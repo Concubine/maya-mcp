@@ -87,6 +87,154 @@ class TestValidation:
         assert capture.clamp_resolution(512) == 512
 
 
+class FakeIsolateCmds:
+    """Minimal cmds stub for the isolate path: isolateSelect + view-selected set.
+
+    editor()/selectionConnection() raise — the isolate path must never touch
+    the mainListConnection machinery (locking it breaks VP2 shading-group
+    resolution for per-face/groupId bindings; redmine #575).
+    """
+
+    def __init__(self, set_members=None, view_selected=False):
+        self.calls = []
+        self.set_members = list(set_members or [])
+        self.view_selected = view_selected
+
+    def isolateSelect(self, panel, **kw):
+        self.calls.append(("isolateSelect", panel, kw))
+        if kw.get("state") is not None:
+            self.view_selected = bool(kw["state"])
+        if "addDagObject" in kw:
+            self.set_members.append(kw["addDagObject"])
+        if "removeDagObject" in kw:
+            self.set_members.remove(kw["removeDagObject"])
+
+    def modelEditor(self, panel, **kw):
+        self.calls.append(("modelEditor", panel, kw))
+        if kw.get("query"):
+            if kw.get("viewObjects"):
+                return "%sViewSelectedSet" % panel
+            if kw.get("viewSelected"):
+                return self.view_selected
+        return None
+
+    def sets(self, name, **kw):
+        self.calls.append(("sets", name, kw))
+        if kw.get("query"):
+            return list(self.set_members)
+        return None
+
+    def editor(self, *args, **kw):
+        raise AssertionError("isolate path must not touch editor()/mainListConnection")
+
+    def selectionConnection(self, *args, **kw):
+        raise AssertionError("isolate path must not touch selectionConnection()")
+
+
+class TestApplyIsolate:
+    def test_enables_state_wipes_stale_members_then_adds_targets(self):
+        cmds = FakeIsolateCmds(set_members=["staleA", "staleB"])
+        capture._apply_isolate(cmds, "panelX", ["|golem", "|rock"])
+        iso_calls = [c for c in cmds.calls if c[0] == "isolateSelect"]
+        assert iso_calls[0][2] == {"state": 1}
+        removed = [c[2]["removeDagObject"] for c in iso_calls if "removeDagObject" in c[2]]
+        assert removed == ["staleA", "staleB"]
+        added = [c[2]["addDagObject"] for c in iso_calls if "addDagObject" in c[2]]
+        assert added == ["|golem", "|rock"]
+        assert cmds.set_members == ["|golem", "|rock"]
+
+    def test_membership_is_exact_even_with_no_stale_members(self):
+        cmds = FakeIsolateCmds()
+        capture._apply_isolate(cmds, "panelX", ["|a"])
+        assert cmds.set_members == ["|a"]
+
+    def test_isolate_members_empty_when_panel_never_isolated(self):
+        class NoSetCmds(FakeIsolateCmds):
+            def modelEditor(self, panel, **kw):
+                if kw.get("query") and kw.get("viewObjects"):
+                    return ""
+                return FakeIsolateCmds.modelEditor(self, panel, **kw)
+
+        assert capture._isolate_members(NoSetCmds(), "panelX") == []
+
+    def test_isolate_members_reads_view_selected_set(self):
+        cmds = FakeIsolateCmds(set_members=["m1", "m2"])
+        assert capture._isolate_members(cmds, "panelX") == ["m1", "m2"]
+
+
+class TestIsolateRestore:
+    def test_restore_reapplies_prior_members_when_user_had_isolate_on(self):
+        cmds = FakeIsolateCmds(set_members=["userObj"], view_selected=True)
+        state = _panel_state_stub(cmds)
+        assert state.isolate_state is True
+        assert state.isolate_members == ["userObj"]
+        # capture isolates something else
+        capture._apply_isolate(cmds, "panelX", ["|captureTarget"])
+        state.isolate_dirty = True
+        cmds.calls.clear()
+        state.restore()
+        assert cmds.set_members == ["userObj"]
+        assert cmds.view_selected is True
+
+    def test_restore_turns_isolate_off_and_wipes_members_when_user_had_it_off(self):
+        cmds = FakeIsolateCmds(set_members=[], view_selected=False)
+        state = _panel_state_stub(cmds)
+        capture._apply_isolate(cmds, "panelX", ["|captureTarget"])
+        state.isolate_dirty = True
+        state.restore()
+        assert cmds.set_members == []
+        assert cmds.view_selected is False
+
+    def test_restore_never_touches_isolate_when_capture_did_not_isolate(self):
+        cmds = FakeIsolateCmds(set_members=["userObj"], view_selected=True)
+        state = _panel_state_stub(cmds)
+        cmds.calls.clear()
+        state.restore()
+        assert [c for c in cmds.calls if c[0] == "isolateSelect"] == []
+
+
+def _panel_state_stub(fake_isolate_cmds):
+    """A _PanelState over the isolate fake, with the unrelated cmds surface stubbed."""
+
+    class FullFake(object):
+        def __getattr__(self, name):
+            return getattr(fake_isolate_cmds, name)
+
+        def modelPanel(self, panel, **kw):
+            return "persp"
+
+        def modelEditor(self, panel, **kw):
+            if kw.get("query"):
+                if kw.get("displayAppearance"):
+                    return "smoothShaded"
+                if kw.get("wireframeOnShaded") or kw.get("displayTextures") or kw.get("grid"):
+                    return False
+            return fake_isolate_cmds.modelEditor(panel, **kw)
+
+        def getAttr(self, attr):
+            return 0
+
+        def setAttr(self, *a, **kw):
+            return None
+
+        def ls(self, **kw):
+            return []
+
+        def getPanel(self, **kw):
+            return None
+
+        def select(self, *a, **kw):
+            return None
+
+        def lookThru(self, *a, **kw):
+            return None
+
+        def setFocus(self, *a, **kw):
+            return None
+
+    return capture._PanelState(FullFake(), "panelX")
+
+
 class TestMarshaling:
     def test_capture_viewport_marshals_angles_resolution_and_wraps_results(
         self, monkeypatch

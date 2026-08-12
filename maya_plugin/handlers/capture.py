@@ -44,12 +44,6 @@ def _cmds():
     return cmds
 
 
-def _mel():
-    import maya.mel as mel  # noqa: PLC0415 - only importable inside Maya
-
-    return mel
-
-
 # ------------------------------------------------------------------ pure math
 
 
@@ -189,19 +183,37 @@ def _find_model_panel(cmds) -> str:
     )
 
 
-def _apply_isolate(cmds, panel: str) -> None:
-    """Isolate the panel to the CURRENT selection, Maya's own way.
+def _isolate_members(cmds, panel: str) -> List[str]:
+    """Current members of the panel's view-selected set ([] if never isolated)."""
+    try:
+        vs_set = cmds.modelEditor(panel, query=True, viewObjects=True)
+        if vs_set:
+            return cmds.sets(vs_set, query=True) or []
+    except Exception:
+        pass
+    return []
 
-    enableIsolateSelect snapshots the active selection into the panel's list
-    connection (re-snapshotting via unlock/relock when called again — the
-    legacy isolateSelect -loadSelected path silently keeps stale members on
-    Maya 2027). The connection is then force-locked so the pre-playblast
-    select(clear) cannot empty the isolated view.
+
+def _apply_isolate(cmds, panel: str, targets: Sequence[str]) -> None:
+    """Isolate the panel to exactly `targets` via the isolateSelect API.
+
+    The M0-era mechanism (enableIsolateSelect + force-locked mainListConnection)
+    breaks VP2 shading-group resolution for shapes with per-face/groupId
+    bindings — they render flat unassigned-green, isolate-only (redmine #575,
+    verified live on Maya 2027). isolateSelect state/addDagObject keeps shading
+    intact, and membership lives in the panel's ViewSelectedSet rather than the
+    live selection, so the pre-playblast select(clear) cannot empty the view —
+    no locking needed. Enabling state retains stale members from previous
+    isolates (like the legacy -loadSelected no-op), so the set is wiped first.
     """
-    _mel().eval("enableIsolateSelect %s 1" % panel)
-    mlc = cmds.editor(panel, query=True, mainListConnection=True)
-    if mlc and not cmds.selectionConnection(mlc, query=True, lock=True):
-        cmds.editor(panel, edit=True, lockMainConnection=True)
+    cmds.isolateSelect(panel, state=1)
+    for member in _isolate_members(cmds, panel):
+        try:
+            cmds.isolateSelect(panel, removeDagObject=member)
+        except Exception:
+            pass  # ambiguous short name: worst case a stale member stays visible
+    for target in targets:
+        cmds.isolateSelect(panel, addDagObject=target)
 
 
 class _PanelState:
@@ -216,21 +228,14 @@ class _PanelState:
         self.wireframe_on_shaded = me(wireframeOnShaded=True)
         self.display_textures = me(displayTextures=True)
         self.grid = me(grid=True)
-        # Isolate ("View Selected") state. Modern Maya implements this via the
-        # editor's mainListConnection + modelEditor -viewSelected, NOT the
-        # legacy isolateSelect set (whose -loadSelected no-ops on Maya 2027 —
-        # verified live). Membership lives in the locked list connection.
+        # Isolate ("View Selected") state. Membership lives in the panel's
+        # ViewSelectedSet objectSet (modelEditor -q -viewObjects); it is only
+        # meaningful while viewSelected is on. isolate_dirty is flipped by
+        # _capture_one when it isolates, so restore leaves the isolate
+        # machinery untouched on captures that never used it.
         self.isolate_state = bool(cmds.modelEditor(panel, query=True, viewSelected=True))
-        self.isolate_members = []
-        if self.isolate_state:
-            try:
-                mlc = cmds.editor(panel, query=True, mainListConnection=True)
-                if mlc:
-                    self.isolate_members = (
-                        cmds.selectionConnection(mlc, query=True, object=True) or []
-                    )
-            except Exception:
-                pass
+        self.isolate_members = _isolate_members(cmds, panel) if self.isolate_state else []
+        self.isolate_dirty = False
         self.ssao = cmds.getAttr("hardwareRenderingGlobals.ssaoEnable")
         self.selection = cmds.ls(selection=True, long=True) or []
         try:
@@ -251,17 +256,19 @@ class _PanelState:
             )
         except Exception:
             pass
-        try:
-            if self.isolate_state:
-                if self.isolate_members:
-                    cmds.select(self.isolate_members, replace=True)
+        if self.isolate_dirty:
+            try:
+                if self.isolate_state:
+                    _apply_isolate(cmds, panel, self.isolate_members)
                 else:
-                    cmds.select(clear=True)
-                _apply_isolate(cmds, self.panel)
-            else:
-                _mel().eval("enableIsolateSelect %s 0" % panel)
-        except Exception:
-            pass
+                    for member in _isolate_members(cmds, panel):
+                        try:
+                            cmds.isolateSelect(panel, removeDagObject=member)
+                        except Exception:
+                            pass
+                    cmds.isolateSelect(panel, state=0)
+            except Exception:
+                pass
         try:
             cmds.setAttr("hardwareRenderingGlobals.ssaoEnable", self.ssao)
         except Exception:
@@ -318,8 +325,9 @@ def _capture_one(
         cmds.lookThru(panel, capture_cam)
 
         if isolate:
-            cmds.select(isolate, replace=True)
-            _apply_isolate(cmds, panel)
+            cmds.select(isolate, replace=True)  # viewFit below frames the selection
+            _apply_isolate(cmds, panel, isolate)
+            state.isolate_dirty = True
 
         if frame_all and angle != "current":
             if isolate:
@@ -343,6 +351,15 @@ def _capture_one(
         }
         cmds.modelEditor(panel, edit=True, **editor_kwargs)
         cmds.setAttr("hardwareRenderingGlobals.ssaoEnable", buffer == "ssao")
+
+        if isolate:
+            # VP2 builds a shape's isolate-mode render items lazily, and their
+            # first draw can precede the shading-group binding — a shape never
+            # drawn under this isolate renders flat unassigned-green for one
+            # frame (verified live on Maya 2027: first capture green, second
+            # correct). Flush one full draw so the playblast grabs bound
+            # materials.
+            cmds.refresh(force=True)
 
         png_bytes = _grab_pixels(cmds, panel, resolution)
 

@@ -79,3 +79,27 @@ Open question #1 (design doc §9) answered for Windows/Maya 2027: playblast
 offscreen works reliably; the M3dView fallback never needed to fire.
 Viewport hygiene verified: no temp cameras, isolate restored, undo queue free
 of capture churn. userSetup.py autoload verified on cold Maya start.
+
+## ADDENDUM — 2026-08-12: isolate fix #1 replaced (redmine #575)
+
+The `enableIsolateSelect` + locked mainListConnection fix above turned out to
+break VP2 shading-group resolution for any shape with per-face/groupId
+bindings — such shapes rendered flat unassigned-green, isolate-only (found
+during the golem run, #574). Replaced with the `isolateSelect
+state/addDagObject` API (membership lives in the panel's ViewSelectedSet, so
+the pre-playblast select-clear needs no locking), plus a forced refresh before
+playblast (a shape's first-ever draw under isolate precedes its shading-group
+binding — one transient green frame otherwise).
+
+## Regression checks
+
+After any change to `maya_plugin/handlers/capture.py`, with Maya open and the
+plugin listening:
+
+```bash
+.venv/Scripts/python.exe evals/isolate_regression.py
+```
+
+Builds a temporary per-face-shaded cube (the minimal trigger for both green
+modes above), captures it with isolate, and asserts material colors rather
+than VP2's unassigned-green. Exit 0 = pass; the cube is deleted either way.
