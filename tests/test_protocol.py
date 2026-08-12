@@ -132,3 +132,17 @@ class TestTokenCheck:
     def test_token_comparison_is_constant_time_api(self):
         # token_ok must use hmac.compare_digest — non-string tokens must not crash it
         assert not protocol.token_ok({"token": 123}, expected="abc")
+
+
+class TestInboundCap:
+    def test_read_frame_honors_custom_max_bytes(self):
+        frame = protocol.encode_frame({"pad": "x" * 5000})
+        with pytest.raises(protocol.ProtocolError, match="exceeds"):
+            protocol.read_frame(reader_from(frame), max_bytes=1024)
+        # same frame passes under the default cap
+        assert protocol.read_frame(reader_from(frame))["pad"] == "x" * 5000
+
+    def test_oversized_header_rejected_before_body_read(self):
+        header = struct.pack(">I", 10 * 1024 * 1024)
+        with pytest.raises(protocol.ProtocolError, match="exceeds"):
+            protocol.read_frame(reader_from(header), max_bytes=4 * 1024 * 1024)

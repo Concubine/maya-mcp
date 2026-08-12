@@ -193,3 +193,59 @@ class TestTimeoutAndBusy:
         resp = d.handle_request(req("fast"))
         assert resp["status"] == "ok"
         assert resp["result"] == {"who": "fast"}
+
+
+class TestOneInFlight:
+    def test_second_request_during_execution_is_busy_not_queued(self, dispatcher):
+        started = threading.Event()
+        release = threading.Event()
+        ran = []
+
+        def slow(params):
+            started.set()
+            release.wait(5.0)
+            return {"who": "slow"}
+
+        def tracked(params):
+            ran.append("tracked")
+            return {}
+
+        d = dispatcher({"slow": slow, "tracked": tracked})
+        result = {}
+        t = threading.Thread(
+            target=lambda: result.update(d.handle_request(req("slow", timeout_s=5.0)))
+        )
+        t.start()
+        assert started.wait(2.0)
+
+        # slow is executing (not timed out): a concurrent request must be
+        # rejected as busy, not silently queued behind it
+        busy = d.handle_request(req("tracked"))
+        assert busy["status"] == "error"
+        assert busy["error"]["type"] == "BusyError"
+
+        release.set()
+        t.join(timeout=2.0)
+        assert result["status"] == "ok"
+        assert ran == []  # the rejected request never executed
+
+        # session recovered
+        assert d.handle_request(req("tracked"))["status"] == "ok"
+        assert ran == ["tracked"]
+
+    def test_non_string_cmd_is_unknown_command_not_crash(self, dispatcher):
+        d = dispatcher({"ping": lambda p: {}})
+        resp = d.handle_request(req("x", v=1) | {"cmd": ["ping"]})
+        assert resp["status"] == "error"
+        assert resp["error"]["type"] == "UnknownCommandError"
+
+    def test_shutdown_rejects_new_requests_immediately(self, dispatcher):
+        d = dispatcher({"ping": lambda p: {"pong": 1}})
+        assert d.handle_request(req("ping"))["status"] == "ok"
+        d.shutdown()
+        start = time.monotonic()
+        resp = d.handle_request(req("ping", timeout_s=30.0))
+        elapsed = time.monotonic() - start
+        assert elapsed < 1.0  # immediate, not a 30s stall against a dead worker
+        assert resp["status"] == "error"
+        assert resp["error"]["type"] == "ServerStoppedError"

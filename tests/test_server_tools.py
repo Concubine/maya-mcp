@@ -49,10 +49,16 @@ class TestRegistration:
     def test_annotations_declare_read_only_vs_destructive(self):
         mcp = server_mod.create_server(FakeConn())
         by_name = {t.name: t for t in run(mcp.list_tools())}
-        assert by_name["maya_get_scene_graph"].annotations.read_only_hint is True
-        assert by_name["maya_capture_viewport"].annotations.read_only_hint is True
-        assert by_name["maya_execute_python"].annotations.destructive_hint is True
-        assert by_name["maya_execute_python"].annotations.read_only_hint is False
+        # design §5: every tool declares all three hints explicitly
+        execute = by_name["maya_execute_python"].annotations
+        assert (execute.read_only_hint, execute.destructive_hint,
+                execute.idempotent_hint) == (False, True, False)
+        scene_graph = by_name["maya_get_scene_graph"].annotations
+        assert (scene_graph.read_only_hint, scene_graph.destructive_hint,
+                scene_graph.idempotent_hint) == (True, False, True)
+        capture = by_name["maya_capture_viewport"].annotations
+        assert (capture.read_only_hint, capture.destructive_hint,
+                capture.idempotent_hint) == (True, False, True)
 
 
 class TestExecutePython:

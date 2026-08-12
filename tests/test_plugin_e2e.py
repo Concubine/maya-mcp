@@ -111,3 +111,92 @@ class TestLifecycle:
     def test_non_loopback_bind_without_token_refused(self):
         with pytest.raises(ValueError, match="token"):
             maya_mcp_plugin.start_server(host="0.0.0.0", port=0)
+
+
+class TestHardening:
+    def test_stop_while_client_connected_fails_fast_and_restart_recovers(
+        self, plugin_server
+    ):
+        import time
+
+        srv = plugin_server()
+        port = srv.port
+        conn = MayaConnection(port=port)
+        assert conn.request("ping", {}, timeout_s=5)["pong"] is True
+
+        srv.stop()  # client connection still open — must be force-closed
+        start = time.monotonic()
+        with pytest.raises(Exception):
+            conn.request("execute_python", {"code": "1"}, timeout_s=30)
+        assert time.monotonic() - start < 2.0  # fail fast, not a 30s stall
+
+        srv2 = maya_mcp_plugin.start_server(port=port)
+        try:
+            assert conn.request("ping", {}, timeout_s=5)["pong"] is True
+        finally:
+            srv2.stop()
+        conn.close()
+
+    def test_auth_error_closes_the_connection(self, plugin_server):
+        srv = plugin_server(token="hunter2")
+        bad = MayaConnection(port=srv.port, token="wrong")
+        with pytest.raises(MayaError) as exc_info:
+            bad.request("ping", {}, timeout_s=5)
+        assert exc_info.value.error_type == "AuthError"
+        # server must have dropped the connection after answering: the next
+        # request on the cached socket dies at transport level, not AuthError
+        from maya_mcp.connection import MayaConnectionError
+
+        with pytest.raises(MayaConnectionError):
+            bad.request("ping", {}, timeout_s=5)
+        bad.close()
+
+    def test_oversized_inbound_frame_closes_connection(self, plugin_server):
+        import socket
+        import struct
+
+        srv = plugin_server()
+        with socket.create_connection(("127.0.0.1", srv.port), timeout=2) as raw:
+            raw.sendall(struct.pack(">I", 32 * 1024 * 1024))  # 32MB claim, no body
+            raw.settimeout(2.0)
+            assert raw.recv(4096) == b""  # closed without buffering the body
+
+    def test_half_sent_frame_hits_body_deadline(self, plugin_server):
+        import socket
+        import struct
+        import time
+
+        srv = plugin_server(body_deadline_s=0.3)
+        with socket.create_connection(("127.0.0.1", srv.port), timeout=5) as raw:
+            raw.sendall(struct.pack(">I", 100))  # promise 100 bytes...
+            raw.sendall(b"only a few")  # ...deliver 10, then stall
+            raw.settimeout(5.0)
+            start = time.monotonic()
+            assert raw.recv(4096) == b""  # server gives up and closes
+            assert time.monotonic() - start < 3.0
+
+    def test_failed_bind_leaks_no_dispatcher_thread(self):
+        import socket
+        import threading
+
+        before = sum(
+            1 for t in threading.enumerate() if t.name == "maya-mcp-dispatch"
+        )
+        blocker = socket.create_server(("127.0.0.1", 0))
+        try:
+            with pytest.raises(OSError):
+                maya_mcp_plugin.start_server(port=blocker.getsockname()[1])
+            after = sum(
+                1 for t in threading.enumerate() if t.name == "maya-mcp-dispatch"
+            )
+            assert after == before
+        finally:
+            blocker.close()
+
+    def test_bad_log_level_does_not_crash_setup(self, monkeypatch):
+        monkeypatch.setenv("MAYA_MCP_LOG_LEVEL", "trace ")
+        maya_mcp_plugin._setup_logging()  # must not raise
+
+        from maya_mcp import server as server_mod
+
+        server_mod._setup_logging()  # must not raise

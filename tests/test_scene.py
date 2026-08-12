@@ -13,6 +13,7 @@ class FakeCmds:
     """A tiny Maya scene: a golem group with two meshes, a light, default cameras."""
 
     def __init__(self):
+        self.heavy_calls = 0  # polyEvaluate + exactWorldBoundingBox invocations
         self.transforms = {
             "|persp": {}, "|top": {}, "|front": {}, "|side": {},  # default cams
             "|golem": {"shape": None, "parent": None, "visible": True},
@@ -43,8 +44,11 @@ class FakeCmds:
         assert type == "transform" and long
         return list(self.transforms)
 
-    def listRelatives(self, node, shapes=False, parent=False, fullPath=False):
+    def listRelatives(self, node, shapes=False, parent=False, fullPath=False,
+                      noIntermediate=False):
         assert fullPath
+        if shapes:
+            assert noIntermediate  # never pick *Orig intermediate shapes
         info = self.transforms[node]
         if shapes:
             return [info["shape"][0]] if info.get("shape") else None
@@ -57,6 +61,7 @@ class FakeCmds:
         return self.transforms[owner]["shape"][1]
 
     def polyEvaluate(self, shape, triangle=False, vertex=False):
+        self.heavy_calls += 1
         info = self.transforms[self._shape_owner[shape]]
         if triangle:
             return info["tris"]
@@ -65,6 +70,7 @@ class FakeCmds:
         raise AssertionError("unexpected polyEvaluate call")
 
     def exactWorldBoundingBox(self, node):
+        self.heavy_calls += 1
         return self.transforms[node].get("bbox", [0, 0, 0, 0, 0, 0])
 
     def listConnections(self, node, type=None):
@@ -159,3 +165,19 @@ class TestPagination:
 
         with pytest.raises(HandlerError, match="cursor"):
             scene.get_scene_graph({"cursor": "garbage"})
+
+    def test_heavy_stats_only_computed_for_page_items(self, fake_cmds):
+        # Pagination must bound WORK, not just bytes: polyEvaluate and
+        # exactWorldBoundingBox run only for the page being returned.
+        # Page 1 of size 2 (sorted): |golem (group) + |golem|head (mesh)
+        # => 1 bbox per page item (2) + tri/vert polyEvaluate for the one mesh (2).
+        result = scene.get_scene_graph({"max_objects": 2})
+        assert [o["name"] for o in result["objects"]] == ["|golem", "|golem|head"]
+        assert fake_cmds.heavy_calls == 4
+
+    def test_filtered_page_does_not_stat_offpage_matches(self, fake_cmds):
+        result = scene.get_scene_graph({"filter": "mesh", "max_objects": 1})
+        assert result["total"] == 2
+        assert len(result["objects"]) == 1
+        # bbox+tris+verts for the single page item only
+        assert fake_cmds.heavy_calls == 3

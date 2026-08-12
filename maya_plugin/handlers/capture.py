@@ -196,8 +196,22 @@ class _PanelState:
         self.display_textures = me(displayTextures=True)
         self.grid = me(grid=True)
         self.isolate_state = cmds.isolateSelect(panel, query=True, state=True)
+        # isolateSelect(loadSelected) overwrites the panel's persistent
+        # view-selected set, so membership must be snapshotted too.
+        self.isolate_members = []
+        if self.isolate_state:
+            try:
+                view_set = cmds.isolateSelect(panel, query=True, viewObjects=True)
+                if view_set:
+                    self.isolate_members = cmds.sets(view_set, query=True) or []
+            except Exception:
+                pass
         self.ssao = cmds.getAttr("hardwareRenderingGlobals.ssaoEnable")
         self.selection = cmds.ls(selection=True, long=True) or []
+        try:
+            self.focus_panel = cmds.getPanel(withFocus=True)
+        except Exception:
+            self.focus_panel = None
 
     def restore(self):
         cmds, panel = self.cmds, self.panel
@@ -213,7 +227,14 @@ class _PanelState:
         except Exception:
             pass
         try:
-            if not self.isolate_state:
+            if self.isolate_state:
+                if self.isolate_members:
+                    cmds.select(self.isolate_members, replace=True)
+                else:
+                    cmds.select(clear=True)
+                cmds.isolateSelect(panel, state=1)
+                cmds.isolateSelect(panel, loadSelected=True)
+            else:
                 cmds.isolateSelect(panel, state=0)
         except Exception:
             pass
@@ -225,6 +246,12 @@ class _PanelState:
             cmds.lookThru(panel, self.camera)
         except Exception:
             pass
+        try:
+            if self.focus_panel:
+                cmds.setFocus(self.focus_panel)
+        except Exception:
+            pass
+        # Selection restore stays last so the user's selection always wins.
         try:
             if self.selection:
                 cmds.select(self.selection, replace=True)
@@ -247,6 +274,12 @@ def _capture_one(
     panel = _find_model_panel(cmds)
     state = _PanelState(cmds, panel)
     temp_camera = None
+    # Perception must not pollute the undo queue: suppress undo recording for
+    # the whole capture (temp camera, setAttrs, isolate churn) so the
+    # dispatcher's chunk closes empty and Maya discards it. stateWithoutFlush
+    # keeps the user's existing undo history intact.
+    prev_undo = cmds.undoInfo(query=True, state=True)
+    cmds.undoInfo(stateWithoutFlush=False)
     try:
         if angle == "current":
             capture_cam = state.camera
@@ -263,6 +296,9 @@ def _capture_one(
         if isolate:
             cmds.select(isolate, replace=True)
             cmds.isolateSelect(panel, state=1)
+            # state=1 alone does NOT populate the view-selected set; without
+            # loadSelected the panel renders empty (or the user's stale set).
+            cmds.isolateSelect(panel, loadSelected=True)
 
         if frame_all and angle != "current":
             if isolate:
@@ -297,6 +333,10 @@ def _capture_one(
                 cmds.delete(temp_camera)
             except Exception:
                 pass
+        try:
+            cmds.undoInfo(stateWithoutFlush=prev_undo)
+        except Exception:
+            pass
 
 
 def _grab_pixels(cmds, panel: str, resolution: int) -> bytes:

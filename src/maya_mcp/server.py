@@ -34,6 +34,14 @@ CAPTURE_TIMEOUT_S = 120.0
 
 
 def _setup_logging() -> None:
+    root = logging.getLogger("maya_mcp")
+    # Unknown MAYA_MCP_LOG_LEVEL values fall back to INFO; a typo'd env var
+    # must never prevent the server from starting.
+    name = os.environ.get("MAYA_MCP_LOG_LEVEL", "INFO").strip().upper()
+    level = getattr(logging, name, None)
+    root.setLevel(level if isinstance(level, int) else logging.INFO)
+    if any(isinstance(h, logging.handlers.RotatingFileHandler) for h in root.handlers):
+        return
     log_dir = os.path.join(os.path.expanduser("~"), ".maya-mcp", "logs")
     try:
         os.makedirs(log_dir, exist_ok=True)
@@ -43,9 +51,7 @@ def _setup_logging() -> None:
         handler.setFormatter(
             logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
         )
-        root = logging.getLogger("maya_mcp")
         root.addHandler(handler)
-        root.setLevel(os.environ.get("MAYA_MCP_LOG_LEVEL", "INFO").upper())
     except OSError:
         pass
 
@@ -66,7 +72,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
 
     @mcp.tool(
         title="Execute Python in Maya",
-        annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True),
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
     )
     def maya_execute_python(
         code: Annotated[
@@ -105,7 +113,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
 
     @mcp.tool(
         title="Get scene graph",
-        annotations=ToolAnnotations(read_only_hint=True, idempotent_hint=True),
+        annotations=ToolAnnotations(
+            read_only_hint=True, destructive_hint=False, idempotent_hint=True
+        ),
     )
     def maya_get_scene_graph(
         filter: Annotated[
@@ -136,7 +146,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
 
     @mcp.tool(
         title="Capture viewport",
-        annotations=ToolAnnotations(read_only_hint=True),
+        annotations=ToolAnnotations(
+            read_only_hint=True, destructive_hint=False, idempotent_hint=True
+        ),
     )
     def maya_capture_viewport(
         angles: Annotated[

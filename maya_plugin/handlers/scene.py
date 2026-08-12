@@ -24,11 +24,17 @@ def _cmds():
     return cmds
 
 
-def _entry(cmds, transform: str) -> Dict[str, Any]:
-    shapes = cmds.listRelatives(transform, shapes=True, fullPath=True) or []
+def _shape_and_type(cmds, transform: str):
+    """Cheap resolve: first non-intermediate shape and its type ('group' if none)."""
+    shapes = (
+        cmds.listRelatives(transform, shapes=True, fullPath=True, noIntermediate=True)
+        or []
+    )
     shape = shapes[0] if shapes else None
-    obj_type = cmds.nodeType(shape) if shape else "group"
+    return shape, (cmds.nodeType(shape) if shape else "group")
 
+
+def _entry(cmds, transform: str, shape: Optional[str], obj_type: str) -> Dict[str, Any]:
     tris: Optional[int] = None
     verts: Optional[int] = None
     if obj_type == "mesh":
@@ -88,17 +94,28 @@ def get_scene_graph(params: Dict[str, Any]) -> Dict[str, Any]:
         if t not in _DEFAULT_CAMERAS
     )
 
-    entries: List[Dict[str, Any]] = []
+    # Cheap pass first: pagination must bound WORK, not just response bytes.
+    # Names (and, only when a filter needs it, shape types) decide membership;
+    # the expensive per-object stats run solely for the page being returned.
     needle = filt.lower() if isinstance(filt, str) and filt else None
+    matches: List[tuple] = []  # (transform, resolved (shape, type) or None)
     for transform in transforms:
-        entry = _entry(cmds, transform)
-        if needle is None or needle in entry["name"].lower() or needle in entry["type"].lower():
-            entries.append(entry)
+        if needle is None or needle in transform.lower():
+            matches.append((transform, None))
+            continue
+        shape, obj_type = _shape_and_type(cmds, transform)
+        if needle in obj_type.lower():
+            matches.append((transform, (shape, obj_type)))
 
-    page = entries[offset : offset + max_objects]
-    next_offset = offset + len(page)
+    page_items = matches[offset : offset + max_objects]
+    objects: List[Dict[str, Any]] = []
+    for transform, resolved in page_items:
+        shape, obj_type = resolved or _shape_and_type(cmds, transform)
+        objects.append(_entry(cmds, transform, shape, obj_type))
+
+    next_offset = offset + len(page_items)
     return {
-        "objects": page,
-        "total": len(entries),
-        "cursor": str(next_offset) if next_offset < len(entries) else None,
+        "objects": objects,
+        "total": len(matches),
+        "cursor": str(next_offset) if next_offset < len(matches) else None,
     }

@@ -27,6 +27,14 @@ from .handlers import capture, code_exec, scene
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9877
 
+# Inbound requests never legitimately carry images (largest is execute_python
+# source); the 64 MB protocol cap is for image-bearing responses only.
+INBOUND_MAX_BYTES = 4 * 1024 * 1024
+# Once a frame has started arriving, the rest must follow promptly; a half-sent
+# frame must not pin a connection thread forever. Idle connections (no bytes at
+# all) are healthy and block indefinitely.
+DEFAULT_BODY_DEADLINE_S = 30.0
+
 log = logging.getLogger("maya_mcp_plugin")
 
 _active_server: Optional["PluginServer"] = None
@@ -74,7 +82,16 @@ def _undo_hooks():
         return None, None
 
 
+def _log_level_from_env() -> int:
+    """MAYA_MCP_LOG_LEVEL, falling back to INFO on any unknown value —
+    a typo'd level must never take the process down."""
+    name = os.environ.get("MAYA_MCP_LOG_LEVEL", "INFO").strip().upper()
+    level = getattr(logging, name, None)
+    return level if isinstance(level, int) else logging.INFO
+
+
 def _setup_logging() -> None:
+    log.setLevel(_log_level_from_env())
     if any(isinstance(h, logging.handlers.RotatingFileHandler) for h in log.handlers):
         return
     log_dir = os.path.join(os.path.expanduser("~"), ".maya-mcp", "logs")
@@ -87,13 +104,26 @@ def _setup_logging() -> None:
             logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
         )
         log.addHandler(handler)
-        log.setLevel(os.environ.get("MAYA_MCP_LOG_LEVEL", "INFO").upper())
     except OSError:
         pass  # logging must never take the plugin down
 
 
 class PluginServer:
-    def __init__(self, host: str, port: int, token: Optional[str]):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        token: Optional[str],
+        body_deadline_s: float = DEFAULT_BODY_DEADLINE_S,
+    ):
+        # Bind FIRST: if the port is taken, fail before spawning any thread.
+        family = socket.AF_INET6 if ":" in host else socket.AF_INET
+        self._sock = socket.create_server((host, port), family=family)
+        self._sock.settimeout(0.25)
+        self.host = host
+        self.port = self._sock.getsockname()[1]
+        self._body_deadline_s = body_deadline_s
+
         undo_open, undo_close = _undo_hooks()
         self._dispatcher = Dispatcher(
             handlers=_build_handlers(),
@@ -102,10 +132,8 @@ class PluginServer:
             undo_open=undo_open,
             undo_close=undo_close,
         )
-        self._sock = socket.create_server((host, port))
-        self._sock.settimeout(0.25)
-        self.host = host
-        self.port = self._sock.getsockname()[1]
+        self._conns: set = set()
+        self._conns_lock = threading.Lock()
         self._stop = threading.Event()
         self._accept_thread = threading.Thread(
             target=self._accept_loop, name="maya-mcp-accept", daemon=True
@@ -122,6 +150,8 @@ class PluginServer:
             except OSError:
                 break
             log.info("client connected from %s:%d", *addr[:2])
+            with self._conns_lock:
+                self._conns.add(conn)
             threading.Thread(
                 target=self._serve_connection,
                 args=(conn,),
@@ -133,12 +163,34 @@ class PluginServer:
         except OSError:
             pass
 
-    def _serve_connection(self, conn: socket.socket) -> None:
-        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    def _read_request(self, conn: socket.socket):
+        """Read one request frame: block indefinitely while idle, but once the
+        first bytes arrive the rest of the frame must land within the body
+        deadline, so a half-sent frame cannot pin this thread forever."""
+        started = [False]
+
+        def recv(n: int) -> bytes:
+            data = conn.recv(n)
+            if not started[0] and data:
+                started[0] = True
+                conn.settimeout(self._body_deadline_s)
+            return data
+
+        conn.settimeout(None)
         try:
+            return protocol.read_frame(recv, max_bytes=INBOUND_MAX_BYTES)
+        finally:
+            try:
+                conn.settimeout(None)
+            except OSError:
+                pass
+
+    def _serve_connection(self, conn: socket.socket) -> None:
+        try:
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             while not self._stop.is_set():
                 try:
-                    frame = protocol.read_frame(lambda n: conn.recv(n))
+                    frame = self._read_request(conn)
                 except protocol.ConnectionClosedError:
                     log.info("client disconnected")
                     return
@@ -148,15 +200,41 @@ class PluginServer:
                 except OSError:
                     return
                 log.debug("request cmd=%s id=%s", frame.get("cmd"), frame.get("id"))
-                response = self._dispatcher.handle_request(frame)
+                # Never let a dispatch/encode bug kill the connection silently:
+                # the contract is one response frame per request, always.
                 try:
-                    conn.sendall(protocol.encode_frame(response))
+                    response = self._dispatcher.handle_request(frame)
+                    payload = protocol.encode_frame(response)
+                except Exception:
+                    log.exception("dispatch failed for id=%s", frame.get("id"))
+                    import traceback as _tb
+
+                    try:
+                        response = protocol.make_error(
+                            str(frame.get("id", "")),
+                            "InternalError",
+                            "internal plugin error while dispatching",
+                            maya_traceback=_tb.format_exc(),
+                        )
+                        payload = protocol.encode_frame(response)
+                    except Exception:
+                        return
+                try:
+                    conn.sendall(payload)
                 except OSError:
                     log.warning(
                         "client vanished before response for id=%s", frame.get("id")
                     )
                     return
+                # An unauthenticated peer gets exactly one answer per connection:
+                # no free retry loop for token guessing.
+                error = response.get("error") if isinstance(response, dict) else None
+                if error and error.get("type") == "AuthError":
+                    log.warning("closing connection after AuthError")
+                    return
         finally:
+            with self._conns_lock:
+                self._conns.discard(conn)
             try:
                 conn.close()
             except OSError:
@@ -164,6 +242,20 @@ class PluginServer:
 
     def stop(self) -> None:
         self._stop.set()
+        # Force-close established connections so threads blocked in recv() exit
+        # now, clients fail fast instead of stalling a full timeout against a
+        # dead dispatcher, and the port is actually free for a rebind.
+        with self._conns_lock:
+            conns = list(self._conns)
+        for conn in conns:
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                conn.close()
+            except OSError:
+                pass
         self._accept_thread.join(timeout=2.0)
         self._dispatcher.shutdown()
         log.info("maya-mcp plugin stopped")
@@ -173,6 +265,7 @@ def start_server(
     host: Optional[str] = None,
     port: Optional[int] = None,
     token: Optional[str] = None,
+    body_deadline_s: float = DEFAULT_BODY_DEADLINE_S,
 ) -> PluginServer:
     """Start the plugin server; returns the running server (also kept globally)."""
     global _active_server
@@ -193,7 +286,7 @@ def start_server(
         _active_server.stop()
         _active_server = None
 
-    _active_server = PluginServer(host, port, token)
+    _active_server = PluginServer(host, port, token, body_deadline_s=body_deadline_s)
     return _active_server
 
 

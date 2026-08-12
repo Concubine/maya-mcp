@@ -42,10 +42,18 @@ Failure — tracebacks are sacred, never truncated:
   connection and opens a fresh one on the next request.
 - **Version.** Requests with `v != 1` are rejected with `ProtocolVersionError`.
 - **Auth.** With `MAYA_MCP_TOKEN` set on the plugin, every frame must carry a
-  matching `token` (constant-time comparison) or it gets `AuthError`. The
-  plugin refuses to bind non-loopback hosts unless `MAYA_MCP_BIND_ANY=1` AND a
-  token are set.
-- **Undo.** Every command runs inside one `undoInfo` chunk = one undo step.
+  matching `token` (constant-time comparison) or it gets `AuthError` — and the
+  connection is closed after the response (no free retry loop for guessing).
+  The plugin refuses to bind non-loopback hosts unless `MAYA_MCP_BIND_ANY=1`
+  AND a token are set.
+- **Inbound cap.** The plugin accepts request frames up to 4 MB (requests never
+  carry images; the 64 MB protocol cap applies to responses only). Once a
+  frame starts arriving, its remainder must land within 30 s or the connection
+  is dropped — idle connections between requests block indefinitely and are fine.
+- **Undo.** Every mutating command runs inside one `undoInfo` chunk = one undo
+  step. Read-only perception commands (`capture_viewport`) suppress undo
+  recording (`stateWithoutFlush`) so their internal churn never lands on the
+  undo queue — undo after a capture reverts the last real edit.
 
 ## Error types
 

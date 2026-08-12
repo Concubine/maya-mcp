@@ -60,7 +60,9 @@ class Dispatcher:
         self._undo_close = undo_close
 
         self._lock = threading.Lock()
+        self._inflight: Optional[Future] = None
         self._straggler: Optional[Future] = None
+        self._closed = False
         self._queue: "queue.Queue[Optional[tuple]]" = queue.Queue()
         self._worker = threading.Thread(
             target=self._worker_loop, name="maya-mcp-dispatch", daemon=True
@@ -92,40 +94,62 @@ class Dispatcher:
             )
 
         cmd = frame.get("cmd")
-        handler = self._handlers.get(cmd)
+        handler = self._handlers.get(cmd) if isinstance(cmd, str) else None
         if handler is None:
             return protocol.make_error(
                 req_id,
                 "UnknownCommandError",
-                "unknown command %r" % cmd,
+                "unknown command %r" % (cmd,),
                 hint="available commands: %s" % ", ".join(sorted(self._handlers)),
             )
 
-        with self._lock:
-            if self._straggler is not None:
-                return protocol.make_error(
-                    req_id,
-                    "BusyError",
-                    "a previous command is still executing in Maya",
-                    hint="the session is busy until the straggling command finishes; "
-                    "retry shortly",
-                )
-
         timeout_s = frame.get("timeout_s", self._default_timeout_s)
-        if not isinstance(timeout_s, (int, float)) or timeout_s <= 0:
+        if not isinstance(timeout_s, (int, float)) or isinstance(timeout_s, bool) or timeout_s <= 0:
             timeout_s = self._default_timeout_s
         timeout_s = min(float(timeout_s), MAX_TIMEOUT_S)
 
         params = frame.get("params") or {}
         fut: Future = Future()
-        self._queue.put((fut, req_id, handler, params))
+        # Admission and enqueue are one critical section: one in-flight command,
+        # period — a second request must never queue silently behind a running job.
+        with self._lock:
+            if self._closed:
+                return protocol.make_error(
+                    req_id,
+                    "ServerStoppedError",
+                    "the plugin server has been stopped",
+                    hint="the plugin was stopped or restarted; reconnect to the new server",
+                )
+            if self._inflight is not None or self._straggler is not None:
+                return protocol.make_error(
+                    req_id,
+                    "BusyError",
+                    "a previous command is still executing in Maya",
+                    hint="the session is busy until the running command finishes; "
+                    "retry shortly",
+                )
+            self._inflight = fut
+            self._queue.put((fut, req_id, handler, params))
         try:
             return fut.result(timeout=timeout_s)
         # concurrent.futures.TimeoutError only became an alias of the builtin in
         # Python 3.11; Maya 2023/2024 embed 3.9/3.10, so catch both explicitly.
         except (_FutureTimeoutError, TimeoutError):
             with self._lock:
+                if fut.cancel():
+                    # Still queued, never started: it will never run. Not busy.
+                    self._inflight = None
+                    return protocol.make_error(
+                        req_id,
+                        "TimeoutError",
+                        "command %r timed out after %.1f s before it started"
+                        % (cmd, timeout_s),
+                        hint="the command was cancelled and never ran; retry, "
+                        "with a larger timeout_s if needed",
+                    )
                 if not fut.done():
+                    # Running on Maya's main thread; keep _inflight set so the
+                    # session stays busy until the straggler finishes.
                     self._straggler = fut
             return protocol.make_error(
                 req_id,
@@ -137,6 +161,8 @@ class Dispatcher:
             )
 
     def shutdown(self, join_timeout_s: float = 2.0) -> None:
+        with self._lock:
+            self._closed = True
         self._queue.put(None)
         self._worker.join(timeout=join_timeout_s)
 
@@ -148,9 +174,17 @@ class Dispatcher:
             if job is None:
                 return
             fut, req_id, handler, params = job
+            if not fut.set_running_or_notify_cancel():
+                # Cancelled by the timeout path before it started; never run it.
+                with self._lock:
+                    if self._inflight is fut:
+                        self._inflight = None
+                continue
             response = self._run_job(req_id, handler, params)
             with self._lock:
                 fut.set_result(response)
+                if self._inflight is fut:
+                    self._inflight = None
                 if self._straggler is fut:
                     # The caller already gave up on this job; drop its result and
                     # unblock the session.

@@ -63,13 +63,20 @@ def _recv_exact(recv: Callable[[int], bytes], n: int, *, at_boundary: bool) -> b
     return b"".join(chunks)
 
 
-def read_frame(recv: Callable[[int], bytes]) -> Dict[str, Any]:
-    """Read one frame via recv(n)->bytes (short reads allowed, b'' = EOF)."""
+def read_frame(
+    recv: Callable[[int], bytes], max_bytes: int = MAX_FRAME_BYTES
+) -> Dict[str, Any]:
+    """Read one frame via recv(n)->bytes (short reads allowed, b'' = EOF).
+
+    max_bytes caps the accepted body size BEFORE any allocation. The default is
+    the image-bearing response cap; the plugin passes a much smaller cap for
+    inbound requests, which never legitimately carry images.
+    """
     header = _recv_exact(recv, _HEADER.size, at_boundary=True)
     (length,) = _HEADER.unpack(header)
-    if length > MAX_FRAME_BYTES:
+    if length > max_bytes:
         raise ProtocolError(
-            "incoming frame of %d bytes exceeds MAX_FRAME_BYTES (%d)" % (length, MAX_FRAME_BYTES)
+            "incoming frame of %d bytes exceeds the %d byte cap" % (length, max_bytes)
         )
     body = _recv_exact(recv, length, at_boundary=False) if length else b""
     try:
