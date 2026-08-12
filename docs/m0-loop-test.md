@@ -57,3 +57,25 @@ proportions). Record tool-call count.
 
 File what broke on redmine #573 (maya-mcp project) — M1 does not start until
 this loop is solid.
+
+---
+
+## RESULT — 2026-08-12: PASSED
+
+Run on Maya 2027 (Windows), driven end-to-end through the real MCP stdio
+server. Snowman with carrot nose + coal eyes built in 7 productive tool calls
+(1 scene graph, 3 execute_python, 3 capture rounds), with multiple visible
+capture-driven corrections (framing via isolate, silhouette proportions).
+
+Two real capture bugs were found BY the loop and fixed live:
+1. Isolate rendered blank/stale: modern Maya implements View Selected via the
+   editor mainListConnection + `modelEditor -viewSelected`, not the legacy
+   `isolateSelect -state/-loadSelected` (which silently no-ops on 2027).
+   Fixed to use Maya's own `enableIsolateSelect` + locked list connection.
+2. Selection highlight wireframes polluted captures; now cleared pre-playblast
+   and restored after.
+
+Open question #1 (design doc §9) answered for Windows/Maya 2027: playblast
+offscreen works reliably; the M3dView fallback never needed to fire.
+Viewport hygiene verified: no temp cameras, isolate restored, undo queue free
+of capture churn. userSetup.py autoload verified on cold Maya start.

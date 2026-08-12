@@ -44,6 +44,12 @@ def _cmds():
     return cmds
 
 
+def _mel():
+    import maya.mel as mel  # noqa: PLC0415 - only importable inside Maya
+
+    return mel
+
+
 # ------------------------------------------------------------------ pure math
 
 
@@ -183,6 +189,21 @@ def _find_model_panel(cmds) -> str:
     )
 
 
+def _apply_isolate(cmds, panel: str) -> None:
+    """Isolate the panel to the CURRENT selection, Maya's own way.
+
+    enableIsolateSelect snapshots the active selection into the panel's list
+    connection (re-snapshotting via unlock/relock when called again — the
+    legacy isolateSelect -loadSelected path silently keeps stale members on
+    Maya 2027). The connection is then force-locked so the pre-playblast
+    select(clear) cannot empty the isolated view.
+    """
+    _mel().eval("enableIsolateSelect %s 1" % panel)
+    mlc = cmds.editor(panel, query=True, mainListConnection=True)
+    if mlc and not cmds.selectionConnection(mlc, query=True, lock=True):
+        cmds.editor(panel, edit=True, lockMainConnection=True)
+
+
 class _PanelState:
     """Snapshot/restore for every viewport setting the capture touches."""
 
@@ -195,15 +216,19 @@ class _PanelState:
         self.wireframe_on_shaded = me(wireframeOnShaded=True)
         self.display_textures = me(displayTextures=True)
         self.grid = me(grid=True)
-        self.isolate_state = cmds.isolateSelect(panel, query=True, state=True)
-        # isolateSelect(loadSelected) overwrites the panel's persistent
-        # view-selected set, so membership must be snapshotted too.
+        # Isolate ("View Selected") state. Modern Maya implements this via the
+        # editor's mainListConnection + modelEditor -viewSelected, NOT the
+        # legacy isolateSelect set (whose -loadSelected no-ops on Maya 2027 —
+        # verified live). Membership lives in the locked list connection.
+        self.isolate_state = bool(cmds.modelEditor(panel, query=True, viewSelected=True))
         self.isolate_members = []
         if self.isolate_state:
             try:
-                view_set = cmds.isolateSelect(panel, query=True, viewObjects=True)
-                if view_set:
-                    self.isolate_members = cmds.sets(view_set, query=True) or []
+                mlc = cmds.editor(panel, query=True, mainListConnection=True)
+                if mlc:
+                    self.isolate_members = (
+                        cmds.selectionConnection(mlc, query=True, object=True) or []
+                    )
             except Exception:
                 pass
         self.ssao = cmds.getAttr("hardwareRenderingGlobals.ssaoEnable")
@@ -232,10 +257,9 @@ class _PanelState:
                     cmds.select(self.isolate_members, replace=True)
                 else:
                     cmds.select(clear=True)
-                cmds.isolateSelect(panel, state=1)
-                cmds.isolateSelect(panel, loadSelected=True)
+                _apply_isolate(cmds, self.panel)
             else:
-                cmds.isolateSelect(panel, state=0)
+                _mel().eval("enableIsolateSelect %s 0" % panel)
         except Exception:
             pass
         try:
@@ -295,16 +319,19 @@ def _capture_one(
 
         if isolate:
             cmds.select(isolate, replace=True)
-            cmds.isolateSelect(panel, state=1)
-            # state=1 alone does NOT populate the view-selected set; without
-            # loadSelected the panel renders empty (or the user's stale set).
-            cmds.isolateSelect(panel, loadSelected=True)
+            _apply_isolate(cmds, panel)
 
         if frame_all and angle != "current":
             if isolate:
                 cmds.viewFit(capture_cam, fitFactor=0.85)  # fits current selection
             else:
                 cmds.viewFit(capture_cam, allObjects=True, fitFactor=0.85)
+
+        # Deselect before grabbing pixels: selection highlight (green/white
+        # wireframes) otherwise pollutes the capture. Must happen AFTER viewFit,
+        # which frames the current selection; _PanelState restores the user's
+        # selection afterwards.
+        cmds.select(clear=True)
 
         editor_kwargs = {
             "displayAppearance": "wireframe" if shading == "wireframe" else (
