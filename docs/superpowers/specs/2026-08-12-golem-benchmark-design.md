@@ -22,9 +22,17 @@ is only earth.
 - Legs almost absent: pelvis boulder sinks into a broken-earth base disc —
   "feet rooted like broken earth" is literal.
 
-## Construction grammar (M1 tools; body unified and watertight)
+## Construction grammar (M1 tools; separable boulders, each watertight)
 
-Part list (all primitives, then union + join work):
+**Rev 2026-08-12 (#574, user decision):** the body is NOT unioned. Every
+chunk (boulder/slab/plate) stays its own closed watertight mesh, deeply
+interpenetrating its neighbors so the silhouette reads pressed-together.
+Chunks must be able to rip off — this is the export shape Demigol's golem
+kit (M2) consumes; a fused hero mesh is presentation-only if made at all.
+Verified build: 14 parts (pelvis, belly, chest girdle, 2 shoulders, head,
+brow plate, 2×2 arm stones, 2 fists, ground disc).
+
+Part list (all primitives; join work by interpenetration + per-part sculpt):
 1. Pelvis boulder (sphere, flattened) sunk into a cracked ground disc.
 2. Torso slab (rounded box), narrower than pelvis — mass reads bottom-heavy.
 3. Two shoulder boulders (spheres) larger than the head, set high and forward.
@@ -48,8 +56,11 @@ checks. `remesh_retopo` to ≤50k tris, `mesh_cleanup` last.
   driven by a ramp keyed to distance from the forehead — brightest at the
   rune, faint at the fists. One `create_texture_network` recipe: noise →
   remapValue → layeredTexture → (bump2d + emission).
-- Rune: אמת embossed on a flattened brow plate (boolean or displacement),
-  strongest emission in the scene.
+- Rune (rev 2026-08-12, #574): a single **inverted + mirrored aleph (א)**
+  — not the full word — ETCHED into the flattened brow plate as a carved
+  recess (boolean; no applied letter geometry, no recess emission). The
+  surrounding crack-glow falloff stays centered at the brow so the carving
+  sits inside the brightest ember zone.
 
 ## Presentation
 

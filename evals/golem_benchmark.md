@@ -16,9 +16,13 @@ prompt below.
 ## Hard pass criteria
 
 - ≤ 120 tool calls
-- One connected watertight body ≤ 50k tris (no floating/intersecting shells)
+- Separable boulder construction, ≤ 50k tris total: each chunk (boulder,
+  slab, plate) its own closed watertight mesh; chunks interpenetrate at the
+  joins (pressed together — no floating, visually disconnected chunks). No
+  fused/unioned body — chunks must be able to rip off (decided 2026-08-12,
+  #574: this is the export shape Demigol's golem kit consumes)
 - Cracked-earth material with a noise→bump network
-- Emissive rune on the forehead
+- Rune etched INTO the forehead plate (carved recess, not applied lettering)
 - Three-point lighting
 - Final 8-frame turntable contact sheet produced
 
