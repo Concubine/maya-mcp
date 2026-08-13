@@ -127,7 +127,7 @@ def _create_glyph(cmds, text: str, font: str) -> str:
     # indefinitely. Because the handler runs on Maya's main thread via
     # executeInMainThreadWithResult, that hang froze Dispatcher's single
     # worker thread forever, which set dispatcher._straggler and made every
-    # later request fail BusyError until Maya was killed (redmine #578).
+    # later request fail BusyError until Maya was killed (redmine #577).
     # mayapy standalone never showed this because standalone has no tool
     # context/manipulator system to enter, so the interactive path silently
     # behaves like a plain node-creation call there - mayapy green was not

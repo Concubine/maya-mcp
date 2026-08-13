@@ -197,7 +197,7 @@ class TestTimeoutAndBusy:
 
 
 class TestBusyHint:
-    """redmine #578 fix: BusyError must be actionable, and the session must
+    """redmine #577 fix: BusyError must be actionable, and the session must
     recover on its own once a straggler genuinely finishes (never before)."""
 
     def test_hint_names_stuck_command_while_genuinely_still_running(self, dispatcher):
