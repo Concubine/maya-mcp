@@ -22,7 +22,16 @@ from typing import Any, Dict, Optional
 
 from . import protocol
 from .dispatcher import Dispatcher
-from .handlers import capture, code_exec, etch, modeling, scene, sculpt, session
+from .handlers import (
+    capture,
+    code_exec,
+    etch,
+    modeling,
+    scene,
+    sculpt,
+    session,
+    viewport,
+)
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9877
@@ -76,6 +85,8 @@ def _build_handlers() -> Dict[str, Any]:
         "etch_text": etch.etch_text,
         "sculpt_ops": sculpt.sculpt_ops,
         "deform": sculpt.deform,
+        "set_viewport": viewport.set_viewport,
+        "set_camera": viewport.set_camera,
     }
 
 

@@ -575,6 +575,60 @@ class TestSculptInMaya:
         assert checkpoint_id in exc.value.hint
 
 
+class TestViewportInMaya:
+    def test_set_camera_creates_and_positions_named_camera(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import viewport
+
+        result = viewport.set_camera(
+            {"camera": "mb_test_cam", "position": [0, 5, 10],
+             "look_at": [0, 0, 0], "focal_length": 35, "set_active": False}
+        )
+        assert result["name"] == "|mb_test_cam"
+        assert cmds.objExists("|mb_test_cam")
+        shape = cmds.listRelatives("|mb_test_cam", shapes=True, fullPath=True)[0]
+        assert cmds.getAttr(shape + ".focalLength") == 35.0
+        pos = cmds.xform("|mb_test_cam", query=True, worldSpace=True, translation=True)
+        assert pos == pytest.approx([0.0, 5.0, 10.0])
+        # looking back toward the origin from +Y/+Z: pitched down, no roll
+        rot = cmds.xform("|mb_test_cam", query=True, worldSpace=True, rotation=True)
+        assert rot[0] < 0.0
+        assert rot[2] == pytest.approx(0.0)
+
+    def test_set_camera_reuses_existing_camera_by_name(self):
+        # Regression: cmds.camera(name=...) does NOT rename the transform on
+        # this Maya version (it always appends "1", ignoring the requested
+        # name) - the handler must create unnamed then cmds.rename(), and a
+        # second call with the same name must reposition the SAME camera
+        # rather than creating a new one each time (idempotent_hint=True).
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import viewport
+
+        first = viewport.set_camera({"camera": "mb_reuse_cam", "set_active": False})
+        assert first["name"] == "|mb_reuse_cam"
+        second = viewport.set_camera(
+            {"camera": "mb_reuse_cam", "position": [1, 2, 3], "set_active": False}
+        )
+        assert second["name"] == "|mb_reuse_cam"
+        assert len(cmds.ls("mb_reuse_cam", long=True)) == 1
+        assert cmds.xform(
+            "|mb_reuse_cam", query=True, worldSpace=True, translation=True
+        ) == pytest.approx([1.0, 2.0, 3.0])
+
+    def test_set_viewport_and_set_camera_refuse_cleanly_without_gui(self):
+        # Same constraint as capture_viewport: no modelPanel exists in
+        # mayapy/batch mode, and set_active defaults to True.
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import viewport
+
+        with pytest.raises(HandlerError, match="panel|batch"):
+            viewport.set_viewport({"show_grid": True})
+        with pytest.raises(HandlerError, match="panel|batch"):
+            viewport.set_camera({"camera": "mb_active_cam"})
+
+
 class TestDeformRemeshCleanupInMaya:
     def test_bend_deformer_created_and_baked(self):
         import maya.cmds as cmds

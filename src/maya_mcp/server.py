@@ -24,6 +24,7 @@ from . import images
 from .connection import MayaConnection
 from .schemas import (
     BooleanResult,
+    CameraResult,
     CheckpointResult,
     CleanupResult,
     DeformResult,
@@ -40,6 +41,7 @@ from .schemas import (
     SculptResult,
     TransformResult,
     UndoResult,
+    ViewportState,
 )
 
 log = logging.getLogger("maya_mcp.server")
@@ -778,6 +780,79 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                  "delete_history": delete_history, "freeze_transforms": freeze_transforms,
                  "conform_normals": conform_normals},
                 timeout_s=BOOL_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Configure viewport",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=True
+        ),
+    )
+    def maya_set_viewport(
+        show_grid: Annotated[Optional[bool], Field(description="Grid visibility.")] = None,
+        show_light_icons: Annotated[Optional[bool], Field(description=(
+            "Light icons render into playblasts - keep off while capturing art."
+        ))] = None,
+        show_camera_icons: Annotated[Optional[bool], Field(description="Camera icons.")] = None,
+        show_locators: Annotated[Optional[bool], Field(description="Locator display.")] = None,
+        show_manipulators: Annotated[Optional[bool], Field(description="Manipulator display.")] = None,
+        show_texture_placements: Annotated[Optional[bool], Field(description=(
+            "place3dTexture widgets - they render into captures too."
+        ))] = None,
+        wireframe_on_shaded: Annotated[Optional[bool], Field(description="Wire overlay.")] = None,
+        display_lights: Annotated[
+            Optional[Literal["default", "all", "active", "flat", "none"]],
+            Field(description="Which lights illuminate the viewport."),
+        ] = None,
+    ) -> ViewportState:
+        """Persistently configure the working viewport (unlike captures, which
+        restore themselves). Only the params you pass change; the FULL resulting
+        state always comes back - call with no params to just read it."""
+        return ViewportState.model_validate(
+            maya.request(
+                "set_viewport",
+                {"show_grid": show_grid, "show_light_icons": show_light_icons,
+                 "show_camera_icons": show_camera_icons,
+                 "show_locators": show_locators,
+                 "show_manipulators": show_manipulators,
+                 "show_texture_placements": show_texture_placements,
+                 "wireframe_on_shaded": wireframe_on_shaded,
+                 "display_lights": display_lights},
+                timeout_s=SCENE_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Set camera",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=True
+        ),
+    )
+    def maya_set_camera(
+        camera: Annotated[str, Field(description=(
+            "Camera name; created if missing. Use a dedicated named camera "
+            "instead of trusting whatever the panel last looked through."
+        ))] = "mcpCam",
+        position: Annotated[Optional[List[float]], Field(
+            min_length=3, max_length=3, description="World-space position.",
+        )] = None,
+        look_at: Annotated[Optional[List[float]], Field(
+            min_length=3, max_length=3, description="World-space aim point.",
+        )] = None,
+        focal_length: Annotated[Optional[float], Field(gt=0, description="mm.")] = None,
+        set_active: Annotated[bool, Field(description=(
+            "Make the viewport look through this camera (what capture 'current' uses)."
+        ))] = True,
+    ) -> CameraResult:
+        """Create/position a named camera and (by default) make it the active
+        viewport camera, so capture_viewport 'current' is deterministic."""
+        return CameraResult.model_validate(
+            maya.request(
+                "set_camera",
+                {"camera": camera, "position": position, "look_at": look_at,
+                 "focal_length": focal_length, "set_active": set_active},
+                timeout_s=SCENE_TIMEOUT_S,
             )
         )
 

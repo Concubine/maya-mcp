@@ -74,6 +74,8 @@ class TestRegistration:
             "maya_deform",
             "maya_remesh_retopo",
             "maya_mesh_cleanup",
+            "maya_set_viewport",
+            "maya_set_camera",
         }
 
     def test_annotations_declare_read_only_vs_destructive(self):

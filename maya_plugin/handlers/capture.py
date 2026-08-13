@@ -140,6 +140,7 @@ def capture_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
                 "angle": angle,
                 "position": shot["camera_position"],
                 "rotation": shot["camera_rotation"],
+                "camera": shot["camera"],
             }
         )
     return {"images": images, "camera_positions": camera_positions}
@@ -228,6 +229,14 @@ class _PanelState:
         self.wireframe_on_shaded = me(wireframeOnShaded=True)
         self.display_textures = me(displayTextures=True)
         self.grid = me(grid=True)
+        # Icon/manipulator visibility (#577 4a): captures force these off so
+        # light icons and place3dTexture widgets never render into a
+        # playblast; restore puts back whatever the user had.
+        self.lights = me(lights=True)
+        self.cameras = me(cameras=True)
+        self.locators = me(locators=True)
+        self.manipulators = me(manipulators=True)
+        self.textures = me(textures=True)
         # Isolate ("View Selected") state. Membership lives in the panel's
         # ViewSelectedSet objectSet (modelEditor -q -viewObjects); it is only
         # meaningful while viewSelected is on. isolate_dirty is flipped by
@@ -253,6 +262,11 @@ class _PanelState:
                 wireframeOnShaded=self.wireframe_on_shaded,
                 displayTextures=self.display_textures,
                 grid=self.grid,
+                lights=self.lights,
+                cameras=self.cameras,
+                locators=self.locators,
+                manipulators=self.manipulators,
+                textures=self.textures,
             )
         except Exception:
             pass
@@ -348,6 +362,11 @@ def _capture_one(
             "wireframeOnShaded": wireframe_overlay and shading != "wireframe",
             "displayTextures": shading == "textured",
             "grid": False,
+            "lights": False,
+            "cameras": False,
+            "locators": False,
+            "manipulators": False,
+            "textures": False,
         }
         cmds.modelEditor(panel, edit=True, **editor_kwargs)
         cmds.setAttr("hardwareRenderingGlobals.ssaoEnable", buffer == "ssao")
@@ -365,10 +384,12 @@ def _capture_one(
 
         pos = cmds.getAttr(capture_cam + ".translate")[0]
         rot = cmds.getAttr(capture_cam + ".rotate")[0]
+        camera_long = (cmds.ls(capture_cam, long=True) or [capture_cam])[0]
         return {
             "png_b64": base64.b64encode(png_bytes).decode("ascii"),
             "camera_position": list(pos),
             "camera_rotation": list(rot),
+            "camera": camera_long,
         }
     finally:
         state.restore()

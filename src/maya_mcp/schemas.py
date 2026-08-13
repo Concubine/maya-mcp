@@ -195,3 +195,27 @@ class CleanupResult(BaseModel):
     before: MeshStats
     after: MeshStats
     warnings: List[str] = Field(default_factory=list)
+
+
+class ViewportState(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    panel: str
+    show_grid: bool
+    show_light_icons: bool
+    show_camera_icons: bool
+    show_locators: bool
+    show_manipulators: bool
+    show_texture_placements: bool
+    wireframe_on_shaded: bool
+    display_lights: str
+    camera: str
+
+
+class CameraResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    position: List[float]
+    rotation: List[float]
+    warnings: List[str] = Field(default_factory=list)
