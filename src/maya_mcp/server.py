@@ -44,6 +44,7 @@ from .schemas import (
     SaveSceneResult,
     SceneGraphResult,
     SculptResult,
+    TextureRecipeResult,
     TransformResult,
     UndoResult,
     ViewportState,
@@ -1089,6 +1090,43 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             maya.request(
                 "assign_material",
                 {"mesh": mesh, "shader": shader, "params": params, "name": name},
+                timeout_s=SCENE_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Apply texture recipe",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=False
+        ),
+    )
+    def maya_apply_texture_recipe(
+        mesh: Annotated[str, Field(min_length=1, description="Canonical long name.")],
+        recipe: Annotated[
+            Literal["noise_bump", "ramp_gradient", "layered_mask", "file_texture"],
+            Field(description=(
+                "noise_bump - surface grain via bump; ramp_gradient - gradient "
+                "into colour; layered_mask - masked blend; file_texture - an "
+                "image file. Requires a material on the mesh first."
+            )),
+        ],
+        params: Annotated[dict, Field(description=(
+            "noise_bump: scale, depth. file_texture: file_path (required). "
+            "Others take no params yet."
+        ))] = {},
+        slot: Annotated[
+            Optional[Literal["color", "roughness", "normal"]],
+            Field(description=(
+                "Override the recipe's default slot. Mapped to the real attribute "
+                "per shader type; a slot the shader lacks is an error, not a no-op."
+            )),
+        ] = None,
+    ) -> TextureRecipeResult:
+        """Build a named texture network and wire it into the mesh's shader."""
+        return TextureRecipeResult.model_validate(
+            maya.request(
+                "apply_texture_recipe",
+                {"mesh": mesh, "recipe": recipe, "params": params, "slot": slot},
                 timeout_s=SCENE_TIMEOUT_S,
             )
         )

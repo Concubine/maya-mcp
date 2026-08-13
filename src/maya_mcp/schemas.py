@@ -297,3 +297,13 @@ class MaterialResult(BaseModel):
     shading_group: str
     shader: str
     warnings: List[str] = Field(default_factory=list)
+
+
+class TextureRecipeResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    mesh: str
+    recipe: str
+    slot: str = Field(description="Semantic slot driven: color, roughness, or normal.")
+    nodes: List[str] = Field(description="Texture nodes created by the recipe.")
+    warnings: List[str] = Field(default_factory=list)

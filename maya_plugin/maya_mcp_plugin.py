@@ -33,6 +33,7 @@ from .handlers import (
     scene,
     sculpt,
     session,
+    texture_recipes,
     viewport,
 )
 
@@ -94,6 +95,7 @@ def _build_handlers() -> Dict[str, Any]:
         "set_camera": viewport.set_camera,
         "setup_lighting": lighting.setup_lighting,
         "assign_material": material.assign_material,
+        "apply_texture_recipe": texture_recipes.apply_texture_recipe,
     }
 
 

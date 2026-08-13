@@ -82,6 +82,7 @@ class TestRegistration:
             "maya_compare_to_reference",
             "maya_setup_lighting",
             "maya_assign_material",
+            "maya_apply_texture_recipe",
         }
 
     def test_annotations_declare_read_only_vs_destructive(self):

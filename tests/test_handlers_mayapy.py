@@ -1357,6 +1357,34 @@ class TestLightingInMaya:
         assert cmds.getAttr(shapes[0] + ".intensity") == pytest.approx(2.0)
 
 
+class TestTextureRecipesInMaya:
+    def test_recipe_connects_and_leaves_no_orphans_on_failure(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import material, texture_recipes
+
+        cmds.file(new=True, force=True)
+        cmds.file(rename=str(tmp_path / "recipes.ma"))
+        cmds.polyCube(name="texcube", w=2, h=2, d=2)
+        material.assign_material({"mesh": "|texcube", "name": "clay"})
+
+        before = set(cmds.ls(long=True))
+        result = texture_recipes.apply_texture_recipe(
+            {"mesh": "|texcube", "recipe": "noise_bump"}
+        )
+        assert len(result["nodes"]) == 2
+        assert cmds.listConnections("clay.normalCamera") != []
+
+        # a failing recipe must return the scene to exactly this state
+        mid = set(cmds.ls(long=True))
+        with pytest.raises(HandlerError):
+            texture_recipes.apply_texture_recipe(
+                {"mesh": "|texcube", "recipe": "file_texture"}  # no file_path
+            )
+        assert set(cmds.ls(long=True)) == mid
+
+
 class TestMaterialInMaya:
     def test_assigned_material_reads_back_through_get_object_info(self, tmp_path):
         import maya.cmds as cmds
