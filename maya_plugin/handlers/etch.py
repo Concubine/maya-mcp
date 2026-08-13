@@ -115,6 +115,7 @@ def _create_glyph(cmds, text: str, font: str) -> str:
     import maya.mel as mel  # noqa: PLC0415
 
     before = set(cmds.ls(type="transform"))
+    before_type_nodes = set(cmds.ls(type="type") or [])
     mel.eval("CreatePolygonType;")
     created = [t for t in cmds.ls(type="transform") if t not in before]
     if not created:
@@ -144,7 +145,17 @@ def _create_glyph(cmds, text: str, font: str) -> str:
     extras = [t for t in created if t != glyph_tf]
     if extras:
         cmds.delete(extras)  # the manipulator handle is not needed headless
-    type_node = (cmds.ls(type="type") or [])[-1]
+    # Diff against the snapshot taken before CreatePolygonType ran, rather
+    # than picking cmds.ls(type="type")[-1] (scene-wide "last one" - only
+    # correct by creation-order luck; a "type" node from an earlier etch_text
+    # call, or anything else in the scene, would silently win instead).
+    new_type_nodes = list(set(cmds.ls(type="type") or []) - before_type_nodes)
+    if not new_type_nodes:
+        raise HandlerError(
+            "CreatePolygonType produced no type node",
+            hint="the Type plugin misbehaved; retry or carve with maya_boolean_op",
+        )
+    type_node = new_type_nodes[0]
     hex_codes = " ".join("%X" % ord(ch) for ch in text)
     cmds.setAttr(type_node + ".textInput", hex_codes, type="string")
     cmds.setAttr(type_node + ".currentFont", font, type="string")
@@ -195,9 +206,21 @@ def etch_text(params: Dict[str, Any]) -> Dict[str, Any]:
             return set()
 
     node_snapshot = {t: _ls_safe(t) for t in _TYPE_NODE_TYPES}
+    transforms_before = set(cmds.ls(type="transform") or [])
     glyph_tf = None
+    # Any transform newly created by _create_glyph (the glyph mesh itself,
+    # plus a manipulator handle on any failure path that raises before
+    # _create_glyph reaches its own extras cleanup) - captured immediately
+    # after that call returns or raises, before _do_boolean creates the
+    # (legitimate, wanted) output transform. The _TYPE_NODE_TYPES sweep below
+    # only ever caught the Type/history *nodes*, never the mesh transform
+    # CreatePolygonType built - that is what actually orphaned it.
+    created_transforms: set = set()
     try:
-        glyph_tf = _create_glyph(cmds, text, font)
+        try:
+            glyph_tf = _create_glyph(cmds, text, font)
+        finally:
+            created_transforms = set(cmds.ls(type="transform") or []) - transforms_before
         bbox = cmds.exactWorldBoundingBox(glyph_tf)
         placement = face_frame_transform(center, normal, bbox[:3], bbox[3:], width, depth)
         scale = placement["scale"]
@@ -223,6 +246,18 @@ def etch_text(params: Dict[str, Any]) -> Dict[str, Any]:
         # zero orphan history nodes: sweep anything the Type network left behind
         for node_type, before in node_snapshot.items():
             for node in _ls_safe(node_type) - before:
+                try:
+                    cmds.delete(node)
+                except Exception:
+                    pass
+        # zero orphan glyph mesh: on success _do_boolean consumes glyph_tf
+        # (it stops existing), so this is a no-op there. On any failure
+        # between glyph creation and a successful boolean, it - and any
+        # manipulator handle a failure-before-cleanup path left alongside
+        # it - is still sitting at the face center, inside the target's
+        # bbox, waiting to be swallowed by a later boolean call by accident.
+        for node in created_transforms:
+            if cmds.objExists(node):
                 try:
                     cmds.delete(node)
                 except Exception:

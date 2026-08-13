@@ -168,7 +168,7 @@ def _scene_bbox(cmds, isolate: Optional[List[str]]):
     return list(bbox[:3]), list(bbox[3:])
 
 
-def _find_model_panel(cmds) -> str:
+def find_model_panel(cmds) -> str:
     panel = cmds.getPanel(withFocus=True)
     if panel and cmds.getPanel(typeOf=panel) == "modelPanel":
         return panel
@@ -320,7 +320,7 @@ def _capture_one(
     resolution: int,
 ) -> Dict[str, Any]:
     cmds = _cmds()
-    panel = _find_model_panel(cmds)
+    panel = find_model_panel(cmds)
     state = _PanelState(cmds, panel)
     temp_camera = None
     # Perception must not pollute the undo queue: suppress undo recording for
@@ -335,7 +335,17 @@ def _capture_one(
         else:
             bbox_min, bbox_max = _scene_bbox(cmds, isolate)
             position, rotation = camera_placement(angle, bbox_min, bbox_max)
-            temp_camera = cmds.camera(name="mayaMcpTempCam")[0]
+            # cmds.camera(name=...) does NOT rename the transform on this
+            # Maya (verified live: it always yields "camera1"/"camera2", the
+            # same broken idiom set_camera works around) - create unnamed,
+            # then rename deterministically via unique_name. Without this the
+            # temp camera really is "cameraN", a name a user scene plausibly
+            # already contains, which is exactly what made the cosmetic
+            # `camera` field below able to collide and (pre-fix) fail the
+            # whole capture on an ambiguous short name.
+            temp_name = naming.unique_name(cmds, "mayaMcpTempCam")
+            created_cam = cmds.camera()[0]
+            temp_camera = cmds.rename(created_cam, temp_name)
             cmds.setAttr(temp_camera + ".translate", *position, type="double3")
             cmds.setAttr(temp_camera + ".rotate", *rotation, type="double3")
             cmds.setAttr(temp_camera + ".visibility", False)
@@ -388,7 +398,11 @@ def _capture_one(
 
         pos = cmds.getAttr(capture_cam + ".translate")[0]
         rot = cmds.getAttr(capture_cam + ".rotate")[0]
-        camera_long = naming.require_object(cmds, capture_cam)
+        # Cosmetic field only - a display name must never fail a capture.
+        # naming.require_object raises on an ambiguous short name, which
+        # would fail the whole call after the pixels were already grabbed;
+        # fall back to the bare name rather than resolve-or-raise.
+        camera_long = (cmds.ls(capture_cam, long=True) or [capture_cam])[0]
         return {
             "png_b64": base64.b64encode(png_bytes).decode("ascii"),
             "camera_position": list(pos),

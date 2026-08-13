@@ -89,6 +89,12 @@ def checkpoint(params: Dict[str, Any]) -> Dict[str, Any]:
 def restore_checkpoint(params: Dict[str, Any]) -> Dict[str, Any]:
     cmds = _cmds()
     checkpoint_id = str(params.get("checkpoint_id") or "")
+    if ".." in checkpoint_id:
+        raise HandlerError(
+            "checkpoint_id %r must not contain '..'" % checkpoint_id,
+            hint="pass the NNN_label stem exactly as returned by maya_checkpoint, "
+            "e.g. '007_pre_rune' - not a path",
+        )
     cp_dir = _checkpoint_dir(cmds)
     path = os.path.join(cp_dir, checkpoint_id + ".ma")
     if not os.path.isfile(path):
@@ -157,9 +163,15 @@ def new_scene(params: Dict[str, Any]) -> Dict[str, Any]:
             hint="pass confirm=true; call maya_checkpoint or maya_save_scene first "
             "if the current state matters",
         )
+    # new_scene is genuinely unrecoverable (no undo chunk survives a scene
+    # replace) - unlike every other destructive op here it took no
+    # checkpoint of its own, so a confirm=true retry after a refusal was
+    # permanent total loss. Checkpoint AFTER validation (so a refused call
+    # burns nothing) and BEFORE the destructive file() call.
+    pre = auto_checkpoint("pre_new_scene")
     _cmds().file(new=True, force=True)
     ledger.clear()
-    return {"new_scene": True}
+    return {"new_scene": True, "pre_checkpoint": pre["checkpoint_id"]}
 
 
 new_scene.no_undo_chunk = True
@@ -179,9 +191,13 @@ def open_scene(params: Dict[str, Any]) -> Dict[str, Any]:
             hint="pass confirm=true to discard them, or maya_save_scene / "
             "maya_checkpoint first",
         )
+    # Same rationale as new_scene: replacing the scene destroys the undo
+    # queue, so this is the only recovery path. Checkpoint after validation,
+    # before the destructive open.
+    pre = auto_checkpoint("pre_open_scene")
     cmds.file(path, open=True, force=True)
     ledger.clear()
-    return {"opened": path}
+    return {"opened": path, "pre_checkpoint": pre["checkpoint_id"]}
 
 
 open_scene.no_undo_chunk = True

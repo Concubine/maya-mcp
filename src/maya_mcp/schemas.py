@@ -84,12 +84,22 @@ class NewSceneResult(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     new_scene: bool = Field(description="True when the new scene was created successfully.")
+    pre_checkpoint: Optional[str] = Field(
+        default=None,
+        description="Checkpoint id saved just before the discarded scene was replaced; "
+        "pass to maya_restore_checkpoint to recover it.",
+    )
 
 
 class OpenSceneResult(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     opened: str = Field(description="Absolute path to the scene file that was opened.")
+    pre_checkpoint: Optional[str] = Field(
+        default=None,
+        description="Checkpoint id saved just before the discarded scene was replaced; "
+        "pass to maya_restore_checkpoint to recover it.",
+    )
 
 
 class SaveSceneResult(BaseModel):
@@ -175,6 +185,10 @@ class RemeshResult(BaseModel):
     tris: int
     method: str = Field(description="Which path ran: polyRetopo, polyRemesh, or polyReduce.")
     warnings: List[str] = Field(default_factory=list)
+    original: Optional[str] = Field(
+        default=None,
+        description="Long name of the hidden pre-remesh duplicate, when keep_original=true.",
+    )
 
 
 class MeshStats(BaseModel):
@@ -209,7 +223,11 @@ class ViewportState(BaseModel):
     show_texture_placements: bool
     wireframe_on_shaded: bool
     display_lights: str
-    camera: str
+    camera: Optional[str] = Field(
+        default=None,
+        description="Canonical long name of the panel's active camera, or None when the "
+        "panel reports no camera.",
+    )
 
 
 class CameraResult(BaseModel):

@@ -70,7 +70,9 @@ def call(cmd, params, timeout_s=60.0):
 
 
 def color_fractions(png_bytes):
-    """(green_fraction, red_fraction) over opaque pixels.
+    """(green_fraction, red_fraction) over opaque pixels, or (None, None) if
+    the capture had no opaque pixels at all (a distinct failure from #575 -
+    see the caller).
 
     VP2's unassigned-material green measured live: (0, 208, 57) — saturated
     green with no red. The cube's lamberts render red- and yellow-dominant.
@@ -80,7 +82,12 @@ def color_fractions(png_bytes):
     image = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
     opaque = [(r, g, b) for r, g, b, a in image.getdata() if a > 128]
     if not opaque:
-        return 1.0, 0.0
+        # A blank/empty capture is a DIFFERENT failure than the #575 shading
+        # bug (which produces a fully-opaque, saturated-green image) - do not
+        # report it as green-dominant, or a capture pipeline break masquerades
+        # as "the isolate bug is back" and burns a debugging session on the
+        # wrong problem (as it already did once).
+        return None, None
     green = sum(1 for r, g, b in opaque if g > 120 and g > 1.5 * r and g > 1.5 * b)
     red = sum(1 for r, g, b in opaque if r > 120 and r > 1.5 * g and r > 1.5 * b)
     return green / len(opaque), red / len(opaque)
@@ -104,6 +111,10 @@ def main() -> int:
         green, red = color_fractions(png)
     finally:
         call("execute_python", {"code": TEARDOWN})
+
+    if green is None:
+        print("FAIL: capture was empty - this is not the #575 bug")
+        return 1
 
     print("isolate capture: green-dominant %.2f, red-dominant %.2f of opaque pixels"
           % (green, red))

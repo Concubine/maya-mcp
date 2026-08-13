@@ -92,6 +92,13 @@ def test_checkpoint_prunes_beyond_20(fake, tmp_path):
     assert "021_newest.ma" in remaining
 
 
+def test_restore_rejects_path_traversal(fake):
+    with pytest.raises(HandlerError) as exc:
+        session.restore_checkpoint({"checkpoint_id": "../../foo"})
+    assert ".." in str(exc.value)
+    assert exc.value.hint
+
+
 def test_restore_unknown_id_hints_listing(fake):
     with pytest.raises(HandlerError) as exc:
         session.restore_checkpoint({"checkpoint_id": "042_nope"})
@@ -124,17 +131,38 @@ def test_new_scene_requires_confirm(fake):
         session.new_scene({})
     assert "confirm" in exc.value.hint
     assert fake.new_calls == 0
+    # C1: a validation failure must never burn a checkpoint.
+    assert fake.saved_to == []
 
 
 def test_new_scene_with_confirm(fake):
     result = session.new_scene({"confirm": True})
-    assert result == {"new_scene": True}
+    assert result["new_scene"] is True
     assert fake.new_calls == 1
+    # C1: new_scene destroys the undo queue with it, so an auto-checkpoint
+    # is the only way back - it must be taken and its id returned.
+    assert result["pre_checkpoint"] == "001_auto_pre_new_scene"
+    assert fake.saved_to == [
+        os.path.join(fake._tmp, "checkpoints", "001_auto_pre_new_scene.ma")
+    ]
+
+
+def test_new_scene_checkpoints_before_the_destructive_call(fake, monkeypatch):
+    # C1: prove the ordering, not just that both things happened - if
+    # auto_checkpoint itself blows up, the scene must NOT have been replaced.
+    def _boom(reason):
+        raise RuntimeError("checkpoint boom")
+
+    monkeypatch.setattr(session, "auto_checkpoint", _boom)
+    with pytest.raises(RuntimeError, match="checkpoint boom"):
+        session.new_scene({"confirm": True})
+    assert fake.new_calls == 0
 
 
 def test_open_scene_missing_file(fake):
     with pytest.raises(HandlerError):
         session.open_scene({"path": "Z:/does/not/exist.ma"})
+    assert fake.saved_to == []
 
 
 def test_open_scene_unsaved_changes_needs_confirm(fake, tmp_path):
@@ -144,8 +172,25 @@ def test_open_scene_unsaved_changes_needs_confirm(fake, tmp_path):
     with pytest.raises(HandlerError) as exc:
         session.open_scene({"path": str(target)})
     assert "unsaved" in str(exc.value)
+    # C1: the refusal must not have taken a checkpoint either.
+    assert fake.saved_to == []
     result = session.open_scene({"path": str(target), "confirm": True})
     assert result["opened"] == str(target)
+    # C1: open_scene is just as unrecoverable via undo as new_scene.
+    assert result["pre_checkpoint"] == "001_auto_pre_open_scene"
+
+
+def test_open_scene_checkpoints_before_the_destructive_call(fake, monkeypatch, tmp_path):
+    target = tmp_path / "scene2.ma"
+    target.write_text("x")
+
+    def _boom(reason):
+        raise RuntimeError("checkpoint boom")
+
+    monkeypatch.setattr(session, "auto_checkpoint", _boom)
+    with pytest.raises(RuntimeError, match="checkpoint boom"):
+        session.open_scene({"path": str(target), "confirm": True})
+    assert fake.opened == []
 
 
 def test_save_scene_untitled_without_path_errors(fake):

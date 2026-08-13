@@ -87,7 +87,21 @@ class FakeCmds:
                 return long_name
         return None
 
-    # -- panel discovery (used by _find_model_panel, imported from capture) --
+    def _all_matches(self, name):
+        """Every registered node whose long name or short tail equals `name`
+        - unlike _resolve (which arbitrarily returns the first hit), this can
+        report more than one match so naming.require_object's ambiguity
+        branch is reachable through a handler, not just in isolation
+        (test_naming.py already covers it directly)."""
+        if name in self.node_type:
+            return [name]
+        short = str(name).lstrip("|")
+        return [
+            long_name for long_name in self.node_type
+            if long_name.rsplit("|", 1)[-1] == short
+        ]
+
+    # -- panel discovery (used by find_model_panel, imported from capture) --
     def getPanel(self, **kw):
         if kw.get("withFocus"):
             return self.panel
@@ -130,10 +144,10 @@ class FakeCmds:
     def ls(self, *args, **kw):
         if not args:
             return []
+        if kw.get("long"):
+            return self._all_matches(args[0])
         resolved = self._resolve(args[0])
-        if resolved is None:
-            return []
-        return [resolved] if kw.get("long") else [args[0]]
+        return [] if resolved is None else [args[0]]
 
     def listRelatives(self, node, **kw):
         resolved = self._resolve(node)
@@ -242,6 +256,18 @@ class TestSetViewport:
         result = viewport.set_viewport({})
         assert result["camera"] == "|bkCam"
 
+    def test_ambiguous_camera_short_name_refuses_before_any_edit(self, fake_cmds):
+        # A second node sharing the panel camera's short name makes
+        # naming.require_object raise "ambiguous". That must happen BEFORE
+        # cmds.modelEditor(edit=True, ...) mutates the panel - otherwise the
+        # requested settings silently took even though the call raised.
+        fake_cmds._register("|other|bkCam", "camera", shape="|other|bkCam|bkCamShape")
+        with pytest.raises(HandlerError, match="ambiguous") as exc:
+            viewport.set_viewport({"show_grid": False})
+        assert exc.value.hint
+        assert fake_cmds.calls == []  # no modelEditor call was ever made
+        assert fake_cmds.editor_flags["grid"] is True  # untouched
+
 
 class TestSetCamera:
     def test_create_path_uses_camera_then_rename_not_named_kwarg(self, fake_cmds):
@@ -257,6 +283,7 @@ class TestSetCamera:
         self, fake_cmds
     ):
         first = viewport.set_camera({"camera": "reuseCam", "set_active": False})
+        assert first["warnings"] == []  # fresh create: nothing to warn about
         created_after_first = fake_cmds._create_seq
         second = viewport.set_camera(
             {"camera": "reuseCam", "position": [1, 2, 3], "set_active": False}
@@ -264,6 +291,7 @@ class TestSetCamera:
         assert second["name"] == first["name"] == "|reuseCam"
         assert fake_cmds._create_seq == created_after_first  # no extra create
         assert fake_cmds.translate["|reuseCam"] == [1.0, 2.0, 3.0]
+        assert any("reused existing camera |reuseCam" in w for w in second["warnings"])
 
     def test_reuse_path_resolves_nested_short_name_to_canonical_long(self, fake_cmds):
         fake_cmds._register("|grp|camB", "camera", shape="|grp|camB|camBShape")

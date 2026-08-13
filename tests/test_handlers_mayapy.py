@@ -377,11 +377,27 @@ class TestEtchInMaya:
 
         monkeypatch.setattr(etch, "face_frame_transform", _boom)
 
+        # Spy on the real _create_glyph so the test can name the mesh
+        # transform it built - I2: the old orphan check only asserted zero
+        # Type/typeExtrude *nodes*, which stayed true even when the glyph
+        # MESH transform itself (not a Type-network node) was left behind.
+        real_create_glyph = etch._create_glyph
+        created_names = []
+
+        def _spy_create_glyph(cmds_arg, text, font):
+            name = real_create_glyph(cmds_arg, text, font)
+            created_names.append(name)
+            return name
+
+        monkeypatch.setattr(etch, "_create_glyph", _spy_create_glyph)
+
         with pytest.raises(HandlerError, match="forced face_frame_transform failure"):
             etch.etch_text({"mesh": "|plate", "text": "א", "face": 0})
 
         assert cmds.ls(type="type") == []
         assert cmds.ls(type="typeExtrude") == []
+        assert created_names, "the real glyph creator should have run"
+        assert not cmds.objExists(created_names[0])
 
     def test_sweep_runs_when_create_glyph_itself_fails_after_type_node_created(
         self, monkeypatch, tmp_path
@@ -407,8 +423,12 @@ class TestEtchInMaya:
         cmds.file(rename=str(tmp_path / "etch_sweep_create.ma"))
         cmds.polyCube(name="plate", w=2, h=1, d=0.3)
 
+        created_names = []
+
         def _fake_create_glyph(cmds_arg, text, font):
+            before = set(cmds.ls(type="transform"))
             mel.eval("CreatePolygonType;")
+            created_names.extend(set(cmds.ls(type="transform")) - before)
             raise HandlerError("forced create_glyph failure after real node creation")
 
         monkeypatch.setattr(etch, "_create_glyph", _fake_create_glyph)
@@ -418,6 +438,12 @@ class TestEtchInMaya:
 
         assert cmds.ls(type="type") == []
         assert cmds.ls(type="typeExtrude") == []
+        # I2: CreatePolygonType makes at least the glyph mesh transform (plus
+        # a manipulator handle) - neither is a Type/typeExtrude *node*, so
+        # the assertions above stayed green with them still in the scene.
+        assert created_names, "CreatePolygonType should have created transforms"
+        for name in created_names:
+            assert not cmds.objExists(name), name
 
 
 class TestSculptInMaya:
@@ -677,6 +703,31 @@ class TestDeformRemeshCleanupInMaya:
         # above), so resolve to canonical long names before comparing.
         history = [(cmds.ls(h, long=True) or [h])[0] for h in cmds.listHistory(shape)]
         assert history == [shape]
+        # I1: baking must not orphan the handle transform either (bend's is
+        # bend1Handle, shape type deformBend) - constructionHistory delete
+        # only removes the deformer DG node, not the handle it created.
+        assert cmds.ls(type="deformBend") == []
+
+    def test_lattice_deform_baked_leaves_no_handle_transforms(self):
+        # I1: cmds.delete(mesh, constructionHistory=True) removes the ffd
+        # deformer DG node but NOT the transforms cmds.lattice created
+        # (ffd1Lattice, ffd1Base) - both stay in the scene, visible and
+        # framed by viewFit, even though the response claims baked=True
+        # with deformer_nodes=[] (nothing left to clean up, by its own
+        # report). Verify against real Maya that both are actually gone.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import sculpt
+
+        cmds.polyCube(name="lat_bake_target")
+        result = sculpt.deform(
+            {"mesh": "|lat_bake_target", "deformer": "lattice",
+             "params": {"translate": [1, 0, 0]}, "delete_history_after": True}
+        )
+        assert result["baked"] is True
+        assert result["deformer_nodes"] == []
+        assert cmds.ls(type="lattice") == []
+        assert cmds.ls(type="baseLattice") == []
 
     def test_deform_rejects_unknown_param(self):
         import pytest as _pytest
@@ -707,6 +758,57 @@ class TestDeformRemeshCleanupInMaya:
         assert result["method"] in ("polyRetopo", "polyRemesh", "polyReduce")
         assert cmds.objExists("blob_orig")
         assert cmds.getAttr("blob_orig.visibility") is False
+        # the hidden duplicate's name must come back so the LLM can find/clean it
+        assert result["original"] == "|blob_orig"
+
+    def test_remesh_reports_no_original_when_keep_original_false(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        cmds.file(rename=str(tmp_path / "remesh_no_orig.ma"))
+        cmds.polySphere(name="blob_bare", subdivisionsAxis=40, subdivisionsHeight=40)
+        result = modeling.remesh_retopo(
+            {"mesh": "|blob_bare", "target_polycount": 400, "keep_original": False}
+        )
+        assert result["original"] is None
+        assert not cmds.objExists("blob_bare_orig")
+
+    def test_remesh_polyreduce_percentage_warning_distinguishes_query_failure(
+        self, tmp_path, monkeypatch
+    ):
+        # Minor finding: if polyEvaluate(face=True) ever returns a non-int,
+        # the old code silently left percentage at 0 and still claimed
+        # "target_polycount %d >= current face count %s" - lying about a
+        # query failure as if it were the ordinary "nothing to reduce" case.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        def _raise(*args, **kwargs):
+            raise RuntimeError("forced fallback for test")
+
+        monkeypatch.setattr(cmds, "polyRetopo", _raise)
+        monkeypatch.setattr(cmds, "polyRemesh", _raise)
+        real_poly_evaluate = cmds.polyEvaluate
+
+        def _flaky_poly_evaluate(*args, **kwargs):
+            if kwargs.get("face"):
+                return {"unexpected": "shape"}  # not an int
+            return real_poly_evaluate(*args, **kwargs)
+
+        monkeypatch.setattr(cmds, "polyEvaluate", _flaky_poly_evaluate)
+
+        cmds.file(rename=str(tmp_path / "remesh_badeval.ma"))
+        cmds.polySphere(name="blob3", subdivisionsAxis=40, subdivisionsHeight=40)
+        result = modeling.remesh_retopo(
+            {"mesh": "|blob3", "target_polycount": 400, "keep_original": False}
+        )
+        assert result["method"] == "polyReduce"
+        assert any(
+            "polyEvaluate" in w and "int" in w for w in result["warnings"]
+        ), result["warnings"]
+        assert not any("target_polycount" in w for w in result["warnings"])
 
     def test_cleanup_reports_before_after(self):
         import maya.cmds as cmds
@@ -908,8 +1010,15 @@ class TestM1AcceptanceGate:
                 assert not cmds.objExists("gate_cutter")
                 assert not cmds.objExists("gate_carved")
 
-                # scene-wide orphan sweep
-                for orphan_type in ("polyCBoolOp", "type", "typeExtrude", "groupParts"):
+                # scene-wide orphan sweep (I1: lattice/baseLattice/nonlinear
+                # handle shape types added so this gate would also catch a
+                # regression in sculpt.deform's delete_history_after handle
+                # cleanup, not just boolean_op's history discipline)
+                for orphan_type in (
+                    "polyCBoolOp", "type", "typeExtrude", "groupParts",
+                    "lattice", "baseLattice",
+                    "deformBend", "deformSquash", "deformTwist",
+                ):
                     assert cmds.ls(type=orphan_type) == [], orphan_type
             except BaseException as exc:  # re-raised on the main thread below
                 helper_failure.append(exc)

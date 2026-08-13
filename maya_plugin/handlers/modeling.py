@@ -363,11 +363,13 @@ def remesh_retopo(params: Dict[str, Any]) -> Dict[str, Any]:
 
     session.auto_checkpoint("remesh")
 
+    original: Optional[str] = None
     if keep_original:
         orig_name = naming.unique_name(cmds, mesh_long.split("|")[-1] + "_orig")
         dup = cmds.duplicate(mesh_long, name=orig_name, returnRootsOnly=True)[0]
         dup_long = _long(cmds, dup)
         cmds.setAttr(dup_long + ".visibility", False)
+        original = dup_long
 
     # Feature-detect in order, degrading with a reported fallback rather than
     # failing outright (§6 compatibility) - Maya versions vary in which of
@@ -400,20 +402,32 @@ def remesh_retopo(params: Dict[str, Any]) -> Dict[str, Any]:
         # keep. target/current is the keep-fraction, so the reduction amount
         # is its complement.
         percentage = 0.0
-        if isinstance(current_faces, int) and current_faces > target > 0:
+        if not isinstance(current_faces, int):
+            # A query failure, not "nothing to reduce" - keep the two cases
+            # from ever sharing one warning message (the old message claimed
+            # target_polycount >= current face count here too, which is a lie
+            # when the count was never obtained).
+            warnings.append(
+                "polyEvaluate(face=True) on %s returned %r instead of an int "
+                "face count; skipped polyReduce" % (mesh_long, current_faces)
+            )
+        elif current_faces > target > 0:
             percentage = max(1.0, min(100.0, (1.0 - target / float(current_faces)) * 100.0))
         if percentage > 0.0:
             cmds.polyReduce(mesh_long, percentage=percentage, constructionHistory=False)
-        else:
+        elif isinstance(current_faces, int):
             warnings.append(
-                "target_polycount %d >= current face count %s; nothing to reduce"
+                "target_polycount %d >= current face count %d; nothing to reduce"
                 % (target, current_faces)
             )
         method = "polyReduce"
 
     cmds.delete(mesh_long, constructionHistory=True)
     tris = cmds.polyEvaluate(mesh_long, triangle=True)
-    return {"name": mesh_long, "tris": tris, "method": method, "warnings": warnings}
+    return {
+        "name": mesh_long, "tris": tris, "method": method, "warnings": warnings,
+        "original": original,
+    }
 
 
 def mesh_cleanup(params: Dict[str, Any]) -> Dict[str, Any]:

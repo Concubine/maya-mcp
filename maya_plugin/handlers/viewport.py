@@ -13,7 +13,7 @@ from typing import Any, Dict, List
 
 from ..dispatcher import HandlerError
 from . import naming
-from .capture import _find_model_panel
+from .capture import find_model_panel
 
 DEFAULT_CAMERA = "mcpCam"
 _EDITOR_FLAGS = {
@@ -55,7 +55,7 @@ def look_at_rotation(position: List[float], target: List[float]) -> List[float]:
 
 def set_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
     cmds = _cmds()
-    panel = _find_model_panel(cmds)
+    panel = find_model_panel(cmds)
     edits: Dict[str, Any] = {}
     for param, flag in _EDITOR_FLAGS.items():
         value = params.get(param)
@@ -69,6 +69,15 @@ def set_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
                 hint="valid: %s" % ", ".join(_DISPLAY_LIGHTS),
             )
         edits["displayLights"] = display_lights
+
+    # modelPanel -q -camera returns a short name (verified live, Maya 2027);
+    # every scene-node name this plugin reports must be canonical long.
+    # Resolved BEFORE the edit call below: an ambiguous short name must
+    # refuse the whole request, not raise after the panel was already
+    # mutated (there would be no way to report the settings actually took).
+    cam = cmds.modelPanel(panel, query=True, camera=True)
+    camera_long = naming.require_object(cmds, cam) if cam else cam
+
     if edits:
         cmds.modelEditor(panel, edit=True, **edits)
 
@@ -76,10 +85,7 @@ def set_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
     for param, flag in _EDITOR_FLAGS.items():
         state[param] = bool(cmds.modelEditor(panel, query=True, **{flag: True}))
     state["display_lights"] = cmds.modelEditor(panel, query=True, displayLights=True)
-    # modelPanel -q -camera returns a short name (verified live, Maya 2027);
-    # every scene-node name this plugin reports must be canonical long.
-    cam = cmds.modelPanel(panel, query=True, camera=True)
-    state["camera"] = naming.require_object(cmds, cam) if cam else cam
+    state["camera"] = camera_long
     return state
 
 
@@ -100,6 +106,7 @@ def set_camera(params: Dict[str, Any]) -> Dict[str, Any]:
                 "%r exists but is not a camera" % name,
                 hint="pass a different `camera` name, or rename/delete the conflicting node",
             )
+        warnings.append("reused existing camera %s" % cam)
     else:
         # cmds.camera(name=...) does NOT rename the transform (verified live,
         # Maya 2027: camera(name="mcpCam") always yields "mcpCam1", ignoring
@@ -135,7 +142,7 @@ def set_camera(params: Dict[str, Any]) -> Dict[str, Any]:
         shape = cmds.listRelatives(cam, shapes=True, fullPath=True)[0]
         cmds.setAttr(shape + ".focalLength", float(focal))
     if params.get("set_active", True):
-        panel = _find_model_panel(cmds)
+        panel = find_model_panel(cmds)
         cmds.lookThru(panel, cam)
     return {
         "name": cam,

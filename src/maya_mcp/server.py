@@ -319,7 +319,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "Must be true; the current scene is discarded."
         ))] = False,
     ) -> NewSceneResult:
-        """Start an empty scene. REFUSES without confirm=true."""
+        """Start an empty scene. REFUSES without confirm=true. Auto-checkpoints
+        the discarded scene first (unlike undo, this survives a scene replace) -
+        recover it via maya_restore_checkpoint(pre_checkpoint)."""
         return NewSceneResult.model_validate(
             maya.request("new_scene", {"confirm": confirm}, timeout_s=SESSION_TIMEOUT_S)
         )
@@ -336,7 +338,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "Required (true) only when the current scene has unsaved changes."
         ))] = False,
     ) -> OpenSceneResult:
-        """Open a scene file, replacing the current scene."""
+        """Open a scene file, replacing the current scene. Auto-checkpoints the
+        discarded scene first (unlike undo, this survives a scene replace) -
+        recover it via maya_restore_checkpoint(pre_checkpoint)."""
         return OpenSceneResult.model_validate(
             maya.request(
                 "open_scene", {"path": path, "confirm": confirm}, timeout_s=SESSION_TIMEOUT_S
@@ -449,7 +453,7 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         scale: Vec3 = None,
         relative: Annotated[bool, Field(description=(
             "True (default): offsets relative to current values. False: absolute "
-            "world-space translate, object-space rotate/scale."
+            "world-space translate and rotate; object-space scale."
         ))] = True,
     ) -> TransformResult:
         """Move/rotate/scale objects by name. Returns the resulting transforms —

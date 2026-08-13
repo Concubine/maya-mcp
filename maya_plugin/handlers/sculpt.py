@@ -330,6 +330,17 @@ def deform(params: Dict[str, Any]) -> Dict[str, Any]:
         cmds.xform(handle, rotation=handle_xform["rotate"], worldSpace=True)
     if params.get("delete_history_after"):
         cmds.delete(mesh_long, constructionHistory=True)
+        # constructionHistory delete only removes the deformer DG node, not
+        # the handle transforms the deformer command created (ffd1Lattice/
+        # ffd1Base for lattice, bendHandle/twistHandle for nonLinear, the
+        # sculpt origin + stretch origin for sculpt) - nodes[1:] is exactly
+        # that set (nodes[0] is the deformer node history already removed).
+        # They are visible, get framed by viewFit, and render into captures
+        # if left behind, so sweep them here rather than reporting baked=True
+        # with orphans still in the scene.
+        for handle in nodes[1:]:
+            if cmds.objExists(handle):
+                cmds.delete(handle)
         return {"deformer_nodes": [], "baked": True, "warnings": []}
     long_nodes = [(cmds.ls(n, long=True) or [n])[0] for n in nodes]
     return {"deformer_nodes": long_nodes, "baked": False, "warnings": []}

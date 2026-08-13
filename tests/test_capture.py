@@ -311,8 +311,17 @@ class FakeCaptureCmds:
             "textures": True,
         }
         self.ssao = False
-        self.camera = "persp"
+        self.active_camera = "persp"  # panel's current camera (not cmds.camera(), below)
         self.focus_panel = "modelPanel1"
+        self._create_seq = 0
+        self.renamed = []
+        self.deleted = []
+        self.existing_names = set()
+        # When set, cmds.ls(<this name>, long=True) reports TWO matches
+        # instead of one - reproduces a scene with a stray node sharing the
+        # temp camera's short name, without require_object being involved
+        # (capture.py's cosmetic `camera` field must never raise on this).
+        self.ambiguous_name = None
 
     def getPanel(self, **kw):
         if kw.get("withFocus"):
@@ -327,7 +336,7 @@ class FakeCaptureCmds:
 
     def modelPanel(self, panel, **kw):
         if kw.get("query") and kw.get("camera"):
-            return self.camera
+            return self.active_camera
         return None
 
     def modelEditor(self, panel, **kw):
@@ -361,7 +370,12 @@ class FakeCaptureCmds:
 
     def ls(self, *args, **kw):
         if args and kw.get("long"):
-            return ["|%s" % str(args[0]).lstrip("|")]
+            name = str(args[0]).lstrip("|")
+            if self.ambiguous_name and name == self.ambiguous_name:
+                return ["|dupA|%s" % name, "|dupB|%s" % name]
+            return ["|%s" % name]
+        if kw.get("geometry"):
+            return []
         return []
 
     def select(self, *a, **kw):
@@ -371,6 +385,29 @@ class FakeCaptureCmds:
         return None
 
     def setFocus(self, *a, **kw):
+        return None
+
+    def objExists(self, name):
+        return str(name).lstrip("|") in self.existing_names
+
+    def camera(self, **kw):
+        # Deliberately ignores kw["name"] - matches the live Maya quirk
+        # set_camera already works around (viewport.py); capture.py's temp
+        # camera must use the same create-then-rename idiom.
+        self._create_seq += 1
+        transform = "camera%d" % self._create_seq
+        shape = "camera%dShape" % self._create_seq
+        return [transform, shape]
+
+    def rename(self, node, new_name):
+        self.renamed.append((node, new_name))
+        return new_name
+
+    def viewFit(self, *a, **kw):
+        return None
+
+    def delete(self, *a, **kw):
+        self.deleted.extend(a)
         return None
 
 
@@ -420,3 +457,43 @@ class TestIconHiding:
             "current", "smoothShaded", True, "beauty", None, True, 256
         )
         assert shot["camera"] == "|persp"
+
+
+class TestTempCamera:
+    """I3: the per-angle temp camera must use the same create-then-rename
+    idiom as set_camera (cmds.camera(name=...) does not actually rename the
+    transform on this Maya), and the cosmetic `camera` field it feeds must
+    never raise on an ambiguous short name - it must never fail an entire
+    capture over a display-only field."""
+
+    def test_temp_camera_created_then_renamed_not_named_kwarg(self, monkeypatch):
+        cmds = FakeCaptureCmds()
+        monkeypatch.setattr(capture, "_cmds", lambda: cmds)
+        monkeypatch.setattr(capture, "_grab_pixels", lambda *a, **k: b"fakepng")
+
+        shot = capture._capture_one(
+            "front", "smoothShaded", True, "beauty", None, True, 256
+        )
+
+        assert cmds._create_seq == 1  # exactly one temp camera created
+        assert cmds.renamed == [("camera1", "mayaMcpTempCam")]
+        assert shot["camera"] == "|mayaMcpTempCam"
+        # the temp camera must be cleaned up afterwards
+        assert "mayaMcpTempCam" in cmds.deleted
+
+    def test_ambiguous_temp_camera_short_name_does_not_raise(self, monkeypatch):
+        # Reproduces the exact bug: a scene node happens to share the temp
+        # camera's short name. Before the fix, the cosmetic `camera` field
+        # used naming.require_object, which raises HandlerError("ambiguous")
+        # here and would fail the whole capture after pixels were grabbed.
+        cmds = FakeCaptureCmds()
+        cmds.ambiguous_name = "mayaMcpTempCam"
+        monkeypatch.setattr(capture, "_cmds", lambda: cmds)
+        monkeypatch.setattr(capture, "_grab_pixels", lambda *a, **k: b"fakepng")
+
+        shot = capture._capture_one(
+            "front", "smoothShaded", True, "beauty", None, True, 256
+        )
+
+        assert shot["png_b64"]  # the capture succeeded end to end
+        assert shot["camera"] == "|dupA|mayaMcpTempCam"  # first match, no raise
