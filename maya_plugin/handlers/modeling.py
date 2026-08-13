@@ -193,13 +193,20 @@ def group(params: Dict[str, Any]) -> Dict[str, Any]:
     grp = cmds.group(*resolved, name=naming.unique_name(cmds, requested))
     group_long = _long(cmds, grp)
 
-    # Re-key ledger entries: each child's long name has changed due to reparenting
+    # Re-key ledger entries: each child's long name has changed due to reparenting.
+    # Query Maya's actual post-group paths rather than assuming a naming scheme
+    # (Maya may auto-rename a child on collision).
+    actual_children = (
+        cmds.listRelatives(group_long, children=True, fullPath=True) or []
+    )
     for old_long in resolved:
         ledger.forget(old_long)
-        # New long name is <group_long>|<child_short_name>
-        child_short = old_long.split("|")[-1]
-        new_long = group_long + "|" + child_short
-        ledger.record(cmds, new_long)
+        old_short = old_long.split("|")[-1]
+        new_long = next(
+            (c for c in actual_children if c.split("|")[-1] == old_short), None
+        )
+        if new_long is not None:
+            ledger.record(cmds, new_long)
 
     return {"name": group_long, "warnings": []}
 

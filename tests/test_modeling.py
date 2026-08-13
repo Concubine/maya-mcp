@@ -22,10 +22,17 @@ class FakeCmds:
         assert long
         return [o for o in self.objects if o == name or o.split("|")[-1] == name]
 
-    def listRelatives(self, node, shapes=False, fullPath=False, noIntermediate=False):
-        assert shapes and fullPath and noIntermediate
-        entry = self.shapes.get(node)
-        return [entry[0]] if entry else None
+    def listRelatives(self, node, shapes=False, children=False, fullPath=False, noIntermediate=False):
+        if shapes:
+            assert shapes and fullPath and noIntermediate
+            entry = self.shapes.get(node)
+            return [entry[0]] if entry else None
+        assert children and fullPath
+        prefix = node + "|"
+        return [
+            o for o in self.objects
+            if o.startswith(prefix) and "|" not in o[len(prefix):]
+        ] or None
 
     def nodeType(self, node):
         for shape, ntype in self.shapes.values():
@@ -150,8 +157,16 @@ def test_group_rekeys_ledger_for_children(monkeypatch):
     assert ledger.check(fake, "|a") is None
     assert ledger.check(fake, "|b") is None
 
-    # New ledger entries should exist for the reparented children
+    # New ledger entries should exist for the reparented children: mutate the
+    # post-group transform and confirm a baseline was actually recorded
+    # (mirrors test_transform_reports_user_moved_warning; check() returning
+    # None can't distinguish "recorded" from "never recorded").
     new_a = group_name + "|a"
     new_b = group_name + "|b"
-    assert ledger.check(fake, new_a) is None
-    assert ledger.check(fake, new_b) is None
+    fake.xf[new_a] = ((99, 0, 0), (0, 0, 0), (1, 1, 1))
+    warning_a = ledger.check(fake, new_a)
+    assert warning_a is not None and "outside" in warning_a
+
+    fake.xf[new_b] = ((99, 0, 0), (0, 0, 0), (1, 1, 1))
+    warning_b = ledger.check(fake, new_b)
+    assert warning_b is not None and "outside" in warning_b
