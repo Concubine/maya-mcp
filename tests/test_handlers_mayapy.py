@@ -352,6 +352,32 @@ class TestEtchInMaya:
         assert cmds.ls(type="type") == []
         assert cmds.ls(type="typeExtrude") == []
 
+    def test_face_center_normal_matches_the_face_it_names(self, tmp_path):
+        # Regression, found by the live smoke (redmine #577): the old code
+        # called it.getNormal(om.MSpace.kWorld) POSITIONALLY, which binds to
+        # MItMeshPolygon's getNormal(vertexIndex) overload rather than
+        # getNormal(space) - MSpace.kWorld is the int 4. On a cube that
+        # returned the NEXT face's normal for every face, so etch_text carved
+        # into the wrong plane (an "A" meant for the +Z face landed edge-on).
+        #
+        # The check is deliberately independent of any normal API: on a cube
+        # centred at the origin, the outward normal of each face is its own
+        # centre direction, and the centre comes from a different call
+        # (it.center) than the normal does.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import etch
+
+        cmds.file(rename=str(tmp_path / "face_normals.ma"))
+        cmds.polyCube(name="normplate", w=2, h=2, d=2)
+        for face in range(6):
+            center, normal = etch._face_center_normal("|normplate", face)
+            length = sum(c * c for c in center) ** 0.5
+            expected = [c / length for c in center]
+            assert normal == pytest.approx(expected, abs=1e-6), (
+                "face %d centre %r but normal %r" % (face, center, normal)
+            )
+
     def test_sweep_runs_when_failure_happens_after_glyph_creation(self, monkeypatch, tmp_path):
         # face_frame_transform runs inside the try, after _create_glyph has
         # already built a real Type network - a failure there must still

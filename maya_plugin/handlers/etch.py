@@ -85,7 +85,16 @@ def _face_center_normal(mesh_long: str, face: int):
         )
     it.setIndex(face)
     center = it.center(om.MSpace.kWorld)
-    normal = it.getNormal(om.MSpace.kWorld)
+    # NOT it.getNormal(om.MSpace.kWorld): MItMeshPolygon.getNormal is overloaded
+    # as getNormal(space) AND getNormal(vertexIndex[, space]), and a POSITIONAL
+    # int binds to the vertex overload - MSpace.kWorld is 4, so that call
+    # silently returns "the normal at face-local vertex 4" instead of the face
+    # normal. On a cube it yields the NEXT face's normal for every face
+    # (verified live on Maya 2027, api 20270200: face 0, center (0,0,0.5),
+    # returned (0,1,0) instead of (0,0,1)), so etch_text carved every glyph into
+    # the wrong plane. it.getNormal(space=...) is correct, but MFnMesh's
+    # getPolygonNormal has no overload to fall into at all - prefer it.
+    normal = om.MFnMesh(dag).getPolygonNormal(face, om.MSpace.kWorld)
     return [center.x, center.y, center.z], [normal.x, normal.y, normal.z]
 
 
