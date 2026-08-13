@@ -746,6 +746,43 @@ class TestViewportInMaya:
             viewport.set_camera({"camera": "mb_active_cam"})
 
 
+class TestObjectInfoInMaya:
+    def test_sections_against_a_real_mesh(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import objinfo
+
+        cmds.file(rename=str(tmp_path / "objinfo.ma"))
+        cmds.polyCube(name="infocube", w=2, h=2, d=2)
+        cmds.xform("|infocube", translation=[1, 2, 3])
+
+        info = objinfo.get_object_info(
+            {"name": "|infocube",
+             "include": ["transform", "mesh_stats", "uvs", "shading", "history"]}
+        )
+        assert info["name"] == "|infocube"
+        assert info["transform"]["translate"] == pytest.approx([1.0, 2.0, 3.0])
+        assert info["mesh_stats"]["watertight"] is True
+        assert info["mesh_stats"]["tris"] == 12
+        assert info["uvs"]["count"] >= 1
+        # a fresh polyCube is in initialShadingGroup at object level
+        assert info["shading"]["shading_groups"] == ["initialShadingGroup"]
+        assert info["shading"]["per_face"] is False
+        assert info["history"]["node_count"] >= 1
+
+    def test_group_without_a_shape_rejects_mesh_sections(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import objinfo
+
+        cmds.file(rename=str(tmp_path / "objinfo_group.ma"))
+        cmds.polyCube(name="gchild")
+        cmds.group("|gchild", name="ginfo")
+        with pytest.raises(HandlerError, match="no shape node"):
+            objinfo.get_object_info({"name": "|ginfo", "include": ["mesh_stats"]})
+
+
 class TestDeformRemeshCleanupInMaya:
     def test_bend_deformer_created_and_baked(self):
         import maya.cmds as cmds

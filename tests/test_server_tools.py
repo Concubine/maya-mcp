@@ -52,6 +52,7 @@ class TestRegistration:
         assert {t.name for t in tools} == {
             "maya_execute_python",
             "maya_get_scene_graph",
+            "maya_get_object_info",
             "maya_capture_viewport",
             "maya_checkpoint",
             "maya_restore_checkpoint",

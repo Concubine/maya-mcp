@@ -32,6 +32,7 @@ from .schemas import (
     ExecuteResult,
     NameResult,
     NewSceneResult,
+    ObjectInfoResult,
     OpenSceneResult,
     RemeshResult,
     ResetNamespaceResult,
@@ -165,6 +166,35 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             maya.request(
                 "get_scene_graph",
                 {"filter": filter, "max_objects": max_objects, "cursor": cursor},
+                timeout_s=SCENE_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Get object info",
+        annotations=ToolAnnotations(
+            read_only_hint=True, destructive_hint=False, idempotent_hint=True
+        ),
+    )
+    def maya_get_object_info(
+        name: Annotated[str, Field(min_length=1, description=(
+            "Canonical long name, e.g. |golem|torso."
+        ))],
+        include: Annotated[
+            List[Literal["transform", "mesh_stats", "uvs", "shading", "history"]],
+            Field(description=(
+                "Sections to return. uvs and history are summaries (counts and "
+                "node types), never raw component data."
+            )),
+        ] = ["transform", "mesh_stats"],
+    ) -> ObjectInfoResult:
+        """Read one object's transform, mesh stats, UV sets, shading, or history.
+
+        The shading section is how you verify a material actually landed."""
+        return ObjectInfoResult.model_validate(
+            maya.request(
+                "get_object_info",
+                {"name": name, "include": list(include)},
                 timeout_s=SCENE_TIMEOUT_S,
             )
         )

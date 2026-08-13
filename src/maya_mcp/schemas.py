@@ -56,6 +56,32 @@ class SceneGraphResult(BaseModel):
     )
 
 
+class ObjectInfoResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str = Field(description="Canonical long name of the object queried.")
+    transform: Optional[dict] = Field(
+        default=None, description="World-space translate/rotate/scale."
+    )
+    mesh_stats: Optional[dict] = Field(
+        default=None,
+        description="tris, verts, faces, boundary_edges, nonmanifold_edges, watertight.",
+    )
+    uvs: Optional[dict] = Field(
+        default=None, description="UV set names and count - a summary, never raw UVs."
+    )
+    shading: Optional[dict] = Field(
+        default=None,
+        description=(
+            "shading_groups, materials, and per_face - per_face=true means "
+            "face-level assignment, which is unreliable on boolean output."
+        ),
+    )
+    history: Optional[dict] = Field(
+        default=None, description="Construction-history node count and distinct node types."
+    )
+
+
 class CheckpointResult(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
