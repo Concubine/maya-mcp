@@ -242,9 +242,9 @@ class TestMarshaling:
         calls = []
 
         def fake_capture(angle, shading, wireframe_overlay, buffer, isolate,
-                         frame_all, resolution):
+                         frame_all, resolution, lighting, shadows):
             calls.append((angle, shading, wireframe_overlay, buffer, isolate,
-                          frame_all, resolution))
+                          frame_all, resolution, lighting, shadows))
             return {"png_b64": "ZmFrZQ==", "camera_position": [0, 0, 10],
                     "camera_rotation": [0, 0, 0], "camera": "|mayaMcpTempCam"}
 
@@ -259,6 +259,8 @@ class TestMarshaling:
         assert all(c[4] == ["|golem"] for c in calls)
         assert all(c[5] is False for c in calls)
         assert all(c[6] == 2048 for c in calls)  # clamped
+        assert all(c[7] == "default" for c in calls)  # lighting default
+        assert all(c[8] is False for c in calls)  # shadows default
         assert [img["angle"] for img in result["images"]] == ["front", "top"]
         assert all(img["png_b64"] == "ZmFrZQ==" for img in result["images"])
         assert len(result["camera_positions"]) == 2
@@ -285,6 +287,37 @@ class TestMarshaling:
             capture.capture_viewport({"buffer": "zdepth"})
 
 
+def test_lighting_scene_sets_displayLights_all_and_restores_it(monkeypatch):
+    # The blocking M2 requirement: a lit model must be capturable lit.
+    # displayLights/shadows must also be RESTORED - they were not part of
+    # _PanelState before, so setting them would have leaked into the user's
+    # viewport permanently.
+    fake = FakeCaptureCmds()
+    fake.editor_state["displayLights"] = "default"
+    fake.editor_state["shadows"] = False
+    monkeypatch.setattr(capture, "_cmds", lambda: fake)
+    monkeypatch.setattr(capture, "_grab_pixels", lambda *a, **k: b"fakepng")
+
+    capture.capture_viewport({
+        "angles": ["front"], "lighting": "scene", "shadows": True,
+    })
+
+    applied = [c for c in fake.calls if c[0] == "modelEditor" and c[2].get("edit")]
+    assert any(c[2].get("displayLights") == "all" for c in applied), applied
+    assert any(c[2].get("shadows") is True for c in applied), applied
+    # restored to what it was before the capture
+    assert fake.editor_state["displayLights"] == "default"
+    assert fake.editor_state["shadows"] is False
+
+
+def test_lighting_rejects_an_unknown_mode(monkeypatch):
+    fake = FakeCaptureCmds()
+    monkeypatch.setattr(capture, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        capture.capture_viewport({"angles": ["front"], "lighting": "cinematic"})
+    assert "scene" in exc.value.hint
+
+
 class FakeCaptureCmds:
     """Full cmds surface for driving _capture_one() end-to-end headless
     (angle="current", no isolate — the minimal path that still touches
@@ -299,7 +332,7 @@ class FakeCaptureCmds:
 
     def __init__(self):
         self.calls = []
-        self.editor_flags = {
+        self.editor_state = {
             "displayAppearance": "smoothShaded",
             "wireframeOnShaded": True,
             "displayTextures": True,
@@ -309,6 +342,8 @@ class FakeCaptureCmds:
             "locators": True,
             "manipulators": True,
             "textures": True,
+            "displayLights": "default",
+            "shadows": False,
         }
         self.ssao = False
         self.active_camera = "persp"  # panel's current camera (not cmds.camera(), below)
@@ -346,13 +381,13 @@ class FakeCaptureCmds:
                 return False
             if kw.get("viewObjects"):
                 return ""
-            for flag, value in self.editor_flags.items():
+            for flag, value in self.editor_state.items():
                 if kw.get(flag):
                     return value
             return None
         for flag, value in kw.items():
-            if flag in self.editor_flags:
-                self.editor_flags[flag] = value
+            if flag in self.editor_state:
+                self.editor_state[flag] = value
         return None
 
     def undoInfo(self, **kw):

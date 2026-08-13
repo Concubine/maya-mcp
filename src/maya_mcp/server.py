@@ -228,6 +228,16 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 "in beauty renders and show in AO."
             )),
         ] = "beauty",
+        lighting: Annotated[
+            Literal["default", "scene", "flat"],
+            Field(description=(
+                "'scene' renders with the scene's own lights - required to judge "
+                "a lit model; 'default' is Maya's headlight; 'flat' is unlit."
+            )),
+        ] = "default",
+        shadows: Annotated[
+            bool, Field(description="Viewport shadow casting; only meaningful with lighting='scene'.")
+        ] = False,
         isolate: Annotated[
             Optional[List[str]],
             Field(description="Show only these objects (canonical long names)."),
@@ -252,6 +262,8 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 "shading": shading,
                 "wireframe_overlay": wireframe_overlay,
                 "buffer": buffer,
+                "lighting": lighting,
+                "shadows": shadows,
                 "isolate": isolate,
                 "frame_all": frame_all,
                 "resolution": resolution,

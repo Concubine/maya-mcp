@@ -80,6 +80,39 @@ class TestCaptureInMayapy:
             capture.capture_viewport({"angles": ["front"]})
 
 
+class TestCaptureLightingInMaya:
+    def test_scene_lighting_changes_the_pixels(self, tmp_path):
+        # Spec 2: a capture must be able to use the scene's own lights.
+        # Asserting the modelEditor flag alone would pass even if VP2 ignored
+        # it - so compare actual pixels between the two modes.
+        import base64
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import capture
+
+        if not cmds.about(query=True, batch=True) is False:
+            pytest.skip("viewport capture needs a GUI Maya")
+
+        cmds.file(rename=str(tmp_path / "lighting.ma"))
+        cmds.polyCube(name="litcube", w=4, h=4, d=4)
+        light = cmds.directionalLight(name="keyish", intensity=3.0)
+        cmds.xform(cmds.listRelatives(light, parent=True)[0], rotation=[-35, 25, 0])
+
+        shots = {}
+        for mode in ("default", "scene"):
+            out = capture.capture_viewport({
+                "angles": ["three_quarter"], "lighting": mode,
+                "wireframe_overlay": False, "resolution": [256, 256],
+                "isolate": ["|litcube"],
+            })
+            shots[mode] = base64.b64decode(out["images"][0]["png_b64"])
+
+        assert shots["default"] != shots["scene"], (
+            "scene lighting produced pixel-identical output to the default "
+            "headlight - displayLights is not reaching VP2"
+        )
+
+
 class TestSessionInMaya:
     def test_checkpoint_restore_roundtrip(self, tmp_path):
         import maya.cmds as cmds

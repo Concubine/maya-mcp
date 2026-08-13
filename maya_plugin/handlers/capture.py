@@ -22,6 +22,10 @@ from . import naming
 VALID_ANGLES = ("front", "side", "back", "top", "three_quarter", "current")
 VALID_SHADING = ("smoothShaded", "flatShaded", "wireframe", "textured")
 VALID_BUFFERS = ("beauty", "ssao")
+# displayLights modes we expose. "scene" is the one that makes a lit model
+# judgeable; "default" is Maya's headlight (what every capture did before M2).
+VALID_LIGHTING = ("default", "scene", "flat")
+_LIGHTING_TO_DISPLAY = {"default": "default", "scene": "all", "flat": "flat"}
 MAX_ANGLES_PER_CALL = 4
 DEFAULT_ANGLES = ["front", "side", "three_quarter"]
 DEFAULT_RESOLUTION = 768
@@ -117,6 +121,15 @@ def capture_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
             "unknown buffer %r" % buffer,
             hint="valid buffers: %s" % ", ".join(VALID_BUFFERS),
         )
+    lighting = params.get("lighting", "default")
+    if lighting not in VALID_LIGHTING:
+        raise HandlerError(
+            "unknown lighting mode %r" % lighting,
+            hint="valid lighting modes: %s ('scene' lights the model with the "
+            "scene's own lights; 'default' is Maya's headlight)"
+            % ", ".join(VALID_LIGHTING),
+        )
+    shadows = bool(params.get("shadows", False))
     wireframe_overlay = bool(params.get("wireframe_overlay", True))
     frame_all = bool(params.get("frame_all", True))
     resolution = clamp_resolution(params.get("resolution"))
@@ -133,7 +146,8 @@ def capture_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
     camera_positions = []
     for angle in angles:
         shot = _capture_one(
-            angle, shading, wireframe_overlay, buffer, isolate, frame_all, resolution
+            angle, shading, wireframe_overlay, buffer, isolate, frame_all, resolution,
+            lighting, shadows,
         )
         images.append({"angle": angle, "png_b64": shot["png_b64"]})
         camera_positions.append(
@@ -241,6 +255,14 @@ class _PanelState:
         self.locators = me(locators=True)
         self.manipulators = me(manipulators=True)
         self.textures = me(textures=True)
+        # Scene-lighting state. These are NOT the icon-visibility flags above:
+        # displayLights selects which lights actually light the shaded view,
+        # and shadows toggles viewport shadow casting. Neither was snapshotted
+        # before M2 because nothing set them - capture rendered in Maya's
+        # default headlight regardless of the scene's own rig, which is
+        # exactly the gap this task closes (spec 2).
+        self.display_lights = me(displayLights=True)
+        self.shadows = bool(me(shadows=True))
         # Isolate ("View Selected") state. Membership lives in the panel's
         # ViewSelectedSet objectSet (modelEditor -q -viewObjects); it is only
         # meaningful while viewSelected is on. isolate_dirty is flipped by
@@ -271,6 +293,8 @@ class _PanelState:
                 locators=self.locators,
                 manipulators=self.manipulators,
                 textures=self.textures,
+                displayLights=self.display_lights,
+                shadows=self.shadows,
             )
         except Exception:
             pass
@@ -318,6 +342,8 @@ def _capture_one(
     isolate: Optional[List[str]],
     frame_all: bool,
     resolution: int,
+    lighting: str = "default",
+    shadows: bool = False,
 ) -> Dict[str, Any]:
     cmds = _cmds()
     panel = find_model_panel(cmds)
@@ -381,6 +407,8 @@ def _capture_one(
             "locators": False,
             "manipulators": False,
             "textures": False,
+            "displayLights": _LIGHTING_TO_DISPLAY[lighting],
+            "shadows": shadows,
         }
         cmds.modelEditor(panel, edit=True, **editor_kwargs)
         cmds.setAttr("hardwareRenderingGlobals.ssaoEnable", buffer == "ssao")
