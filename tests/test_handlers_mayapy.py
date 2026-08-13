@@ -418,3 +418,56 @@ class TestEtchInMaya:
 
         assert cmds.ls(type="type") == []
         assert cmds.ls(type="typeExtrude") == []
+
+
+class TestSculptInMaya:
+    def test_displace_noise_moves_verts_and_keeps_count(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import sculpt
+
+        cmds.polySphere(name="rock", subdivisionsAxis=12, subdivisionsHeight=12)
+        before = cmds.xform("rock.vtx[5]", q=True, ws=True, t=True)
+        verts = cmds.polyEvaluate("rock", vertex=True)
+        result = sculpt.sculpt_ops(
+            {"mesh": "|rock",
+             "ops": [{"op": "displace_noise", "amp": 0.08, "freq": 2.6,
+                      "octaves": 2, "soften_angle": 55}]}
+        )
+        assert result["applied"] == 1
+        assert cmds.polyEvaluate("rock", vertex=True) == verts
+        assert cmds.xform("rock.vtx[5]", q=True, ws=True, t=True) != before
+
+    def test_soft_move_is_local(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import sculpt
+
+        cmds.polyPlane(name="pad", sx=10, sy=10, w=10, h=10)
+        far_before = cmds.xform("pad.vtx[0]", q=True, ws=True, t=True)
+        sculpt.sculpt_ops(
+            {"mesh": "|pad",
+             "ops": [{"op": "soft_move", "center": [0, 0, 0], "radius": 2.0,
+                      "falloff": "smooth", "delta": [0, 1, 0]}]}
+        )
+        center_y = cmds.xform("pad.vtx[60]", q=True, ws=True, t=True)[1]
+        assert center_y > 0.5  # lifted
+        assert cmds.xform("pad.vtx[0]", q=True, ws=True, t=True) == far_before
+
+    def test_abort_and_report_lists_applied(self):
+        import pytest as _pytest
+
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import sculpt
+
+        cmds.polyCube(name="ar_cube")
+        with _pytest.raises(HandlerError) as exc:
+            sculpt.sculpt_ops(
+                {"mesh": "|ar_cube",
+                 "ops": [{"op": "smooth", "divisions": 1},
+                         {"op": "extrude_faces", "faces": "NOT_A_COMPONENT",
+                          "distance": 1.0}]}
+            )
+        assert "smooth" in str(exc.value)  # reports what landed

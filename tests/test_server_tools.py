@@ -70,6 +70,7 @@ class TestRegistration:
             "maya_delete_objects",
             "maya_boolean_op",
             "maya_etch_text",
+            "maya_sculpt_ops",
         }
 
     def test_annotations_declare_read_only_vs_destructive(self):
@@ -310,3 +311,27 @@ class TestModelingTools:
         }
         assert conn.calls[0]["timeout_s"] == server_mod.BOOL_TIMEOUT_S
         assert result.structured_content["carved_text"] == "א"
+
+    def test_maya_sculpt_ops_forwards_params(self):
+        conn = FakeConn(
+            responses={
+                "sculpt_ops": {
+                    "applied": 1, "ops": ["displace_noise"], "tris": 480,
+                    "warnings": [],
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        ops = [{"op": "displace_noise", "amp": 0.06, "freq": 2.6, "octaves": 2}]
+        result = run(
+            mcp.call_tool(
+                "maya_sculpt_ops",
+                {"mesh": "|rock", "ops": ops},
+            )
+        )
+        assert result.is_error is False
+        assert conn.calls[0]["cmd"] == "sculpt_ops"
+        assert conn.calls[0]["params"] == {"mesh": "|rock", "ops": ops}
+        assert conn.calls[0]["timeout_s"] == server_mod.BOOL_TIMEOUT_S
+        assert result.structured_content["applied"] == 1
+        assert result.structured_content["ops"] == ["displace_noise"]

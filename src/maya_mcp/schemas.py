@@ -145,3 +145,12 @@ class BooleanResult(BaseModel):
     watertight: bool
     warnings: List[str] = Field(default_factory=list)
     carved_text: Optional[str] = None
+
+
+class SculptResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    applied: int
+    ops: List[str]
+    tris: int
+    warnings: List[str] = Field(default_factory=list)

@@ -34,6 +34,7 @@ from .schemas import (
     RestoreResult,
     SaveSceneResult,
     SceneGraphResult,
+    SculptResult,
     TransformResult,
     UndoResult,
 )
@@ -616,6 +617,37 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                  "depth": depth, "font": font, "mirror": mirror,
                  "rotate_deg": rotate_deg, "new_name": new_name},
                 timeout_s=BOOL_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Sculpt operations",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_sculpt_ops(
+        mesh: Annotated[str, Field(description="Target mesh (canonical long name).")],
+        ops: Annotated[List[dict], Field(min_length=1, max_length=20, description=(
+            'Applied in order; aborts on first failure reporting what landed. '
+            'Tagged by "op": '
+            'soft_move {center:[x,y,z]|vertex_id, radius, falloff:"smooth"|"linear", delta:[x,y,z]} '
+            '— THE organic tool, weighted vertex offsets; '
+            'inflate_region {center, radius, amount} — push along normals; '
+            'displace_noise {amp:0.05, freq:2.6, octaves:2, soften_angle:55?} '
+            '— value-noise rock-surface breakup, kills the untouched-primitive look; '
+            'smooth {divisions:1..3}; '
+            'extrude_faces {faces:"f[120:135]", distance, keep_together:true}; '
+            'bevel_edges {edges:"e[3:7]", width, segments:1..10}; '
+            'crease_edges {edges, amount:0..10} — stone-plate joints; '
+            'bridge {edges_a, edges_b}.'
+        ))],
+    ) -> SculptResult:
+        """Apply sculpt ops in order to one mesh. The whole call is ONE undo
+        step; on partial failure, applied ops stay and maya_undo(1) reverts."""
+        return SculptResult.model_validate(
+            maya.request(
+                "sculpt_ops", {"mesh": mesh, "ops": ops}, timeout_s=BOOL_TIMEOUT_S
             )
         )
 
