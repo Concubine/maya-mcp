@@ -107,3 +107,61 @@ class TestSessionInMaya:
         result = session.undo({"steps": 1})
         assert result["undone"] == 1
         assert not cmds.objExists("undo_me")
+
+
+class TestMeshcheckInMaya:
+    def test_closed_cube_is_watertight(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import meshcheck
+
+        cube = cmds.polyCube(name="wt_cube")[0]
+        stats = meshcheck.mesh_stats(cube)
+        assert stats["tris"] == 12
+        assert stats["boundary_edges"] == 0
+        assert stats["nonmanifold_edges"] == 0
+        assert stats["watertight"] is True
+
+    def test_open_plane_is_not_watertight(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import meshcheck
+
+        plane = cmds.polyPlane(name="wt_plane", sx=1, sy=1)[0]
+        stats = meshcheck.mesh_stats(plane)
+        assert stats["boundary_edges"] == 4
+        assert stats["watertight"] is False
+
+    def test_ensure_object_shading_repairs_partial_assignment(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import meshcheck
+
+        cube = cmds.polyCube(name="sg_cube")[0]
+        shape = cmds.listRelatives(cube, shapes=True, fullPath=True)[0]
+        shader = cmds.shadingNode("lambert", asShader=True, name="sg_red")
+        sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True,
+                       name="sg_redSG")
+        cmds.connectAttr(shader + ".outColor", sg + ".surfaceShader", force=True)
+        # per-face assignment on half the cube = partial coverage
+        cmds.sets(cube + ".f[0:2]", edit=True, forceElement=sg)
+        result = meshcheck.ensure_object_shading(cmds, shape, fallback_sg=sg)
+        assert result["repaired"] is True
+        assert result["sg"] == sg
+        # whole shape is now an object-level member (cmds.sets query returns
+        # short names on this Maya version, even when queried/assigned via
+        # full path, so compare short names)
+        members = cmds.sets(sg, query=True) or []
+        assert shape.split("|")[-1] in [m.split("|")[-1] for m in members]
+
+    def test_ensure_object_shading_leaves_healthy_mesh_alone(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import meshcheck
+
+        cube = cmds.polyCube(name="sg_ok_cube")[0]
+        shape = cmds.listRelatives(cube, shapes=True, fullPath=True)[0]
+        # fresh primitives are object-level members of initialShadingGroup
+        result = meshcheck.ensure_object_shading(cmds, shape, fallback_sg=None)
+        assert result["repaired"] is False
+        assert result["sg"] == "initialShadingGroup"
