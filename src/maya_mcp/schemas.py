@@ -78,3 +78,27 @@ class UndoResult(BaseModel):
     undone: int = 0
     redone: int = 0
     requested: int
+
+
+class NewSceneResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    new_scene: bool = Field(description="True when the new scene was created successfully.")
+
+
+class OpenSceneResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    opened: str = Field(description="Absolute path to the scene file that was opened.")
+
+
+class SaveSceneResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    path: str = Field(description="Absolute path where the scene was saved.")
+
+
+class ResetNamespaceResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    reset: bool = Field(description="True when the namespace was reset successfully.")

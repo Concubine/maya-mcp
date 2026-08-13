@@ -22,7 +22,17 @@ from pydantic import Field
 
 from . import images
 from .connection import MayaConnection
-from .schemas import CheckpointResult, ExecuteResult, RestoreResult, SceneGraphResult, UndoResult
+from .schemas import (
+    CheckpointResult,
+    ExecuteResult,
+    NewSceneResult,
+    OpenSceneResult,
+    ResetNamespaceResult,
+    RestoreResult,
+    SaveSceneResult,
+    SceneGraphResult,
+    UndoResult,
+)
 
 log = logging.getLogger("maya_mcp.server")
 
@@ -293,9 +303,11 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         confirm: Annotated[bool, Field(description=(
             "Must be true; the current scene is discarded."
         ))] = False,
-    ) -> dict:
+    ) -> NewSceneResult:
         """Start an empty scene. REFUSES without confirm=true."""
-        return maya.request("new_scene", {"confirm": confirm}, timeout_s=SESSION_TIMEOUT_S)
+        return NewSceneResult.model_validate(
+            maya.request("new_scene", {"confirm": confirm}, timeout_s=SESSION_TIMEOUT_S)
+        )
 
     @mcp.tool(
         title="Open scene",
@@ -308,10 +320,12 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         confirm: Annotated[bool, Field(description=(
             "Required (true) only when the current scene has unsaved changes."
         ))] = False,
-    ) -> dict:
+    ) -> OpenSceneResult:
         """Open a scene file, replacing the current scene."""
-        return maya.request(
-            "open_scene", {"path": path, "confirm": confirm}, timeout_s=SESSION_TIMEOUT_S
+        return OpenSceneResult.model_validate(
+            maya.request(
+                "open_scene", {"path": path, "confirm": confirm}, timeout_s=SESSION_TIMEOUT_S
+            )
         )
 
     @mcp.tool(
@@ -325,9 +339,11 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "Target path for save-as; omit to save in place (errors on an "
             "untitled scene)."
         ))] = None,
-    ) -> dict:
+    ) -> SaveSceneResult:
         """Save the scene (.ma or .mb by extension)."""
-        return maya.request("save_scene", {"path": path}, timeout_s=SESSION_TIMEOUT_S)
+        return SaveSceneResult.model_validate(
+            maya.request("save_scene", {"path": path}, timeout_s=SESSION_TIMEOUT_S)
+        )
 
     @mcp.tool(
         title="Reset Python namespace",
@@ -335,9 +351,11 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             read_only_hint=False, destructive_hint=False, idempotent_hint=True
         ),
     )
-    def maya_reset_namespace() -> dict:
+    def maya_reset_namespace() -> ResetNamespaceResult:
         """Clear the persistent maya_execute_python namespace."""
-        return maya.request("reset_namespace", {}, timeout_s=SCENE_TIMEOUT_S)
+        return ResetNamespaceResult.model_validate(
+            maya.request("reset_namespace", {}, timeout_s=SCENE_TIMEOUT_S)
+        )
 
     return mcp
 
