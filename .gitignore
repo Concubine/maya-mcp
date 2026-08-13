@@ -7,3 +7,7 @@ dist/
 .uv/
 logs/
 .superpowers/
+
+# golem look-dev work copies and their auto-checkpoints (generated)
+evals/golem_run/golem_m1_pass.mb
+evals/golem_run/checkpoints/
