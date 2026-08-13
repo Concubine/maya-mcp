@@ -158,3 +158,40 @@ class SculptResult(BaseModel):
         default=None,
         description="Auto-checkpoint id; pass to maya_restore_checkpoint to revert vertex ops.",
     )
+
+
+class DeformResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    deformer_nodes: List[str]
+    baked: bool = False
+    warnings: List[str] = Field(default_factory=list)
+
+
+class RemeshResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    tris: int
+    method: str = Field(description="Which path ran: polyRetopo, polyRemesh, or polyReduce.")
+    warnings: List[str] = Field(default_factory=list)
+
+
+class MeshStats(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    tris: int
+    verts: int
+    faces: int
+    boundary_edges: int
+    nonmanifold_edges: int
+    watertight: bool
+
+
+class CleanupResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    before: MeshStats
+    after: MeshStats
+    warnings: List[str] = Field(default_factory=list)

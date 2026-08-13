@@ -336,3 +336,99 @@ def boolean_op(params: Dict[str, Any]) -> Dict[str, Any]:
 
     session.auto_checkpoint("boolean")
     return _do_boolean(cmds, a_long, b_long, op, naming.unique_name(cmds, requested))
+
+
+MIN_TARGET_POLYCOUNT = 100
+MAX_TARGET_POLYCOUNT = 200000
+
+
+def remesh_retopo(params: Dict[str, Any]) -> Dict[str, Any]:
+    cmds = _cmds()
+    mesh_long, _ = naming.require_mesh(cmds, str(params.get("mesh") or ""))
+    target = params.get("target_polycount")
+    if (
+        not isinstance(target, int) or isinstance(target, bool)
+        or not (MIN_TARGET_POLYCOUNT <= target <= MAX_TARGET_POLYCOUNT)
+    ):
+        raise HandlerError(
+            "target_polycount must be an integer %d..%d"
+            % (MIN_TARGET_POLYCOUNT, MAX_TARGET_POLYCOUNT),
+            hint="got %r" % (target,),
+        )
+    # Validate everything before spending the auto-checkpoint (same discipline
+    # as sculpt_ops: an invalid call must never burn one).
+    keep_original = params.get("keep_original", True) is not False
+
+    from . import session  # noqa: PLC0415
+
+    session.auto_checkpoint("remesh")
+
+    if keep_original:
+        orig_name = naming.unique_name(cmds, mesh_long.split("|")[-1] + "_orig")
+        dup = cmds.duplicate(mesh_long, name=orig_name, returnRootsOnly=True)[0]
+        dup_long = _long(cmds, dup)
+        cmds.setAttr(dup_long + ".visibility", False)
+
+    # Feature-detect in order, degrading with a reported fallback rather than
+    # failing outright (§6 compatibility) - Maya versions vary in which of
+    # these commands exist / behave on a given mesh.
+    warnings: List[str] = []
+    method: Optional[str] = None
+    if hasattr(cmds, "polyRetopo"):
+        try:
+            cmds.polyRetopo(mesh_long, targetFaceCount=target)
+            method = "polyRetopo"
+        except Exception:
+            warnings.append("polyRetopo raised at runtime; fell back to polyRemesh")
+    else:
+        warnings.append("polyRetopo is not available in this Maya; fell back to polyRemesh")
+
+    if method is None:
+        if hasattr(cmds, "polyRemesh"):
+            try:
+                cmds.polyRemesh(mesh_long)
+                method = "polyRemesh"
+            except Exception:
+                warnings.append("polyRemesh raised at runtime; fell back to polyReduce")
+        else:
+            warnings.append("polyRemesh is not available in this Maya; fell back to polyReduce")
+
+    if method is None:
+        current_faces = cmds.polyEvaluate(mesh_long, face=True)
+        percentage = 100.0
+        if isinstance(current_faces, int) and current_faces > 0:
+            percentage = max(1.0, min(100.0, (target / float(current_faces)) * 100.0))
+        cmds.polyReduce(mesh_long, percentage=percentage, constructionHistory=False)
+        method = "polyReduce"
+
+    cmds.delete(mesh_long, constructionHistory=True)
+    tris = cmds.polyEvaluate(mesh_long, triangle=True)
+    return {"name": mesh_long, "tris": tris, "method": method, "warnings": warnings}
+
+
+def mesh_cleanup(params: Dict[str, Any]) -> Dict[str, Any]:
+    cmds = _cmds()
+    from . import meshcheck  # noqa: PLC0415 - keep module import cheap headless
+
+    mesh_long, _ = naming.require_mesh(cmds, str(params.get("mesh") or ""))
+    threshold = params.get("merge_verts_threshold", 0.001)
+    if (
+        not isinstance(threshold, (int, float)) or isinstance(threshold, bool)
+        or not (0 < threshold <= 1.0)
+    ):
+        raise HandlerError(
+            "merge_verts_threshold must be a number in (0, 1.0]",
+            hint="got %r; default is 0.001" % (threshold,),
+        )
+
+    before = meshcheck.mesh_stats(mesh_long)
+    cmds.polyMergeVertex(mesh_long, distance=threshold)
+    if params.get("conform_normals", True):
+        cmds.polyNormal(mesh_long, normalMode=2, constructionHistory=False)
+    if params.get("freeze_transforms", True):
+        cmds.makeIdentity(mesh_long, apply=True, translate=True, rotate=True, scale=True)
+        ledger.record(cmds, mesh_long)  # frozen transform is a tool write
+    if params.get("delete_history", True):
+        cmds.delete(mesh_long, constructionHistory=True)
+    after = meshcheck.mesh_stats(mesh_long)
+    return {"name": mesh_long, "before": before, "after": after, "warnings": []}

@@ -71,6 +71,9 @@ class TestRegistration:
             "maya_boolean_op",
             "maya_etch_text",
             "maya_sculpt_ops",
+            "maya_deform",
+            "maya_remesh_retopo",
+            "maya_mesh_cleanup",
         }
 
     def test_annotations_declare_read_only_vs_destructive(self):
@@ -360,3 +363,72 @@ class TestModelingTools:
         )
         assert result.is_error is False
         assert result.structured_content["checkpoint_id"] is None
+
+    def test_maya_deform_forwards_params(self):
+        conn = FakeConn(
+            responses={
+                "deform": {"deformer_nodes": ["|bend1Handle"], "baked": False, "warnings": []}
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        result = run(
+            mcp.call_tool(
+                "maya_deform",
+                {"mesh": "|col", "deformer": "bend", "params": {"curvature": 45}},
+            )
+        )
+        assert result.is_error is False
+        assert conn.calls[0]["cmd"] == "deform"
+        assert conn.calls[0]["params"] == {
+            "mesh": "|col", "deformer": "bend", "params": {"curvature": 45},
+            "delete_history_after": False,
+        }
+        assert conn.calls[0]["timeout_s"] == server_mod.BOOL_TIMEOUT_S
+        assert result.structured_content["deformer_nodes"] == ["|bend1Handle"]
+
+    def test_maya_remesh_retopo_forwards_params(self):
+        conn = FakeConn(
+            responses={
+                "remesh_retopo": {
+                    "name": "|blob", "tris": 400, "method": "polyRetopo", "warnings": [],
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        result = run(
+            mcp.call_tool(
+                "maya_remesh_retopo",
+                {"mesh": "|blob", "target_polycount": 400},
+            )
+        )
+        assert result.is_error is False
+        assert conn.calls[0]["cmd"] == "remesh_retopo"
+        assert conn.calls[0]["params"] == {
+            "mesh": "|blob", "target_polycount": 400, "keep_original": True,
+        }
+        assert conn.calls[0]["timeout_s"] == server_mod.BOOL_TIMEOUT_S
+        assert result.structured_content["method"] == "polyRetopo"
+
+    def test_maya_mesh_cleanup_forwards_defaults(self):
+        conn = FakeConn(
+            responses={
+                "mesh_cleanup": {
+                    "name": "|dirty",
+                    "before": {"tris": 12, "verts": 8, "faces": 6, "boundary_edges": 0,
+                               "nonmanifold_edges": 0, "watertight": True},
+                    "after": {"tris": 12, "verts": 8, "faces": 6, "boundary_edges": 0,
+                              "nonmanifold_edges": 0, "watertight": True},
+                    "warnings": [],
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_mesh_cleanup", {"mesh": "|dirty"}))
+        assert result.is_error is False
+        assert conn.calls[0]["cmd"] == "mesh_cleanup"
+        assert conn.calls[0]["params"] == {
+            "mesh": "|dirty", "merge_verts_threshold": 0.001,
+            "delete_history": True, "freeze_transforms": True, "conform_normals": True,
+        }
+        assert conn.calls[0]["timeout_s"] == server_mod.BOOL_TIMEOUT_S
+        assert result.structured_content["before"]["tris"] == 12

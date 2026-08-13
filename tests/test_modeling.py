@@ -3,7 +3,7 @@
 import pytest
 
 from maya_plugin.dispatcher import HandlerError
-from maya_plugin.handlers import ledger, modeling
+from maya_plugin.handlers import ledger, modeling, sculpt
 
 
 class FakeCmds:
@@ -57,10 +57,11 @@ class FakeCmds:
             return list(s)
         self.calls.append(("xform", name, kw))
 
-    def delete(self, *names):
+    def delete(self, *names, **kw):
         self.calls.append(("delete", names))
-        for n in names:
-            self.objects.discard(n)
+        if not kw.get("constructionHistory"):
+            for n in names:
+                self.objects.discard(n)
 
     def group(self, *names, name=None):
         self.calls.append(("group", names, name))
@@ -77,6 +78,29 @@ class FakeCmds:
                 self.xf[new_long] = self.xf[child]
                 del self.xf[child]
         return name
+
+    def duplicate(self, source, name=None, returnRootsOnly=False):
+        self.calls.append(("duplicate", source, name))
+        long_name = "|" + name
+        self.objects.add(long_name)
+        self.xf[long_name] = ((0, 0, 0), (0, 0, 0), (1, 1, 1))
+        return [name]
+
+    def setAttr(self, attr, value):
+        self.calls.append(("setAttr", attr, value))
+
+    def nonLinear(self, name, type=None, **kw):
+        self.calls.append(("nonLinear", name, type, kw))
+        deformer_name = type + "1"
+        handle_name = type + "Handle1"
+        self.objects.add("|" + handle_name)
+        return [deformer_name, handle_name]
+
+    def lattice(self, name, divisions=None, objectCentered=None, **kw):
+        self.calls.append(("lattice", name, divisions, objectCentered, kw))
+        self.objects.add("|ffd1Lattice")
+        self.objects.add("|ffd1Base")
+        return ["ffd1", "ffd1Lattice", "ffd1Base"]
 
 
 @pytest.fixture(autouse=True)
@@ -188,3 +212,101 @@ def test_boolean_rejects_same_object(monkeypatch):
     monkeypatch.setattr(modeling, "_cmds", lambda: fake)
     with pytest.raises(HandlerError):
         modeling.boolean_op({"a": "|a", "b": "|a", "op": "union", "new_name": "x"})
+
+
+def _mesh_fake(name="|blob"):
+    return FakeCmds(objects={name}, shapes={name: (name + "|blobShape", "mesh")})
+
+
+def test_remesh_retopo_rejects_too_low_target_polycount(monkeypatch):
+    fake = _mesh_fake()
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        modeling.remesh_retopo({"mesh": "|blob", "target_polycount": 50})
+    assert "target_polycount" in str(exc.value)
+    # validation happens before the auto-checkpoint (which would need real
+    # Maya) - no cmds writes must have happened
+    assert fake.calls == []
+
+
+def test_remesh_retopo_rejects_too_high_target_polycount(monkeypatch):
+    fake = _mesh_fake()
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        modeling.remesh_retopo({"mesh": "|blob", "target_polycount": 999999})
+    assert "target_polycount" in str(exc.value)
+
+
+def test_remesh_retopo_rejects_non_int_target_polycount(monkeypatch):
+    fake = _mesh_fake()
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError):
+        modeling.remesh_retopo({"mesh": "|blob", "target_polycount": 400.5})
+
+
+def test_remesh_retopo_rejects_missing_mesh(monkeypatch):
+    fake = FakeCmds()
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError):
+        modeling.remesh_retopo({"mesh": "|nope", "target_polycount": 400})
+
+
+def test_mesh_cleanup_rejects_zero_threshold(monkeypatch):
+    fake = _mesh_fake("|dirty")
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        modeling.mesh_cleanup({"mesh": "|dirty", "merge_verts_threshold": 0})
+    assert "merge_verts_threshold" in str(exc.value)
+    assert fake.calls == []
+
+
+def test_mesh_cleanup_rejects_threshold_above_one(monkeypatch):
+    fake = _mesh_fake("|dirty")
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError):
+        modeling.mesh_cleanup({"mesh": "|dirty", "merge_verts_threshold": 1.5})
+
+
+def test_mesh_cleanup_rejects_missing_mesh(monkeypatch):
+    fake = FakeCmds()
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError):
+        modeling.mesh_cleanup({"mesh": "|nope"})
+
+
+def test_deform_rejects_unknown_deformer(monkeypatch):
+    fake = _mesh_fake("|col")
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        sculpt.deform({"mesh": "|col", "deformer": "melt", "params": {}})
+    assert "bend" in exc.value.hint
+
+
+def test_deform_rejects_unknown_param_for_type(monkeypatch):
+    fake = _mesh_fake("|col")
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        sculpt.deform({"mesh": "|col", "deformer": "twist", "params": {"wobble": 1}})
+    assert "startAngle" in exc.value.hint
+
+
+def test_deform_does_not_mutate_caller_params_dict(monkeypatch):
+    # Ambiguity #1 fix: dparams must be a copy, not the caller's dict popped
+    # in place.
+    fake = _mesh_fake("|col")
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    caller_params = {"curvature": 45, "translate": [0, 1, 0]}
+    result = sculpt.deform({"mesh": "|col", "deformer": "bend", "params": caller_params})
+    assert caller_params == {"curvature": 45, "translate": [0, 1, 0]}
+    assert result["deformer_nodes"] == ["bend1", "|bendHandle1"]
+
+
+def test_deform_bakes_and_deletes_history(monkeypatch):
+    fake = _mesh_fake("|col")
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    result = sculpt.deform(
+        {"mesh": "|col", "deformer": "bend", "params": {"curvature": -20},
+         "delete_history_after": True}
+    )
+    assert result == {"deformer_nodes": [], "baked": True, "warnings": []}
+    assert ("delete", ("|col",)) in [(c[0], c[1]) for c in fake.calls if c[0] == "delete"]

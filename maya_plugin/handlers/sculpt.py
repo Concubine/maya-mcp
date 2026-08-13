@@ -270,3 +270,49 @@ def sculpt_ops(params: Dict[str, Any]) -> Dict[str, Any]:
         "warnings": warnings,
         "checkpoint_id": checkpoint_info["checkpoint_id"] if checkpoint_info else None,
     }
+
+
+DEFORMER_WHITELIST = {
+    "bend": {"curvature", "lowBound", "highBound", "rotate", "translate"},
+    "squash": {"factor", "lowBound", "highBound", "rotate", "translate"},
+    "twist": {"startAngle", "endAngle", "lowBound", "highBound", "rotate", "translate"},
+    "sculpt": {"maxDisplacement", "dropoffDistance", "translate", "rotate"},
+    "lattice": {"divisions", "translate", "rotate"},
+}
+
+
+def deform(params: Dict[str, Any]) -> Dict[str, Any]:
+    cmds = _cmds()
+    mesh_long, _ = naming.require_mesh(cmds, str(params.get("mesh") or ""))
+    deformer = params.get("deformer")
+    if deformer not in DEFORMER_WHITELIST:
+        raise HandlerError(
+            "unknown deformer %r" % deformer,
+            hint="valid: %s" % ", ".join(sorted(DEFORMER_WHITELIST)),
+        )
+    # Copy before popping so we never mutate the caller's params dict.
+    dparams = dict(params.get("params") or {})
+    unknown = set(dparams) - DEFORMER_WHITELIST[deformer]
+    if unknown:
+        raise HandlerError(
+            "unknown params for %s: %s" % (deformer, ", ".join(sorted(unknown))),
+            hint="valid params: %s" % ", ".join(sorted(DEFORMER_WHITELIST[deformer])),
+        )
+    handle_xform = {k: dparams.pop(k) for k in ("translate", "rotate") if k in dparams}
+    if deformer == "lattice":
+        divisions = dparams.get("divisions", [2, 5, 2])
+        nodes = cmds.lattice(
+            mesh_long, divisions=divisions, objectCentered=True
+        )
+    else:
+        nodes = cmds.nonLinear(mesh_long, type=deformer, **dparams)
+    handle = nodes[-1]
+    if "translate" in handle_xform:
+        cmds.xform(handle, translation=handle_xform["translate"], worldSpace=True)
+    if "rotate" in handle_xform:
+        cmds.xform(handle, rotation=handle_xform["rotate"], worldSpace=True)
+    if params.get("delete_history_after"):
+        cmds.delete(mesh_long, constructionHistory=True)
+        return {"deformer_nodes": [], "baked": True, "warnings": []}
+    long_nodes = [(cmds.ls(n, long=True) or [n])[0] for n in nodes]
+    return {"deformer_nodes": long_nodes, "baked": False, "warnings": []}

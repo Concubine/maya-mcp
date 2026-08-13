@@ -71,8 +71,11 @@ def _build_handlers() -> Dict[str, Any]:
         "rename": modeling.rename,
         "delete_objects": modeling.delete_objects,
         "boolean_op": modeling.boolean_op,
+        "remesh_retopo": modeling.remesh_retopo,
+        "mesh_cleanup": modeling.mesh_cleanup,
         "etch_text": etch.etch_text,
         "sculpt_ops": sculpt.sculpt_ops,
+        "deform": sculpt.deform,
     }
 
 

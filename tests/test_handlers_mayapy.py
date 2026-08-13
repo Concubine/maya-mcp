@@ -573,3 +573,69 @@ class TestSculptInMaya:
         assert matches
         checkpoint_id = matches[-1][:-len(".ma")]
         assert checkpoint_id in exc.value.hint
+
+
+class TestDeformRemeshCleanupInMaya:
+    def test_bend_deformer_created_and_baked(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import sculpt
+
+        cmds.polyCylinder(name="col", sx=8, sy=12, height=6)
+        result = sculpt.deform(
+            {"mesh": "|col", "deformer": "bend", "params": {"curvature": 45}}
+        )
+        assert result["deformer_nodes"]
+        baked = sculpt.deform(
+            {"mesh": "|col", "deformer": "bend", "params": {"curvature": -20},
+             "delete_history_after": True}
+        )
+        assert baked["baked"] is True
+        shape = cmds.listRelatives("|col", shapes=True, fullPath=True)[0]
+        # cmds.listHistory returns short names on this Maya version (same
+        # quirk as cmds.sets query / cmds.listHistory in the boolean tests
+        # above), so resolve to canonical long names before comparing.
+        history = [(cmds.ls(h, long=True) or [h])[0] for h in cmds.listHistory(shape)]
+        assert history == [shape]
+
+    def test_deform_rejects_unknown_param(self):
+        import pytest as _pytest
+
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import sculpt
+
+        cmds.polyCube(name="dp_cube")
+        with _pytest.raises(HandlerError) as exc:
+            sculpt.deform(
+                {"mesh": "|dp_cube", "deformer": "bend",
+                 "params": {"wobble": 3}}
+            )
+        assert "curvature" in exc.value.hint  # hint lists the whitelist
+
+    def test_remesh_reports_method_and_keeps_original(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        cmds.file(rename=str(tmp_path / "remesh.ma"))
+        cmds.polySphere(name="blob", subdivisionsAxis=40, subdivisionsHeight=40)
+        result = modeling.remesh_retopo(
+            {"mesh": "|blob", "target_polycount": 400, "keep_original": True}
+        )
+        assert result["method"] in ("polyRetopo", "polyRemesh", "polyReduce")
+        assert cmds.objExists("blob_orig")
+        assert cmds.getAttr("blob_orig.visibility") is False
+
+    def test_cleanup_reports_before_after(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        cmds.polyCube(name="dirty")
+        cmds.xform("dirty", t=(3, 1, 0), ro=(10, 20, 30))
+        result = modeling.mesh_cleanup({"mesh": "|dirty"})
+        assert result["before"]["tris"] == result["after"]["tris"] == 12
+        # frozen: transform is identity now
+        assert cmds.xform("dirty", q=True, ws=True, t=True) == [0.0, 0.0, 0.0]

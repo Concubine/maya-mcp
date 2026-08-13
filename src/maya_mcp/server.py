@@ -25,11 +25,14 @@ from .connection import MayaConnection
 from .schemas import (
     BooleanResult,
     CheckpointResult,
+    CleanupResult,
+    DeformResult,
     DeleteResult,
     ExecuteResult,
     NameResult,
     NewSceneResult,
     OpenSceneResult,
+    RemeshResult,
     ResetNamespaceResult,
     RestoreResult,
     SaveSceneResult,
@@ -661,6 +664,120 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         return SculptResult.model_validate(
             maya.request(
                 "sculpt_ops", {"mesh": mesh, "ops": ops}, timeout_s=BOOL_TIMEOUT_S
+            )
+        )
+
+    @mcp.tool(
+        title="Deform mesh",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_deform(
+        mesh: Annotated[str, Field(description="Target mesh (canonical long name).")],
+        deformer: Annotated[
+            Literal["bend", "lattice", "squash", "twist", "sculpt"],
+            Field(description="Nonlinear/lattice deformer type to apply."),
+        ],
+        params: Annotated[
+            Optional[dict],
+            Field(description=(
+                "Deformer parameters, whitelisted per type: bend takes curvature; "
+                "squash takes factor; twist takes startAngle/endAngle; sculpt takes "
+                "maxDisplacement/dropoffDistance; all four also take lowBound/"
+                "highBound; lattice takes divisions:[x,y,z]. Every type also accepts "
+                "translate/rotate, applied to the deformer handle. Unknown keys are "
+                "rejected with that type's whitelist in the error hint."
+            )),
+        ] = None,
+        delete_history_after: Annotated[
+            bool,
+            Field(description=(
+                "Bake the deformation into the mesh and delete the deformer "
+                "(construction history) instead of returning it live for further "
+                "tweaking."
+            )),
+        ] = False,
+    ) -> DeformResult:
+        """Apply a nonlinear or lattice deformer to a mesh by name. Returns the
+        deformer node names so maya_execute_python can tweak their attributes
+        further; delete_history_after=true bakes the shape and consumes the
+        deformer instead."""
+        return DeformResult.model_validate(
+            maya.request(
+                "deform",
+                {"mesh": mesh, "deformer": deformer, "params": params,
+                 "delete_history_after": delete_history_after},
+                timeout_s=BOOL_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Remesh / retopologize",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_remesh_retopo(
+        mesh: Annotated[str, Field(description="Target mesh (canonical long name).")],
+        target_polycount: Annotated[
+            int,
+            Field(ge=100, le=200000, description="Target face count to retopologize toward."),
+        ],
+        keep_original: Annotated[
+            bool,
+            Field(description=(
+                "Keep a hidden <name>_orig backup of the source mesh before "
+                "remeshing."
+            )),
+        ] = True,
+    ) -> RemeshResult:
+        """Retopologize a mesh toward target_polycount. Auto-checkpoints first.
+        Tries polyRetopo, then polyRemesh, then polyReduce, in that order, as
+        compatibility fallbacks across Maya versions — the response's method
+        field says which one actually ran, and a fallback adds a warning
+        naming what was unavailable."""
+        return RemeshResult.model_validate(
+            maya.request(
+                "remesh_retopo",
+                {"mesh": mesh, "target_polycount": target_polycount,
+                 "keep_original": keep_original},
+                timeout_s=BOOL_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Clean up mesh",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=False
+        ),
+    )
+    def maya_mesh_cleanup(
+        mesh: Annotated[str, Field(description="Target mesh (canonical long name).")],
+        merge_verts_threshold: Annotated[
+            float, Field(gt=0, le=1.0, description="Merge distance for polyMergeVertex.")
+        ] = 0.001,
+        delete_history: Annotated[
+            bool, Field(description="Delete construction history after cleanup.")
+        ] = True,
+        freeze_transforms: Annotated[
+            bool, Field(description="Freeze translate/rotate/scale to identity.")
+        ] = True,
+        conform_normals: Annotated[
+            bool, Field(description="Conform face normal winding (polyNormal).")
+        ] = True,
+    ) -> CleanupResult:
+        """Merge near-duplicate vertices, then (in order) conform normals,
+        freeze transforms, and delete construction history. Returns mesh
+        stats from before and after so you can confirm the cleanup did
+        something."""
+        return CleanupResult.model_validate(
+            maya.request(
+                "mesh_cleanup",
+                {"mesh": mesh, "merge_verts_threshold": merge_verts_threshold,
+                 "delete_history": delete_history, "freeze_transforms": freeze_transforms,
+                 "conform_normals": conform_normals},
+                timeout_s=BOOL_TIMEOUT_S,
             )
         )
 
