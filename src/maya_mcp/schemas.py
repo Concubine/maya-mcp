@@ -265,6 +265,21 @@ class CameraResult(BaseModel):
     warnings: List[str] = Field(default_factory=list)
 
 
+class LightingResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    preset: str
+    lights: List[str] = Field(description="Canonical long names of the lights created.")
+    removed: List[str] = Field(
+        default_factory=list, description="Short names of lights deleted by replace_existing."
+    )
+    checkpoint_id: Optional[str] = Field(
+        default=None,
+        description="Auto-checkpoint taken before deleting lights; None if nothing was deleted.",
+    )
+    warnings: List[str] = Field(default_factory=list)
+
+
 class ReferenceResult(BaseModel):
     model_config = ConfigDict(extra="ignore")
 

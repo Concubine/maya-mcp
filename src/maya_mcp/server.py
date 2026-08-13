@@ -31,6 +31,7 @@ from .schemas import (
     DeformResult,
     DeleteResult,
     ExecuteResult,
+    LightingResult,
     NameResult,
     NewSceneResult,
     ObjectInfoResult,
@@ -1017,6 +1018,41 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 "set_camera",
                 {"camera": camera, "position": position, "look_at": look_at,
                  "focal_length": focal_length, "set_active": set_active},
+                timeout_s=SCENE_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Setup lighting",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_setup_lighting(
+        preset: Annotated[
+            Literal["three_point", "single_sun", "hdri"],
+            Field(description="Light rig to build."),
+        ],
+        intensity: Annotated[float, Field(gt=0, le=20, description=(
+            "Overall rig intensity; 1.0 is neutral."
+        ))] = 1.0,
+        hdri_path: Annotated[Optional[str], Field(description=(
+            "Absolute path to an .hdr/.exr. Required for preset='hdri' - no HDRI "
+            "is bundled."
+        ))] = None,
+        replace_existing: Annotated[bool, Field(description=(
+            "Delete existing lights first. Auto-checkpoints before doing so. "
+            "Only light transforms are removed; other nodes are never touched."
+        ))] = True,
+    ) -> LightingResult:
+        """Build a lighting rig so the model can actually be judged.
+
+        Pair with maya_capture_viewport(lighting='scene') to see it."""
+        return LightingResult.model_validate(
+            maya.request(
+                "setup_lighting",
+                {"preset": preset, "intensity": intensity,
+                 "hdri_path": hdri_path, "replace_existing": replace_existing},
                 timeout_s=SCENE_TIMEOUT_S,
             )
         )

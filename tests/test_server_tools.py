@@ -80,6 +80,7 @@ class TestRegistration:
             "maya_set_camera",
             "maya_load_reference_image",
             "maya_compare_to_reference",
+            "maya_setup_lighting",
         }
 
     def test_annotations_declare_read_only_vs_destructive(self):
@@ -95,6 +96,9 @@ class TestRegistration:
         capture = by_name["maya_capture_viewport"].annotations
         assert (capture.read_only_hint, capture.destructive_hint,
                 capture.idempotent_hint) == (True, False, True)
+        lighting = by_name["maya_setup_lighting"].annotations
+        assert (lighting.read_only_hint, lighting.destructive_hint,
+                lighting.idempotent_hint) == (False, True, False)
 
 
 class TestExecutePython:
@@ -546,6 +550,60 @@ class TestSetCamera:
         mcp = server_mod.create_server(conn)
         with pytest.raises(Exception, match="position"):
             run(mcp.call_tool("maya_set_camera", {"position": [1, 2]}))
+        assert conn.calls == []  # rejected before reaching Maya
+
+
+class TestSetupLighting:
+    def test_marshals_all_params_and_returns_result(self):
+        conn = FakeConn(
+            responses={
+                "setup_lighting": {
+                    "preset": "three_point",
+                    "lights": ["|mcpLight_key", "|mcpLight_fill", "|mcpLight_rim"],
+                    "removed": ["oldKey"],
+                    "checkpoint_id": "007_auto_lighting",
+                    "warnings": [],
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        result = run(
+            mcp.call_tool(
+                "maya_setup_lighting",
+                {"preset": "three_point", "intensity": 1.5,
+                 "replace_existing": True},
+            )
+        )
+        assert result.is_error is False
+        assert conn.calls[0]["cmd"] == "setup_lighting"
+        assert conn.calls[0]["params"] == {
+            "preset": "three_point", "intensity": 1.5,
+            "hdri_path": None, "replace_existing": True,
+        }
+        assert conn.calls[0]["timeout_s"] == server_mod.SCENE_TIMEOUT_S
+        assert result.structured_content["removed"] == ["oldKey"]
+        assert result.structured_content["checkpoint_id"] == "007_auto_lighting"
+
+    def test_defaults_intensity_and_replace_existing(self):
+        conn = FakeConn(
+            responses={
+                "setup_lighting": {
+                    "preset": "single_sun", "lights": ["|mcpLight_sun"],
+                    "removed": [], "checkpoint_id": None, "warnings": [],
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_setup_lighting", {"preset": "single_sun"}))
+        assert conn.calls[0]["params"]["intensity"] == 1.0
+        assert conn.calls[0]["params"]["replace_existing"] is True
+        assert conn.calls[0]["params"]["hdri_path"] is None
+
+    def test_invalid_preset_rejected_by_schema(self):
+        conn = FakeConn(responses={"setup_lighting": {}})
+        mcp = server_mod.create_server(conn)
+        with pytest.raises(Exception, match="preset"):
+            run(mcp.call_tool("maya_setup_lighting", {"preset": "cinematic"}))
         assert conn.calls == []  # rejected before reaching Maya
 
 

@@ -1198,3 +1198,45 @@ class TestM1AcceptanceGate:
 
         if helper_failure:
             raise helper_failure[0]
+
+
+class TestLightingInMaya:
+    def test_replace_existing_removes_exactly_the_prior_lights(self, tmp_path):
+        # A full node-count diff, not a spot check: this tool deletes user
+        # work, and "removed one thing too many" is the failure that matters.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import lighting
+
+        cmds.file(new=True, force=True)
+        cmds.file(rename=str(tmp_path / "lighting.ma"))
+        cmds.polyCube(name="keepme")
+        cmds.spaceLocator(name="keepme_loc")
+        old = cmds.directionalLight(name="old_key")
+        before = set(cmds.ls(long=True))
+
+        result = lighting.setup_lighting(
+            {"preset": "three_point", "replace_existing": True}
+        )
+
+        assert cmds.objExists("|keepme")
+        assert cmds.objExists("|keepme_loc")
+        assert not cmds.objExists("|old_key")
+        assert len(result["lights"]) == 3
+        assert result["removed"] == ["old_key"]
+        # every surviving pre-existing node is still there
+        after = set(cmds.ls(long=True))
+        vanished = {n for n in before - after if "old_key" not in n}
+        assert vanished == set(), "setup_lighting deleted more than the lights: %s" % vanished
+
+    def test_lights_actually_light_the_scene(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import lighting
+
+        cmds.file(new=True, force=True)
+        cmds.file(rename=str(tmp_path / "lighting_shape.ma"))
+        result = lighting.setup_lighting({"preset": "single_sun", "intensity": 2.0})
+        shapes = cmds.listRelatives(result["lights"][0], shapes=True, fullPath=True)
+        assert cmds.nodeType(shapes[0]) == "directionalLight"
+        assert cmds.getAttr(shapes[0] + ".intensity") == pytest.approx(2.0)
