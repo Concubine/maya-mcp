@@ -332,7 +332,13 @@ class TestEtchInMaya:
 
         from maya_plugin.handlers import etch
 
-        if not cmds.loadPlugin("Type", quiet=True):
+        # loadPlugin returns falsy both when the plugin is genuinely
+        # unavailable AND when it's already loaded (see etch._create_glyph's
+        # own comment) - check pluginInfo too so an already-loaded plugin
+        # from an earlier test in this session doesn't cause a false skip.
+        if not cmds.loadPlugin("Type", quiet=True) and not cmds.pluginInfo(
+            "Type", query=True, loaded=True
+        ):
             pytest.skip("Type plugin unavailable in standalone")
         cmds.file(rename=str(tmp_path / "etch.ma"))
         cmds.polyCube(name="plate", w=2, h=1, d=0.3)
@@ -355,7 +361,13 @@ class TestEtchInMaya:
         from maya_plugin.dispatcher import HandlerError
         from maya_plugin.handlers import etch
 
-        if not cmds.loadPlugin("Type", quiet=True):
+        # loadPlugin returns falsy both when the plugin is genuinely
+        # unavailable AND when it's already loaded (see etch._create_glyph's
+        # own comment) - check pluginInfo too so an already-loaded plugin
+        # from an earlier test in this session doesn't cause a false skip.
+        if not cmds.loadPlugin("Type", quiet=True) and not cmds.pluginInfo(
+            "Type", query=True, loaded=True
+        ):
             pytest.skip("Type plugin unavailable in standalone")
         cmds.file(rename=str(tmp_path / "etch_sweep_frame.ma"))
         cmds.polyCube(name="plate", w=2, h=1, d=0.3)
@@ -384,7 +396,13 @@ class TestEtchInMaya:
         from maya_plugin.dispatcher import HandlerError
         from maya_plugin.handlers import etch
 
-        if not cmds.loadPlugin("Type", quiet=True):
+        # loadPlugin returns falsy both when the plugin is genuinely
+        # unavailable AND when it's already loaded (see etch._create_glyph's
+        # own comment) - check pluginInfo too so an already-loaded plugin
+        # from an earlier test in this session doesn't cause a false skip.
+        if not cmds.loadPlugin("Type", quiet=True) and not cmds.pluginInfo(
+            "Type", query=True, loaded=True
+        ):
             pytest.skip("Type plugin unavailable in standalone")
         cmds.file(rename=str(tmp_path / "etch_sweep_create.ma"))
         cmds.polyCube(name="plate", w=2, h=1, d=0.3)
