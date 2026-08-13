@@ -165,3 +165,53 @@ class TestMeshcheckInMaya:
         result = meshcheck.ensure_object_shading(cmds, shape, fallback_sg=None)
         assert result["repaired"] is False
         assert result["sg"] == "initialShadingGroup"
+
+    def test_ensure_object_shading_ignores_other_shapes_basename_match(self):
+        # Regression: two shapes sharing a basename in different groups used
+        # to let a healthy OTHER shape's object-level membership mask a
+        # partially-assigned shape of the same short name (commit ec0af3f).
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import meshcheck
+
+        shader = cmds.shadingNode("lambert", asShader=True, name="sg_dup_red")
+        sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True,
+                       name="sg_dupSG")
+        cmds.connectAttr(shader + ".outColor", sg + ".surfaceShader", force=True)
+
+        grp_a = cmds.group(cmds.polyCube()[0], name="grpA")
+        cmds.rename(cmds.listRelatives(grp_a, children=True)[0], "part")
+        grp_b = cmds.group(cmds.polyCube()[0], name="grpB")
+        cmds.rename(cmds.listRelatives(grp_b, children=True)[0], "part")
+
+        shape_a = cmds.listRelatives("|grpA|part", shapes=True, fullPath=True)[0]
+        shape_b = cmds.listRelatives("|grpB|part", shapes=True, fullPath=True)[0]
+
+        # grpB's shape gets full, healthy object-level membership.
+        cmds.sets(shape_b, edit=True, forceElement=sg)
+        # grpA's shape only gets partial per-face membership of the same SG -
+        # this must NOT be masked as healthy by grpB's basename-matching
+        # object-level membership.
+        cmds.sets(shape_a + ".f[0:2]", edit=True, forceElement=sg)
+
+        result = meshcheck.ensure_object_shading(cmds, shape_a, fallback_sg=sg)
+        assert result["repaired"] is True
+        assert result["sg"] == sg
+
+        members = cmds.sets(sg, query=True) or []
+        resolved = [
+            (cmds.ls(m, long=True) or [m])[0] for m in members if ".f[" not in m
+        ]
+        assert shape_a in resolved
+
+
+class TestMeshStatsNonMeshInMaya:
+    def test_non_mesh_input_raises_clear_error(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import meshcheck
+
+        cmds.group(empty=True, name="someGroup")
+        with pytest.raises(HandlerError, match="not a polygon mesh"):
+            meshcheck.mesh_stats("|someGroup")

@@ -29,6 +29,11 @@ def _mesh_fn(name: str):
         dag.extendToShape()
     except RuntimeError:
         pass  # already a shape
+    if not dag.hasFn(om.MFn.kMesh):
+        raise HandlerError(
+            "%s is not a polygon mesh" % name,
+            hint="this tool needs a mesh; call maya_get_scene_graph with filter='mesh'",
+        )
     return om, dag
 
 
@@ -71,8 +76,19 @@ def ensure_object_shading(cmds, shape: str, fallback_sg: Optional[str]) -> Dict[
     sgs = cmds.listSets(object=shape, type=1) or []
     if len(sgs) == 1:
         members = cmds.sets(sgs[0], query=True) or []
-        short = shape.split("|")[-1]
-        if any(m.split("|")[-1] == short and ".f[" not in m for m in members):
+        shape_long = (cmds.ls(shape, long=True) or [shape])[0]
+        healthy = False
+        for m in members:
+            if ".f[" in m:
+                continue
+            resolved = cmds.ls(m, long=True) or [m]
+            # An ambiguous short-name resolution (multiple long names) must
+            # not be trusted as healthy membership of OUR shape - only a
+            # unique resolution that matches counts.
+            if resolved == [shape_long]:
+                healthy = True
+                break
+        if healthy:
             return {"sg": sgs[0], "repaired": False}
     target = fallback_sg or (sgs[0] if sgs else "initialShadingGroup")
     cmds.sets(shape, edit=True, forceElement=target)
