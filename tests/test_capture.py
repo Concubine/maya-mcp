@@ -246,7 +246,7 @@ class TestMarshaling:
             calls.append((angle, shading, wireframe_overlay, buffer, isolate,
                           frame_all, resolution))
             return {"png_b64": "ZmFrZQ==", "camera_position": [0, 0, 10],
-                    "camera_rotation": [0, 0, 0]}
+                    "camera_rotation": [0, 0, 0], "camera": "|mayaMcpTempCam"}
 
         monkeypatch.setattr(capture, "_capture_one", fake_capture)
         result = capture.capture_viewport(
@@ -262,6 +262,11 @@ class TestMarshaling:
         assert [img["angle"] for img in result["images"]] == ["front", "top"]
         assert all(img["png_b64"] == "ZmFrZQ==" for img in result["images"])
         assert len(result["camera_positions"]) == 2
+        # A stale "current" camera used to be captured silently - the LLM
+        # must be able to SEE which camera actually produced each shot.
+        assert all(
+            cp["camera"] == "|mayaMcpTempCam" for cp in result["camera_positions"]
+        )
 
     def test_invalid_shading_rejected_before_any_capture(self, monkeypatch):
         monkeypatch.setattr(
@@ -278,3 +283,217 @@ class TestMarshaling:
         )
         with pytest.raises(HandlerError, match="buffer"):
             capture.capture_viewport({"buffer": "zdepth"})
+
+
+class FakeCaptureCmds:
+    """Full cmds surface for driving _capture_one() end-to-end headless
+    (angle="current", no isolate — the minimal path that still touches
+    every call _capture_one makes) with _grab_pixels stubbed out.
+
+    modelEditor's fake panel starts with every icon/manipulator flag ON
+    (as a live user might leave them), so the test can tell "capture forced
+    it off" (the mid-capture edit call) apart from "restore put it back"
+    (the final edit call in _PanelState.restore) by value, not just by call
+    order.
+    """
+
+    def __init__(self):
+        self.calls = []
+        self.editor_flags = {
+            "displayAppearance": "smoothShaded",
+            "wireframeOnShaded": True,
+            "displayTextures": True,
+            "grid": True,
+            "lights": True,
+            "cameras": True,
+            "locators": True,
+            "manipulators": True,
+            "textures": True,
+        }
+        self.ssao = False
+        self.active_camera = "persp"  # panel's current camera (not cmds.camera(), below)
+        self.focus_panel = "modelPanel1"
+        self._create_seq = 0
+        self.renamed = []
+        self.deleted = []
+        self.existing_names = set()
+        # When set, cmds.ls(<this name>, long=True) reports TWO matches
+        # instead of one - reproduces a scene with a stray node sharing the
+        # temp camera's short name, without require_object being involved
+        # (capture.py's cosmetic `camera` field must never raise on this).
+        self.ambiguous_name = None
+
+    def getPanel(self, **kw):
+        if kw.get("withFocus"):
+            return self.focus_panel
+        if kw.get("typeOf") == self.focus_panel:
+            return "modelPanel"
+        if kw.get("type") == "modelPanel":
+            return [self.focus_panel]
+        if kw.get("visiblePanels"):
+            return [self.focus_panel]
+        return None
+
+    def modelPanel(self, panel, **kw):
+        if kw.get("query") and kw.get("camera"):
+            return self.active_camera
+        return None
+
+    def modelEditor(self, panel, **kw):
+        self.calls.append(("modelEditor", panel, dict(kw)))
+        if kw.get("query"):
+            if kw.get("viewSelected"):
+                return False
+            if kw.get("viewObjects"):
+                return ""
+            for flag, value in self.editor_flags.items():
+                if kw.get(flag):
+                    return value
+            return None
+        for flag, value in kw.items():
+            if flag in self.editor_flags:
+                self.editor_flags[flag] = value
+        return None
+
+    def undoInfo(self, **kw):
+        return True if kw.get("query") else None
+
+    def getAttr(self, attr):
+        if attr == "hardwareRenderingGlobals.ssaoEnable":
+            return self.ssao
+        return [(0.0, 0.0, 0.0)]  # .translate / .rotate
+
+    def setAttr(self, attr, *args, **kw):
+        if attr == "hardwareRenderingGlobals.ssaoEnable":
+            self.ssao = args[0]
+        return None
+
+    def ls(self, *args, **kw):
+        if args and kw.get("long"):
+            name = str(args[0]).lstrip("|")
+            if self.ambiguous_name and name == self.ambiguous_name:
+                return ["|dupA|%s" % name, "|dupB|%s" % name]
+            return ["|%s" % name]
+        if kw.get("geometry"):
+            return []
+        return []
+
+    def select(self, *a, **kw):
+        return None
+
+    def lookThru(self, *a, **kw):
+        return None
+
+    def setFocus(self, *a, **kw):
+        return None
+
+    def objExists(self, name):
+        return str(name).lstrip("|") in self.existing_names
+
+    def camera(self, **kw):
+        # Deliberately ignores kw["name"] - matches the live Maya quirk
+        # set_camera already works around (viewport.py); capture.py's temp
+        # camera must use the same create-then-rename idiom.
+        self._create_seq += 1
+        transform = "camera%d" % self._create_seq
+        shape = "camera%dShape" % self._create_seq
+        return [transform, shape]
+
+    def rename(self, node, new_name):
+        self.renamed.append((node, new_name))
+        return new_name
+
+    def viewFit(self, *a, **kw):
+        return None
+
+    def delete(self, *a, **kw):
+        self.deleted.extend(a)
+        return None
+
+
+class TestIconHiding:
+    """capture must never let light icons / place3dTexture manipulators leak
+    into a playblast (golem-run pain: they drifted into renders constantly),
+    and must restore whatever the live user had afterwards."""
+
+    def test_capture_forces_icons_off_then_panel_state_restores_them(
+        self, monkeypatch
+    ):
+        cmds = FakeCaptureCmds()
+        monkeypatch.setattr(capture, "_cmds", lambda: cmds)
+        monkeypatch.setattr(capture, "_grab_pixels", lambda *a, **k: b"fakepng")
+
+        capture._capture_one(
+            "current", "smoothShaded", True, "beauty", None, True, 256
+        )
+
+        edit_calls = [
+            c[2] for c in cmds.calls
+            if not c[2].get("query") and "lights" in c[2]
+        ]
+        assert len(edit_calls) == 2, "expected one capture edit + one restore edit"
+        capture_kwargs, restore_kwargs = edit_calls
+
+        assert capture_kwargs["lights"] is False
+        assert capture_kwargs["cameras"] is False
+        assert capture_kwargs["locators"] is False
+        assert capture_kwargs["manipulators"] is False
+        assert capture_kwargs["textures"] is False
+
+        # _PanelState snapshotted the user's original (all-on) state and
+        # restore() puts it back rather than leaving icons force-hidden.
+        assert restore_kwargs["lights"] is True
+        assert restore_kwargs["cameras"] is True
+        assert restore_kwargs["locators"] is True
+        assert restore_kwargs["manipulators"] is True
+        assert restore_kwargs["textures"] is True
+
+    def test_result_carries_resolved_long_camera_name(self, monkeypatch):
+        cmds = FakeCaptureCmds()
+        monkeypatch.setattr(capture, "_cmds", lambda: cmds)
+        monkeypatch.setattr(capture, "_grab_pixels", lambda *a, **k: b"fakepng")
+
+        shot = capture._capture_one(
+            "current", "smoothShaded", True, "beauty", None, True, 256
+        )
+        assert shot["camera"] == "|persp"
+
+
+class TestTempCamera:
+    """I3: the per-angle temp camera must use the same create-then-rename
+    idiom as set_camera (cmds.camera(name=...) does not actually rename the
+    transform on this Maya), and the cosmetic `camera` field it feeds must
+    never raise on an ambiguous short name - it must never fail an entire
+    capture over a display-only field."""
+
+    def test_temp_camera_created_then_renamed_not_named_kwarg(self, monkeypatch):
+        cmds = FakeCaptureCmds()
+        monkeypatch.setattr(capture, "_cmds", lambda: cmds)
+        monkeypatch.setattr(capture, "_grab_pixels", lambda *a, **k: b"fakepng")
+
+        shot = capture._capture_one(
+            "front", "smoothShaded", True, "beauty", None, True, 256
+        )
+
+        assert cmds._create_seq == 1  # exactly one temp camera created
+        assert cmds.renamed == [("camera1", "mayaMcpTempCam")]
+        assert shot["camera"] == "|mayaMcpTempCam"
+        # the temp camera must be cleaned up afterwards
+        assert "mayaMcpTempCam" in cmds.deleted
+
+    def test_ambiguous_temp_camera_short_name_does_not_raise(self, monkeypatch):
+        # Reproduces the exact bug: a scene node happens to share the temp
+        # camera's short name. Before the fix, the cosmetic `camera` field
+        # used naming.require_object, which raises HandlerError("ambiguous")
+        # here and would fail the whole capture after pixels were grabbed.
+        cmds = FakeCaptureCmds()
+        cmds.ambiguous_name = "mayaMcpTempCam"
+        monkeypatch.setattr(capture, "_cmds", lambda: cmds)
+        monkeypatch.setattr(capture, "_grab_pixels", lambda *a, **k: b"fakepng")
+
+        shot = capture._capture_one(
+            "front", "smoothShaded", True, "beauty", None, True, 256
+        )
+
+        assert shot["png_b64"]  # the capture succeeded end to end
+        assert shot["camera"] == "|dupA|mayaMcpTempCam"  # first match, no raise

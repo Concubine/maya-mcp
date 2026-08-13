@@ -28,6 +28,12 @@ from . import protocol
 
 DEFAULT_TIMEOUT_S = 30.0
 MAX_TIMEOUT_S = 600.0
+# Past this many seconds stuck, the BusyError hint stops sounding like a
+# normal "still running" wait and starts telling the caller it may be
+# permanently wedged. Comfortably above MAX_TIMEOUT_S so it never fires for
+# a legitimately long-running (but eventually finishing) operation that was
+# given a large timeout_s.
+_LIKELY_WEDGED_S = MAX_TIMEOUT_S * 2
 
 
 class HandlerError(Exception):
@@ -62,6 +68,12 @@ class Dispatcher:
         self._lock = threading.Lock()
         self._inflight: Optional[Future] = None
         self._straggler: Optional[Future] = None
+        # What the worker is (or was) actually running, for the BusyError
+        # hint below - set right before a handler starts on the main thread,
+        # cleared the moment it returns (success, HandlerError, or any other
+        # exception all go through the same _run_job return path).
+        self._running_cmd: Optional[str] = None
+        self._running_since: Optional[float] = None
         self._closed = False
         self._queue: "queue.Queue[Optional[tuple]]" = queue.Queue()
         self._worker = threading.Thread(
@@ -125,11 +137,10 @@ class Dispatcher:
                     req_id,
                     "BusyError",
                     "a previous command is still executing in Maya",
-                    hint="the session is busy until the running command finishes; "
-                    "retry shortly",
+                    hint=self._busy_hint(),
                 )
             self._inflight = fut
-            self._queue.put((fut, req_id, handler, params))
+            self._queue.put((fut, req_id, cmd, handler, params))
         try:
             return fut.result(timeout=timeout_s)
         # concurrent.futures.TimeoutError only became an alias of the builtin in
@@ -166,6 +177,52 @@ class Dispatcher:
         self._queue.put(None)
         self._worker.join(timeout=join_timeout_s)
 
+    # ---------------------------------------------------------------- busy hint
+
+    def _busy_hint(self) -> str:
+        """Build the BusyError hint. Caller must hold self._lock.
+
+        Recovery itself needs nothing extra: _worker_loop already clears
+        _inflight/_straggler (and _running_cmd/_running_since, below) the
+        instant the stuck handler's call to the main-thread executor
+        returns - by success, HandlerError, or any other exception - so a
+        genuinely-finished straggler unblocks the session on its own; this
+        only makes the error explain what it's waiting for while that
+        hasn't happened yet.
+
+        No auto-clear-after-a-timeout and no cancel/reset command: the
+        worker is a single thread blocked *synchronously* inside
+        executeInMainThreadWithResult, so while a handler is genuinely
+        wedged there, nothing this dispatcher does can free that thread to
+        pick up a new job - forgetting the straggler would just start
+        silently queuing requests behind a job that will never be dequeued,
+        which is the exact "queues silently behind a running job" failure
+        the one-in-flight design (see module docstring) exists to prevent.
+        The only real fix for a truly wedged handler is restarting Maya,
+        which is outside what a request over this socket can do, so the
+        hint says so once the stall looks abnormal.
+        """
+        cmd = self._running_cmd or "a command"
+        if self._running_since is None:
+            return (
+                "the session is busy running %r; it will unblock automatically "
+                "the instant that command finishes - retry shortly" % cmd
+            )
+        elapsed_s = time.monotonic() - self._running_since
+        hint = (
+            "the session is busy: %r has been running for %.0fs; it will "
+            "unblock automatically the instant that command finishes - retry "
+            "shortly" % (cmd, elapsed_s)
+        )
+        if elapsed_s > _LIKELY_WEDGED_S:
+            hint += (
+                ". this is far longer than a Maya command normally takes - "
+                "it may be permanently wedged on Maya's main thread (e.g. an "
+                "interactive tool call that never returns); if it stays stuck, "
+                "the only recovery is restarting Maya"
+            )
+        return hint
+
     # ------------------------------------------------------------------ worker
 
     def _worker_loop(self) -> None:
@@ -173,13 +230,16 @@ class Dispatcher:
             job = self._queue.get()
             if job is None:
                 return
-            fut, req_id, handler, params = job
+            fut, req_id, cmd, handler, params = job
             if not fut.set_running_or_notify_cancel():
                 # Cancelled by the timeout path before it started; never run it.
                 with self._lock:
                     if self._inflight is fut:
                         self._inflight = None
                 continue
+            with self._lock:
+                self._running_cmd = cmd
+                self._running_since = time.monotonic()
             response = self._run_job(req_id, handler, params)
             with self._lock:
                 fut.set_result(response)
@@ -189,19 +249,22 @@ class Dispatcher:
                     # The caller already gave up on this job; drop its result and
                     # unblock the session.
                     self._straggler = None
+                self._running_cmd = None
+                self._running_since = None
 
     def _run_job(
         self, req_id: str, handler: Callable, params: Dict[str, Any]
     ) -> Dict[str, Any]:
         start = time.monotonic()
+        use_chunk = not getattr(handler, "no_undo_chunk", False)
 
         def run_on_main() -> Dict[str, Any]:
-            if self._undo_open is not None:
+            if use_chunk and self._undo_open is not None:
                 self._undo_open()
             try:
                 return handler(params)
             finally:
-                if self._undo_close is not None:
+                if use_chunk and self._undo_close is not None:
                     self._undo_close()
 
         try:

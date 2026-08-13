@@ -76,3 +76,47 @@ Failure — tracebacks are sacred, never truncated:
 | `reset_namespace` | `{}` | `{ reset: true }` |
 | `get_scene_graph` | `{ filter?, max_objects?, cursor? }` | `{ objects: [...], total, cursor }` |
 | `capture_viewport` | `{ angles?, shading?, wireframe_overlay?, buffer?, isolate?, frame_all?, resolution? }` | `{ images: [{angle, png_b64}], camera_positions: [...] }` |
+
+## Commands (M1)
+
+Session safety:
+
+| cmd | params | result |
+|---|---|---|
+| `checkpoint` | `{ label }` | `{ checkpoint_id, path }` |
+| `restore_checkpoint` | `{ checkpoint_id }` | `{ restored, pre_restore_checkpoint }` |
+| `undo` | `{ steps? }` | `{ undone, requested }` |
+| `redo` | `{ steps? }` | `{ redone, requested }` |
+| `new_scene` | `{ confirm }` | `{ new_scene: true }` |
+| `open_scene` | `{ path, confirm? }` | `{ opened }` |
+| `save_scene` | `{ path? }` | `{ path }` |
+
+Scene ops:
+
+| cmd | params | result |
+|---|---|---|
+| `create_primitive` | `{ kind, name, translate?, rotate?, scale?, divisions? }` | `{ name, warnings }` |
+| `duplicate` | `{ name, new_name, translate?, rotate?, scale? }` | `{ name, warnings }` |
+| `transform` | `{ names, translate?, rotate?, scale?, relative? }` | `{ objects: [...], warnings }` |
+| `group` | `{ names, group_name }` | `{ name, warnings }` |
+| `parent` | `{ child, parent }` | `{ name, warnings }` |
+| `rename` | `{ name, new_name }` | `{ name, warnings }` |
+| `delete_objects` | `{ names }` | `{ deleted: [...], warnings }` |
+
+Modeling and sculpting:
+
+| cmd | params | result |
+|---|---|---|
+| `boolean_op` | `{ a, b, op, new_name }` | `{ name, tris, watertight, warnings, carved_text? }` |
+| `etch_text` | `{ mesh, text, face, width?, depth?, font?, mirror?, rotate_deg?, new_name? }` | `{ name, tris, watertight, warnings, carved_text }` |
+| `sculpt_ops` | `{ mesh, ops: [...] }` | `{ applied, ops: [...], tris, warnings, checkpoint_id? }` |
+| `deform` | `{ mesh, deformer, params?, delete_history_after? }` | `{ deformer_nodes: [...], baked, warnings }` |
+| `remesh_retopo` | `{ mesh, target_polycount, keep_original? }` | `{ name, tris, method, warnings }` |
+| `mesh_cleanup` | `{ mesh, merge_verts_threshold?, delete_history?, freeze_transforms?, conform_normals? }` | `{ name, before, after, warnings }` |
+
+Viewport and camera:
+
+| cmd | params | result |
+|---|---|---|
+| `set_viewport` | `{ show_grid?, show_light_icons?, show_camera_icons?, show_locators?, show_manipulators?, show_texture_placements?, wireframe_on_shaded?, display_lights? }` | `{ panel, show_grid, ..., camera }` |
+| `set_camera` | `{ camera?, position?, look_at?, focal_length?, set_active? }` | `{ name, position, rotation, warnings }` |

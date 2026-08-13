@@ -17,6 +17,7 @@ import tempfile
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..dispatcher import HandlerError
+from . import naming
 
 VALID_ANGLES = ("front", "side", "back", "top", "three_quarter", "current")
 VALID_SHADING = ("smoothShaded", "flatShaded", "wireframe", "textured")
@@ -140,6 +141,7 @@ def capture_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
                 "angle": angle,
                 "position": shot["camera_position"],
                 "rotation": shot["camera_rotation"],
+                "camera": shot["camera"],
             }
         )
     return {"images": images, "camera_positions": camera_positions}
@@ -166,7 +168,7 @@ def _scene_bbox(cmds, isolate: Optional[List[str]]):
     return list(bbox[:3]), list(bbox[3:])
 
 
-def _find_model_panel(cmds) -> str:
+def find_model_panel(cmds) -> str:
     panel = cmds.getPanel(withFocus=True)
     if panel and cmds.getPanel(typeOf=panel) == "modelPanel":
         return panel
@@ -178,8 +180,11 @@ def _find_model_panel(cmds) -> str:
     if panels:
         return panels[0]
     raise HandlerError(
-        "no model panel available to capture from",
-        hint="open a viewport in Maya (capture does not work in batch/mayapy mode)",
+        "no model panel available",
+        hint=(
+            "open a viewport in Maya - capture/viewport/camera tools don't "
+            "work in batch/mayapy mode"
+        ),
     )
 
 
@@ -228,6 +233,14 @@ class _PanelState:
         self.wireframe_on_shaded = me(wireframeOnShaded=True)
         self.display_textures = me(displayTextures=True)
         self.grid = me(grid=True)
+        # Icon/manipulator visibility (#577 4a): captures force these off so
+        # light icons and place3dTexture widgets never render into a
+        # playblast; restore puts back whatever the user had.
+        self.lights = me(lights=True)
+        self.cameras = me(cameras=True)
+        self.locators = me(locators=True)
+        self.manipulators = me(manipulators=True)
+        self.textures = me(textures=True)
         # Isolate ("View Selected") state. Membership lives in the panel's
         # ViewSelectedSet objectSet (modelEditor -q -viewObjects); it is only
         # meaningful while viewSelected is on. isolate_dirty is flipped by
@@ -253,6 +266,11 @@ class _PanelState:
                 wireframeOnShaded=self.wireframe_on_shaded,
                 displayTextures=self.display_textures,
                 grid=self.grid,
+                lights=self.lights,
+                cameras=self.cameras,
+                locators=self.locators,
+                manipulators=self.manipulators,
+                textures=self.textures,
             )
         except Exception:
             pass
@@ -302,7 +320,7 @@ def _capture_one(
     resolution: int,
 ) -> Dict[str, Any]:
     cmds = _cmds()
-    panel = _find_model_panel(cmds)
+    panel = find_model_panel(cmds)
     state = _PanelState(cmds, panel)
     temp_camera = None
     # Perception must not pollute the undo queue: suppress undo recording for
@@ -317,7 +335,17 @@ def _capture_one(
         else:
             bbox_min, bbox_max = _scene_bbox(cmds, isolate)
             position, rotation = camera_placement(angle, bbox_min, bbox_max)
-            temp_camera = cmds.camera(name="mayaMcpTempCam")[0]
+            # cmds.camera(name=...) does NOT rename the transform on this
+            # Maya (verified live: it always yields "camera1"/"camera2", the
+            # same broken idiom set_camera works around) - create unnamed,
+            # then rename deterministically via unique_name. Without this the
+            # temp camera really is "cameraN", a name a user scene plausibly
+            # already contains, which is exactly what made the cosmetic
+            # `camera` field below able to collide and (pre-fix) fail the
+            # whole capture on an ambiguous short name.
+            temp_name = naming.unique_name(cmds, "mayaMcpTempCam")
+            created_cam = cmds.camera()[0]
+            temp_camera = cmds.rename(created_cam, temp_name)
             cmds.setAttr(temp_camera + ".translate", *position, type="double3")
             cmds.setAttr(temp_camera + ".rotate", *rotation, type="double3")
             cmds.setAttr(temp_camera + ".visibility", False)
@@ -348,6 +376,11 @@ def _capture_one(
             "wireframeOnShaded": wireframe_overlay and shading != "wireframe",
             "displayTextures": shading == "textured",
             "grid": False,
+            "lights": False,
+            "cameras": False,
+            "locators": False,
+            "manipulators": False,
+            "textures": False,
         }
         cmds.modelEditor(panel, edit=True, **editor_kwargs)
         cmds.setAttr("hardwareRenderingGlobals.ssaoEnable", buffer == "ssao")
@@ -365,10 +398,16 @@ def _capture_one(
 
         pos = cmds.getAttr(capture_cam + ".translate")[0]
         rot = cmds.getAttr(capture_cam + ".rotate")[0]
+        # Cosmetic field only - a display name must never fail a capture.
+        # naming.require_object raises on an ambiguous short name, which
+        # would fail the whole call after the pixels were already grabbed;
+        # fall back to the bare name rather than resolve-or-raise.
+        camera_long = (cmds.ls(capture_cam, long=True) or [capture_cam])[0]
         return {
             "png_b64": base64.b64encode(png_bytes).decode("ascii"),
             "camera_position": list(pos),
             "camera_rotation": list(rot),
+            "camera": camera_long,
         }
     finally:
         state.restore()

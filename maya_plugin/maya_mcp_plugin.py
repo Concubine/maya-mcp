@@ -22,7 +22,16 @@ from typing import Any, Dict, Optional
 
 from . import protocol
 from .dispatcher import Dispatcher
-from .handlers import capture, code_exec, scene
+from .handlers import (
+    capture,
+    code_exec,
+    etch,
+    modeling,
+    scene,
+    sculpt,
+    session,
+    viewport,
+)
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9877
@@ -56,6 +65,28 @@ def _build_handlers() -> Dict[str, Any]:
         "reset_namespace": code_exec.reset_namespace,
         "get_scene_graph": scene.get_scene_graph,
         "capture_viewport": capture.capture_viewport,
+        "checkpoint": session.checkpoint,
+        "restore_checkpoint": session.restore_checkpoint,
+        "undo": session.undo,
+        "redo": session.redo,
+        "new_scene": session.new_scene,
+        "open_scene": session.open_scene,
+        "save_scene": session.save_scene,
+        "create_primitive": modeling.create_primitive,
+        "duplicate": modeling.duplicate,
+        "transform": modeling.transform,
+        "group": modeling.group,
+        "parent": modeling.parent,
+        "rename": modeling.rename,
+        "delete_objects": modeling.delete_objects,
+        "boolean_op": modeling.boolean_op,
+        "remesh_retopo": modeling.remesh_retopo,
+        "mesh_cleanup": modeling.mesh_cleanup,
+        "etch_text": etch.etch_text,
+        "sculpt_ops": sculpt.sculpt_ops,
+        "deform": sculpt.deform,
+        "set_viewport": viewport.set_viewport,
+        "set_camera": viewport.set_camera,
     }
 
 

@@ -6,7 +6,7 @@ simply lacks `cmds`/`mel` when Maya is absent.
 
 import pytest
 
-from maya_plugin.handlers import code_exec
+from maya_plugin.handlers import code_exec, session
 
 
 @pytest.fixture(autouse=True)
@@ -91,16 +91,18 @@ class TestRisky:
     def test_risky_triggers_auto_checkpoint(self, monkeypatch):
         calls = []
         monkeypatch.setattr(
-            code_exec, "_auto_checkpoint", lambda: calls.append("checkpoint") or "path.ma"
+            session, "auto_checkpoint",
+            lambda reason: calls.append(reason)
+            or {"checkpoint_id": "001_auto_risky_exec", "path": "path.ma"},
         )
         result = code_exec.execute_python({"code": "1", "risky": True})
-        assert calls == ["checkpoint"]
+        assert calls == ["risky_exec"]
         assert result["checkpoint"] == "path.ma"
 
     def test_non_risky_takes_no_checkpoint(self, monkeypatch):
         calls = []
         monkeypatch.setattr(
-            code_exec, "_auto_checkpoint", lambda: calls.append("checkpoint")
+            session, "auto_checkpoint", lambda reason: calls.append(reason)
         )
         code_exec.execute_python({"code": "1"})
         assert calls == []

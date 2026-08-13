@@ -22,15 +22,40 @@ from pydantic import Field
 
 from . import images
 from .connection import MayaConnection
-from .schemas import ExecuteResult, SceneGraphResult
+from .schemas import (
+    BooleanResult,
+    CameraResult,
+    CheckpointResult,
+    CleanupResult,
+    DeformResult,
+    DeleteResult,
+    ExecuteResult,
+    NameResult,
+    NewSceneResult,
+    OpenSceneResult,
+    RemeshResult,
+    ResetNamespaceResult,
+    RestoreResult,
+    SaveSceneResult,
+    SceneGraphResult,
+    SculptResult,
+    TransformResult,
+    UndoResult,
+    ViewportState,
+)
 
 log = logging.getLogger("maya_mcp.server")
 
 Angle = Literal["front", "side", "back", "top", "three_quarter", "current"]
+Vec3 = Annotated[
+    Optional[List[float]],
+    Field(min_length=3, max_length=3, description="XYZ triple."),
+]
 
 # Transport grace on top of the per-command timeout the plugin enforces itself.
 SCENE_TIMEOUT_S = 30.0
 CAPTURE_TIMEOUT_S = 120.0
+BOOL_TIMEOUT_S = 120.0
 
 
 def _setup_logging() -> None:
@@ -211,6 +236,635 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "camera_positions: " + json.dumps(result.get("camera_positions", []))
         )
         return content
+
+    SESSION_TIMEOUT_S = 60.0  # checkpoint saves of heavy scenes take a while
+
+    @mcp.tool(
+        title="Save checkpoint",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=False
+        ),
+    )
+    def maya_checkpoint(
+        label: Annotated[str, Field(min_length=1, max_length=60, description=(
+            "Short label for the checkpoint, e.g. 'pre_rune'. Sanitized to "
+            "[a-z0-9_-]; the returned checkpoint_id is NNN_label."
+        ))],
+    ) -> CheckpointResult:
+        """Incremental scene save to <project>/checkpoints/. Keeps the newest
+        20; older ones are pruned. Cheap insurance before experiments."""
+        return CheckpointResult.model_validate(
+            maya.request("checkpoint", {"label": label}, timeout_s=SESSION_TIMEOUT_S)
+        )
+
+    @mcp.tool(
+        title="Restore checkpoint",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_restore_checkpoint(
+        checkpoint_id: Annotated[str, Field(description=(
+            "Id returned by maya_checkpoint (NNN_label)."
+        ))],
+    ) -> RestoreResult:
+        """Replace the current scene with a checkpoint. An auto-checkpoint of
+        the current state is taken first. Discards the undo queue (file load)."""
+        return RestoreResult.model_validate(
+            maya.request(
+                "restore_checkpoint", {"checkpoint_id": checkpoint_id},
+                timeout_s=SESSION_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Undo",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_undo(
+        steps: Annotated[int, Field(ge=1, le=50, description=(
+            "How many tool calls to undo; each mutating call is one step."
+        ))] = 1,
+    ) -> UndoResult:
+        """Undo the last N mutating tool calls. Undo is cheaper than re-modeling;
+        returns how many steps actually landed (the queue may be shorter)."""
+        return UndoResult.model_validate(
+            maya.request("undo", {"steps": steps}, timeout_s=SESSION_TIMEOUT_S)
+        )
+
+    @mcp.tool(
+        title="Redo",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_redo(
+        steps: Annotated[int, Field(ge=1, le=50, description="Steps to redo.")] = 1,
+    ) -> UndoResult:
+        """Redo previously undone tool calls."""
+        return UndoResult.model_validate(
+            maya.request("redo", {"steps": steps}, timeout_s=SESSION_TIMEOUT_S)
+        )
+
+    @mcp.tool(
+        title="New scene",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_new_scene(
+        confirm: Annotated[bool, Field(description=(
+            "Must be true; the current scene is discarded."
+        ))] = False,
+    ) -> NewSceneResult:
+        """Start an empty scene. REFUSES without confirm=true. Auto-checkpoints
+        the discarded scene first (unlike undo, this survives a scene replace) -
+        recover it via maya_restore_checkpoint(pre_checkpoint)."""
+        return NewSceneResult.model_validate(
+            maya.request("new_scene", {"confirm": confirm}, timeout_s=SESSION_TIMEOUT_S)
+        )
+
+    @mcp.tool(
+        title="Open scene",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_open_scene(
+        path: Annotated[str, Field(description="Absolute path to a .ma/.mb file.")],
+        confirm: Annotated[bool, Field(description=(
+            "Required (true) only when the current scene has unsaved changes."
+        ))] = False,
+    ) -> OpenSceneResult:
+        """Open a scene file, replacing the current scene. Auto-checkpoints the
+        discarded scene first (unlike undo, this survives a scene replace) -
+        recover it via maya_restore_checkpoint(pre_checkpoint)."""
+        return OpenSceneResult.model_validate(
+            maya.request(
+                "open_scene", {"path": path, "confirm": confirm}, timeout_s=SESSION_TIMEOUT_S
+            )
+        )
+
+    @mcp.tool(
+        title="Save scene",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=True
+        ),
+    )
+    def maya_save_scene(
+        path: Annotated[Optional[str], Field(description=(
+            "Target path for save-as; omit to save in place (errors on an "
+            "untitled scene)."
+        ))] = None,
+    ) -> SaveSceneResult:
+        """Save the scene (.ma or .mb by extension)."""
+        return SaveSceneResult.model_validate(
+            maya.request("save_scene", {"path": path}, timeout_s=SESSION_TIMEOUT_S)
+        )
+
+    @mcp.tool(
+        title="Reset Python namespace",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=True
+        ),
+    )
+    def maya_reset_namespace() -> ResetNamespaceResult:
+        """Clear the persistent maya_execute_python namespace."""
+        return ResetNamespaceResult.model_validate(
+            maya.request("reset_namespace", {}, timeout_s=SCENE_TIMEOUT_S)
+        )
+
+    @mcp.tool(
+        title="Create primitive",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=False
+        ),
+    )
+    def maya_create_primitive(
+        kind: Annotated[
+            Literal["cube", "sphere", "cylinder", "plane", "torus", "cone"],
+            Field(description="Primitive type."),
+        ],
+        name: Annotated[str, Field(min_length=1, description=(
+            "Requested name; collisions get a deterministic _NNN suffix and the "
+            "assigned canonical long name is returned."
+        ))],
+        translate: Vec3 = None,
+        rotate: Vec3 = None,
+        scale: Vec3 = None,
+        divisions: Annotated[int, Field(ge=1, le=200, description=(
+            "1 = Maya defaults; higher multiplies subdivision counts. This is a "
+            "MULTIPLIER, and it costs very different amounts per kind: a cube "
+            "spends it linearly per axis (6*d^2 faces) while a sphere or torus "
+            "multiplies it by 20 on BOTH axes (400*d^2), so divisions=50 is a "
+            "1M-face sphere but a 15k-face cube. Results are capped at 1,000,000 "
+            "faces; over that the call is refused with the highest divisions that "
+            "kind allows, rather than building a mesh that hangs Maya."
+        ))] = 1,
+    ) -> NameResult:
+        """Create a polygon primitive at an optional transform (no construction
+        history)."""
+        return NameResult.model_validate(
+            maya.request(
+                "create_primitive",
+                {"kind": kind, "name": name, "translate": translate,
+                 "rotate": rotate, "scale": scale, "divisions": divisions},
+                timeout_s=SCENE_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Duplicate object",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=False
+        ),
+    )
+    def maya_duplicate(
+        name: Annotated[str, Field(min_length=1, description=(
+            "Canonical long name of the object to duplicate."
+        ))],
+        new_name: Annotated[str, Field(min_length=1, description=(
+            "Requested name for the copy; collisions get a deterministic _NNN "
+            "suffix and the assigned canonical long name is returned."
+        ))],
+        translate: Vec3 = None,
+        rotate: Vec3 = None,
+        scale: Vec3 = None,
+    ) -> NameResult:
+        """Duplicate an object by name, optionally offsetting the copy
+        (translate/rotate/scale are applied relative to the source)."""
+        return NameResult.model_validate(
+            maya.request(
+                "duplicate",
+                {"name": name, "new_name": new_name, "translate": translate,
+                 "rotate": rotate, "scale": scale},
+                timeout_s=SCENE_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Transform objects",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=False
+        ),
+    )
+    def maya_transform(
+        names: Annotated[List[str], Field(min_length=1, description=(
+            "Canonical long names of the objects to move."
+        ))],
+        translate: Vec3 = None,
+        rotate: Vec3 = None,
+        scale: Vec3 = None,
+        relative: Annotated[bool, Field(description=(
+            "True (default): offsets relative to current values. False: absolute "
+            "world-space translate and rotate; object-space scale."
+        ))] = True,
+    ) -> TransformResult:
+        """Move/rotate/scale objects by name. Returns the resulting transforms —
+        trust these over your own bookkeeping: the live user may also be moving
+        things, and warnings will say so."""
+        return TransformResult.model_validate(
+            maya.request(
+                "transform",
+                {"names": names, "translate": translate, "rotate": rotate,
+                 "scale": scale, "relative": relative},
+                timeout_s=SCENE_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Group objects",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=False
+        ),
+    )
+    def maya_group(
+        names: Annotated[List[str], Field(min_length=1, description=(
+            "Canonical long names of the objects to place under a new group "
+            "transform."
+        ))],
+        group_name: Annotated[str, Field(min_length=1, description=(
+            "Requested name for the new group; collisions get a deterministic "
+            "_NNN suffix and the assigned canonical long name is returned."
+        ))],
+    ) -> NameResult:
+        """Create a new group transform and parent the named objects under it."""
+        return NameResult.model_validate(
+            maya.request(
+                "group",
+                {"names": names, "group_name": group_name},
+                timeout_s=SCENE_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Parent object",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=False
+        ),
+    )
+    def maya_parent(
+        child: Annotated[str, Field(min_length=1, description=(
+            "Canonical long name of the object to reparent."
+        ))],
+        parent: Annotated[str, Field(min_length=1, description=(
+            "Canonical long name of the new parent transform."
+        ))],
+    ) -> NameResult:
+        """Reparent one object under another. Returns the child's new canonical
+        long name (its path changes when its parent changes)."""
+        return NameResult.model_validate(
+            maya.request(
+                "parent",
+                {"child": child, "parent": parent},
+                timeout_s=SCENE_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Rename object",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=False
+        ),
+    )
+    def maya_rename(
+        name: Annotated[str, Field(min_length=1, description=(
+            "Canonical long name of the object to rename."
+        ))],
+        new_name: Annotated[str, Field(min_length=1, description=(
+            "Requested new name; collisions get a deterministic _NNN suffix and "
+            "the assigned canonical long name is returned."
+        ))],
+    ) -> NameResult:
+        """Rename an object by name."""
+        return NameResult.model_validate(
+            maya.request(
+                "rename",
+                {"name": name, "new_name": new_name},
+                timeout_s=SCENE_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Delete objects",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_delete_objects(
+        names: Annotated[List[str], Field(min_length=1, description=(
+            "Canonical long names of the objects to delete. All-or-nothing: if "
+            "any name is missing, nothing is deleted."
+        ))],
+    ) -> DeleteResult:
+        """Delete objects by name. Fails clean (no partial deletion) if any
+        name does not exist."""
+        return DeleteResult.model_validate(
+            maya.request(
+                "delete_objects",
+                {"names": names},
+                timeout_s=SCENE_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Boolean operation",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_boolean_op(
+        a: Annotated[str, Field(description="First mesh (kept material wins).")],
+        b: Annotated[str, Field(description="Second mesh; both inputs are consumed.")],
+        op: Annotated[Literal["union", "difference", "intersection"],
+                      Field(description="difference = a minus b.")],
+        new_name: Annotated[str, Field(min_length=1, description="Name for the result.")],
+    ) -> BooleanResult:
+        """Boolean two meshes. Auto-checkpoints first; deletes construction
+        history and collapses shading to one object-level material (per-face
+        shading does not survive booleans). Non-watertight results come back
+        ok with a warning + cleanup hint."""
+        return BooleanResult.model_validate(
+            maya.request(
+                "boolean_op", {"a": a, "b": b, "op": op, "new_name": new_name},
+                timeout_s=BOOL_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Etch text into a face",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_etch_text(
+        mesh: Annotated[str, Field(description="Target mesh (canonical long name).")],
+        text: Annotated[str, Field(min_length=1, max_length=32, description=(
+            "Characters to carve; Unicode ok (Hebrew renders in correct RTL "
+            "visual order)."
+        ))],
+        face: Annotated[int, Field(ge=0, description=(
+            "Face id to carve into; the glyph is oriented to this face's actual "
+            "normal (works on smoothed/bowed faces)."
+        ))],
+        width: Annotated[float, Field(gt=0, description="Carve width, scene units.")] = 0.6,
+        depth: Annotated[float, Field(gt=0, description="Recess depth, scene units.")] = 0.1,
+        font: Annotated[str, Field(description="Font for the Type node.")] = "Arial",
+        mirror: Annotated[bool, Field(description=(
+            "Mirror the glyph horizontally (e.g. the golem's inverted-mirrored aleph)."
+        ))] = False,
+        rotate_deg: Annotated[float, Field(description=(
+            "Extra in-plane rotation in degrees (180 = inverted)."
+        ))] = 0.0,
+        new_name: Annotated[Optional[str], Field(description=(
+            "Name for the carved result; defaults to <mesh>_etched."
+        ))] = None,
+    ) -> BooleanResult:
+        """Carve text into a mesh face in ONE call: glyph -> sized -> oriented
+        to the face's normal frame -> depth-forced -> boolean difference ->
+        cleanup. Auto-checkpoints first; leaves zero Type/history nodes behind."""
+        return BooleanResult.model_validate(
+            maya.request(
+                "etch_text",
+                {"mesh": mesh, "text": text, "face": face, "width": width,
+                 "depth": depth, "font": font, "mirror": mirror,
+                 "rotate_deg": rotate_deg, "new_name": new_name},
+                timeout_s=BOOL_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Sculpt operations",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_sculpt_ops(
+        mesh: Annotated[str, Field(description="Target mesh (canonical long name).")],
+        ops: Annotated[List[dict], Field(min_length=1, max_length=20, description=(
+            'Applied in order; aborts on first failure reporting what landed. '
+            'Tagged by "op": '
+            'soft_move {center:[x,y,z]|vertex_id, radius, falloff:"smooth"|"linear", delta:[x,y,z]} '
+            '— THE organic tool, weighted vertex offsets; '
+            'inflate_region {center, radius, amount} — push along normals; '
+            'displace_noise {amp:0.05, freq:2.6, octaves:2, soften_angle:55?} '
+            '— value-noise rock-surface breakup, kills the untouched-primitive look; '
+            'smooth {divisions:1..3}; '
+            'extrude_faces {faces:"f[120:135]", distance, keep_together:true}; '
+            'bevel_edges {edges:"e[3:7]", width, segments:1..10}; '
+            'crease_edges {edges, amount:0..10} — stone-plate joints; '
+            'bridge {edges_a, edges_b}. '
+            'soft_move/inflate_region/displace_noise are fast vertex ops that write '
+            'via the Maya API and bypass the undo queue entirely — maya_undo will NOT '
+            'revert them. If any of the three appear in this list, the call '
+            'auto-checkpoints before applying anything; pass the returned '
+            'checkpoint_id to maya_restore_checkpoint to revert. The other five '
+            'ops (smooth, extrude_faces, bevel_edges, '
+            'crease_edges, bridge) are cmds-based and undo normally.'
+        ))],
+    ) -> SculptResult:
+        """Apply sculpt ops in order to one mesh. cmds-based ops (smooth,
+        extrude_faces, bevel_edges, crease_edges, bridge) undo normally via
+        maya_undo(1). soft_move, inflate_region, and displace_noise write
+        vertices via the Maya API and bypass the undo queue - when any of
+        those three are requested, the call auto-checkpoints first, and
+        restoring the returned checkpoint_id via maya_restore_checkpoint
+        (not maya_undo) is how you revert this call. On partial failure,
+        applied ops stay and the response says which recovery path applies."""
+        return SculptResult.model_validate(
+            maya.request(
+                "sculpt_ops", {"mesh": mesh, "ops": ops}, timeout_s=BOOL_TIMEOUT_S
+            )
+        )
+
+    @mcp.tool(
+        title="Deform mesh",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_deform(
+        mesh: Annotated[str, Field(description="Target mesh (canonical long name).")],
+        deformer: Annotated[
+            Literal["bend", "lattice", "squash", "twist", "sculpt"],
+            Field(description="Nonlinear/lattice deformer type to apply."),
+        ],
+        params: Annotated[
+            Optional[dict],
+            Field(description=(
+                "Deformer parameters, whitelisted per type: bend takes curvature; "
+                "squash takes factor; twist takes startAngle/endAngle; sculpt takes "
+                "maxDisplacement/dropoffDistance; all four also take lowBound/"
+                "highBound; lattice takes divisions:[x,y,z]. Every type also accepts "
+                "translate/rotate, applied to the deformer handle. Unknown keys are "
+                "rejected with that type's whitelist in the error hint."
+            )),
+        ] = None,
+        delete_history_after: Annotated[
+            bool,
+            Field(description=(
+                "Bake the deformation into the mesh and delete the deformer "
+                "(construction history) instead of returning it live for further "
+                "tweaking."
+            )),
+        ] = False,
+    ) -> DeformResult:
+        """Apply a nonlinear or lattice deformer to a mesh by name. Returns the
+        deformer node names so maya_execute_python can tweak their attributes
+        further; delete_history_after=true bakes the shape and consumes the
+        deformer instead."""
+        return DeformResult.model_validate(
+            maya.request(
+                "deform",
+                {"mesh": mesh, "deformer": deformer, "params": params,
+                 "delete_history_after": delete_history_after},
+                timeout_s=BOOL_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Remesh / retopologize",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_remesh_retopo(
+        mesh: Annotated[str, Field(description="Target mesh (canonical long name).")],
+        target_polycount: Annotated[
+            int,
+            Field(ge=100, le=200000, description="Target face count to retopologize toward."),
+        ],
+        keep_original: Annotated[
+            bool,
+            Field(description=(
+                "Keep a hidden <name>_orig backup of the source mesh before "
+                "remeshing."
+            )),
+        ] = True,
+    ) -> RemeshResult:
+        """Retopologize a mesh toward target_polycount. Auto-checkpoints first.
+        Tries polyRetopo, then polyRemesh, then polyReduce, in that order, as
+        compatibility fallbacks across Maya versions — the response's method
+        field says which one actually ran, and a fallback adds a warning
+        naming what was unavailable."""
+        return RemeshResult.model_validate(
+            maya.request(
+                "remesh_retopo",
+                {"mesh": mesh, "target_polycount": target_polycount,
+                 "keep_original": keep_original},
+                timeout_s=BOOL_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Clean up mesh",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=False
+        ),
+    )
+    def maya_mesh_cleanup(
+        mesh: Annotated[str, Field(description="Target mesh (canonical long name).")],
+        merge_verts_threshold: Annotated[
+            float, Field(gt=0, le=1.0, description="Merge distance for polyMergeVertex.")
+        ] = 0.001,
+        delete_history: Annotated[
+            bool, Field(description="Delete construction history after cleanup.")
+        ] = True,
+        freeze_transforms: Annotated[
+            bool, Field(description="Freeze translate/rotate/scale to identity.")
+        ] = True,
+        conform_normals: Annotated[
+            bool, Field(description="Conform face normal winding (polyNormal).")
+        ] = True,
+    ) -> CleanupResult:
+        """Merge near-duplicate vertices, then (in order) conform normals,
+        freeze transforms, and delete construction history. Returns mesh
+        stats from before and after so you can confirm the cleanup did
+        something."""
+        return CleanupResult.model_validate(
+            maya.request(
+                "mesh_cleanup",
+                {"mesh": mesh, "merge_verts_threshold": merge_verts_threshold,
+                 "delete_history": delete_history, "freeze_transforms": freeze_transforms,
+                 "conform_normals": conform_normals},
+                timeout_s=BOOL_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Configure viewport",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=True
+        ),
+    )
+    def maya_set_viewport(
+        show_grid: Annotated[Optional[bool], Field(description="Grid visibility.")] = None,
+        show_light_icons: Annotated[Optional[bool], Field(description=(
+            "Light icons render into playblasts - keep off while capturing art."
+        ))] = None,
+        show_camera_icons: Annotated[Optional[bool], Field(description="Camera icons.")] = None,
+        show_locators: Annotated[Optional[bool], Field(description="Locator display.")] = None,
+        show_manipulators: Annotated[Optional[bool], Field(description="Manipulator display.")] = None,
+        show_texture_placements: Annotated[Optional[bool], Field(description=(
+            "place3dTexture widgets - they render into captures too."
+        ))] = None,
+        wireframe_on_shaded: Annotated[Optional[bool], Field(description="Wire overlay.")] = None,
+        display_lights: Annotated[
+            Optional[Literal["default", "all", "active", "flat", "none"]],
+            Field(description="Which lights illuminate the viewport."),
+        ] = None,
+    ) -> ViewportState:
+        """Persistently configure the working viewport (unlike captures, which
+        restore themselves). Only the params you pass change; the FULL resulting
+        state always comes back - call with no params to just read it."""
+        return ViewportState.model_validate(
+            maya.request(
+                "set_viewport",
+                {"show_grid": show_grid, "show_light_icons": show_light_icons,
+                 "show_camera_icons": show_camera_icons,
+                 "show_locators": show_locators,
+                 "show_manipulators": show_manipulators,
+                 "show_texture_placements": show_texture_placements,
+                 "wireframe_on_shaded": wireframe_on_shaded,
+                 "display_lights": display_lights},
+                timeout_s=SCENE_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Set camera",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=True
+        ),
+    )
+    def maya_set_camera(
+        camera: Annotated[str, Field(description=(
+            "Camera name; created if missing. Use a dedicated named camera "
+            "instead of trusting whatever the panel last looked through."
+        ))] = "mcpCam",
+        position: Annotated[Optional[List[float]], Field(
+            min_length=3, max_length=3, description="World-space position.",
+        )] = None,
+        look_at: Annotated[Optional[List[float]], Field(
+            min_length=3, max_length=3, description="World-space aim point.",
+        )] = None,
+        focal_length: Annotated[Optional[float], Field(gt=0, description="mm.")] = None,
+        set_active: Annotated[bool, Field(description=(
+            "Make the viewport look through this camera (what capture 'current' uses)."
+        ))] = True,
+    ) -> CameraResult:
+        """Create/position a named camera and (by default) make it the active
+        viewport camera, so capture_viewport 'current' is deterministic."""
+        return CameraResult.model_validate(
+            maya.request(
+                "set_camera",
+                {"camera": camera, "position": position, "look_at": look_at,
+                 "focal_length": focal_length, "set_active": set_active},
+                timeout_s=SCENE_TIMEOUT_S,
+            )
+        )
 
     return mcp
 

@@ -4,6 +4,7 @@ Pure Python — the dispatcher never imports maya; the main-thread executor and
 undo hooks are injected (the real plugin injects maya.utils / maya.cmds).
 """
 
+import re
 import threading
 import time
 
@@ -195,6 +196,68 @@ class TestTimeoutAndBusy:
         assert resp["result"] == {"who": "fast"}
 
 
+class TestBusyHint:
+    """redmine #577 fix: BusyError must be actionable, and the session must
+    recover on its own once a straggler genuinely finishes (never before)."""
+
+    def test_hint_names_stuck_command_while_genuinely_still_running(self, dispatcher):
+        release = threading.Event()
+
+        def slow(params):
+            release.wait(5.0)
+            return {}
+
+        d = dispatcher({"slow": slow, "ping": lambda p: {}})
+        d.handle_request(req("slow", timeout_s=0.05))
+        try:
+            # Still running: repeated requests keep refusing, each time
+            # naming the stuck command and roughly how long it's been stuck.
+            for _ in range(2):
+                busy = d.handle_request(req("ping"))
+                assert busy["status"] == "error"
+                assert busy["error"]["type"] == "BusyError"
+                hint = busy["error"]["hint"]
+                assert "'slow'" in hint
+                assert re.search(r"for \d+s", hint)
+                assert "unblock automatically" in hint
+                time.sleep(0.05)
+        finally:
+            release.set()
+
+    def test_hint_flags_abnormally_long_stall_but_still_recovers(self, dispatcher, monkeypatch):
+        import maya_plugin.dispatcher as dispatcher_mod
+
+        # Lower the "this looks wedged" threshold so the test doesn't need
+        # to actually wait ten-plus minutes to exercise that branch.
+        monkeypatch.setattr(dispatcher_mod, "_LIKELY_WEDGED_S", 0.05)
+        release = threading.Event()
+
+        def slow(params):
+            release.wait(5.0)
+            return {"late": True}
+
+        d = dispatcher({"slow": slow, "ping": lambda p: {}})
+        d.handle_request(req("slow", timeout_s=0.02))
+        time.sleep(0.15)  # now well past the (patched) wedged threshold
+
+        busy = d.handle_request(req("ping"))
+        assert busy["error"]["type"] == "BusyError"
+        assert "restarting Maya" in busy["error"]["hint"]
+
+        # Even a stall flagged as "likely wedged" still recovers the instant
+        # the handler actually returns - the flag is informational only, it
+        # never triggers an auto-clear.
+        release.set()
+        deadline = time.monotonic() + 2.0
+        resp = None
+        while time.monotonic() < deadline:
+            resp = d.handle_request(req("ping"))
+            if resp["status"] == "ok":
+                break
+            time.sleep(0.01)
+        assert resp is not None and resp["status"] == "ok"
+
+
 class TestOneInFlight:
     def test_second_request_during_execution_is_busy_not_queued(self, dispatcher):
         started = threading.Event()
@@ -249,3 +312,28 @@ class TestOneInFlight:
         assert elapsed < 1.0  # immediate, not a 30s stall against a dead worker
         assert resp["status"] == "error"
         assert resp["error"]["type"] == "ServerStoppedError"
+
+
+def test_no_undo_chunk_handler_skips_hooks():
+    calls = []
+
+    def normal(params):
+        return {"ok": 1}
+
+    def exempt(params):
+        return {"ok": 2}
+
+    exempt.no_undo_chunk = True
+
+    d = Dispatcher(
+        {"normal": normal, "exempt": exempt},
+        undo_open=lambda: calls.append("open"),
+        undo_close=lambda: calls.append("close"),
+    )
+    try:
+        d.handle_request({"v": 1, "id": "a", "cmd": "normal", "params": {}})
+        assert calls == ["open", "close"]
+        d.handle_request({"v": 1, "id": "b", "cmd": "exempt", "params": {}})
+        assert calls == ["open", "close"]  # unchanged: hooks skipped
+    finally:
+        d.shutdown()

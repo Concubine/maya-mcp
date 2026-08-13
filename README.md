@@ -3,8 +3,9 @@
 An MCP server that lets an LLM (Claude Desktop / Claude Code) model, texture, light, and
 render 3D content in a live Autodesk Maya session through an iterative visual feedback loop.
 
-**Status: M0** — the perceive/act loop only: `maya_execute_python`, `maya_get_scene_graph`,
-`maya_capture_viewport`. See [docs/design.md](docs/design.md) for the full design and milestones.
+**Status: M1** — the perceive/act loop (M0) plus modeling primitives, `boolean_op`, `etch_text`,
+sculpt/deform, remesh/cleanup, session safety (checkpoint/undo/redo), and viewport/camera control.
+See [docs/design.md](docs/design.md) for the full design and milestones.
 
 ## Security warning
 
@@ -82,14 +83,81 @@ Environment variables, all optional:
 | `MAYA_MCP_LOG_LEVEL` | `INFO` | Rotating file logs in `~/.maya-mcp/logs/` |
 | `MAYA_MCP_MAX_IMAGE_PX` | `768` | Longest edge for returned viewport images |
 
-## Tools (M0)
+## Tools
 
-- `maya_execute_python(code, timeout_s=30, risky=False)` — run Python in Maya with a
-  persistent namespace; full tracebacks come back verbatim.
-- `maya_get_scene_graph(filter=None, max_objects=200, cursor=None)` — compact paginated
-  outline of the scene; never returns component data.
-- `maya_capture_viewport(angles=[...], shading=..., wireframe_overlay=True, ...)` — offscreen
-  multi-angle viewport captures returned as images.
+`src/maya_mcp/server.py` is the authoritative source — the table below enumerates its
+`@mcp.tool` wrappers (26 total: 3 from M0, 23 added in M1). Schemas (`src/maya_mcp/schemas.py`)
+are the reference for exact fields; each row here is one sentence.
+
+### Perception (M0)
+
+| Tool | Description |
+|---|---|
+| `maya_execute_python` | Run Python in Maya with a persistent namespace; full tracebacks come back verbatim. |
+| `maya_get_scene_graph` | Compact paginated outline of the scene; never returns component data. |
+| `maya_capture_viewport` | Offscreen multi-angle viewport captures returned as images; side-effect-free. |
+
+### Session safety
+
+| Tool | Description |
+|---|---|
+| `maya_checkpoint` | Incremental scene save to the checkpoint directory; keeps the newest 20. |
+| `maya_restore_checkpoint` | Replace the current scene with a checkpoint (auto-checkpoints first; discards the undo queue). |
+| `maya_undo` | Undo the last N mutating tool calls (one call = one undo step). |
+| `maya_redo` | Redo previously undone tool calls. |
+| `maya_new_scene` | Start an empty scene; refuses without `confirm=true`. |
+| `maya_open_scene` | Open a scene file, replacing the current scene; requires `confirm=true` if the current scene has unsaved changes. |
+| `maya_save_scene` | Save the scene (.ma or .mb by extension). |
+| `maya_reset_namespace` | Clear the persistent `maya_execute_python` namespace. |
+
+### Scene ops
+
+| Tool | Description |
+|---|---|
+| `maya_create_primitive` | Create a polygon primitive (cube/sphere/cylinder/plane/torus/cone) at an optional transform. |
+| `maya_duplicate` | Duplicate an object by name, optionally offsetting the copy. |
+| `maya_transform` | Move/rotate/scale one or more objects by name. |
+| `maya_group` | Create a new group transform and parent named objects under it. |
+| `maya_parent` | Reparent one object under another. |
+| `maya_rename` | Rename an object by name. |
+| `maya_delete_objects` | Delete objects by name; all-or-nothing if any name is missing. |
+
+### Modeling and sculpting
+
+| Tool | Description |
+|---|---|
+| `maya_boolean_op` | Boolean two meshes (union/difference/intersection); auto-checkpoints, deletes construction history, collapses shading to one material. |
+| `maya_etch_text` | Carve text into a mesh face in one call (glyph, size, orient to face normal, depth, boolean, cleanup); reuses `boolean_op`'s core. |
+| `maya_sculpt_ops` | Apply a sequence of sculpt ops (`soft_move`, `inflate_region`, `displace_noise`, `smooth`, `extrude_faces`, `bevel_edges`, `crease_edges`, `bridge`) to one mesh. |
+| `maya_deform` | Apply a nonlinear/lattice deformer (bend/lattice/squash/twist/sculpt) to a mesh by name. |
+| `maya_remesh_retopo` | Retopologize a mesh toward a target polycount (polyRetopo, falling back to polyRemesh, then polyReduce); auto-checkpoints. |
+| `maya_mesh_cleanup` | Merge near-duplicate vertices, conform normals, freeze transforms, and delete construction history. |
+
+### Viewport and camera
+
+| Tool | Description |
+|---|---|
+| `maya_set_viewport` | Persistently configure the working viewport (grid/icon/manipulator visibility, lighting mode). |
+| `maya_set_camera` | Create/position a named camera and, by default, make it the active viewport camera. |
+
+### Checkpoint directory and undo contract
+
+Checkpoints save to `<scene_dir_or_workspace_root>/checkpoints/NNN_label.ma` (numbered,
+newest 20 kept). `maya_restore_checkpoint` takes the `checkpoint_id` **stem** returned by
+`maya_checkpoint` (e.g. `003_pre_rune`), not a file path.
+
+The plugin dispatcher wraps each mutating tool call in one `undoInfo` chunk, so **one tool
+call = one undo step** via `maya_undo`/`maya_redo`. Two exceptions:
+
+- `maya_undo`/`maya_redo`/`maya_new_scene`/`maya_open_scene`/`maya_restore_checkpoint` are
+  themselves chunk-exempt (they manipulate the undo queue or reload the scene directly).
+- `maya_sculpt_ops`'s vertex ops — `soft_move`, `inflate_region`, `displace_noise` — write
+  through `MFnMesh.setPoints`, which bypasses Maya's undo queue entirely; `maya_undo` will
+  **not** revert them. When any of the three appear in a `sculpt_ops` call, the call
+  auto-checkpoints first and returns a `checkpoint_id` (not a path) — restore that via
+  `maya_restore_checkpoint` to recover. This is a different contract from `ExecuteResult.checkpoint`
+  (from `maya_execute_python(risky=true)`) and `CheckpointResult.path` (from `maya_checkpoint`),
+  which return a file **path**, not an id — don't confuse the two shapes.
 
 ## Known ceiling
 
