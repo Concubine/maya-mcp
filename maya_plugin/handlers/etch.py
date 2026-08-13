@@ -18,7 +18,10 @@ from . import naming
 DEFAULT_WIDTH = 0.6
 DEFAULT_DEPTH = 0.1
 DEFAULT_FONT = "Arial"
-_TYPE_NODE_TYPES = ("type", "typeExtrude", "vectorAdjust", "shellDeformer")
+# vectorAdjust/shellDeformer no longer appear here: _create_glyph never wires
+# them in (see its docstring) - they only existed to drive interactive
+# per-glyph manipulator dragging, which this tool never does.
+_TYPE_NODE_TYPES = ("type", "typeExtrude")
 
 
 def _cmds():
@@ -112,60 +115,76 @@ def _create_glyph(cmds, text: str, font: str) -> str:
                 hint="etch needs Maya's Type tool; carve with maya_boolean_op "
                 "and a custom cutter mesh instead",
             )
-    import maya.mel as mel  # noqa: PLC0415
+    # ------------------------------------------------------------------
+    # Why this doesn't call CreatePolygonType / typeCreateText anymore:
+    #
+    # mel.eval("CreatePolygonType;") (old code) resolves - via
+    # defaultRunTimeCommands.mel - to the MEL proc typeCreateText, which
+    # calls Python's maya.app.type.typeToolSetup.createTypeTool(). In a GUI
+    # Maya that establishes the interactive Type tool context (a manipulator
+    # + tool state machine waiting for viewport/UI interaction) rather than
+    # just creating nodes, and never returns - it hung a live GUI session
+    # indefinitely. Because the handler runs on Maya's main thread via
+    # executeInMainThreadWithResult, that hang froze Dispatcher's single
+    # worker thread forever, which set dispatcher._straggler and made every
+    # later request fail BusyError until Maya was killed (redmine #578).
+    # mayapy standalone never showed this because standalone has no tool
+    # context/manipulator system to enter, so the interactive path silently
+    # behaves like a plain node-creation call there - mayapy green was not
+    # sufficient evidence the interactive path was safe.
+    #
+    # Investigated on this install (Maya 2027) by reading
+    # E:/Autodesk/Maya2027/Python/Lib/site-packages/maya/app/type/typeToolSetup.py
+    # (createTypeTool/createTypeToolWithNode - the actual implementation
+    # CreatePolygonType/typeCreateText delegates to) plus the MEL call chain
+    # (defaultRunTimeCommands.mel -> typeCreateText.mel -> typeInitPlugin.mel,
+    # which only sources Attribute Editor templates and registers UI
+    # callbacks - irrelevant to node evaluation). There is no `cmds.type`
+    # command (cmds.help("type") -> "no command named type"); the Type
+    # plugin's public surface is entirely through cmds.createNode. The
+    # reference implementation itself proves the whole glyph mesh is buildable
+    # with plain createNode/connectAttr/setAttr - the interactive entry point
+    # was never required to get geometry, only to let a user drag it in the
+    # viewport.
+    #
+    # So: build the minimal subgraph directly, matching what
+    # createTypeToolWithNode wires for the mesh-producing chain
+    # (type.outputMesh -> typeExtrude.inputMesh -> mesh.inMesh), and stop
+    # there. We deliberately skip createTypeToolWithNode/createTypeTool
+    # themselves too, not just CreatePolygonType, because outside batch mode
+    # they end with cmds.evalDeferred(...showEditorExact...) - popping the
+    # interactive Type Editor panel as a side effect of a headless call - and
+    # they also wire vectorAdjust/shellDeformer "adjust" deformers, which
+    # exist solely to support per-glyph interactive manipulator dragging
+    # (their inputs are literally named manipulatorTransforms). We never
+    # need per-glyph manipulation: etch_text immediately bakes the whole
+    # glyph transform with a uniform scale/rotate/translate and then calls
+    # `cmds.delete(glyph_tf, constructionHistory=True)` to freeze it before
+    # handing it to the boolean, so that machinery would be built only to be
+    # discarded. Remesh/UV/shader nodes are skipped for the same reason -
+    # none of them affect the frozen mesh a boolean difference consumes.
+    #
+    # DO NOT restore mel.eval("CreatePolygonType;") or call
+    # maya.app.type.typeToolSetup.createTypeTool()/createTypeToolWithNode() -
+    # see the paragraphs above.
+    type_node = cmds.createNode("type", name="type#", skipSelect=True)
+    type_extrude = cmds.createNode("typeExtrude", name="typeExtrude#", skipSelect=True)
+    glyph_tf = cmds.createNode("transform", name="typeMesh#", skipSelect=True)
+    glyph_mesh = cmds.createNode(
+        "mesh", name="typeMeshShape#", parent=glyph_tf, skipSelect=True
+    )
+    cmds.connectAttr(type_node + ".vertsPerChar", type_extrude + ".vertsPerChar")
+    cmds.connectAttr(type_node + ".outputMesh", type_extrude + ".inputMesh")
+    cmds.connectAttr(type_extrude + ".outputMesh", glyph_mesh + ".inMesh")
 
-    before = set(cmds.ls(type="transform"))
-    before_type_nodes = set(cmds.ls(type="type") or [])
-    mel.eval("CreatePolygonType;")
-    created = [t for t in cmds.ls(type="transform") if t not in before]
-    if not created:
-        raise HandlerError(
-            "CreatePolygonType produced no transform",
-            hint="the Type plugin misbehaved; retry or carve with maya_boolean_op",
-        )
-    # CreatePolygonType creates TWO new transforms: the typeMesh transform
-    # (mesh shape, what we want) and a handle/manipulator transform (a
-    # displayPoints locator) used for interactive dragging - not creation
-    # order guaranteed, so pick by shape type rather than created[0].
-    # Confirmed live on Maya 2027 standalone: ls(type="transform") right
-    # after CreatePolygonType returns the manipulator transform FIRST.
-    mesh_created = [
-        t for t in created
-        if any(
-            cmds.nodeType(s) == "mesh"
-            for s in (cmds.listRelatives(t, shapes=True, fullPath=True) or [])
-        )
-    ]
-    if not mesh_created:
-        raise HandlerError(
-            "CreatePolygonType produced no mesh transform",
-            hint="the Type plugin misbehaved; retry or carve with maya_boolean_op",
-        )
-    glyph_tf = mesh_created[0]
-    extras = [t for t in created if t != glyph_tf]
-    if extras:
-        cmds.delete(extras)  # the manipulator handle is not needed headless
-    # Diff against the snapshot taken before CreatePolygonType ran, rather
-    # than picking cmds.ls(type="type")[-1] (scene-wide "last one" - only
-    # correct by creation-order luck; a "type" node from an earlier etch_text
-    # call, or anything else in the scene, would silently win instead).
-    new_type_nodes = list(set(cmds.ls(type="type") or []) - before_type_nodes)
-    if not new_type_nodes:
-        raise HandlerError(
-            "CreatePolygonType produced no type node",
-            hint="the Type plugin misbehaved; retry or carve with maya_boolean_op",
-        )
-    type_node = new_type_nodes[0]
     hex_codes = " ".join("%X" % ord(ch) for ch in text)
     cmds.setAttr(type_node + ".textInput", hex_codes, type="string")
     cmds.setAttr(type_node + ".currentFont", font, type="string")
     cmds.setAttr(type_node + ".alignmentMode", 2)  # center
     try:
-        cmds.setAttr(type_node + ".extrudeEnable", 1)
-        cmds.setAttr(type_node + ".extrudeDistance", 0.1)
+        cmds.setAttr(type_extrude + ".extrudeDistance", 0.1)
     except Exception:
         pass  # depth is forced via scale anyway
-    cmds.refresh()
     return glyph_tf
 
 
