@@ -191,7 +191,17 @@ def group(params: Dict[str, Any]) -> Dict[str, Any]:
             "missing required param 'group_name'", hint="e.g. group_name='golem'"
         )
     grp = cmds.group(*resolved, name=naming.unique_name(cmds, requested))
-    return {"name": _long(cmds, grp), "warnings": []}
+    group_long = _long(cmds, grp)
+
+    # Re-key ledger entries: each child's long name has changed due to reparenting
+    for old_long in resolved:
+        ledger.forget(old_long)
+        # New long name is <group_long>|<child_short_name>
+        child_short = old_long.split("|")[-1]
+        new_long = group_long + "|" + child_short
+        ledger.record(cmds, new_long)
+
+    return {"name": group_long, "warnings": []}
 
 
 def parent(params: Dict[str, Any]) -> Dict[str, Any]:

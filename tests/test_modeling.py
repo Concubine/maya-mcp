@@ -55,6 +55,22 @@ class FakeCmds:
         for n in names:
             self.objects.discard(n)
 
+    def group(self, *names, name=None):
+        self.calls.append(("group", names, name))
+        long_name = "|" + name
+        self.objects.add(long_name)
+        self.xf[long_name] = ((0, 0, 0), (0, 0, 0), (1, 1, 1))
+        # Reparent children: update their long names in objects set
+        for child in names:
+            self.objects.discard(child)
+            child_short = child.split("|")[-1]
+            new_long = long_name + "|" + child_short
+            self.objects.add(new_long)
+            if child in self.xf:
+                self.xf[new_long] = self.xf[child]
+                del self.xf[child]
+        return name
+
 
 @pytest.fixture(autouse=True)
 def clean_ledger():
@@ -113,3 +129,29 @@ def test_delete_objects_lists_all_missing(monkeypatch):
         modeling.delete_objects({"names": ["|a", "|gone", "|also_gone"]})
     assert "|gone" in str(exc.value) and "|also_gone" in str(exc.value)
     assert not any(c[0] == "delete" for c in fake.calls)  # nothing deleted
+
+
+def test_group_rekeys_ledger_for_children(monkeypatch):
+    """After grouping, children's old ledger entries are gone; new ones exist."""
+    fake = FakeCmds(objects={"|a", "|b"})
+    fake.xf["|a"] = ((1, 0, 0), (0, 0, 0), (1, 1, 1))
+    fake.xf["|b"] = ((2, 0, 0), (0, 0, 0), (1, 1, 1))
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+
+    # Record transforms for both objects before grouping
+    ledger.record(fake, "|a")
+    ledger.record(fake, "|b")
+
+    # Group the children
+    result = modeling.group({"names": ["|a", "|b"], "group_name": "parent_grp"})
+    group_name = result["name"]
+
+    # Old ledger entries should be gone
+    assert ledger.check(fake, "|a") is None
+    assert ledger.check(fake, "|b") is None
+
+    # New ledger entries should exist for the reparented children
+    new_a = group_name + "|a"
+    new_b = group_name + "|b"
+    assert ledger.check(fake, new_a) is None
+    assert ledger.check(fake, new_b) is None
