@@ -54,3 +54,27 @@ class SceneGraphResult(BaseModel):
     cursor: Optional[str] = Field(
         default=None, description="Pass back to fetch the next page; None when complete."
     )
+
+
+class CheckpointResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    checkpoint_id: str = Field(description="Stem NNN_label; pass to maya_restore_checkpoint.")
+    path: str = Field(description="Saved .ma file path.")
+
+
+class RestoreResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    restored: str
+    pre_restore_checkpoint: str = Field(
+        description="Auto-checkpoint of the state before restoring, in case you change your mind."
+    )
+
+
+class UndoResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    undone: int = 0
+    redone: int = 0
+    requested: int

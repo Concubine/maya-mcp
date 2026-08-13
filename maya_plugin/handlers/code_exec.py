@@ -14,8 +14,6 @@ from __future__ import annotations
 import ast
 import contextlib
 import io
-import os
-import time
 import traceback
 from typing import Any, Dict, Optional
 
@@ -71,23 +69,6 @@ def _cap(text: str, limit: int) -> str:
     return text[:limit] + TRUNCATION_NOTICE % limit
 
 
-def _auto_checkpoint() -> Optional[str]:
-    """Minimal M0 checkpoint: export the scene to <checkpoints>/ before risky code.
-
-    The full checkpoint/restore tool set lands in M1; risky=True must not be a
-    no-op until then.
-    """
-    import maya.cmds as cmds  # noqa: PLC0415
-
-    scene = cmds.file(query=True, sceneName=True) or ""
-    base_dir = os.path.dirname(scene) if scene else cmds.workspace(query=True, rootDirectory=True)
-    cp_dir = os.path.join(base_dir, "checkpoints")
-    os.makedirs(cp_dir, exist_ok=True)
-    path = os.path.join(cp_dir, "auto_%d.ma" % int(time.time()))
-    cmds.file(path, exportAll=True, type="mayaAscii", force=True, preserveReferences=True)
-    return path
-
-
 def execute_python(params: Dict[str, Any]) -> Dict[str, Any]:
     code = params.get("code")
     if not isinstance(code, str) or not code.strip():
@@ -98,7 +79,9 @@ def execute_python(params: Dict[str, Any]) -> Dict[str, Any]:
 
     checkpoint_path: Optional[str] = None
     if params.get("risky"):
-        checkpoint_path = _auto_checkpoint()
+        from . import session  # noqa: PLC0415 - avoid cycle at import time
+
+        checkpoint_path = session.auto_checkpoint("risky_exec")
 
     ns = get_namespace()
     stdout_buf = io.StringIO()

@@ -22,7 +22,7 @@ from pydantic import Field
 
 from . import images
 from .connection import MayaConnection
-from .schemas import ExecuteResult, SceneGraphResult
+from .schemas import CheckpointResult, ExecuteResult, RestoreResult, SceneGraphResult, UndoResult
 
 log = logging.getLogger("maya_mcp.server")
 
@@ -211,6 +211,133 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "camera_positions: " + json.dumps(result.get("camera_positions", []))
         )
         return content
+
+    SESSION_TIMEOUT_S = 60.0  # checkpoint saves of heavy scenes take a while
+
+    @mcp.tool(
+        title="Save checkpoint",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=False
+        ),
+    )
+    def maya_checkpoint(
+        label: Annotated[str, Field(min_length=1, max_length=60, description=(
+            "Short label for the checkpoint, e.g. 'pre_rune'. Sanitized to "
+            "[a-z0-9_-]; the returned checkpoint_id is NNN_label."
+        ))],
+    ) -> CheckpointResult:
+        """Incremental scene save to <project>/checkpoints/. Keeps the newest
+        20; older ones are pruned. Cheap insurance before experiments."""
+        return CheckpointResult.model_validate(
+            maya.request("checkpoint", {"label": label}, timeout_s=SESSION_TIMEOUT_S)
+        )
+
+    @mcp.tool(
+        title="Restore checkpoint",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_restore_checkpoint(
+        checkpoint_id: Annotated[str, Field(description=(
+            "Id returned by maya_checkpoint (NNN_label)."
+        ))],
+    ) -> RestoreResult:
+        """Replace the current scene with a checkpoint. An auto-checkpoint of
+        the current state is taken first. Discards the undo queue (file load)."""
+        return RestoreResult.model_validate(
+            maya.request(
+                "restore_checkpoint", {"checkpoint_id": checkpoint_id},
+                timeout_s=SESSION_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Undo",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_undo(
+        steps: Annotated[int, Field(ge=1, le=50, description=(
+            "How many tool calls to undo; each mutating call is one step."
+        ))] = 1,
+    ) -> UndoResult:
+        """Undo the last N mutating tool calls. Undo is cheaper than re-modeling;
+        returns how many steps actually landed (the queue may be shorter)."""
+        return UndoResult.model_validate(
+            maya.request("undo", {"steps": steps}, timeout_s=SESSION_TIMEOUT_S)
+        )
+
+    @mcp.tool(
+        title="Redo",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_redo(
+        steps: Annotated[int, Field(ge=1, le=50, description="Steps to redo.")] = 1,
+    ) -> UndoResult:
+        """Redo previously undone tool calls."""
+        return UndoResult.model_validate(
+            maya.request("redo", {"steps": steps}, timeout_s=SESSION_TIMEOUT_S)
+        )
+
+    @mcp.tool(
+        title="New scene",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_new_scene(
+        confirm: Annotated[bool, Field(description=(
+            "Must be true; the current scene is discarded."
+        ))] = False,
+    ) -> dict:
+        """Start an empty scene. REFUSES without confirm=true."""
+        return maya.request("new_scene", {"confirm": confirm}, timeout_s=SESSION_TIMEOUT_S)
+
+    @mcp.tool(
+        title="Open scene",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_open_scene(
+        path: Annotated[str, Field(description="Absolute path to a .ma/.mb file.")],
+        confirm: Annotated[bool, Field(description=(
+            "Required (true) only when the current scene has unsaved changes."
+        ))] = False,
+    ) -> dict:
+        """Open a scene file, replacing the current scene."""
+        return maya.request(
+            "open_scene", {"path": path, "confirm": confirm}, timeout_s=SESSION_TIMEOUT_S
+        )
+
+    @mcp.tool(
+        title="Save scene",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=True
+        ),
+    )
+    def maya_save_scene(
+        path: Annotated[Optional[str], Field(description=(
+            "Target path for save-as; omit to save in place (errors on an "
+            "untitled scene)."
+        ))] = None,
+    ) -> dict:
+        """Save the scene (.ma or .mb by extension)."""
+        return maya.request("save_scene", {"path": path}, timeout_s=SESSION_TIMEOUT_S)
+
+    @mcp.tool(
+        title="Reset Python namespace",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=True
+        ),
+    )
+    def maya_reset_namespace() -> dict:
+        """Clear the persistent maya_execute_python namespace."""
+        return maya.request("reset_namespace", {}, timeout_s=SCENE_TIMEOUT_S)
 
     return mcp
 

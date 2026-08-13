@@ -78,3 +78,32 @@ class TestCaptureInMayapy:
 
         with pytest.raises(HandlerError, match="panel|batch"):
             capture.capture_viewport({"angles": ["front"]})
+
+
+class TestSessionInMaya:
+    def test_checkpoint_restore_roundtrip(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import session
+
+        cmds.file(rename=str(tmp_path / "work.ma"))
+        cmds.polyCube(name="keeper")
+        cp = session.checkpoint({"label": "with_keeper"})
+        cmds.polySphere(name="stray")
+        result = session.restore_checkpoint({"checkpoint_id": cp["checkpoint_id"]})
+        assert result["restored"] == cp["checkpoint_id"]
+        assert cmds.objExists("keeper")
+        assert not cmds.objExists("stray")
+
+    def test_undo_reverses_a_chunked_change(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import session
+
+        cmds.undoInfo(openChunk=True, chunkName="maya-mcp")
+        cmds.polyCube(name="undo_me")
+        cmds.undoInfo(closeChunk=True)
+        assert cmds.objExists("undo_me")
+        result = session.undo({"steps": 1})
+        assert result["undone"] == 1
+        assert not cmds.objExists("undo_me")

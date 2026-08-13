@@ -38,13 +38,30 @@ class TestRegistration:
     def test_exactly_the_three_m0_tools_registered(self):
         mcp = server_mod.create_server(FakeConn())
         tools = run(mcp.list_tools())
+        assert {
+            "maya_execute_python",
+            "maya_get_scene_graph",
+            "maya_capture_viewport",
+        }.issubset({t.name for t in tools})
+        for tool in tools:
+            assert tool.description  # every tool documented
+
+    def test_session_tools_registered(self):
+        mcp = server_mod.create_server(FakeConn())
+        tools = run(mcp.list_tools())
         assert {t.name for t in tools} == {
             "maya_execute_python",
             "maya_get_scene_graph",
             "maya_capture_viewport",
+            "maya_checkpoint",
+            "maya_restore_checkpoint",
+            "maya_undo",
+            "maya_redo",
+            "maya_new_scene",
+            "maya_open_scene",
+            "maya_save_scene",
+            "maya_reset_namespace",
         }
-        for tool in tools:
-            assert tool.description  # every tool documented
 
     def test_annotations_declare_read_only_vs_destructive(self):
         mcp = server_mod.create_server(FakeConn())
@@ -189,3 +206,26 @@ class TestCaptureViewport:
         with pytest.raises(Exception, match="dutch_tilt"):
             run(mcp.call_tool("maya_capture_viewport", {"angles": ["dutch_tilt"]}))
         assert conn.calls == []  # never reached Maya
+
+
+class TestSessionTools:
+    def test_maya_checkpoint_forwards_label(self):
+        conn = FakeConn(
+            responses={"checkpoint": {"checkpoint_id": "001_pre_rune", "path": "x.ma"}}
+        )
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_checkpoint", {"label": "pre_rune"}))
+        assert result.is_error is False
+        assert conn.calls[0]["cmd"] == "checkpoint"
+        assert conn.calls[0]["params"] == {"label": "pre_rune"}
+        assert result.structured_content["checkpoint_id"] == "001_pre_rune"
+
+    def test_maya_new_scene_default_confirm_false_forwards(self):
+        # The plugin itself refuses without confirm=true (see test_session.py::
+        # test_new_scene_requires_confirm); here we only verify the tool forwards
+        # the default confirm=False rather than silently defaulting to True.
+        conn = FakeConn(responses={"new_scene": {"new_scene": True}})
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_new_scene", {}))
+        assert conn.calls[0]["cmd"] == "new_scene"
+        assert conn.calls[0]["params"] == {"confirm": False}

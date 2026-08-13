@@ -22,7 +22,7 @@ from typing import Any, Dict, Optional
 
 from . import protocol
 from .dispatcher import Dispatcher
-from .handlers import capture, code_exec, scene
+from .handlers import capture, code_exec, scene, session
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9877
@@ -56,6 +56,13 @@ def _build_handlers() -> Dict[str, Any]:
         "reset_namespace": code_exec.reset_namespace,
         "get_scene_graph": scene.get_scene_graph,
         "capture_viewport": capture.capture_viewport,
+        "checkpoint": session.checkpoint,
+        "restore_checkpoint": session.restore_checkpoint,
+        "undo": session.undo,
+        "redo": session.redo,
+        "new_scene": session.new_scene,
+        "open_scene": session.open_scene,
+        "save_scene": session.save_scene,
     }
 
 
