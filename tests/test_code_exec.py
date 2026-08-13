@@ -92,7 +92,8 @@ class TestRisky:
         calls = []
         monkeypatch.setattr(
             session, "auto_checkpoint",
-            lambda reason: calls.append(reason) or "path.ma",
+            lambda reason: calls.append(reason)
+            or {"checkpoint_id": "001_auto_risky_exec", "path": "path.ma"},
         )
         result = code_exec.execute_python({"code": "1", "risky": True})
         assert calls == ["risky_exec"]

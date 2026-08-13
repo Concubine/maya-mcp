@@ -66,9 +66,11 @@ def _save_checkpoint(cmds, label: str) -> Dict[str, str]:
     return {"checkpoint_id": stem, "path": path}
 
 
-def auto_checkpoint(reason: str) -> str:
-    """Shared pre-destructive-op checkpoint. Returns the saved path."""
-    return _save_checkpoint(_cmds(), "auto_" + reason)["path"]
+def auto_checkpoint(reason: str) -> Dict[str, str]:
+    """Shared pre-destructive-op checkpoint. Returns {"checkpoint_id", "path"} -
+    checkpoint_id is the stem (NNN_label) maya_restore_checkpoint expects; path
+    is the file it was saved to."""
+    return _save_checkpoint(_cmds(), "auto_" + reason)
 
 
 # ------------------------------------------------------------------ handlers

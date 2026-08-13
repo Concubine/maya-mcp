@@ -81,7 +81,7 @@ def execute_python(params: Dict[str, Any]) -> Dict[str, Any]:
     if params.get("risky"):
         from . import session  # noqa: PLC0415 - avoid cycle at import time
 
-        checkpoint_path = session.auto_checkpoint("risky_exec")
+        checkpoint_path = session.auto_checkpoint("risky_exec")["path"]
 
     ns = get_namespace()
     stdout_buf = io.StringIO()

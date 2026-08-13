@@ -644,8 +644,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             'soft_move/inflate_region/displace_noise are fast vertex ops that write '
             'via the Maya API and bypass the undo queue entirely — maya_undo will NOT '
             'revert them. If any of the three appear in this list, the call '
-            'auto-checkpoints before applying anything; use maya_restore_checkpoint '
-            'to revert. The other five ops (smooth, extrude_faces, bevel_edges, '
+            'auto-checkpoints before applying anything; pass the returned '
+            'checkpoint_id to maya_restore_checkpoint to revert. The other five '
+            'ops (smooth, extrude_faces, bevel_edges, '
             'crease_edges, bridge) are cmds-based and undo normally.'
         ))],
     ) -> SculptResult:
@@ -654,9 +655,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         maya_undo(1). soft_move, inflate_region, and displace_noise write
         vertices via the Maya API and bypass the undo queue - when any of
         those three are requested, the call auto-checkpoints first, and
-        that checkpoint (not maya_undo) is how you revert this call. On
-        partial failure, applied ops stay and the response says which
-        recovery path applies."""
+        restoring the returned checkpoint_id via maya_restore_checkpoint
+        (not maya_undo) is how you revert this call. On partial failure,
+        applied ops stay and the response says which recovery path applies."""
         return SculptResult.model_validate(
             maya.request(
                 "sculpt_ops", {"mesh": mesh, "ops": ops}, timeout_s=BOOL_TIMEOUT_S

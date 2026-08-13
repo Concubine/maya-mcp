@@ -154,11 +154,7 @@ class SculptResult(BaseModel):
     ops: List[str]
     tris: int
     warnings: List[str] = Field(default_factory=list)
-    checkpoint: Optional[str] = Field(
+    checkpoint_id: Optional[str] = Field(
         default=None,
-        description=(
-            "Path of the auto-checkpoint taken when any requested op "
-            "(soft_move, inflate_region, displace_noise) bypasses undo; "
-            "None when the call used only cmds-based ops."
-        ),
+        description="Auto-checkpoint id; pass to maya_restore_checkpoint to revert vertex ops.",
     )

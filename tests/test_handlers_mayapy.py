@@ -488,8 +488,8 @@ class TestSculptInMaya:
         )
         cp_dir = str(tmp_path / "checkpoints")
         assert any("auto_sculpt" in f for f in os.listdir(cp_dir))
-        assert result["checkpoint"] is not None
-        assert os.path.isfile(result["checkpoint"])
+        assert result["checkpoint_id"] is not None
+        assert os.path.isfile(os.path.join(cp_dir, result["checkpoint_id"] + ".ma"))
         assert any(
             "displace_noise" in w and "NOT undoable" in w for w in result["warnings"]
         )
@@ -506,7 +506,7 @@ class TestSculptInMaya:
         result = sculpt.sculpt_ops(
             {"mesh": "|cube_sc2", "ops": [{"op": "smooth", "divisions": 1}]}
         )
-        assert result["checkpoint"] is None
+        assert result["checkpoint_id"] is None
         assert result["warnings"] == []
         cp_dir = tmp_path / "checkpoints"
         assert not cp_dir.exists() or not any(
@@ -533,3 +533,43 @@ class TestSculptInMaya:
         assert not cp_dir.exists() or not any(
             "auto_sculpt" in f for f in os.listdir(cp_dir)
         )
+
+    def test_checkpoint_id_restores_and_error_hint_names_it(self, tmp_path):
+        import os
+
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import session, sculpt
+
+        # happy path: the returned checkpoint_id round-trips through
+        # maya_restore_checkpoint (the review finding: the old "checkpoint"
+        # field was a path, which restore_checkpoint's checkpoint_id param
+        # rejects).
+        cmds.file(rename=str(tmp_path / "sculptcp4.ma"))
+        cmds.polySphere(name="rock4", subdivisionsAxis=12, subdivisionsHeight=12)
+        result = sculpt.sculpt_ops(
+            {"mesh": "|rock4",
+             "ops": [{"op": "displace_noise", "amp": 0.08, "freq": 2.6, "octaves": 2}]}
+        )
+        restore = session.restore_checkpoint({"checkpoint_id": result["checkpoint_id"]})
+        assert restore["restored"] == result["checkpoint_id"]
+
+        # error path: a valid vertex op lands, then soft_move fails
+        # (missing delta) - the checkpoint taken before either op ran must
+        # still exist on disk, and the failure hint must point at it.
+        cmds.file(new=True, force=True)
+        cmds.file(rename=str(tmp_path / "sculptcp5.ma"))
+        cmds.polySphere(name="rock5", subdivisionsAxis=12, subdivisionsHeight=12)
+        with pytest.raises(HandlerError) as exc:
+            sculpt.sculpt_ops(
+                {"mesh": "|rock5",
+                 "ops": [{"op": "displace_noise", "amp": 0.05},
+                         {"op": "soft_move", "center": [0, 0, 0], "radius": 1.0}]}
+            )
+        assert "restore the auto-checkpoint" in exc.value.hint
+        cp_dir = str(tmp_path / "checkpoints")
+        matches = [f for f in os.listdir(cp_dir) if "auto_sculpt" in f]
+        assert matches
+        checkpoint_id = matches[-1][:-len(".ma")]
+        assert checkpoint_id in exc.value.hint

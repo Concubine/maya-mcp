@@ -1,5 +1,6 @@
 """sculpt_ops: the golem-maker (§5.3). Ops apply in order; the first failure
-aborts with a report of what landed (one undo chunk - maya_undo reverts all).
+aborts with a report of what landed (one undo chunk for the five cmds-based
+ops - maya_undo reverts all of those).
 
 Three ops (soft_move, inflate_region, displace_noise) write vertices via
 MFnMesh.setPoints, which Maya's undo queue does not track - maya_undo cannot
@@ -221,11 +222,11 @@ def sculpt_ops(params: Dict[str, Any]) -> Dict[str, Any]:
             )
         kinds.append(kind)
 
-    checkpoint_path = None
+    checkpoint_info = None
     if any(kind in VERTEX_OPS for kind in kinds):
         from . import session  # noqa: PLC0415
 
-        checkpoint_path = session.auto_checkpoint("sculpt")
+        checkpoint_info = session.auto_checkpoint("sculpt")
 
     applied: List[str] = []
     for index, op in enumerate(ops):
@@ -237,7 +238,11 @@ def sculpt_ops(params: Dict[str, Any]) -> Dict[str, Any]:
                 k in VERTEX_OPS for k in applied
             )
             if involves_vertex_op:
-                revert = "restore the auto-checkpoint taken at the start of this call"
+                revert = (
+                    "restore the auto-checkpoint taken at the start of this call "
+                    "(checkpoint_id=%r) via maya_restore_checkpoint"
+                    % checkpoint_info["checkpoint_id"]
+                )
             else:
                 revert = "maya_undo(1) reverts this whole call"
             raise HandlerError(
@@ -248,12 +253,13 @@ def sculpt_ops(params: Dict[str, Any]) -> Dict[str, Any]:
         applied.append(kind)
 
     warnings: List[str] = []
-    if checkpoint_path is not None:
+    if checkpoint_info is not None:
         vertex_ops_applied = [kind for kind in applied if kind in VERTEX_OPS]
         warnings.append(
             "ops [%s] modify vertices via the Maya API and are NOT undoable "
-            "with maya_undo; to revert this call, restore the auto-checkpoint"
-            % ", ".join(vertex_ops_applied)
+            "with maya_undo; to revert this call, pass checkpoint_id=%r to "
+            "maya_restore_checkpoint"
+            % (", ".join(vertex_ops_applied), checkpoint_info["checkpoint_id"])
         )
 
     tris = cmds.polyEvaluate(mesh_long, triangle=True)
@@ -262,5 +268,5 @@ def sculpt_ops(params: Dict[str, Any]) -> Dict[str, Any]:
         "ops": applied,
         "tris": tris,
         "warnings": warnings,
-        "checkpoint": checkpoint_path,
+        "checkpoint_id": checkpoint_info["checkpoint_id"] if checkpoint_info else None,
     }

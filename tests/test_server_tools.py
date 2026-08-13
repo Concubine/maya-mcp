@@ -322,7 +322,7 @@ class TestModelingTools:
                         "and are NOT undoable with maya_undo; to revert this "
                         "call, restore the auto-checkpoint"
                     ],
-                    "checkpoint": "/tmp/checkpoints/001_auto_sculpt.ma",
+                    "checkpoint_id": "001_auto_sculpt",
                 }
             }
         )
@@ -340,7 +340,7 @@ class TestModelingTools:
         assert conn.calls[0]["timeout_s"] == server_mod.BOOL_TIMEOUT_S
         assert result.structured_content["applied"] == 1
         assert result.structured_content["ops"] == ["displace_noise"]
-        assert result.structured_content["checkpoint"] == "/tmp/checkpoints/001_auto_sculpt.ma"
+        assert result.structured_content["checkpoint_id"] == "001_auto_sculpt"
         assert "NOT undoable" in result.structured_content["warnings"][0]
 
     def test_maya_sculpt_ops_checkpoint_defaults_to_none(self):
@@ -359,4 +359,4 @@ class TestModelingTools:
             )
         )
         assert result.is_error is False
-        assert result.structured_content["checkpoint"] is None
+        assert result.structured_content["checkpoint_id"] is None
