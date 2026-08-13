@@ -471,3 +471,65 @@ class TestSculptInMaya:
                           "distance": 1.0}]}
             )
         assert "smooth" in str(exc.value)  # reports what landed
+
+    def test_vertex_op_takes_auto_checkpoint_and_warns(self, tmp_path):
+        import os
+
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import sculpt
+
+        cmds.file(rename=str(tmp_path / "sculptcp.ma"))
+        cmds.polySphere(name="rock2", subdivisionsAxis=12, subdivisionsHeight=12)
+        result = sculpt.sculpt_ops(
+            {"mesh": "|rock2",
+             "ops": [{"op": "displace_noise", "amp": 0.08, "freq": 2.6,
+                      "octaves": 2}]}
+        )
+        cp_dir = str(tmp_path / "checkpoints")
+        assert any("auto_sculpt" in f for f in os.listdir(cp_dir))
+        assert result["checkpoint"] is not None
+        assert os.path.isfile(result["checkpoint"])
+        assert any(
+            "displace_noise" in w and "NOT undoable" in w for w in result["warnings"]
+        )
+
+    def test_cmds_only_ops_take_no_checkpoint_or_warning(self, tmp_path):
+        import os
+
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import sculpt
+
+        cmds.file(rename=str(tmp_path / "sculptcp2.ma"))
+        cmds.polyCube(name="cube_sc2")
+        result = sculpt.sculpt_ops(
+            {"mesh": "|cube_sc2", "ops": [{"op": "smooth", "divisions": 1}]}
+        )
+        assert result["checkpoint"] is None
+        assert result["warnings"] == []
+        cp_dir = tmp_path / "checkpoints"
+        assert not cp_dir.exists() or not any(
+            "auto_sculpt" in f for f in os.listdir(cp_dir)
+        )
+
+    def test_unknown_op_in_list_takes_no_checkpoint(self, tmp_path):
+        import os
+
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import sculpt
+
+        cmds.file(rename=str(tmp_path / "sculptcp3.ma"))
+        cmds.polySphere(name="rock3")
+        with pytest.raises(HandlerError):
+            sculpt.sculpt_ops(
+                {"mesh": "|rock3",
+                 "ops": [{"op": "displace_noise", "amp": 0.05},
+                         {"op": "not_a_real_op"}]}
+            )
+        cp_dir = tmp_path / "checkpoints"
+        assert not cp_dir.exists() or not any(
+            "auto_sculpt" in f for f in os.listdir(cp_dir)
+        )

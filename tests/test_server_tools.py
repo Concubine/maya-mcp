@@ -317,7 +317,12 @@ class TestModelingTools:
             responses={
                 "sculpt_ops": {
                     "applied": 1, "ops": ["displace_noise"], "tris": 480,
-                    "warnings": [],
+                    "warnings": [
+                        "ops [displace_noise] modify vertices via the Maya API "
+                        "and are NOT undoable with maya_undo; to revert this "
+                        "call, restore the auto-checkpoint"
+                    ],
+                    "checkpoint": "/tmp/checkpoints/001_auto_sculpt.ma",
                 }
             }
         )
@@ -335,3 +340,23 @@ class TestModelingTools:
         assert conn.calls[0]["timeout_s"] == server_mod.BOOL_TIMEOUT_S
         assert result.structured_content["applied"] == 1
         assert result.structured_content["ops"] == ["displace_noise"]
+        assert result.structured_content["checkpoint"] == "/tmp/checkpoints/001_auto_sculpt.ma"
+        assert "NOT undoable" in result.structured_content["warnings"][0]
+
+    def test_maya_sculpt_ops_checkpoint_defaults_to_none(self):
+        conn = FakeConn(
+            responses={
+                "sculpt_ops": {
+                    "applied": 1, "ops": ["smooth"], "tris": 12, "warnings": [],
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        result = run(
+            mcp.call_tool(
+                "maya_sculpt_ops",
+                {"mesh": "|cube", "ops": [{"op": "smooth", "divisions": 1}]},
+            )
+        )
+        assert result.is_error is False
+        assert result.structured_content["checkpoint"] is None

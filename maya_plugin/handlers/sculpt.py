@@ -1,5 +1,11 @@
 """sculpt_ops: the golem-maker (§5.3). Ops apply in order; the first failure
-aborts with a report of what landed (one undo chunk - maya_undo reverts all)."""
+aborts with a report of what landed (one undo chunk - maya_undo reverts all).
+
+Three ops (soft_move, inflate_region, displace_noise) write vertices via
+MFnMesh.setPoints, which Maya's undo queue does not track - maya_undo cannot
+revert them. When any requested op is one of those, the call auto-checkpoints
+first (before applying anything) so recovery stays honest: restore the
+checkpoint instead of relying on undo."""
 
 from __future__ import annotations
 
@@ -10,6 +16,7 @@ from . import naming, sculpt_math
 
 MAX_OPS = 20
 FALLOFFS = ("smooth", "linear")
+VERTEX_OPS = {"soft_move", "inflate_region", "displace_noise"}
 
 
 def _cmds():
@@ -200,26 +207,60 @@ def sculpt_ops(params: Dict[str, Any]) -> Dict[str, Any]:
             "ops must be a list of 1..%d operations" % MAX_OPS,
             hint='e.g. ops=[{"op": "displace_noise", "amp": 0.06, "freq": 2.6}]',
         )
-    applied: List[str] = []
+    # Validate every op tag up front, before applying anything, so an
+    # invalid list never burns an auto-checkpoint. Per-op param validation
+    # (numbers, components, falloff names, ...) stays inside each op
+    # function and still runs at apply time below.
+    kinds: List[str] = []
     for index, op in enumerate(ops):
         kind = op.get("op") if isinstance(op, dict) else None
-        fn = _OPS.get(kind) if isinstance(kind, str) else None
-        if fn is None:
+        if not isinstance(kind, str) or kind not in _OPS:
             raise HandlerError(
-                "op %d: unknown op %r; ops %s were already applied"
-                % (index, kind, applied or "none"),
-                hint="valid ops: %s. Applied ops stay; maya_undo(1) reverts "
-                "this whole call" % ", ".join(sorted(_OPS)),
+                "op %d: unknown op %r" % (index, kind),
+                hint="valid ops: %s" % ", ".join(sorted(_OPS)),
             )
+        kinds.append(kind)
+
+    checkpoint_path = None
+    if any(kind in VERTEX_OPS for kind in kinds):
+        from . import session  # noqa: PLC0415
+
+        checkpoint_path = session.auto_checkpoint("sculpt")
+
+    applied: List[str] = []
+    for index, op in enumerate(ops):
+        kind = kinds[index]
         try:
-            fn(cmds, mesh_long, op)
+            _OPS[kind](cmds, mesh_long, op)
         except HandlerError as exc:
+            involves_vertex_op = kind in VERTEX_OPS or any(
+                k in VERTEX_OPS for k in applied
+            )
+            if involves_vertex_op:
+                revert = "restore the auto-checkpoint taken at the start of this call"
+            else:
+                revert = "maya_undo(1) reverts this whole call"
             raise HandlerError(
                 "op %d (%s) failed: %s; ops %s were already applied"
                 % (index, kind, exc, applied or "none"),
-                hint=(exc.hint or "") + " — applied ops stay; maya_undo(1) "
-                "reverts this whole call",
+                hint=(exc.hint or "") + " — applied ops stay; " + revert,
             ) from None
         applied.append(kind)
+
+    warnings: List[str] = []
+    if checkpoint_path is not None:
+        vertex_ops_applied = [kind for kind in applied if kind in VERTEX_OPS]
+        warnings.append(
+            "ops [%s] modify vertices via the Maya API and are NOT undoable "
+            "with maya_undo; to revert this call, restore the auto-checkpoint"
+            % ", ".join(vertex_ops_applied)
+        )
+
     tris = cmds.polyEvaluate(mesh_long, triangle=True)
-    return {"applied": len(applied), "ops": applied, "tris": tris, "warnings": []}
+    return {
+        "applied": len(applied),
+        "ops": applied,
+        "tris": tris,
+        "warnings": warnings,
+        "checkpoint": checkpoint_path,
+    }

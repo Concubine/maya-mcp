@@ -640,11 +640,23 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             'extrude_faces {faces:"f[120:135]", distance, keep_together:true}; '
             'bevel_edges {edges:"e[3:7]", width, segments:1..10}; '
             'crease_edges {edges, amount:0..10} — stone-plate joints; '
-            'bridge {edges_a, edges_b}.'
+            'bridge {edges_a, edges_b}. '
+            'soft_move/inflate_region/displace_noise are fast vertex ops that write '
+            'via the Maya API and bypass the undo queue entirely — maya_undo will NOT '
+            'revert them. If any of the three appear in this list, the call '
+            'auto-checkpoints before applying anything; use maya_restore_checkpoint '
+            'to revert. The other five ops (smooth, extrude_faces, bevel_edges, '
+            'crease_edges, bridge) are cmds-based and undo normally.'
         ))],
     ) -> SculptResult:
-        """Apply sculpt ops in order to one mesh. The whole call is ONE undo
-        step; on partial failure, applied ops stay and maya_undo(1) reverts."""
+        """Apply sculpt ops in order to one mesh. cmds-based ops (smooth,
+        extrude_faces, bevel_edges, crease_edges, bridge) undo normally via
+        maya_undo(1). soft_move, inflate_region, and displace_noise write
+        vertices via the Maya API and bypass the undo queue - when any of
+        those three are requested, the call auto-checkpoints first, and
+        that checkpoint (not maya_undo) is how you revert this call. On
+        partial failure, applied ops stay and the response says which
+        recovery path applies."""
         return SculptResult.model_validate(
             maya.request(
                 "sculpt_ops", {"mesh": mesh, "ops": ops}, timeout_s=BOOL_TIMEOUT_S
