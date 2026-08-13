@@ -102,3 +102,36 @@ class ResetNamespaceResult(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     reset: bool = Field(description="True when the namespace was reset successfully.")
+
+
+class NameResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str = Field(description="Canonical long name of the affected object.")
+    warnings: List[str] = Field(default_factory=list)
+
+
+class TransformedObject(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    translate: List[float]
+    rotate: List[float]
+    scale: List[float]
+
+
+class TransformResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    objects: List[TransformedObject]
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Includes live-user-edit notices when an object moved outside maya-mcp.",
+    )
+
+
+class DeleteResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    deleted: List[str]
+    warnings: List[str] = Field(default_factory=list)

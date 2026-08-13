@@ -24,19 +24,26 @@ from . import images
 from .connection import MayaConnection
 from .schemas import (
     CheckpointResult,
+    DeleteResult,
     ExecuteResult,
+    NameResult,
     NewSceneResult,
     OpenSceneResult,
     ResetNamespaceResult,
     RestoreResult,
     SaveSceneResult,
     SceneGraphResult,
+    TransformResult,
     UndoResult,
 )
 
 log = logging.getLogger("maya_mcp.server")
 
 Angle = Literal["front", "side", "back", "top", "three_quarter", "current"]
+Vec3 = Annotated[
+    Optional[List[float]],
+    Field(min_length=3, max_length=3, description="XYZ triple."),
+]
 
 # Transport grace on top of the per-command timeout the plugin enforces itself.
 SCENE_TIMEOUT_S = 30.0
@@ -355,6 +362,193 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         """Clear the persistent maya_execute_python namespace."""
         return ResetNamespaceResult.model_validate(
             maya.request("reset_namespace", {}, timeout_s=SCENE_TIMEOUT_S)
+        )
+
+    @mcp.tool(
+        title="Create primitive",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=False
+        ),
+    )
+    def maya_create_primitive(
+        kind: Annotated[
+            Literal["cube", "sphere", "cylinder", "plane", "torus", "cone"],
+            Field(description="Primitive type."),
+        ],
+        name: Annotated[str, Field(min_length=1, description=(
+            "Requested name; collisions get a deterministic _NNN suffix and the "
+            "assigned canonical long name is returned."
+        ))],
+        translate: Vec3 = None,
+        rotate: Vec3 = None,
+        scale: Vec3 = None,
+        divisions: Annotated[int, Field(ge=1, le=200, description=(
+            "1 = Maya defaults; higher multiplies subdivision counts."
+        ))] = 1,
+    ) -> NameResult:
+        """Create a polygon primitive at an optional transform (no construction
+        history)."""
+        return NameResult.model_validate(
+            maya.request(
+                "create_primitive",
+                {"kind": kind, "name": name, "translate": translate,
+                 "rotate": rotate, "scale": scale, "divisions": divisions},
+                timeout_s=SCENE_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Duplicate object",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=False
+        ),
+    )
+    def maya_duplicate(
+        name: Annotated[str, Field(min_length=1, description=(
+            "Canonical long name of the object to duplicate."
+        ))],
+        new_name: Annotated[str, Field(min_length=1, description=(
+            "Requested name for the copy; collisions get a deterministic _NNN "
+            "suffix and the assigned canonical long name is returned."
+        ))],
+        translate: Vec3 = None,
+        rotate: Vec3 = None,
+        scale: Vec3 = None,
+    ) -> NameResult:
+        """Duplicate an object by name, optionally offsetting the copy
+        (translate/rotate/scale are applied relative to the source)."""
+        return NameResult.model_validate(
+            maya.request(
+                "duplicate",
+                {"name": name, "new_name": new_name, "translate": translate,
+                 "rotate": rotate, "scale": scale},
+                timeout_s=SCENE_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Transform objects",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=False
+        ),
+    )
+    def maya_transform(
+        names: Annotated[List[str], Field(min_length=1, description=(
+            "Canonical long names of the objects to move."
+        ))],
+        translate: Vec3 = None,
+        rotate: Vec3 = None,
+        scale: Vec3 = None,
+        relative: Annotated[bool, Field(description=(
+            "True (default): offsets relative to current values. False: absolute "
+            "world-space translate, object-space rotate/scale."
+        ))] = True,
+    ) -> TransformResult:
+        """Move/rotate/scale objects by name. Returns the resulting transforms —
+        trust these over your own bookkeeping: the live user may also be moving
+        things, and warnings will say so."""
+        return TransformResult.model_validate(
+            maya.request(
+                "transform",
+                {"names": names, "translate": translate, "rotate": rotate,
+                 "scale": scale, "relative": relative},
+                timeout_s=SCENE_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Group objects",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=False
+        ),
+    )
+    def maya_group(
+        names: Annotated[List[str], Field(min_length=1, description=(
+            "Canonical long names of the objects to place under a new group "
+            "transform."
+        ))],
+        group_name: Annotated[str, Field(min_length=1, description=(
+            "Requested name for the new group; collisions get a deterministic "
+            "_NNN suffix and the assigned canonical long name is returned."
+        ))],
+    ) -> NameResult:
+        """Create a new group transform and parent the named objects under it."""
+        return NameResult.model_validate(
+            maya.request(
+                "group",
+                {"names": names, "group_name": group_name},
+                timeout_s=SCENE_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Parent object",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=False
+        ),
+    )
+    def maya_parent(
+        child: Annotated[str, Field(min_length=1, description=(
+            "Canonical long name of the object to reparent."
+        ))],
+        parent: Annotated[str, Field(min_length=1, description=(
+            "Canonical long name of the new parent transform."
+        ))],
+    ) -> NameResult:
+        """Reparent one object under another. Returns the child's new canonical
+        long name (its path changes when its parent changes)."""
+        return NameResult.model_validate(
+            maya.request(
+                "parent",
+                {"child": child, "parent": parent},
+                timeout_s=SCENE_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Rename object",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=False
+        ),
+    )
+    def maya_rename(
+        name: Annotated[str, Field(min_length=1, description=(
+            "Canonical long name of the object to rename."
+        ))],
+        new_name: Annotated[str, Field(min_length=1, description=(
+            "Requested new name; collisions get a deterministic _NNN suffix and "
+            "the assigned canonical long name is returned."
+        ))],
+    ) -> NameResult:
+        """Rename an object by name."""
+        return NameResult.model_validate(
+            maya.request(
+                "rename",
+                {"name": name, "new_name": new_name},
+                timeout_s=SCENE_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Delete objects",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_delete_objects(
+        names: Annotated[List[str], Field(min_length=1, description=(
+            "Canonical long names of the objects to delete. All-or-nothing: if "
+            "any name is missing, nothing is deleted."
+        ))],
+    ) -> DeleteResult:
+        """Delete objects by name. Fails clean (no partial deletion) if any
+        name does not exist."""
+        return DeleteResult.model_validate(
+            maya.request(
+                "delete_objects",
+                {"names": names},
+                timeout_s=SCENE_TIMEOUT_S,
+            )
         )
 
     return mcp

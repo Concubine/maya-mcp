@@ -215,3 +215,44 @@ class TestMeshStatsNonMeshInMaya:
         cmds.group(empty=True, name="someGroup")
         with pytest.raises(HandlerError, match="not a polygon mesh"):
             meshcheck.mesh_stats("|someGroup")
+
+
+class TestModelingInMaya:
+    def test_create_transform_duplicate_roundtrip(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        created = modeling.create_primitive(
+            {"kind": "cube", "name": "mb_cube", "translate": [1, 2, 3]}
+        )
+        assert created["name"] == "|mb_cube"
+        assert cmds.xform("|mb_cube", q=True, ws=True, t=True) == [1.0, 2.0, 3.0]
+
+        copy = modeling.duplicate(
+            {"name": "|mb_cube", "new_name": "mb_cube_b", "translate": [2, 0, 0]}
+        )
+        assert copy["name"] == "|mb_cube_b"
+        assert cmds.xform("|mb_cube_b", q=True, ws=True, t=True) == [3.0, 2.0, 3.0]
+
+        moved = modeling.transform(
+            {"names": ["|mb_cube"], "translate": [0, 0, 0], "relative": False}
+        )
+        assert moved["objects"][0]["translate"] == [0.0, 0.0, 0.0]
+
+    def test_group_parent_rename_delete(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        modeling.create_primitive({"kind": "cube", "name": "gp_a"})
+        modeling.create_primitive({"kind": "cube", "name": "gp_b"})
+        grp = modeling.group({"names": ["|gp_a", "|gp_b"], "group_name": "gp_grp"})
+        assert grp["name"] == "|gp_grp"
+        modeling.create_primitive({"kind": "cube", "name": "gp_c"})
+        parented = modeling.parent({"child": "|gp_c", "parent": "|gp_grp"})
+        assert parented["name"] == "|gp_grp|gp_c"
+        renamed = modeling.rename({"name": "|gp_grp|gp_c", "new_name": "gp_kid"})
+        assert renamed["name"] == "|gp_grp|gp_kid"
+        modeling.delete_objects({"names": ["|gp_grp"]})
+        assert not cmds.objExists("gp_grp")

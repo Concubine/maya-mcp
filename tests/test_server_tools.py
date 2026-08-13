@@ -61,6 +61,13 @@ class TestRegistration:
             "maya_open_scene",
             "maya_save_scene",
             "maya_reset_namespace",
+            "maya_create_primitive",
+            "maya_duplicate",
+            "maya_transform",
+            "maya_group",
+            "maya_parent",
+            "maya_rename",
+            "maya_delete_objects",
         }
 
     def test_annotations_declare_read_only_vs_destructive(self):
@@ -229,3 +236,24 @@ class TestSessionTools:
         run(mcp.call_tool("maya_new_scene", {}))
         assert conn.calls[0]["cmd"] == "new_scene"
         assert conn.calls[0]["params"] == {"confirm": False}
+
+
+class TestModelingTools:
+    def test_maya_create_primitive_forwards_params(self):
+        conn = FakeConn(
+            responses={"create_primitive": {"name": "|golem_arm", "warnings": []}}
+        )
+        mcp = server_mod.create_server(conn)
+        result = run(
+            mcp.call_tool(
+                "maya_create_primitive",
+                {"kind": "cube", "name": "golem_arm", "translate": [1, 2, 3]},
+            )
+        )
+        assert result.is_error is False
+        assert conn.calls[0]["cmd"] == "create_primitive"
+        assert conn.calls[0]["params"] == {
+            "kind": "cube", "name": "golem_arm", "translate": [1, 2, 3],
+            "rotate": None, "scale": None, "divisions": 1,
+        }
+        assert result.structured_content["name"] == "|golem_arm"
