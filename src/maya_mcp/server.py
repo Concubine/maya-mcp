@@ -21,7 +21,7 @@ from mcp.server.mcpserver import Image
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from . import images
+from . import images, refstore
 from .connection import MayaConnection
 from .schemas import (
     BooleanResult,
@@ -35,6 +35,7 @@ from .schemas import (
     NewSceneResult,
     ObjectInfoResult,
     OpenSceneResult,
+    ReferenceResult,
     RemeshResult,
     ResetNamespaceResult,
     RestoreResult,
@@ -86,6 +87,11 @@ def _setup_logging() -> None:
 def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
     """Build the MCPServer; the connection is injectable for tests."""
     maya = conn if conn is not None else MayaConnection()
+    # Per-server-process, not per-scene: references survive new_scene, never
+    # dirty the user's file, and cannot be destroyed by a scene operation.
+    # Scoped to this create_server() call (like `maya` above) so tests that
+    # build multiple servers don't share loaded references.
+    _references = refstore.ReferenceStore()
     mcp = MCPServer(
         "maya-mcp",
         instructions=(
@@ -322,6 +328,68 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 result.get("n_frames", 0),
                 json.dumps([s["azimuth"] for s in result.get("images", [])]),
             ),
+        ]
+
+    @mcp.tool(
+        title="Load reference image",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=True
+        ),
+    )
+    def maya_load_reference_image(
+        source: Annotated[str, Field(min_length=1, description=(
+            "Absolute path to an image file, or raw base64 image data."
+        ))],
+        ref_id: Annotated[str, Field(min_length=1, description=(
+            "Short id you will pass to maya_compare_to_reference, e.g. 'hero_front'."
+        ))],
+    ) -> ReferenceResult:
+        """Store a reference image in the server for later side-by-side comparison.
+
+        Held in the MCP process, not the Maya scene - it survives new_scene and
+        never dirties your file."""
+        return ReferenceResult.model_validate(_references.put(ref_id, source))
+
+    @mcp.tool(
+        title="Compare to reference",
+        annotations=ToolAnnotations(
+            read_only_hint=True, destructive_hint=False, idempotent_hint=True
+        ),
+    )
+    def maya_compare_to_reference(
+        ref_id: Annotated[str, Field(min_length=1, description=(
+            "Id from maya_load_reference_image."
+        ))],
+        angle: Annotated[
+            Literal["front", "side", "back", "top", "three_quarter", "current"],
+            Field(description="Viewport angle to capture for the right-hand panel."),
+        ] = "three_quarter",
+        resolution: Annotated[int, Field(ge=64, le=1024)] = 640,
+        lighting: Annotated[
+            Literal["default", "scene", "flat"],
+            Field(description="'scene' uses the scene's own lights."),
+        ] = "default",
+    ) -> list:
+        """One side-by-side image: the reference on the left, your viewport on the right.
+
+        Corrects toward a target instead of a vague ideal."""
+        reference = _references.get(ref_id)
+        result = maya.request(
+            "capture_viewport",
+            {"angles": [angle], "shading": "smoothShaded",
+             "wireframe_overlay": False, "buffer": "beauty", "isolate": None,
+             "frame_all": True, "resolution": resolution,
+             "lighting": lighting, "shadows": False},
+            timeout_s=CAPTURE_TIMEOUT_S,
+        )
+        shots = result.get("images", [])
+        if not shots:
+            raise ValueError("capture returned no image to compare against")
+        current = images.decode_and_downscale(shots[0]["png_b64"], max_px=resolution)
+        composite = images.side_by_side(reference, current)
+        return [
+            Image(data=composite, format="png"),
+            "left: reference %r | right: viewport %s" % (ref_id, angle),
         ]
 
     SESSION_TIMEOUT_S = 60.0  # checkpoint saves of heavy scenes take a while

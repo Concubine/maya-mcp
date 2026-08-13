@@ -263,3 +263,12 @@ class CameraResult(BaseModel):
     position: List[float]
     rotation: List[float]
     warnings: List[str] = Field(default_factory=list)
+
+
+class ReferenceResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    ref_id: str = Field(description="Id to pass to maya_compare_to_reference.")
+    width: int
+    height: int
+    bytes: int = Field(description="Stored size of the reference image.")

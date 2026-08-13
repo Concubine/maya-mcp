@@ -10,7 +10,7 @@ import io
 import pytest
 from PIL import Image as PILImage
 
-from maya_mcp import server as server_mod
+from maya_mcp import refstore, server as server_mod
 
 
 def png_b64(width=1024, height=1024):
@@ -78,6 +78,8 @@ class TestRegistration:
             "maya_mesh_cleanup",
             "maya_set_viewport",
             "maya_set_camera",
+            "maya_load_reference_image",
+            "maya_compare_to_reference",
         }
 
     def test_annotations_declare_read_only_vs_destructive(self):
@@ -545,3 +547,70 @@ class TestSetCamera:
         with pytest.raises(Exception, match="position"):
             run(mcp.call_tool("maya_set_camera", {"position": [1, 2]}))
         assert conn.calls == []  # rejected before reaching Maya
+
+
+class TestReferenceImages:
+    def test_load_reference_image_returns_metadata(self):
+        conn = FakeConn()
+        mcp = server_mod.create_server(conn)
+        result = run(
+            mcp.call_tool(
+                "maya_load_reference_image",
+                {"source": png_b64(40, 30), "ref_id": "hero"},
+            )
+        )
+        assert result.is_error is False
+        assert result.structured_content == {
+            "ref_id": "hero", "width": 40, "height": 30, "bytes": len(
+                base64.b64decode(png_b64(40, 30))
+            ),
+        }
+        assert conn.calls == []  # server-side store, never touches Maya
+
+    def test_compare_to_reference_returns_side_by_side_image_left_reference_right_viewport(self):
+        conn = FakeConn(
+            responses={
+                "capture_viewport": {
+                    "images": [{"angle": "three_quarter", "png_b64": png_b64(64, 64)}],
+                    "camera_positions": [],
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        run(
+            mcp.call_tool(
+                "maya_load_reference_image",
+                {"source": png_b64(32, 32), "ref_id": "hero"},
+            )
+        )
+        result = run(mcp.call_tool("maya_compare_to_reference", {"ref_id": "hero"}))
+        assert result.is_error is False
+        image_blocks = [c for c in result.content if c.type == "image"]
+        text_blocks = [c for c in result.content if c.type == "text"]
+        assert len(image_blocks) == 1
+        composite = PILImage.open(io.BytesIO(base64.b64decode(image_blocks[0].data)))
+        # side-by-side canvas: wider than either source alone, same height
+        assert composite.width > 64
+        assert composite.height == 64
+        assert any("hero" in t.text and "three_quarter" in t.text for t in text_blocks)
+        assert conn.calls[0]["cmd"] == "capture_viewport"
+
+    def test_compare_to_reference_unknown_ref_id_errors_naming_loaded_ids(self):
+        conn = FakeConn(responses={"capture_viewport": {"images": [], "camera_positions": []}})
+        mcp = server_mod.create_server(conn)
+        run(
+            mcp.call_tool(
+                "maya_load_reference_image",
+                {"source": png_b64(10, 10), "ref_id": "hero"},
+            )
+        )
+        with pytest.raises(Exception, match="hero"):
+            run(mcp.call_tool("maya_compare_to_reference", {"ref_id": "missing"}))
+        assert conn.calls == []  # never reached Maya - failed before the capture
+
+    def test_compare_to_reference_errors_clearly_for_an_unknown_ref_id(self):
+        # The failure a user will actually hit: comparing before loading.
+        store = refstore.ReferenceStore()
+        with pytest.raises(KeyError) as exc:
+            store.get("never_loaded")
+        assert "none" in str(exc.value)
