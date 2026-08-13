@@ -79,7 +79,7 @@ def set_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
     # modelPanel -q -camera returns a short name (verified live, Maya 2027);
     # every scene-node name this plugin reports must be canonical long.
     cam = cmds.modelPanel(panel, query=True, camera=True)
-    state["camera"] = (cmds.ls(cam, long=True) or [cam])[0] if cam else cam
+    state["camera"] = naming.require_object(cmds, cam) if cam else cam
     return state
 
 
@@ -89,6 +89,17 @@ def set_camera(params: Dict[str, Any]) -> Dict[str, Any]:
     warnings: List[str] = []
     if cmds.objExists(name):
         cam = naming.require_object(cmds, name)
+        # `name` collided with an existing node that require_object resolves
+        # regardless of type. A stray non-camera (or a shapeless transform)
+        # under that name would otherwise crash later with a raw IndexError
+        # (listRelatives(...)[0]) or a raw Maya exception (setAttr/lookThru)
+        # instead of a hinted HandlerError.
+        shapes = cmds.listRelatives(cam, shapes=True, fullPath=True) or []
+        if not shapes or cmds.nodeType(shapes[0]) != "camera":
+            raise HandlerError(
+                "%r exists but is not a camera" % name,
+                hint="pass a different `camera` name, or rename/delete the conflicting node",
+            )
     else:
         # cmds.camera(name=...) does NOT rename the transform (verified live,
         # Maya 2027: camera(name="mcpCam") always yields "mcpCam1", ignoring
@@ -101,7 +112,7 @@ def set_camera(params: Dict[str, Any]) -> Dict[str, Any]:
         resolved_name = naming.unique_name(cmds, name)
         cam = cmds.camera()[0]
         cam = cmds.rename(cam, resolved_name)
-        cam = (cmds.ls(cam, long=True) or [cam])[0]
+        cam = naming.require_object(cmds, cam)
 
     position = params.get("position")
     look_at = params.get("look_at")

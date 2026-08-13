@@ -617,6 +617,32 @@ class TestViewportInMaya:
             "|mb_reuse_cam", query=True, worldSpace=True, translation=True
         ) == pytest.approx([1.0, 2.0, 3.0])
 
+    def test_set_camera_reuse_of_non_camera_name_raises_hinted_error(self):
+        # A stray non-camera node with the requested name must not crash with
+        # a raw IndexError/Maya exception (listRelatives(...)[0] on a
+        # shapeless transform, or setAttr/lookThru on a non-camera shape) -
+        # it's a foreseeable name collision and needs a HandlerError + hint.
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import viewport
+
+        cmds.polyCube(name="mb_not_a_camera")
+        with pytest.raises(HandlerError, match="camera") as exc:
+            viewport.set_camera({"camera": "mb_not_a_camera", "set_active": False})
+        assert exc.value.hint
+
+    def test_set_camera_reuse_of_shapeless_transform_raises_hinted_error(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import viewport
+
+        cmds.group(name="mb_empty_grp", empty=True)
+        with pytest.raises(HandlerError, match="camera") as exc:
+            viewport.set_camera({"camera": "mb_empty_grp", "set_active": False})
+        assert exc.value.hint
+
     def test_set_viewport_and_set_camera_refuse_cleanly_without_gui(self):
         # Same constraint as capture_viewport: no modelPanel exists in
         # mayapy/batch mode, and set_active defaults to True.

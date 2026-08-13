@@ -17,6 +17,7 @@ import tempfile
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..dispatcher import HandlerError
+from . import naming
 
 VALID_ANGLES = ("front", "side", "back", "top", "three_quarter", "current")
 VALID_SHADING = ("smoothShaded", "flatShaded", "wireframe", "textured")
@@ -179,8 +180,11 @@ def _find_model_panel(cmds) -> str:
     if panels:
         return panels[0]
     raise HandlerError(
-        "no model panel available to capture from",
-        hint="open a viewport in Maya (capture does not work in batch/mayapy mode)",
+        "no model panel available",
+        hint=(
+            "open a viewport in Maya - capture/viewport/camera tools don't "
+            "work in batch/mayapy mode"
+        ),
     )
 
 
@@ -384,7 +388,7 @@ def _capture_one(
 
         pos = cmds.getAttr(capture_cam + ".translate")[0]
         rot = cmds.getAttr(capture_cam + ".rotate")[0]
-        camera_long = (cmds.ls(capture_cam, long=True) or [capture_cam])[0]
+        camera_long = naming.require_object(cmds, capture_cam)
         return {
             "png_b64": base64.b64encode(png_bytes).decode("ascii"),
             "camera_position": list(pos),

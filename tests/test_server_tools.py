@@ -434,3 +434,112 @@ class TestModelingTools:
         }
         assert conn.calls[0]["timeout_s"] == server_mod.BOOL_TIMEOUT_S
         assert result.structured_content["before"]["tris"] == 12
+
+
+class TestSetViewport:
+    def test_marshals_provided_params_and_returns_full_state(self):
+        conn = FakeConn(
+            responses={
+                "set_viewport": {
+                    "panel": "modelPanel4", "show_grid": False,
+                    "show_light_icons": False, "show_camera_icons": True,
+                    "show_locators": True, "show_manipulators": True,
+                    "show_texture_placements": True, "wireframe_on_shaded": False,
+                    "display_lights": "default", "camera": "|persp",
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        result = run(
+            mcp.call_tool(
+                "maya_set_viewport", {"show_grid": False, "show_light_icons": False}
+            )
+        )
+        assert result.is_error is False
+        assert conn.calls[0]["cmd"] == "set_viewport"
+        assert conn.calls[0]["params"]["show_grid"] is False
+        assert conn.calls[0]["params"]["show_light_icons"] is False
+        # unset params marshal through as None, not omitted - the handler
+        # treats None as "leave unchanged"
+        assert conn.calls[0]["params"]["show_camera_icons"] is None
+        assert conn.calls[0]["params"]["display_lights"] is None
+        assert conn.calls[0]["timeout_s"] == server_mod.SCENE_TIMEOUT_S
+        assert result.structured_content["panel"] == "modelPanel4"
+        assert result.structured_content["camera"] == "|persp"
+
+    def test_bare_call_is_a_state_query_with_all_params_none(self):
+        conn = FakeConn(
+            responses={
+                "set_viewport": {
+                    "panel": "modelPanel4", "show_grid": True,
+                    "show_light_icons": True, "show_camera_icons": True,
+                    "show_locators": True, "show_manipulators": True,
+                    "show_texture_placements": True, "wireframe_on_shaded": False,
+                    "display_lights": "default", "camera": "|persp",
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_set_viewport", {}))
+        assert all(v is None for v in conn.calls[0]["params"].values())
+
+    def test_invalid_display_lights_rejected_by_schema(self):
+        conn = FakeConn(responses={"set_viewport": {}})
+        mcp = server_mod.create_server(conn)
+        with pytest.raises(Exception, match="display_lights"):
+            run(mcp.call_tool("maya_set_viewport", {"display_lights": "supernova"}))
+        assert conn.calls == []  # rejected before reaching Maya
+
+
+class TestSetCamera:
+    def test_marshals_all_params_and_returns_camera_result(self):
+        conn = FakeConn(
+            responses={
+                "set_camera": {
+                    "name": "|mcpCam", "position": [0.0, 5.0, 10.0],
+                    "rotation": [-27.938, 45.0, 0.0], "warnings": [],
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        result = run(
+            mcp.call_tool(
+                "maya_set_camera",
+                {
+                    "camera": "mcpCam", "position": [0, 5, 10], "look_at": [0, 0, 0],
+                    "focal_length": 35, "set_active": False,
+                },
+            )
+        )
+        assert result.is_error is False
+        assert conn.calls[0]["cmd"] == "set_camera"
+        assert conn.calls[0]["params"] == {
+            "camera": "mcpCam", "position": [0, 5, 10], "look_at": [0, 0, 0],
+            "focal_length": 35, "set_active": False,
+        }
+        assert conn.calls[0]["timeout_s"] == server_mod.SCENE_TIMEOUT_S
+        assert result.structured_content["name"] == "|mcpCam"
+        assert result.structured_content["rotation"] == [-27.938, 45.0, 0.0]
+
+    def test_defaults_camera_name_and_set_active_true(self):
+        conn = FakeConn(
+            responses={
+                "set_camera": {
+                    "name": "|mcpCam", "position": [0.0, 0.0, 0.0],
+                    "rotation": [0.0, 0.0, 0.0], "warnings": [],
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_set_camera", {}))
+        assert conn.calls[0]["params"]["camera"] == "mcpCam"
+        assert conn.calls[0]["params"]["set_active"] is True
+        assert conn.calls[0]["params"]["position"] is None
+        assert conn.calls[0]["params"]["look_at"] is None
+
+    def test_bad_position_length_rejected_by_schema(self):
+        conn = FakeConn(responses={"set_camera": {}})
+        mcp = server_mod.create_server(conn)
+        with pytest.raises(Exception, match="position"):
+            run(mcp.call_tool("maya_set_camera", {"position": [1, 2]}))
+        assert conn.calls == []  # rejected before reaching Maya
