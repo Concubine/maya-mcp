@@ -69,6 +69,7 @@ class TestRegistration:
             "maya_rename",
             "maya_delete_objects",
             "maya_boolean_op",
+            "maya_etch_text",
         }
 
     def test_annotations_declare_read_only_vs_destructive(self):
@@ -282,3 +283,30 @@ class TestModelingTools:
         }
         assert conn.calls[0]["timeout_s"] == server_mod.BOOL_TIMEOUT_S
         assert result.structured_content["name"] == "|carved"
+
+    def test_maya_etch_text_forwards_params(self):
+        conn = FakeConn(
+            responses={
+                "etch_text": {
+                    "name": "|plate_etched", "tris": 512, "watertight": True,
+                    "warnings": [], "carved_text": "א",
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        result = run(
+            mcp.call_tool(
+                "maya_etch_text",
+                {"mesh": "|plate", "text": "א", "face": 0, "width": 0.8,
+                 "depth": 0.05, "mirror": True, "rotate_deg": 180.0},
+            )
+        )
+        assert result.is_error is False
+        assert conn.calls[0]["cmd"] == "etch_text"
+        assert conn.calls[0]["params"] == {
+            "mesh": "|plate", "text": "א", "face": 0, "width": 0.8,
+            "depth": 0.05, "font": "Arial", "mirror": True, "rotate_deg": 180.0,
+            "new_name": None,
+        }
+        assert conn.calls[0]["timeout_s"] == server_mod.BOOL_TIMEOUT_S
+        assert result.structured_content["carved_text"] == "א"

@@ -577,6 +577,48 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             )
         )
 
+    @mcp.tool(
+        title="Etch text into a face",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_etch_text(
+        mesh: Annotated[str, Field(description="Target mesh (canonical long name).")],
+        text: Annotated[str, Field(min_length=1, max_length=32, description=(
+            "Characters to carve; Unicode ok (Hebrew renders in correct RTL "
+            "visual order)."
+        ))],
+        face: Annotated[int, Field(ge=0, description=(
+            "Face id to carve into; the glyph is oriented to this face's actual "
+            "normal (works on smoothed/bowed faces)."
+        ))],
+        width: Annotated[float, Field(gt=0, description="Carve width, scene units.")] = 0.6,
+        depth: Annotated[float, Field(gt=0, description="Recess depth, scene units.")] = 0.1,
+        font: Annotated[str, Field(description="Font for the Type node.")] = "Arial",
+        mirror: Annotated[bool, Field(description=(
+            "Mirror the glyph horizontally (e.g. the golem's inverted-mirrored aleph)."
+        ))] = False,
+        rotate_deg: Annotated[float, Field(description=(
+            "Extra in-plane rotation in degrees (180 = inverted)."
+        ))] = 0.0,
+        new_name: Annotated[Optional[str], Field(description=(
+            "Name for the carved result; defaults to <mesh>_etched."
+        ))] = None,
+    ) -> BooleanResult:
+        """Carve text into a mesh face in ONE call: glyph -> sized -> oriented
+        to the face's normal frame -> depth-forced -> boolean difference ->
+        cleanup. Auto-checkpoints first; leaves zero Type/history nodes behind."""
+        return BooleanResult.model_validate(
+            maya.request(
+                "etch_text",
+                {"mesh": mesh, "text": text, "face": face, "width": width,
+                 "depth": depth, "font": font, "mirror": mirror,
+                 "rotate_deg": rotate_deg, "new_name": new_name},
+                timeout_s=BOOL_TIMEOUT_S,
+            )
+        )
+
     return mcp
 
 

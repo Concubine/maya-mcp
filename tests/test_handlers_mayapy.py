@@ -324,3 +324,24 @@ class TestBooleanInMaya:
         )
         cp_dir = str(tmp_path / "checkpoints")
         assert any("auto_boolean" in f for f in os.listdir(cp_dir))
+
+
+class TestEtchInMaya:
+    def test_etch_carves_recess(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import etch
+
+        if not cmds.loadPlugin("Type", quiet=True):
+            pytest.skip("Type plugin unavailable in standalone")
+        cmds.file(rename=str(tmp_path / "etch.ma"))
+        cmds.polyCube(name="plate", w=2, h=1, d=0.3)
+        before = cmds.polyEvaluate("plate", triangle=True)
+        result = etch.etch_text(
+            {"mesh": "|plate", "text": "א", "face": 0, "width": 0.8,
+             "depth": 0.05, "mirror": True, "rotate_deg": 180.0}
+        )
+        assert result["tris"] > before
+        # zero orphans from the Type network
+        assert cmds.ls(type="type") == []
+        assert cmds.ls(type="typeExtrude") == []

@@ -22,7 +22,7 @@ from typing import Any, Dict, Optional
 
 from . import protocol
 from .dispatcher import Dispatcher
-from .handlers import capture, code_exec, modeling, scene, session
+from .handlers import capture, code_exec, etch, modeling, scene, session
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9877
@@ -71,6 +71,7 @@ def _build_handlers() -> Dict[str, Any]:
         "rename": modeling.rename,
         "delete_objects": modeling.delete_objects,
         "boolean_op": modeling.boolean_op,
+        "etch_text": etch.etch_text,
     }
 
 
