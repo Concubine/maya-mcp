@@ -16,13 +16,32 @@ class FakeCmds:
         self.xf = {}
         self.face_count = 1000
         self.reduced_percentage = None
+        self.selection = []
 
     def objExists(self, name):
         return any(o == name or o.split("|")[-1] == name for o in self.objects)
 
-    def ls(self, name=None, long=False, **kw):
+    def ls(self, name=None, long=False, selection=False, **kw):
         assert long
+        if selection:
+            return list(self.selection)
         return [o for o in self.objects if o == name or o.split("|")[-1] == name]
+
+    def select(self, *args, replace=False, clear=False):
+        self.calls.append(("select", args, {"replace": replace, "clear": clear}))
+        if clear:
+            self.selection = []
+            return
+        flat = []
+        for a in args:
+            flat.extend(a) if isinstance(a, list) else flat.append(a)
+        self.selection = flat
+
+    def polyBridgeEdge(self, constructionHistory=False):
+        self.calls.append(("polyBridgeEdge", self.bridge_saw_selection(), {}))
+
+    def bridge_saw_selection(self):
+        return list(self.selection)
 
     def listRelatives(self, node, shapes=False, children=False, fullPath=False, noIntermediate=False):
         if shapes:
@@ -157,6 +176,95 @@ def test_create_primitive_collision_gets_suffix(monkeypatch):
     monkeypatch.setattr(modeling, "_cmds", lambda: fake)
     result = modeling.create_primitive({"kind": "cube", "name": "golem_arm"})
     assert result["name"] == "|golem_arm_001"
+
+
+def test_bridge_restores_the_users_selection(monkeypatch):
+    # polyBridgeEdge reads the active selection, so bridge is the one op that
+    # must touch it - but an artist's live selection has to survive the call.
+    # It previously ended with select(clear=True), silently discarding it.
+    fake = FakeCmds(objects={"|col"}, shapes={"|col": ("|col|colShape", "mesh")})
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    fake.selection = ["|golem|torso", "|golem|head"]
+
+    sculpt.sculpt_ops({
+        "mesh": "|col",
+        "ops": [{"op": "bridge", "edges_a": "e[0:3]", "edges_b": "e[8:11]"}],
+    })
+
+    # the bridge really did run against the edges, not the user's selection
+    bridged = [c for c in fake.calls if c[0] == "polyBridgeEdge"]
+    assert bridged, fake.calls
+    assert bridged[0][1] == ["|col.e[0:3]", "|col.e[8:11]"]
+    # ...and the user's selection is back afterwards
+    assert fake.selection == ["|golem|torso", "|golem|head"]
+
+
+def test_bridge_clears_selection_when_there_was_none(monkeypatch):
+    fake = FakeCmds(objects={"|col"}, shapes={"|col": ("|col|colShape", "mesh")})
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    fake.selection = []
+
+    sculpt.sculpt_ops({
+        "mesh": "|col",
+        "ops": [{"op": "bridge", "edges_a": "e[0:3]", "edges_b": "e[8:11]"}],
+    })
+
+    assert fake.selection == []
+
+
+def test_resolve_center_rejects_booleans_as_coordinates():
+    # bool is a subclass of int, so an isinstance(v, (int, float)) check alone
+    # accepts [True, False, True] as a world-space centre. modeling._vec3
+    # excludes bools explicitly; this must match. The `center` branch touches
+    # neither om nor fn, so it needs no Maya.
+    with pytest.raises(HandlerError) as exc:
+        sculpt._resolve_center(None, None, {"op": "soft_move", "center": [True, False, True]})
+    assert "center" in str(exc.value)
+
+
+def test_resolve_center_still_accepts_plain_numbers():
+    assert sculpt._resolve_center(
+        None, None, {"op": "soft_move", "center": [1, 2.5, -3]}
+    ) == [1.0, 2.5, -3.0]
+
+
+def test_projected_faces_matches_the_creator_multipliers():
+    # Guards the arithmetic the polycount limit rests on. Measured live in
+    # mayapy: polySphere(subdivisionsAxis=400, subdivisionsHeight=400) at
+    # divisions=20 really is 160000 faces.
+    assert modeling.projected_faces("sphere", 20) == 160_000
+    assert modeling.projected_faces("torus", 20) == 160_000
+    assert modeling.projected_faces("cube", 20) == 2_400
+    assert modeling.projected_faces("plane", 20) == 400
+    # divisions is a MULTIPLIER, and the same value costs ~67x more on a
+    # sphere than a cube - which is the whole reason a shared divisions bound
+    # cannot protect Maya.
+    assert modeling.projected_faces("sphere", 200) == 16_000_000
+
+
+def test_create_primitive_refuses_a_maya_killing_polycount(monkeypatch):
+    # divisions=200 is inside the schema's own 1..200 bound, but on a sphere
+    # it builds 16M faces and hangs Maya - which is unrecoverable, since a
+    # wedged main thread also freezes the GUI and only a kill clears it.
+    fake = FakeCmds()
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        modeling.create_primitive({"kind": "sphere", "name": "s", "divisions": 200})
+    assert "16000000" in str(exc.value) or "16,000,000" in str(exc.value)
+    assert str(modeling.max_divisions_for("sphere")) in exc.value.hint
+    # nothing was built
+    assert fake.calls == []
+
+
+def test_create_primitive_allows_the_largest_safe_divisions(monkeypatch):
+    # The limit must not be so blunt that it blocks a legitimately dense mesh:
+    # the highest allowed divisions for each kind still goes through.
+    for kind in modeling.PRIMITIVE_KINDS:
+        allowed = modeling.max_divisions_for(kind)
+        assert allowed >= 1, kind
+        assert modeling.projected_faces(kind, allowed) <= modeling.MAX_PRIMITIVE_FACES
+        if allowed < modeling.MAX_DIVISIONS:
+            assert modeling.projected_faces(kind, allowed + 1) > modeling.MAX_PRIMITIVE_FACES
 
 
 def test_transform_missing_object_errors(monkeypatch):

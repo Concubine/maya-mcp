@@ -395,7 +395,13 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         rotate: Vec3 = None,
         scale: Vec3 = None,
         divisions: Annotated[int, Field(ge=1, le=200, description=(
-            "1 = Maya defaults; higher multiplies subdivision counts."
+            "1 = Maya defaults; higher multiplies subdivision counts. This is a "
+            "MULTIPLIER, and it costs very different amounts per kind: a cube "
+            "spends it linearly per axis (6*d^2 faces) while a sphere or torus "
+            "multiplies it by 20 on BOTH axes (400*d^2), so divisions=50 is a "
+            "1M-face sphere but a 15k-face cube. Results are capped at 1,000,000 "
+            "faces; over that the call is refused with the highest divisions that "
+            "kind allows, rather than building a mesh that hangs Maya."
         ))] = 1,
     ) -> NameResult:
         """Create a polygon primitive at an optional transform (no construction

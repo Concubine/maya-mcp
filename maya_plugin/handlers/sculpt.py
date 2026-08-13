@@ -60,7 +60,12 @@ def _resolve_center(om, fn, op: Dict[str, Any]):
     center = op.get("center")
     if (
         not isinstance(center, (list, tuple)) or len(center) != 3
-        or not all(isinstance(v, (int, float)) for v in center)
+        # bool is a subclass of int, so the isinstance check alone accepts
+        # center=[True, False, True] as coordinates - modeling._vec3 excludes
+        # it explicitly and this must match.
+        or not all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) for v in center
+        )
     ):
         raise HandlerError(
             "op %r needs center=[x,y,z] or vertex_id" % op.get("op"),
@@ -180,11 +185,22 @@ def _op_crease_edges(cmds, mesh_long: str, op: Dict[str, Any]) -> None:
 def _op_bridge(cmds, mesh_long: str, op: Dict[str, Any]) -> None:
     edges_a = _components(mesh_long, op.get("edges_a"), "e", "edges_a")
     edges_b = _components(mesh_long, op.get("edges_b"), "e", "edges_b")
+    # polyBridgeEdge has no component arguments - it only reads the active
+    # selection - so this is the one op that cannot address geometry by name.
+    # It must therefore put the user's selection back: clearing it (what this
+    # did before) silently throws away whatever an artist had selected in the
+    # live session, which breaks the module contract that tools never disturb
+    # selection state (soft_move deliberately uses OpenMaya offsets rather
+    # than softSelect for exactly this reason).
+    previous = cmds.ls(selection=True, long=True) or []
     cmds.select(edges_a, edges_b, replace=True)
     try:
         cmds.polyBridgeEdge(constructionHistory=False)
     finally:
-        cmds.select(clear=True)
+        if previous:
+            cmds.select(previous, replace=True)
+        else:
+            cmds.select(clear=True)
 
 
 _OPS: Dict[str, Callable] = {

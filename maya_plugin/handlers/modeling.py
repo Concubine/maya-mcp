@@ -15,6 +15,45 @@ from . import ledger, naming
 
 PRIMITIVE_KINDS = ("cube", "sphere", "cylinder", "plane", "torus", "cone")
 MAX_DIVISIONS = 200
+# `divisions` is a multiplier, not a face count, and the multiplier differs
+# wildly per kind: cube spends it linearly per axis (6*d^2 faces) while sphere
+# and torus multiply it by 20 on BOTH axes (400*d^2). Bounding `divisions`
+# alone therefore bounds nothing useful - at the shared ceiling of 200 a cube
+# is a harmless 240k faces but a sphere is 4000x4000 = 16 MILLION, which hangs
+# or OOMs Maya. That is not a recoverable state: cmds run on Maya's main
+# thread, so a wedged build also freezes the GUI event loop and the only exit
+# is killing the process. Bound the RESULT instead, and tell the caller the
+# highest `divisions` their chosen kind actually allows.
+MAX_PRIMITIVE_FACES = 1_000_000
+
+
+def projected_faces(kind: str, divisions: int) -> int:
+    """Faces `kind` will have at `divisions`. Pure - unit-testable without Maya.
+
+    Mirrors the creator lambdas below exactly; keep the two in step.
+    """
+    d = divisions
+    if kind == "cube":
+        return 6 * d * d
+    if kind == "plane":
+        return d * d
+    if kind in ("sphere", "torus"):
+        return (20 * d) * (20 * d)
+    if kind in ("cylinder", "cone"):
+        # side quads plus the cap fan(s): cylinder caps both ends, cone one.
+        caps = 2 if kind == "cylinder" else 1
+        return (20 * d) * d + caps * (20 * d)
+    raise HandlerError("unknown primitive kind %r" % kind)
+
+
+def max_divisions_for(kind: str) -> int:
+    """Largest `divisions` for `kind` that stays inside MAX_PRIMITIVE_FACES."""
+    allowed = 0
+    for d in range(1, MAX_DIVISIONS + 1):
+        if projected_faces(kind, d) > MAX_PRIMITIVE_FACES:
+            break
+        allowed = d
+    return allowed
 
 
 def _cmds():
@@ -71,10 +110,23 @@ def create_primitive(params: Dict[str, Any]) -> Dict[str, Any]:
             hint="pass the object name to create, e.g. name='golem_torso'",
         )
     divisions = params.get("divisions", 1)
-    if not isinstance(divisions, int) or not (1 <= divisions <= MAX_DIVISIONS):
+    if not isinstance(divisions, int) or isinstance(divisions, bool) or not (
+        1 <= divisions <= MAX_DIVISIONS
+    ):
         raise HandlerError(
             "divisions must be an integer 1..%d" % MAX_DIVISIONS,
             hint="1 = Maya defaults; higher multiplies subdivision counts",
+        )
+    faces = projected_faces(kind, divisions)
+    if faces > MAX_PRIMITIVE_FACES:
+        raise HandlerError(
+            "divisions=%d would build a %s with about %d faces, over the "
+            "%d-face limit" % (divisions, kind, faces, MAX_PRIMITIVE_FACES),
+            hint="the highest divisions for a %s is %d; `divisions` is a "
+            "multiplier and costs far more on some kinds than others "
+            "(a sphere multiplies it by 20 on both axes, a cube does not). "
+            "Build it coarse and refine with maya_sculpt_ops op 'smooth'."
+            % (kind, max_divisions_for(kind)),
         )
     cmds = _cmds()
     name = naming.unique_name(cmds, requested)
