@@ -301,12 +301,29 @@ def deform(params: Dict[str, Any]) -> Dict[str, Any]:
     handle_xform = {k: dparams.pop(k) for k in ("translate", "rotate") if k in dparams}
     if deformer == "lattice":
         divisions = dparams.get("divisions", [2, 5, 2])
+        # cmds.lattice returns [ffd, lattice, base]. Deformation is driven by
+        # the *relative offset* between the lattice and its base, so nodes[1]
+        # (the lattice itself) is the movable handle; nodes[2] (the base) is
+        # a fixed reference frame — moving it instead would be a no-op/wrong.
+        # Verified live in mayapy (see task-9-report.md fix addendum).
         nodes = cmds.lattice(
             mesh_long, divisions=divisions, objectCentered=True
         )
+    elif deformer == "sculpt":
+        # cmds.sculpt is a distinct command from cmds.nonLinear (nonLinear
+        # only supports bend|flare|sine|squash|twist|wave — there is no
+        # "sculpt" nonlinear type). It returns
+        # [deformer, sculptOrigin, stretchOrigin]; moving nodes[1] (the
+        # origin locator) pushes/pulls the mesh, matching the shared
+        # nodes[1]-is-the-handle convention below. Verified live in mayapy.
+        nodes = cmds.sculpt(mesh_long, **dparams)
     else:
         nodes = cmds.nonLinear(mesh_long, type=deformer, **dparams)
-    handle = nodes[-1]
+    # nodes[1] is the movable handle for every branch: nonLinear returns
+    # [deformer, handle] (2 elements, so nodes[1] == nodes[-1]); lattice and
+    # sculpt both return 3-element lists where nodes[1] is the deforming
+    # node and nodes[2] is a fixed reference (base / stretch origin).
+    handle = nodes[1]
     if "translate" in handle_xform:
         cmds.xform(handle, translation=handle_xform["translate"], worldSpace=True)
     if "rotate" in handle_xform:

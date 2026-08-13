@@ -395,10 +395,20 @@ def remesh_retopo(params: Dict[str, Any]) -> Dict[str, Any]:
 
     if method is None:
         current_faces = cmds.polyEvaluate(mesh_long, face=True)
-        percentage = 100.0
-        if isinstance(current_faces, int) and current_faces > 0:
-            percentage = max(1.0, min(100.0, (target / float(current_faces)) * 100.0))
-        cmds.polyReduce(mesh_long, percentage=percentage, constructionHistory=False)
+        # polyReduce's -percentage is the amount of reduction to *perform*
+        # (100 = maximal reduction, 0 = no-op), not the fraction of faces to
+        # keep. target/current is the keep-fraction, so the reduction amount
+        # is its complement.
+        percentage = 0.0
+        if isinstance(current_faces, int) and current_faces > target > 0:
+            percentage = max(1.0, min(100.0, (1.0 - target / float(current_faces)) * 100.0))
+        if percentage > 0.0:
+            cmds.polyReduce(mesh_long, percentage=percentage, constructionHistory=False)
+        else:
+            warnings.append(
+                "target_polycount %d >= current face count %s; nothing to reduce"
+                % (target, current_faces)
+            )
         method = "polyReduce"
 
     cmds.delete(mesh_long, constructionHistory=True)

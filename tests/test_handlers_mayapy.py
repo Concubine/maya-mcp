@@ -639,3 +639,89 @@ class TestDeformRemeshCleanupInMaya:
         assert result["before"]["tris"] == result["after"]["tris"] == 12
         # frozen: transform is identity now
         assert cmds.xform("dirty", q=True, ws=True, t=True) == [0.0, 0.0, 0.0]
+
+    def test_sculpt_deformer_uses_sculpt_command_not_nonlinear(self):
+        # Finding 1: Maya's nonLinear command has no "sculpt" type -
+        # deformer="sculpt" must route to cmds.sculpt, which does accept
+        # maxDisplacement/dropoffDistance. Verify against real Maya that the
+        # call succeeds and that the returned handle (nodes[1], the origin
+        # locator) actually moves the mesh when translated - confirming it
+        # is the correct "movable handle", not a fixed reference node.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import sculpt
+
+        cmds.polySphere(name="sculpt_target", subdivisionsAxis=20, subdivisionsHeight=20, radius=5)
+        result = sculpt.deform(
+            {"mesh": "|sculpt_target", "deformer": "sculpt",
+             "params": {"maxDisplacement": 1.0, "dropoffDistance": 2.0,
+                        "translate": [0, 4, 0]}}
+        )
+        assert result["baked"] is False
+        assert len(result["deformer_nodes"]) == 3  # [deformer, origin, stretchOrigin]
+        assert cmds.nodeType(result["deformer_nodes"][0]) == "sculpt"
+        # the top-pole vertex (0, 5, 0) sits inside the moved origin's
+        # dropoff and must have been displaced by the deform call above.
+        n = cmds.polyEvaluate("sculpt_target", vertex=True)
+        top = next(
+            i for i in range(n)
+            if abs(cmds.pointPosition("sculpt_target.vtx[%d]" % i, world=True)[0]) < 0.3
+            and abs(cmds.pointPosition("sculpt_target.vtx[%d]" % i, world=True)[2]) < 0.3
+            and cmds.pointPosition("sculpt_target.vtx[%d]" % i, world=True)[1] > 0
+        )
+        moved = cmds.pointPosition("sculpt_target.vtx[%d]" % top, world=True)
+        assert moved != [0.0, 5.0, 0.0]
+
+    def test_lattice_deformer_moves_lattice_not_base(self):
+        # Finding 2: cmds.lattice returns [ffd, lattice, base]; the FFD
+        # deforms via the relative offset between lattice and base, so the
+        # handle we translate must be nodes[1] (the lattice), not nodes[-1]
+        # (the base, which is a fixed reference and moving it alone is
+        # wrong / a no-op relative to the mesh).
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import sculpt
+
+        cmds.polyCube(name="lattice_target")
+        before = cmds.pointPosition("lattice_target.vtx[0]", world=True)
+        result = sculpt.deform(
+            {"mesh": "|lattice_target", "deformer": "lattice",
+             "params": {"translate": [1, 0, 0]}}
+        )
+        assert result["baked"] is False
+        deformer_nodes = result["deformer_nodes"]
+        assert len(deformer_nodes) == 3  # [ffd, lattice, base]
+        assert cmds.nodeType(deformer_nodes[0]) == "ffd"
+        after = cmds.pointPosition("lattice_target.vtx[0]", world=True)
+        assert after != before  # translating the lattice actually deformed the mesh
+
+    def test_remesh_retopo_polyreduce_fallback_reduces_toward_target(self, tmp_path, monkeypatch):
+        # Finding 3: with polyRetopo/polyRemesh forced unavailable, the
+        # polyReduce fallback's percentage must be the reduction *amount*
+        # (not the keep-fraction) - verified against real Maya by checking
+        # the resulting face count actually lands near target_polycount
+        # instead of barely reducing at all.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        def _raise(*args, **kwargs):
+            raise RuntimeError("forced fallback for test")
+
+        monkeypatch.setattr(cmds, "polyRetopo", _raise)
+        monkeypatch.setattr(cmds, "polyRemesh", _raise)
+
+        cmds.file(rename=str(tmp_path / "remesh_fallback.ma"))
+        cmds.polySphere(name="blob2", subdivisionsAxis=40, subdivisionsHeight=40)
+        before_faces = cmds.polyEvaluate("blob2", face=True)
+        result = modeling.remesh_retopo(
+            {"mesh": "|blob2", "target_polycount": 400, "keep_original": False}
+        )
+        assert result["method"] == "polyReduce"
+        assert any("polyRetopo" in w for w in result["warnings"])
+        assert any("polyRemesh" in w for w in result["warnings"])
+        after_faces = cmds.polyEvaluate("blob2", face=True)
+        assert after_faces < before_faces
+        # With the inverted-percentage bug, a 1600->400 target reduces by
+        # ~4% (barely moves); the fix lands close to the 400 target.
+        assert after_faces <= 500

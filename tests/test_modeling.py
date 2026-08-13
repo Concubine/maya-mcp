@@ -3,7 +3,7 @@
 import pytest
 
 from maya_plugin.dispatcher import HandlerError
-from maya_plugin.handlers import ledger, modeling, sculpt
+from maya_plugin.handlers import ledger, meshcheck, modeling, sculpt, session
 
 
 class FakeCmds:
@@ -14,6 +14,8 @@ class FakeCmds:
         self.shapes = shapes or {}  # long transform -> (shape_long, node_type)
         self.calls = []
         self.xf = {}
+        self.face_count = 1000
+        self.reduced_percentage = None
 
     def objExists(self, name):
         return any(o == name or o.split("|")[-1] == name for o in self.objects)
@@ -101,6 +103,35 @@ class FakeCmds:
         self.objects.add("|ffd1Lattice")
         self.objects.add("|ffd1Base")
         return ["ffd1", "ffd1Lattice", "ffd1Base"]
+
+    def sculpt(self, name, **kw):
+        self.calls.append(("sculpt", name, kw))
+        self.objects.add("|sculptor1")
+        self.objects.add("|sculpt1StretchOrigin")
+        return ["sculpt1", "sculptor1", "sculpt1StretchOrigin"]
+
+    def polyEvaluate(self, name, face=False, triangle=False, vertex=False):
+        self.calls.append(("polyEvaluate", name, face, triangle, vertex))
+        if face:
+            return self.face_count
+        if triangle:
+            return self.face_count
+        if vertex:
+            return self.face_count
+        raise AssertionError("unexpected polyEvaluate call")
+
+    def polyReduce(self, name, percentage=None, constructionHistory=False):
+        self.calls.append(("polyReduce", name, percentage))
+        self.reduced_percentage = percentage
+
+    def polyMergeVertex(self, name, distance=None):
+        self.calls.append(("polyMergeVertex", name, distance))
+
+    def polyNormal(self, name, normalMode=None, constructionHistory=False):
+        self.calls.append(("polyNormal", name, normalMode))
+
+    def makeIdentity(self, name, apply=None, translate=None, rotate=None, scale=None):
+        self.calls.append(("makeIdentity", name, apply, translate, rotate, scale))
 
 
 @pytest.fixture(autouse=True)
@@ -310,3 +341,125 @@ def test_deform_bakes_and_deletes_history(monkeypatch):
     )
     assert result == {"deformer_nodes": [], "baked": True, "warnings": []}
     assert ("delete", ("|col",)) in [(c[0], c[1]) for c in fake.calls if c[0] == "delete"]
+
+
+def test_deform_lattice_translates_lattice_handle_not_base(monkeypatch):
+    # Finding 2: cmds.lattice returns [ffd, lattice, base]; the base is a
+    # fixed reference frame, so translating it (nodes[-1], the old bug)
+    # instead of the lattice (nodes[1]) is wrong. Use the FakeCmds.lattice
+    # scaffolding (previously dead) to assert the xform lands on the right
+    # node.
+    fake = _mesh_fake("|col")
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    result = sculpt.deform(
+        {"mesh": "|col", "deformer": "lattice",
+         "params": {"translate": [1, 2, 3]}}
+    )
+    assert result["deformer_nodes"] == ["ffd1", "|ffd1Lattice", "|ffd1Base"]
+    xform_calls = [c for c in fake.calls if c[0] == "xform"]
+    assert len(xform_calls) == 1
+    # handle is the raw node cmds.lattice returned (nodes[1] = the lattice,
+    # not the base at nodes[2]) - matches the pre-existing convention where
+    # cmds.xform receives the raw handle name, not the resolved long name.
+    assert xform_calls[0][1] == "ffd1Lattice"
+    assert xform_calls[0][2]["translation"] == [1, 2, 3]
+
+
+def test_deform_sculpt_calls_sculpt_command_with_whitelisted_params(monkeypatch):
+    # Finding 1: deformer="sculpt" must route to cmds.sculpt (which accepts
+    # maxDisplacement/dropoffDistance), not cmds.nonLinear (which does not
+    # support a "sculpt" type at all).
+    fake = _mesh_fake("|col")
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    result = sculpt.deform(
+        {"mesh": "|col", "deformer": "sculpt",
+         "params": {"maxDisplacement": 1.0, "dropoffDistance": 2.0}}
+    )
+    sculpt_calls = [c for c in fake.calls if c[0] == "sculpt"]
+    assert len(sculpt_calls) == 1
+    assert sculpt_calls[0][1] == "|col"
+    assert sculpt_calls[0][2] == {"maxDisplacement": 1.0, "dropoffDistance": 2.0}
+    assert not any(c[0] == "nonLinear" for c in fake.calls)
+    assert result["deformer_nodes"] == ["sculpt1", "|sculptor1", "|sculpt1StretchOrigin"]
+
+
+def _patch_auto_checkpoint(monkeypatch):
+    monkeypatch.setattr(
+        session, "auto_checkpoint",
+        lambda reason: {"checkpoint_id": "auto_" + reason, "path": "fake.ma"},
+    )
+
+
+def test_remesh_retopo_keep_original_false_skips_duplicate(monkeypatch):
+    fake = _mesh_fake("|blob")
+    fake.face_count = 1600
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    _patch_auto_checkpoint(monkeypatch)
+    result = modeling.remesh_retopo(
+        {"mesh": "|blob", "target_polycount": 400, "keep_original": False}
+    )
+    assert not any(c[0] == "duplicate" for c in fake.calls)
+    assert result["method"] == "polyReduce"  # FakeCmds has no polyRetopo/polyRemesh
+
+
+def test_remesh_retopo_polyreduce_percentage_is_reduction_amount_not_keep_fraction(monkeypatch):
+    # Finding 3: percentage passed to polyReduce must be the amount of
+    # reduction to *perform* (1 - keep_fraction) * 100, not the keep
+    # fraction itself.
+    fake = _mesh_fake("|blob")
+    fake.face_count = 1600  # target 400 -> keep 25%, so reduce by 75%
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    _patch_auto_checkpoint(monkeypatch)
+    result = modeling.remesh_retopo(
+        {"mesh": "|blob", "target_polycount": 400, "keep_original": False}
+    )
+    assert result["method"] == "polyReduce"
+    assert fake.reduced_percentage == pytest.approx(75.0)
+
+
+def test_remesh_retopo_target_at_or_above_current_skips_polyreduce_call(monkeypatch):
+    fake = _mesh_fake("|blob")
+    fake.face_count = 200  # target 400 >= current 200: nothing to reduce
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    _patch_auto_checkpoint(monkeypatch)
+    result = modeling.remesh_retopo(
+        {"mesh": "|blob", "target_polycount": 400, "keep_original": False}
+    )
+    assert result["method"] == "polyReduce"
+    assert not any(c[0] == "polyReduce" for c in fake.calls)
+    assert any("nothing to reduce" in w for w in result["warnings"])
+
+
+def _fake_mesh_stats(counter):
+    def _stats(name):
+        counter.append(name)
+        return {
+            "tris": 12, "verts": 8, "faces": 6,
+            "boundary_edges": 0, "nonmanifold_edges": 0, "watertight": True,
+        }
+    return _stats
+
+
+def test_mesh_cleanup_conform_normals_false_skips_polyNormal(monkeypatch):
+    fake = _mesh_fake("|dirty")
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    monkeypatch.setattr(meshcheck, "mesh_stats", _fake_mesh_stats([]))
+    modeling.mesh_cleanup({"mesh": "|dirty", "conform_normals": False})
+    assert not any(c[0] == "polyNormal" for c in fake.calls)
+    assert any(c[0] == "polyMergeVertex" for c in fake.calls)  # unaffected
+
+
+def test_mesh_cleanup_freeze_transforms_false_skips_makeIdentity(monkeypatch):
+    fake = _mesh_fake("|dirty")
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    monkeypatch.setattr(meshcheck, "mesh_stats", _fake_mesh_stats([]))
+    modeling.mesh_cleanup({"mesh": "|dirty", "freeze_transforms": False})
+    assert not any(c[0] == "makeIdentity" for c in fake.calls)
+
+
+def test_mesh_cleanup_delete_history_false_skips_delete(monkeypatch):
+    fake = _mesh_fake("|dirty")
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    monkeypatch.setattr(meshcheck, "mesh_stats", _fake_mesh_stats([]))
+    modeling.mesh_cleanup({"mesh": "|dirty", "delete_history": False})
+    assert not any(c[0] == "delete" for c in fake.calls)
