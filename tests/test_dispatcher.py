@@ -249,3 +249,28 @@ class TestOneInFlight:
         assert elapsed < 1.0  # immediate, not a 30s stall against a dead worker
         assert resp["status"] == "error"
         assert resp["error"]["type"] == "ServerStoppedError"
+
+
+def test_no_undo_chunk_handler_skips_hooks():
+    calls = []
+
+    def normal(params):
+        return {"ok": 1}
+
+    def exempt(params):
+        return {"ok": 2}
+
+    exempt.no_undo_chunk = True
+
+    d = Dispatcher(
+        {"normal": normal, "exempt": exempt},
+        undo_open=lambda: calls.append("open"),
+        undo_close=lambda: calls.append("close"),
+    )
+    try:
+        d.handle_request({"v": 1, "id": "a", "cmd": "normal", "params": {}})
+        assert calls == ["open", "close"]
+        d.handle_request({"v": 1, "id": "b", "cmd": "exempt", "params": {}})
+        assert calls == ["open", "close"]  # unchanged: hooks skipped
+    finally:
+        d.shutdown()

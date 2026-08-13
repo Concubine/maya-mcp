@@ -194,14 +194,15 @@ class Dispatcher:
         self, req_id: str, handler: Callable, params: Dict[str, Any]
     ) -> Dict[str, Any]:
         start = time.monotonic()
+        use_chunk = not getattr(handler, "no_undo_chunk", False)
 
         def run_on_main() -> Dict[str, Any]:
-            if self._undo_open is not None:
+            if use_chunk and self._undo_open is not None:
                 self._undo_open()
             try:
                 return handler(params)
             finally:
-                if self._undo_close is not None:
+                if use_chunk and self._undo_close is not None:
                     self._undo_close()
 
         try:
