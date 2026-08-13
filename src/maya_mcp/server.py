@@ -32,6 +32,7 @@ from .schemas import (
     DeleteResult,
     ExecuteResult,
     LightingResult,
+    MaterialResult,
     NameResult,
     NewSceneResult,
     ObjectInfoResult,
@@ -1053,6 +1054,41 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 "setup_lighting",
                 {"preset": preset, "intensity": intensity,
                  "hdri_path": hdri_path, "replace_existing": replace_existing},
+                timeout_s=SCENE_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Assign material",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=False
+        ),
+    )
+    def maya_assign_material(
+        mesh: Annotated[str, Field(min_length=1, description="Canonical long name.")],
+        shader: Annotated[
+            Literal["standardSurface", "lambert", "blinn"],
+            Field(description="Shader type to create."),
+        ] = "standardSurface",
+        params: Annotated[dict, Field(description=(
+            "Whitelisted per shader. standardSurface: baseColor, roughness, "
+            "metalness, emission, emissionColor, specular. lambert: color, "
+            "transparency, incandescence. blinn adds eccentricity, "
+            "specularColor. Colours are [r, g, b] in 0..1. Unknown keys are "
+            "rejected with that shader's whitelist in the hint."
+        ))] = {},
+        name: Annotated[Optional[str], Field(description=(
+            "Material name; defaults to <mesh>_mat. Collisions get a _NNN suffix."
+        ))] = None,
+    ) -> MaterialResult:
+        """Assign one material to a whole mesh (object-level shading only).
+
+        Multi-material looks come from splitting geometry into separate meshes -
+        per-face assignment is unreliable on boolean output."""
+        return MaterialResult.model_validate(
+            maya.request(
+                "assign_material",
+                {"mesh": mesh, "shader": shader, "params": params, "name": name},
                 timeout_s=SCENE_TIMEOUT_S,
             )
         )

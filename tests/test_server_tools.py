@@ -81,6 +81,7 @@ class TestRegistration:
             "maya_load_reference_image",
             "maya_compare_to_reference",
             "maya_setup_lighting",
+            "maya_assign_material",
         }
 
     def test_annotations_declare_read_only_vs_destructive(self):

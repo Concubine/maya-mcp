@@ -1355,3 +1355,39 @@ class TestLightingInMaya:
         shapes = cmds.listRelatives(result["lights"][0], shapes=True, fullPath=True)
         assert cmds.nodeType(shapes[0]) == "directionalLight"
         assert cmds.getAttr(shapes[0] + ".intensity") == pytest.approx(2.0)
+
+
+class TestMaterialInMaya:
+    def test_assigned_material_reads_back_through_get_object_info(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import material, objinfo
+
+        cmds.file(new=True, force=True)
+        cmds.file(rename=str(tmp_path / "material.ma"))
+        cmds.polyCube(name="matcube", w=2, h=2, d=2)
+
+        result = material.assign_material({
+            "mesh": "|matcube", "shader": "standardSurface",
+            "params": {"baseColor": [0.4, 0.3, 0.25], "roughness": 0.8},
+            "name": "clay",
+        })
+        info = objinfo.get_object_info({"name": "|matcube", "include": ["shading"]})
+        assert info["shading"]["materials"] == [result["material"]]
+        assert info["shading"]["per_face"] is False
+        assert cmds.getAttr(result["material"] + ".specularRoughness") == pytest.approx(0.8)
+
+    def test_assign_takes_no_checkpoint(self, tmp_path):
+        # Look-dev is a loop of small tweaks; checkpointing each would evict
+        # the checkpoints that matter.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import material, session
+
+        cmds.file(new=True, force=True)
+        cmds.file(rename=str(tmp_path / "material_cp.ma"))
+        cmds.polyCube(name="cpcube")
+        before = len(session._existing(session._checkpoint_dir(cmds)))
+        material.assign_material({"mesh": "|cpcube", "params": {"roughness": 0.5}})
+        after = len(session._existing(session._checkpoint_dir(cmds)))
+        assert after == before

@@ -287,3 +287,13 @@ class ReferenceResult(BaseModel):
     width: int
     height: int
     bytes: int = Field(description="Stored size of the reference image.")
+
+
+class MaterialResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    mesh: str
+    material: str = Field(description="Name of the shader node created.")
+    shading_group: str
+    shader: str
+    warnings: List[str] = Field(default_factory=list)

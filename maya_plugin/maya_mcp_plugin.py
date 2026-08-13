@@ -27,6 +27,7 @@ from .handlers import (
     code_exec,
     etch,
     lighting,
+    material,
     modeling,
     objinfo,
     scene,
@@ -92,6 +93,7 @@ def _build_handlers() -> Dict[str, Any]:
         "set_viewport": viewport.set_viewport,
         "set_camera": viewport.set_camera,
         "setup_lighting": lighting.setup_lighting,
+        "assign_material": material.assign_material,
     }
 
 
