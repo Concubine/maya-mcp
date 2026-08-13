@@ -9,6 +9,7 @@ Run: `uv run maya-mcp` (stdio transport). Config via MAYA_MCP_* env vars.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import logging.handlers
@@ -278,6 +279,50 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "camera_positions: " + json.dumps(result.get("camera_positions", []))
         )
         return content
+
+    @mcp.tool(
+        title="Capture turntable",
+        annotations=ToolAnnotations(
+            read_only_hint=True, destructive_hint=False, idempotent_hint=True
+        ),
+    )
+    def maya_capture_turntable(
+        target: Annotated[Optional[str], Field(description=(
+            "Object to orbit and frame; omit to frame the whole scene."
+        ))] = None,
+        n_frames: Annotated[int, Field(ge=2, le=16, description=(
+            "Views around the subject. Returns ONE contact sheet regardless."
+        ))] = 8,
+        resolution: Annotated[int, Field(ge=64, le=1024, description=(
+            "Per-cell resolution, before the sheet is downscaled."
+        ))] = 384,
+        lighting: Annotated[
+            Literal["default", "scene", "flat"],
+            Field(description="'scene' uses the scene's own lights."),
+        ] = "default",
+    ) -> list:
+        """Orbit the subject and return a single contact-sheet image.
+
+        Eight views for the token cost of one image - the final judgement pass."""
+        result = maya.request(
+            "capture_turntable",
+            {"target": target, "n_frames": n_frames,
+             "resolution": resolution, "lighting": lighting},
+            timeout_s=CAPTURE_TIMEOUT_S,
+        )
+        cells = [
+            images.decode_and_downscale(shot["png_b64"], max_px=resolution)
+            for shot in result.get("images", [])
+        ]
+        sheet = images.contact_sheet(cells)
+        return [
+            Image(data=images.decode_and_downscale(
+                base64.b64encode(sheet).decode("ascii")), format="png"),
+            "turntable: %d frames, azimuths %s" % (
+                result.get("n_frames", 0),
+                json.dumps([s["azimuth"] for s in result.get("images", [])]),
+            ),
+        ]
 
     SESSION_TIMEOUT_S = 60.0  # checkpoint saves of heavy scenes take a while
 

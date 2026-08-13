@@ -77,15 +77,16 @@ def clamp_resolution(resolution: Optional[int]) -> int:
     return max(MIN_RESOLUTION, min(MAX_RESOLUTION, resolution))
 
 
-def camera_placement(
-    angle: str, bbox_min: Sequence[float], bbox_max: Sequence[float]
+def _placement(
+    azimuth_deg: float, elevation_deg: float,
+    bbox_min: Sequence[float], bbox_max: Sequence[float]
 ) -> Tuple[Tuple[float, float, float], Tuple[float, float, float]]:
-    """Camera position and euler rotation (deg, Maya xyz order) for an angle.
+    """Camera position and euler rotation (deg, Maya xyz order) for an azimuth/
+    elevation pair.
 
     Points the camera at the bbox center from far enough away that the bounding
     sphere fits inside the field of view; viewFit refines the framing afterwards.
     """
-    azimuth_deg, elevation_deg = _ANGLE_DIRECTIONS[angle]
     center = [(lo + hi) / 2.0 for lo, hi in zip(bbox_min, bbox_max)]
     radius = math.dist(bbox_min, bbox_max) / 2.0
     radius = max(radius, 0.5)  # degenerate/empty bbox still gets a sane distance
@@ -102,6 +103,23 @@ def camera_placement(
     # yaw = azimuth, no roll, default xyz rotate order.
     rotation = (-elevation_deg, azimuth_deg, 0.0)
     return position, rotation
+
+
+def camera_placement(
+    angle: str, bbox_min: Sequence[float], bbox_max: Sequence[float]
+) -> Tuple[Tuple[float, float, float], Tuple[float, float, float]]:
+    """Camera position and euler rotation (deg, Maya xyz order) for a named angle."""
+    azimuth_deg, elevation_deg = _ANGLE_DIRECTIONS[angle]
+    return _placement(azimuth_deg, elevation_deg, bbox_min, bbox_max)
+
+
+def camera_placement_azimuth(azimuth_deg: float, bbox_min, bbox_max):
+    """Same framing math as camera_placement, at an arbitrary azimuth.
+
+    Elevation is fixed at the three_quarter value so a turntable reads as one
+    orbit rather than a wobble.
+    """
+    return _placement(azimuth_deg, 27.938, bbox_min, bbox_max)
 
 
 # ------------------------------------------------------------------- handler
@@ -159,6 +177,60 @@ def capture_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
             }
         )
     return {"images": images, "camera_positions": camera_positions}
+
+
+TURNTABLE_DEFAULT_FRAMES = 8
+TURNTABLE_MAX_FRAMES = 16
+
+
+def capture_turntable(params: Dict[str, Any]) -> Dict[str, Any]:
+    """N evenly-spaced azimuths around the subject, for one composite image.
+
+    The frame cap is about grid legibility, not tokens: this returns ONE
+    contact sheet regardless of n_frames, so capture_viewport's 4-image
+    ceiling does not apply - but a 32-cell sheet is unreadable at any sane
+    resolution.
+    """
+    n_frames = params.get("n_frames", TURNTABLE_DEFAULT_FRAMES)
+    if (
+        not isinstance(n_frames, int) or isinstance(n_frames, bool)
+        or not (2 <= n_frames <= TURNTABLE_MAX_FRAMES)
+    ):
+        raise HandlerError(
+            "n_frames must be an integer 2..%d" % TURNTABLE_MAX_FRAMES,
+            hint="the cap is grid legibility - the result is one contact sheet",
+        )
+    target = params.get("target")
+    isolate = [str(target)] if target else None
+    shading = params.get("shading", "smoothShaded")
+    if shading not in VALID_SHADING:
+        raise HandlerError(
+            "unknown shading mode %r" % shading,
+            hint="valid shading modes: %s" % ", ".join(VALID_SHADING),
+        )
+    lighting = params.get("lighting", "default")
+    if lighting not in VALID_LIGHTING:
+        raise HandlerError(
+            "unknown lighting mode %r" % lighting,
+            hint="valid lighting modes: %s" % ", ".join(VALID_LIGHTING),
+        )
+    resolution = clamp_resolution(params.get("resolution") or 384)
+    shadows = bool(params.get("shadows", False))
+
+    images_out = []
+    for i in range(n_frames):
+        azimuth = 360.0 * i / n_frames
+        shot = _capture_one(
+            ("azimuth", azimuth), shading, False, "beauty", isolate, True,
+            resolution, lighting, shadows,
+        )
+        images_out.append(
+            {"index": i, "azimuth": azimuth, "png_b64": shot["png_b64"]}
+        )
+    return {"images": images_out, "n_frames": n_frames}
+
+
+capture_turntable.no_undo_chunk = True
 
 
 # ------------------------------------------------------------- maya internals
@@ -360,7 +432,12 @@ def _capture_one(
             capture_cam = state.camera
         else:
             bbox_min, bbox_max = _scene_bbox(cmds, isolate)
-            position, rotation = camera_placement(angle, bbox_min, bbox_max)
+            if isinstance(angle, (tuple, list)) and angle[0] == "azimuth":
+                position, rotation = camera_placement_azimuth(
+                    float(angle[1]), bbox_min, bbox_max
+                )
+            else:
+                position, rotation = camera_placement(angle, bbox_min, bbox_max)
             # cmds.camera(name=...) does NOT rename the transform on this
             # Maya (verified live: it always yields "camera1"/"camera2", the
             # same broken idiom set_camera works around) - create unnamed,

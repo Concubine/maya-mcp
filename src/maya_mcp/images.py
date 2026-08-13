@@ -2,7 +2,8 @@
 
 Viewport captures travel as base64 PNG inside result frames; before they reach
 the LLM they are downscaled to MAYA_MCP_MAX_IMAGE_PX on the longest edge.
-(The contact-sheet compositor for turntables lands in M2.)
+contact_sheet() composites a turntable's N frames into one row-major grid
+image so a final judgement pass costs one image instead of N.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import base64
 import binascii
 import io
+import math
 import os
 
 from PIL import Image as PILImage
@@ -50,3 +52,60 @@ def decode_and_downscale(png_b64: str, max_px: int | None = None) -> bytes:
     out = io.BytesIO()
     img.save(out, format="PNG")
     return out.getvalue()
+
+
+def _open(png: bytes) -> PILImage.Image:
+    return PILImage.open(io.BytesIO(png)).convert("RGB")
+
+
+def _to_png(img: PILImage.Image) -> bytes:
+    out = io.BytesIO()
+    img.save(out, format="PNG")
+    return out.getvalue()
+
+
+def contact_sheet(pngs, cols: int | None = None) -> bytes:
+    """Composite frames into one row-major grid image.
+
+    Row-major matters: the caller reads the sheet as "frame 0 top-left, going
+    right", and a column-major sheet would silently mislabel every view.
+    """
+    if not pngs:
+        raise ValueError("contact_sheet needs at least one image")
+    tiles = [_open(p) for p in pngs]
+    cell_w = max(t.width for t in tiles)
+    cell_h = max(t.height for t in tiles)
+    if cols is None:
+        # Favor a wide-ish rectangle over a tall one: pick rows as the floor
+        # of sqrt(n) and let cols absorb the remainder, so an exact square
+        # count (8 -> 4x2, 16 -> 4x4) lands flush and others get one
+        # partially-filled last row rather than a lopsided column count.
+        rows_for_cols = max(1, int(math.floor(math.sqrt(len(tiles)))))
+        cols = int(math.ceil(len(tiles) / rows_for_cols))
+    rows = int(math.ceil(len(tiles) / cols))
+    sheet = PILImage.new("RGB", (cols * cell_w, rows * cell_h), (18, 18, 20))
+    for i, tile in enumerate(tiles):
+        x = (i % cols) * cell_w
+        y = (i // cols) * cell_h
+        sheet.paste(tile, (x, y))
+    return _to_png(sheet)
+
+
+def side_by_side(left_png: bytes, right_png: bytes, gap: int = 8) -> bytes:
+    """Reference on the left, current viewport on the right, same scale."""
+    left, right = _open(left_png), _open(right_png)
+    height = max(left.height, right.height)
+
+    def fit(img):
+        if img.height == height:
+            return img
+        w = max(1, round(img.width * height / img.height))
+        return img.resize((w, height), PILImage.LANCZOS)
+
+    left, right = fit(left), fit(right)
+    canvas = PILImage.new(
+        "RGB", (left.width + gap + right.width, height), (18, 18, 20)
+    )
+    canvas.paste(left, (0, 0))
+    canvas.paste(right, (left.width + gap, 0))
+    return _to_png(canvas)

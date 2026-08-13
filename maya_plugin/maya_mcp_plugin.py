@@ -67,6 +67,7 @@ def _build_handlers() -> Dict[str, Any]:
         "get_scene_graph": scene.get_scene_graph,
         "get_object_info": objinfo.get_object_info,
         "capture_viewport": capture.capture_viewport,
+        "capture_turntable": capture.capture_turntable,
         "checkpoint": session.checkpoint,
         "restore_checkpoint": session.restore_checkpoint,
         "undo": session.undo,

@@ -54,6 +54,7 @@ class TestRegistration:
             "maya_get_scene_graph",
             "maya_get_object_info",
             "maya_capture_viewport",
+            "maya_capture_turntable",
             "maya_checkpoint",
             "maya_restore_checkpoint",
             "maya_undo",

@@ -532,3 +532,27 @@ class TestTempCamera:
 
         assert shot["png_b64"]  # the capture succeeded end to end
         assert shot["camera"] == "|dupA|mayaMcpTempCam"  # first match, no raise
+
+
+def test_turntable_defaults_to_eight_frames_evenly_spaced(monkeypatch):
+    fake = FakeCaptureCmds()
+    monkeypatch.setattr(capture, "_cmds", lambda: fake)
+    seen = []
+
+    def fake_capture_one(angle, *args, **kwargs):
+        seen.append(angle)
+        return {"png_b64": "x", "camera_position": [0, 0, 0],
+                "camera_rotation": [0, 0, 0], "camera": "|cam"}
+
+    monkeypatch.setattr(capture, "_capture_one", fake_capture_one)
+    result = capture.capture_turntable({"target": "|golem"})
+    assert result["n_frames"] == 8
+    assert [i["azimuth"] for i in result["images"]] == [0, 45, 90, 135, 180, 225, 270, 315]
+
+
+def test_turntable_caps_at_sixteen_frames(monkeypatch):
+    fake = FakeCaptureCmds()
+    monkeypatch.setattr(capture, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        capture.capture_turntable({"target": "|golem", "n_frames": 32})
+    assert "16" in str(exc.value)
