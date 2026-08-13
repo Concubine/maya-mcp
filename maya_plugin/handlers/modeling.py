@@ -256,3 +256,83 @@ def delete_objects(params: Dict[str, Any]) -> Dict[str, Any]:
     for name in resolved:
         ledger.forget(name)
     return {"deleted": resolved, "warnings": []}
+
+
+BOOLEAN_OPS = {"union": 1, "difference": 2, "intersection": 3}
+
+
+def _do_boolean(cmds, a_long: str, b_long: str, op: str, new_name: str) -> Dict[str, Any]:
+    """Shared boolean core: polyCBoolOp + the golem-run cleanup discipline.
+
+    Per-face shader assignment on boolean output silently no-ops and corrupts
+    shading groups (redmine #577 req 1), so: delete history immediately, then
+    collapse shading to one object-level SG (input A's material wins).
+    """
+    from . import meshcheck  # noqa: PLC0415 - keep module import cheap headless
+
+    _, a_shape = naming.require_mesh(cmds, a_long)
+    fallback_sg = meshcheck.first_sg(cmds, a_shape)
+
+    result = cmds.polyCBoolOp(a_long, b_long, op=BOOLEAN_OPS[op], name=new_name)
+    out = cmds.rename(result[0], new_name)
+    out_long = _long(cmds, out)
+    cmds.delete(out_long, constructionHistory=True)
+
+    warnings: List[str] = []
+    _, out_shape = naming.require_mesh(cmds, out_long)
+    # polyCBoolOp leaves groupId nodes wired into the shape's (comp)InstObjGroups
+    # to carry each operand's original per-face material group across the
+    # boolean; constructionHistory=True does not remove them because they are
+    # still "in use" by that group tracking. They are exactly the per-face
+    # machinery that silently corrupts shading on this Maya version (module
+    # docstring), and object-level collapse below makes them dead weight
+    # regardless, so clear them before collapsing shading.
+    stale_group_ids = set(cmds.listConnections(out_shape, type="groupId") or [])
+    if stale_group_ids:
+        cmds.delete(list(stale_group_ids))
+    shading = meshcheck.ensure_object_shading(cmds, out_shape, fallback_sg)
+    if shading["repaired"]:
+        warnings.append(
+            "shading collapsed to object-level %s (per-face assignment is "
+            "unreliable on boolean output)" % shading["sg"]
+        )
+    stats = meshcheck.mesh_stats(out_long)
+    if not stats["watertight"]:
+        warnings.append(
+            "result is not watertight (%d boundary, %d non-manifold edges); "
+            "run maya_mesh_cleanup" % (stats["boundary_edges"], stats["nonmanifold_edges"])
+        )
+    ledger.forget(a_long)
+    ledger.forget(b_long)
+    ledger.record(cmds, out_long)
+    return {
+        "name": out_long,
+        "tris": stats["tris"],
+        "watertight": stats["watertight"],
+        "warnings": warnings,
+    }
+
+
+def boolean_op(params: Dict[str, Any]) -> Dict[str, Any]:
+    cmds = _cmds()
+    op = params.get("op")
+    if op not in BOOLEAN_OPS:
+        raise HandlerError(
+            "unknown boolean op %r" % op,
+            hint="valid ops: union, difference, intersection",
+        )
+    a_long = naming.require_mesh(cmds, str(params.get("a") or ""))[0]
+    b_long = naming.require_mesh(cmds, str(params.get("b") or ""))[0]
+    if a_long == b_long:
+        raise HandlerError(
+            "a and b are the same object", hint="pass two different meshes"
+        )
+    requested = params.get("new_name")
+    if not isinstance(requested, str) or not requested.strip():
+        raise HandlerError(
+            "missing required param 'new_name'", hint="name for the result mesh"
+        )
+    from . import session  # noqa: PLC0415
+
+    session.auto_checkpoint("boolean")
+    return _do_boolean(cmds, a_long, b_long, op, naming.unique_name(cmds, requested))

@@ -68,6 +68,7 @@ class TestRegistration:
             "maya_parent",
             "maya_rename",
             "maya_delete_objects",
+            "maya_boolean_op",
         }
 
     def test_annotations_declare_read_only_vs_destructive(self):
@@ -257,3 +258,27 @@ class TestModelingTools:
             "rotate": None, "scale": None, "divisions": 1,
         }
         assert result.structured_content["name"] == "|golem_arm"
+
+    def test_maya_boolean_op_forwards_params(self):
+        conn = FakeConn(
+            responses={
+                "boolean_op": {
+                    "name": "|carved", "tris": 24, "watertight": True,
+                    "warnings": [],
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        result = run(
+            mcp.call_tool(
+                "maya_boolean_op",
+                {"a": "|base", "b": "|cutter", "op": "difference", "new_name": "carved"},
+            )
+        )
+        assert result.is_error is False
+        assert conn.calls[0]["cmd"] == "boolean_op"
+        assert conn.calls[0]["params"] == {
+            "a": "|base", "b": "|cutter", "op": "difference", "new_name": "carved",
+        }
+        assert conn.calls[0]["timeout_s"] == server_mod.BOOL_TIMEOUT_S
+        assert result.structured_content["name"] == "|carved"

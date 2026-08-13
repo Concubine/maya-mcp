@@ -170,3 +170,21 @@ def test_group_rekeys_ledger_for_children(monkeypatch):
     fake.xf[new_b] = ((99, 0, 0), (0, 0, 0), (1, 1, 1))
     warning_b = ledger.check(fake, new_b)
     assert warning_b is not None and "outside" in warning_b
+
+
+def test_boolean_rejects_unknown_op(monkeypatch):
+    fake = FakeCmds(objects={"|a", "|b"})
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        modeling.boolean_op({"a": "|a", "b": "|b", "op": "xor", "new_name": "x"})
+    assert "union" in exc.value.hint
+
+
+def test_boolean_rejects_same_object(monkeypatch):
+    fake = FakeCmds(
+        objects={"|a"},
+        shapes={"|a": ("|a|aShape", "mesh")},
+    )
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError):
+        modeling.boolean_op({"a": "|a", "b": "|a", "op": "union", "new_name": "x"})

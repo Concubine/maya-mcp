@@ -70,6 +70,7 @@ def _build_handlers() -> Dict[str, Any]:
         "parent": modeling.parent,
         "rename": modeling.rename,
         "delete_objects": modeling.delete_objects,
+        "boolean_op": modeling.boolean_op,
     }
 
 

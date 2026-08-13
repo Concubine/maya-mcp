@@ -256,3 +256,71 @@ class TestModelingInMaya:
         assert renamed["name"] == "|gp_grp|gp_kid"
         modeling.delete_objects({"names": ["|gp_grp"]})
         assert not cmds.objExists("gp_grp")
+
+
+class TestBooleanInMaya:
+    def test_difference_carves_and_is_clean(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        cmds.file(rename=str(tmp_path / "bool.ma"))
+        cmds.polyCube(name="base", w=2, h=2, d=2)
+        cmds.polySphere(name="cutter", r=1.2)
+        cmds.xform("cutter", ws=True, t=(1, 1, 1))
+        result = modeling.boolean_op(
+            {"a": "|base", "b": "|cutter", "op": "difference", "new_name": "carved"}
+        )
+        assert result["name"] == "|carved"
+        assert result["watertight"] is True
+        assert result["tris"] > 12
+        # inputs consumed, no leftover boolean nodes, no construction history
+        assert not cmds.objExists("base") and not cmds.objExists("cutter")
+        assert cmds.ls(type="polyCBoolOp") == []
+        shape = cmds.listRelatives("|carved", shapes=True, fullPath=True)[0]
+        # cmds.listHistory returns short names on this Maya version (same
+        # quirk as cmds.sets query, see meshcheck test precedent below), so
+        # resolve to canonical long names before comparing.
+        history = [(cmds.ls(h, long=True) or [h])[0] for h in cmds.listHistory(shape)]
+        assert history == [shape]
+
+    def test_boolean_keeps_object_level_shading(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        cmds.file(rename=str(tmp_path / "boolsg.ma"))
+        cmds.polyCube(name="base2", w=2, h=2, d=2)
+        shader = cmds.shadingNode("lambert", asShader=True, name="bool_clay")
+        sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True,
+                       name="bool_claySG")
+        cmds.connectAttr(shader + ".outColor", sg + ".surfaceShader", force=True)
+        cmds.sets("base2", edit=True, forceElement=sg)
+        cmds.polySphere(name="cutter2", r=1.2)
+        result = modeling.boolean_op(
+            {"a": "|base2", "b": "|cutter2", "op": "difference", "new_name": "carved2"}
+        )
+        # the run's trap: output must end object-level assigned to A's material
+        # (cmds.sets query returns short names on this Maya version even for
+        # full-path assignment - see meshcheck's
+        # test_ensure_object_shading_repairs_partial_assignment - so compare
+        # short names, same as that precedent).
+        shape = cmds.listRelatives("|carved2", shapes=True, fullPath=True)[0]
+        members = cmds.sets(sg, query=True) or []
+        assert shape.split("|")[-1] in [m.split("|")[-1] for m in members]
+
+    def test_boolean_takes_auto_checkpoint(self, tmp_path):
+        import os
+
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        cmds.file(rename=str(tmp_path / "boolcp.ma"))
+        cmds.polyCube(name="base3")
+        cmds.polySphere(name="cutter3")
+        modeling.boolean_op(
+            {"a": "|base3", "b": "|cutter3", "op": "union", "new_name": "fused3"}
+        )
+        cp_dir = str(tmp_path / "checkpoints")
+        assert any("auto_boolean" in f for f in os.listdir(cp_dir))

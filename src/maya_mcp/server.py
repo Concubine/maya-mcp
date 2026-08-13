@@ -23,6 +23,7 @@ from pydantic import Field
 from . import images
 from .connection import MayaConnection
 from .schemas import (
+    BooleanResult,
     CheckpointResult,
     DeleteResult,
     ExecuteResult,
@@ -48,6 +49,7 @@ Vec3 = Annotated[
 # Transport grace on top of the per-command timeout the plugin enforces itself.
 SCENE_TIMEOUT_S = 30.0
 CAPTURE_TIMEOUT_S = 120.0
+BOOL_TIMEOUT_S = 120.0
 
 
 def _setup_logging() -> None:
@@ -548,6 +550,30 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 "delete_objects",
                 {"names": names},
                 timeout_s=SCENE_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Boolean operation",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_boolean_op(
+        a: Annotated[str, Field(description="First mesh (kept material wins).")],
+        b: Annotated[str, Field(description="Second mesh; both inputs are consumed.")],
+        op: Annotated[Literal["union", "difference", "intersection"],
+                      Field(description="difference = a minus b.")],
+        new_name: Annotated[str, Field(min_length=1, description="Name for the result.")],
+    ) -> BooleanResult:
+        """Boolean two meshes. Auto-checkpoints first; deletes construction
+        history and collapses shading to one object-level material (per-face
+        shading does not survive booleans). Non-watertight results come back
+        ok with a warning + cleanup hint."""
+        return BooleanResult.model_validate(
+            maya.request(
+                "boolean_op", {"a": a, "b": b, "op": op, "new_name": new_name},
+                timeout_s=BOOL_TIMEOUT_S,
             )
         )
 
