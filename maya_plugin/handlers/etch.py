@@ -263,6 +263,16 @@ def etch_text(params: Dict[str, Any]) -> Dict[str, Any]:
         current = [(lo + hi) / 2.0 for lo, hi in zip(bbox[:3], bbox[3:])]
         offset = [t - c for t, c in zip(placement["translate"], current)]
         cmds.xform(glyph_tf, translation=offset, relative=True, worldSpace=True)
+        if mirror:
+            # A negative scale factor mirrors the mesh, which reverses its face
+            # winding: the cutter ends up inside-out, and polyBoolOp reads an
+            # inside-out operand as its own complement - so "difference"
+            # silently returned the INTERSECTION (the carve volume alone,
+            # 2 x 2.14 x 0.3) instead of the carved host. Reverse the winding
+            # back before the boolean. Done before the constructionHistory
+            # delete below so that delete bakes it out too - no history node
+            # survives (zero-orphan discipline).
+            cmds.polyNormal(glyph_tf, normalMode=0, userNormalMode=0)
         cmds.delete(glyph_tf, constructionHistory=True)  # freeze type network out
 
         result = modeling._do_boolean(

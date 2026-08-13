@@ -378,6 +378,45 @@ class TestEtchInMaya:
                 "face %d centre %r but normal %r" % (face, center, normal)
             )
 
+    def test_mirrored_etch_carves_the_host_not_the_cutter(self, tmp_path):
+        # Regression, found by the live smoke (redmine #577): mirror=True
+        # negates the cutter's X scale, which reverses its face winding.
+        # polyBoolOp reads an inside-out operand as its own complement, so
+        # "difference" quietly returned the INTERSECTION - the carve volume
+        # alone (2 x 2.14 x 0.3) instead of the carved 4x4x4 host. Both
+        # results are watertight and have a plausible triangle count, which
+        # is why every existing assertion stayed green.
+        #
+        # The host's bounding box is the discriminator: a difference keeps it,
+        # an intersection collapses it to the cutter.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import etch
+
+        if not cmds.loadPlugin("Type", quiet=True) and not cmds.pluginInfo(
+            "Type", query=True, loaded=True
+        ):
+            pytest.skip("Type plugin unavailable in standalone")
+        cmds.file(rename=str(tmp_path / "etch_mirror.ma"))
+        cmds.polyCube(name="mirrorplate", w=4, h=4, d=4)
+        host_bbox = cmds.exactWorldBoundingBox("|mirrorplate")
+
+        result = etch.etch_text(
+            {"mesh": "|mirrorplate", "text": "א", "face": 0, "width": 2.0,
+             "depth": 0.3, "mirror": True, "rotate_deg": 180.0}
+        )
+        assert result["watertight"] is True
+        carved_bbox = cmds.exactWorldBoundingBox(result["name"])
+        assert carved_bbox == pytest.approx(host_bbox, abs=1e-4), (
+            "mirrored etch returned a %r-sized solid; the host is %r - the "
+            "cutter's winding was not corrected, so difference became "
+            "intersection"
+            % ([round(hi - lo, 3) for lo, hi in zip(carved_bbox[:3], carved_bbox[3:])],
+               [round(hi - lo, 3) for lo, hi in zip(host_bbox[:3], host_bbox[3:])])
+        )
+        assert cmds.ls(type="type") == []
+        assert cmds.ls(type="typeExtrude") == []
+
     def test_sweep_runs_when_failure_happens_after_glyph_creation(self, monkeypatch, tmp_path):
         # face_frame_transform runs inside the try, after _create_glyph has
         # already built a real Type network - a failure there must still
