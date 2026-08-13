@@ -805,3 +805,152 @@ class TestDeformRemeshCleanupInMaya:
         # With the inverted-percentage bug, a 1600->400 target reduces by
         # ~4% (barely moves); the fix lands close to the 400 target.
         assert after_faces <= 500
+
+
+class TestM1AcceptanceGate:
+    def test_boolean_rune_cavity_undo_restore_zero_orphans(self, tmp_path):
+        import queue
+        import threading
+        import time
+
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import Dispatcher
+        from maya_plugin.maya_mcp_plugin import _build_handlers, _undo_hooks
+
+        cmds.file(rename=str(tmp_path / "gate.ma"))
+        undo_open, undo_close = _undo_hooks()
+
+        # Maya 2027's mayapy standalone mis-parses undoInfo(closeChunk=True)
+        # and any query=True command call when it runs on a thread other
+        # than the one that called maya.standalone.initialize() (raising a
+        # misleading "must be passed a boolean argument" TypeError).
+        # Production never hits this: PluginServer wires main_thread_exec to
+        # maya.utils.executeInMainThreadWithResult, which marshals every
+        # handler call onto Maya's real GUI main thread. That same call
+        # hangs forever here (headless mayapy has no Qt event loop to pump
+        # it), so it can't be reused verbatim for this gate. Instead the
+        # gate supplies its own main_thread_exec: a queue that THIS test
+        # method's thread — the pytest/mayapy main thread that initialized
+        # standalone (see the session-scoped maya_session fixture) — pumps
+        # below, while the actual call(...) sequence runs on a helper
+        # thread (handle_request() blocks its caller, so the thread doing
+        # the pumping cannot also be the one making the calls). Do not
+        # "simplify" this back to a bare Dispatcher(...) with no
+        # main_thread_exec (silently runs handlers on the wrong thread and
+        # hits the TypeError above) or to executeInMainThreadWithResult
+        # (deadlocks headless) — either "simplification" turns this gate
+        # into a deadlock or a false pass.
+        _SENTINEL = object()
+        work_queue: "queue.Queue" = queue.Queue()
+
+        def main_thread_exec(fn):
+            result_slot: dict = {}
+            done = threading.Event()
+            work_queue.put((fn, result_slot, done))
+            done.wait()
+            if "error" in result_slot:
+                raise result_slot["error"]
+            return result_slot["value"]
+
+        dispatcher = Dispatcher(
+            _build_handlers(),
+            main_thread_exec=main_thread_exec,
+            undo_open=undo_open,
+            undo_close=undo_close,
+        )
+
+        def call(cmd, **params):
+            frame = {"v": 1, "id": cmd, "cmd": cmd, "params": params}
+            response = dispatcher.handle_request(frame)
+            assert response["status"] == "ok", response
+            return response["result"]
+
+        helper_failure = []
+
+        def run_sequence():
+            try:
+                call("create_primitive", kind="cube", name="gate_block",
+                     scale=[2, 2, 2])
+                checkpoint = call("checkpoint", label="pre_cavity")
+
+                # rune cavity: a cutter cube booleaned out of the block
+                call("create_primitive", kind="cube", name="gate_cutter",
+                     translate=[0, 0, 1.0], scale=[0.6, 1.2, 0.4])
+                carved = call("boolean_op", a="|gate_block", b="|gate_cutter",
+                              op="difference", new_name="gate_carved")
+                assert carved["watertight"] is True
+                assert carved["tris"] > 12
+
+                # zero orphan history nodes, ever
+                assert cmds.ls(type="polyCBoolOp") == []
+                shape = cmds.listRelatives("|gate_carved", shapes=True,
+                                           fullPath=True)[0]
+                # cmds.listHistory returns short names on this Maya version (same
+                # quirk as the boolean/deform tests above), so resolve to
+                # canonical long names before comparing. Unrelated to threading:
+                # reproduces identically on the true main thread.
+                history = [(cmds.ls(h, long=True) or [h])[0]
+                           for h in cmds.listHistory(shape)]
+                assert history == [shape]
+
+                # undo the boolean: ONE step (the whole tool call was one chunk)
+                undone = call("undo", steps=1)
+                assert undone["undone"] == 1
+                assert cmds.objExists("gate_block") and cmds.objExists("gate_cutter")
+                assert not cmds.objExists("gate_carved")
+
+                # restore the pre-cavity checkpoint: block only, no cutter
+                restored = call("restore_checkpoint",
+                                checkpoint_id=checkpoint["checkpoint_id"])
+                assert restored["restored"] == checkpoint["checkpoint_id"]
+                assert cmds.objExists("gate_block")
+                assert not cmds.objExists("gate_cutter")
+                assert not cmds.objExists("gate_carved")
+
+                # scene-wide orphan sweep
+                for orphan_type in ("polyCBoolOp", "type", "typeExtrude", "groupParts"):
+                    assert cmds.ls(type=orphan_type) == [], orphan_type
+            except BaseException as exc:  # re-raised on the main thread below
+                helper_failure.append(exc)
+            finally:
+                # Always unblock the pump, success or failure, so a mid-sequence
+                # assertion failure (or any other exception) can never hang it.
+                work_queue.put(_SENTINEL)
+
+        helper = threading.Thread(
+            target=run_sequence, name="gate-sequence", daemon=True
+        )
+        helper.start()
+
+        deadline = time.monotonic() + 30.0
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise AssertionError(
+                        "gate pump timed out waiting for the helper thread "
+                        "(possible deadlock feeding main_thread_exec)"
+                    )
+                try:
+                    item = work_queue.get(timeout=remaining)
+                except queue.Empty:
+                    raise AssertionError(
+                        "gate pump timed out waiting for the helper thread "
+                        "(possible deadlock feeding main_thread_exec)"
+                    )
+                if item is _SENTINEL:
+                    break
+                fn, result_slot, done = item
+                try:
+                    result_slot["value"] = fn()
+                except BaseException as exc:  # propagate to the dispatcher worker intact
+                    result_slot["error"] = exc
+                finally:
+                    done.set()
+        finally:
+            helper.join(timeout=5.0)
+            dispatcher.shutdown()
+
+        if helper_failure:
+            raise helper_failure[0]
