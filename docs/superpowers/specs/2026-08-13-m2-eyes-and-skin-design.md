@@ -260,13 +260,26 @@ Rough order:
 
 ---
 
-## 7. Open questions for the plan
+## 7. Decisions (settled 2026-08-13, approved by the user)
 
-- Which shader attribute each texture recipe targets by default, per shader type
-  (`standardSurface` vs `lambert` differ in slot names).
-- Whether `hdri` preset requires a bundled default HDRI or errors without a
-  path.
-- Turntable frame count cap, and whether it shares `capture_viewport`'s
-  4-images-per-call ceiling (it produces one composite, so probably not).
-- Where `evals/` artifacts from the judged run live, and whether they are
-  committed.
+**Texture recipes target semantic slots, not raw attribute names.** Recipes name
+`color`, `roughness`, or `normal`; the tool maps each to the actual attribute
+for the mesh's shader type (`standardSurface.baseColor` vs `lambert.color`,
+`standardSurface.specularRoughness` vs nothing on `lambert`). A slot the shader
+genuinely lacks is a hinted error, never a silent no-op — a texture that
+connects to nothing and changes no pixels is exactly the failure mode this
+codebase keeps finding the expensive way.
+
+**No bundled HDRI.** The `hdri` preset errors without `hdri_path`. An HDRI is
+megabytes and carries its own licence; neither belongs in this repo. The error
+hint explains what to supply.
+
+**Turntable caps at 16 frames, defaults to 8.** It returns one composite, so
+`capture_viewport`'s 4-images-per-call token ceiling does not apply; the real
+limit is grid legibility, since a 32-cell sheet is unreadable at any sane
+resolution.
+
+**Judged-run artifacts are committed** as downscaled PNGs under `evals/`,
+matching the existing `evals/golem_run/` precedent. They are M2's only exit
+evidence, so they must survive the session. Scene files (`.mb`) stay
+gitignored.
