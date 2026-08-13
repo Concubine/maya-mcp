@@ -234,6 +234,35 @@ def test_invalid_preset_burns_no_checkpoint(monkeypatch):
     assert fake.deleted == []
 
 
+def test_build_three_point_sweeps_in_flight_light_on_xform_failure(monkeypatch):
+    # IMPORTANT: _build must record a created light's transform BEFORE the
+    # xform() call that can fail on it, mirroring _build_hdri. If it records
+    # only after xform succeeds, a failure on light N leaves lights 1..N-1
+    # swept but light N itself - already created via directionalLight() -
+    # never makes it into `created`, so it leaks as an orphan.
+    fake = FakeCmds()
+    monkeypatch.setattr(lighting, "_cmds", lambda: fake)
+    monkeypatch.setattr(lighting, "_auto_checkpoint", lambda reason: None)
+    before = set(fake.objects)
+
+    real_xform = fake.xform
+    calls = []
+
+    def _flaky_xform(name, **kw):
+        calls.append(name)
+        if len(calls) == 2:
+            raise RuntimeError("forced xform failure")
+        return real_xform(name, **kw)
+
+    monkeypatch.setattr(fake, "xform", _flaky_xform)
+
+    with pytest.raises(RuntimeError, match="forced xform failure"):
+        lighting.setup_lighting({"preset": "three_point", "replace_existing": False})
+
+    assert fake.objects == before, \
+        "the in-flight second light must be swept too, not just the completed first light"
+
+
 def test_build_hdri_sweeps_orphans_on_forced_connect_failure(monkeypatch, tmp_path):
     # IMPORTANT (I2): _build_hdri creates a light, then a file texture, then
     # connects them - a failure on the connect must not leave either behind.

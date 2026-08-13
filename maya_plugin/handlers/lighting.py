@@ -76,8 +76,8 @@ def _build(cmds, prefix: str, specs, intensity: float) -> List[str]:
             shape = cmds.directionalLight(name=name, intensity=intensity * factor)
             parents = cmds.listRelatives(shape, parent=True, fullPath=True) or []
             transform = parents[0] if parents else shape
-            cmds.xform(transform, rotation=rotate, worldSpace=True)
             created.append(transform)
+            cmds.xform(transform, rotation=rotate, worldSpace=True)
     except Exception:
         _sweep(cmds, created)
         raise

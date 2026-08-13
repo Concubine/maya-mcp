@@ -1310,6 +1310,40 @@ class TestLightingInMaya:
             "the orphaned light + file texture must be swept: %s" % (after - before)
         )
 
+    def test_build_three_point_sweeps_in_flight_light_on_xform_failure(self, monkeypatch, tmp_path):
+        # IMPORTANT: _build must record a created light's transform BEFORE
+        # the xform() call that can fail on it, mirroring _build_hdri. If it
+        # records only after xform succeeds, a failure on light N leaves
+        # lights 1..N-1 swept but light N itself - already created via
+        # directionalLight() - never makes it into `created`, so it leaks.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import lighting
+
+        cmds.file(new=True, force=True)
+        cmds.file(rename=str(tmp_path / "lighting_xform_sweep.ma"))
+        before = set(cmds.ls(long=True))
+
+        real_xform = cmds.xform
+        calls = []
+
+        def _flaky_xform(*args, **kwargs):
+            calls.append(args)
+            if len(calls) == 2:
+                raise RuntimeError("forced xform failure")
+            return real_xform(*args, **kwargs)
+
+        monkeypatch.setattr(cmds, "xform", _flaky_xform)
+
+        with pytest.raises(RuntimeError, match="forced xform failure"):
+            lighting.setup_lighting({"preset": "three_point", "replace_existing": False})
+
+        after = set(cmds.ls(long=True))
+        assert after == before, (
+            "the in-flight second light must be swept too, not just the "
+            "completed first light: %s" % (after - before)
+        )
+
     def test_lights_actually_light_the_scene(self, tmp_path):
         import maya.cmds as cmds
 
