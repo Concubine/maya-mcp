@@ -9,7 +9,7 @@ call never burns one (the correction M1 made to sculpt_ops/remesh).
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..dispatcher import HandlerError
 from . import naming
@@ -52,15 +52,35 @@ def _existing_light_transforms(cmds) -> List[str]:
     return out
 
 
+def _sweep(cmds, nodes: List[str]) -> None:
+    """Delete every node in `nodes` that still exists.
+
+    Used to clean up a partially-built rig on any failure path, so a raise
+    never leaves orphans behind - the house pattern from etch.py's
+    _TYPE_NODE_TYPES sweep, adapted here to a plain created-node list since
+    _build/_build_hdri create only nodes they name directly.
+    """
+    for node in nodes:
+        if cmds.objExists(node):
+            try:
+                cmds.delete(node)
+            except Exception:
+                pass
+
+
 def _build(cmds, prefix: str, specs, intensity: float) -> List[str]:
     created: List[str] = []
-    for suffix, factor, rotate in specs:
-        name = naming.unique_name(cmds, "%s_%s" % (prefix, suffix))
-        shape = cmds.directionalLight(name=name, intensity=intensity * factor)
-        parents = cmds.listRelatives(shape, parent=True, fullPath=True) or []
-        transform = parents[0] if parents else shape
-        cmds.xform(transform, rotation=rotate, worldSpace=True)
-        created.append(transform)
+    try:
+        for suffix, factor, rotate in specs:
+            name = naming.unique_name(cmds, "%s_%s" % (prefix, suffix))
+            shape = cmds.directionalLight(name=name, intensity=intensity * factor)
+            parents = cmds.listRelatives(shape, parent=True, fullPath=True) or []
+            transform = parents[0] if parents else shape
+            cmds.xform(transform, rotation=rotate, worldSpace=True)
+            created.append(transform)
+    except Exception:
+        _sweep(cmds, created)
+        raise
     return created
 
 
@@ -94,14 +114,13 @@ def setup_lighting(params: Dict[str, Any]) -> Dict[str, Any]:
     # checkpoint or delete anything.
     checkpoint_id: Optional[str] = None
     removed: List[str] = []
+    warnings: List[str] = []
     if replace_existing:
         existing = _existing_light_transforms(cmds)
         if existing:
             info = _auto_checkpoint("lighting")
             checkpoint_id = (info or {}).get("checkpoint_id")
-            for transform in existing:
-                cmds.delete(transform)
-                removed.append(transform.split("|")[-1])
+            removed, warnings = _replace_existing_lights(cmds, existing)
 
     if preset == "three_point":
         lights = _build(cmds, "mcpLight", _THREE_POINT, float(intensity))
@@ -115,8 +134,44 @@ def setup_lighting(params: Dict[str, Any]) -> Dict[str, Any]:
         "lights": lights,
         "removed": removed,
         "checkpoint_id": checkpoint_id,
-        "warnings": [],
+        "warnings": warnings,
     }
+
+
+def _replace_existing_lights(cmds, transforms: List[str]) -> Tuple[List[str], List[str]]:
+    """Remove prior lights, deleting a transform ONLY when it's left empty.
+
+    Deleting a transform in Maya deletes its whole subtree - every shape on
+    it and every node parented under it. So this never deletes a transform
+    directly: it deletes the light shape(s) first, then removes the
+    transform only if that leaves it holding nothing else (no other shape,
+    no child node). A transform that also carries a mesh, or has a locator
+    (or anything) parented under it, survives - callers find out via the
+    returned warnings.
+    """
+    removed: List[str] = []
+    warnings: List[str] = []
+    for transform in transforms:
+        if not cmds.objExists(transform):
+            continue
+        short = transform.split("|")[-1]
+        light_shapes = cmds.listRelatives(
+            transform, shapes=True, fullPath=True, type="light"
+        ) or []
+        for shape in light_shapes:
+            if cmds.objExists(shape):
+                cmds.delete(shape)
+        remaining = cmds.listRelatives(transform, children=True, fullPath=True) or []
+        if remaining:
+            kept = ", ".join(n.split("|")[-1] for n in remaining)
+            warnings.append(
+                "kept %s: still holds %s after its light was removed"
+                % (short, kept)
+            )
+            continue
+        cmds.delete(transform)
+        removed.append(short)
+    return removed, warnings
 
 
 def _build_hdri(cmds, hdri_path: str, intensity: float) -> List[str]:
@@ -125,12 +180,19 @@ def _build_hdri(cmds, hdri_path: str, intensity: float) -> List[str]:
     aiSkyDomeLight is Arnold-only, so this uses Maya's own light + file node
     to stay renderer-agnostic (compatibility rule, design doc 6).
     """
-    name = naming.unique_name(cmds, "mcpLight_dome")
-    shape = cmds.directionalLight(name=name, intensity=intensity)
-    parents = cmds.listRelatives(shape, parent=True, fullPath=True) or []
-    transform = parents[0] if parents else shape
-    tex = cmds.shadingNode("file", asTexture=True,
-                           name=naming.unique_name(cmds, "mcpLight_domeTex"))
-    cmds.setAttr(tex + ".fileTextureName", hdri_path, type="string")
-    cmds.connectAttr(tex + ".outColor", shape + ".color", force=True)
+    created: List[str] = []
+    try:
+        name = naming.unique_name(cmds, "mcpLight_dome")
+        shape = cmds.directionalLight(name=name, intensity=intensity)
+        parents = cmds.listRelatives(shape, parent=True, fullPath=True) or []
+        transform = parents[0] if parents else shape
+        created.append(transform)
+        tex = cmds.shadingNode("file", asTexture=True,
+                               name=naming.unique_name(cmds, "mcpLight_domeTex"))
+        created.append(tex)
+        cmds.setAttr(tex + ".fileTextureName", hdri_path, type="string")
+        cmds.connectAttr(tex + ".outColor", shape + ".color", force=True)
+    except Exception:
+        _sweep(cmds, created)
+        raise
     return [transform]

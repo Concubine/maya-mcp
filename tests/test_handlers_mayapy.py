@@ -1204,6 +1204,14 @@ class TestLightingInMaya:
     def test_replace_existing_removes_exactly_the_prior_lights(self, tmp_path):
         # A full node-count diff, not a spot check: this tool deletes user
         # work, and "removed one thing too many" is the failure that matters.
+        #
+        # The fixture also covers I1 (over-deletion, CRITICAL): a light
+        # transform that also carries a mesh shape, and a light transform
+        # with a child node parented under it. cmds.delete(transform)
+        # deletes the whole subtree, so a naive "delete the transform" pass
+        # would take the mesh and the child down with the light - that is
+        # exactly what the old code did, and why an earlier version of this
+        # fixture (light alone, no children, no co-located shapes) missed it.
         import maya.cmds as cmds
 
         from maya_plugin.handlers import lighting
@@ -1212,7 +1220,29 @@ class TestLightingInMaya:
         cmds.file(rename=str(tmp_path / "lighting.ma"))
         cmds.polyCube(name="keepme")
         cmds.spaceLocator(name="keepme_loc")
-        old = cmds.directionalLight(name="old_key")
+        old_shape = cmds.ls(cmds.directionalLight(name="old_key"), long=True)[0]
+        old_transform = cmds.listRelatives(old_shape, parent=True, fullPath=True)[0]
+
+        # A light transform that ALSO holds a mesh shape (two shapes, one
+        # transform) - reparent a cube's shape onto the light's transform.
+        shared_shape = cmds.ls(cmds.directionalLight(name="old_shared"), long=True)[0]
+        shared_transform = cmds.listRelatives(shared_shape, parent=True, fullPath=True)[0]
+        cube_tf = cmds.polyCube(name="shared_mesh_src")[0]
+        cube_shape = cmds.listRelatives(cube_tf, shapes=True, fullPath=True)[0]
+        cmds.parent(cube_shape, shared_transform, relative=True, shape=True)
+        cmds.delete(cube_tf)  # now-empty source transform; the shape lives on shared_transform
+        mesh_under_shared = [
+            s for s in cmds.listRelatives(shared_transform, shapes=True, fullPath=True) or []
+            if cmds.nodeType(s) == "mesh"
+        ][0]
+
+        # A light transform with a child node (a locator) parented under it.
+        child_shape = cmds.ls(cmds.directionalLight(name="old_with_child"), long=True)[0]
+        child_transform = cmds.listRelatives(child_shape, parent=True, fullPath=True)[0]
+        cmds.spaceLocator(name="old_with_child_loc")
+        cmds.parent("old_with_child_loc", child_transform)
+        child_loc = child_transform + "|old_with_child_loc"
+
         before = set(cmds.ls(long=True))
 
         result = lighting.setup_lighting(
@@ -1221,13 +1251,64 @@ class TestLightingInMaya:
 
         assert cmds.objExists("|keepme")
         assert cmds.objExists("|keepme_loc")
-        assert not cmds.objExists("|old_key")
+        # the isolated light: fully removed, transform included
+        assert not cmds.objExists(old_transform)
+        assert not cmds.objExists(old_shape)
+        # the mesh-sharing transform: light shape gone, transform + mesh survive
+        assert not cmds.objExists(shared_shape)
+        assert cmds.objExists(shared_transform)
+        assert cmds.objExists(mesh_under_shared)
+        # the transform with a child locator: light shape gone, transform + child survive
+        assert not cmds.objExists(child_shape)
+        assert cmds.objExists(child_transform)
+        assert cmds.objExists(child_loc)
+
         assert len(result["lights"]) == 3
         assert result["removed"] == ["old_key"]
-        # every surviving pre-existing node is still there
+        assert len(result["warnings"]) == 2, \
+            "the two spared transforms (shared mesh, child locator) must be surfaced"
+
+        # every surviving pre-existing node is still there - a full set
+        # diff against exactly the nodes that were legitimately deleted
         after = set(cmds.ls(long=True))
-        vanished = {n for n in before - after if "old_key" not in n}
-        assert vanished == set(), "setup_lighting deleted more than the lights: %s" % vanished
+        expected_vanished = {old_transform, old_shape, shared_shape, child_shape}
+        vanished = before - after
+        assert vanished == expected_vanished, (
+            "setup_lighting deleted more or less than the light shapes/isolated "
+            "transform: extra=%s missing=%s"
+            % (vanished - expected_vanished, expected_vanished - vanished)
+        )
+
+    def test_build_hdri_sweeps_orphans_on_forced_connect_failure(self, monkeypatch, tmp_path):
+        # IMPORTANT (I2): _build_hdri creates a light, then a file texture,
+        # then connects them - a failure on the connect must not leave
+        # either behind. This runs after the delete step, so a miss here
+        # means prior lights are already gone AND stray half-built nodes
+        # remain.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import lighting
+
+        cmds.file(new=True, force=True)
+        cmds.file(rename=str(tmp_path / "lighting_hdri_sweep.ma"))
+        before = set(cmds.ls(long=True))
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("forced connectAttr failure")
+
+        monkeypatch.setattr(cmds, "connectAttr", _boom)
+
+        with pytest.raises(RuntimeError, match="forced connectAttr failure"):
+            lighting.setup_lighting({
+                "preset": "hdri",
+                "hdri_path": str(tmp_path / "sky.hdr"),
+                "replace_existing": False,
+            })
+
+        after = set(cmds.ls(long=True))
+        assert after == before, (
+            "the orphaned light + file texture must be swept: %s" % (after - before)
+        )
 
     def test_lights_actually_light_the_scene(self, tmp_path):
         import maya.cmds as cmds
