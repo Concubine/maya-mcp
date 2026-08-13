@@ -13,8 +13,8 @@ from PIL import Image as PILImage
 from maya_mcp import refstore, server as server_mod
 
 
-def png_b64(width=1024, height=1024):
-    img = PILImage.new("RGB", (width, height), (140, 100, 70))
+def png_b64(width=1024, height=1024, color=(140, 100, 70)):
+    img = PILImage.new("RGB", (width, height), color)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("ascii")
@@ -568,10 +568,14 @@ class TestReferenceImages:
         assert conn.calls == []  # server-side store, never touches Maya
 
     def test_compare_to_reference_returns_side_by_side_image_left_reference_right_viewport(self):
+        # Reference color: bright red; viewport color: bright blue
+        ref_color = (255, 0, 0)
+        viewport_color = (0, 0, 255)
+
         conn = FakeConn(
             responses={
                 "capture_viewport": {
-                    "images": [{"angle": "three_quarter", "png_b64": png_b64(64, 64)}],
+                    "images": [{"angle": "three_quarter", "png_b64": png_b64(64, 64, color=viewport_color)}],
                     "camera_positions": [],
                 }
             }
@@ -580,7 +584,7 @@ class TestReferenceImages:
         run(
             mcp.call_tool(
                 "maya_load_reference_image",
-                {"source": png_b64(32, 32), "ref_id": "hero"},
+                {"source": png_b64(32, 32, color=ref_color), "ref_id": "hero"},
             )
         )
         result = run(mcp.call_tool("maya_compare_to_reference", {"ref_id": "hero"}))
@@ -594,6 +598,21 @@ class TestReferenceImages:
         assert composite.height == 64
         assert any("hero" in t.text and "three_quarter" in t.text for t in text_blocks)
         assert conn.calls[0]["cmd"] == "capture_viewport"
+
+        # Verify the image placement: reference on left, viewport on right.
+        # The 8px gap separates them; sample well inside each half to avoid edges.
+        # Left panel should be at least 32px (the scaled reference width).
+        left_sample_x = 15  # well inside the left half
+        right_sample_x = composite.width - 15  # well inside the right half
+        center_y = composite.height // 2
+
+        left_pixel = composite.getpixel((left_sample_x, center_y))
+        right_pixel = composite.getpixel((right_sample_x, center_y))
+
+        # Left side should have reference color (red)
+        assert left_pixel == ref_color, f"Left pixel {left_pixel} != reference color {ref_color}"
+        # Right side should have viewport color (blue)
+        assert right_pixel == viewport_color, f"Right pixel {right_pixel} != viewport color {viewport_color}"
 
     def test_compare_to_reference_unknown_ref_id_errors_naming_loaded_ids(self):
         conn = FakeConn(responses={"capture_viewport": {"images": [], "camera_positions": []}})
