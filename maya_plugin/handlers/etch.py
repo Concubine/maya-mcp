@@ -98,12 +98,20 @@ def _create_glyph(cmds, text: str, font: str) -> str:
         newly_loaded = cmds.loadPlugin("Type", quiet=True)
     except RuntimeError:
         newly_loaded = None
-    if not newly_loaded and not cmds.pluginInfo("Type", query=True, loaded=True):
-        raise HandlerError(
-            "the Type plugin is not available in this Maya",
-            hint="etch needs Maya's Type tool; carve with maya_boolean_op "
-            "and a custom cutter mesh instead",
-        )
+    if not newly_loaded:
+        try:
+            loaded = cmds.pluginInfo("Type", query=True, loaded=True)
+        except Exception:
+            # pluginInfo itself raises for a plugin Maya has never registered,
+            # rather than returning a falsy value - treat that the same as
+            # "not loaded" so we still surface the intended HandlerError.
+            loaded = False
+        if not loaded:
+            raise HandlerError(
+                "the Type plugin is not available in this Maya",
+                hint="etch needs Maya's Type tool; carve with maya_boolean_op "
+                "and a custom cutter mesh instead",
+            )
     import maya.mel as mel  # noqa: PLC0415
 
     before = set(cmds.ls(type="transform"))
@@ -187,8 +195,9 @@ def etch_text(params: Dict[str, Any]) -> Dict[str, Any]:
             return set()
 
     node_snapshot = {t: _ls_safe(t) for t in _TYPE_NODE_TYPES}
-    glyph_tf = _create_glyph(cmds, text, font)
+    glyph_tf = None
     try:
+        glyph_tf = _create_glyph(cmds, text, font)
         bbox = cmds.exactWorldBoundingBox(glyph_tf)
         placement = face_frame_transform(center, normal, bbox[:3], bbox[3:], width, depth)
         scale = placement["scale"]

@@ -345,3 +345,58 @@ class TestEtchInMaya:
         # zero orphans from the Type network
         assert cmds.ls(type="type") == []
         assert cmds.ls(type="typeExtrude") == []
+
+    def test_sweep_runs_when_failure_happens_after_glyph_creation(self, monkeypatch, tmp_path):
+        # face_frame_transform runs inside the try, after _create_glyph has
+        # already built a real Type network - a failure there must still
+        # trigger the finally sweep.
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import etch
+
+        if not cmds.loadPlugin("Type", quiet=True):
+            pytest.skip("Type plugin unavailable in standalone")
+        cmds.file(rename=str(tmp_path / "etch_sweep_frame.ma"))
+        cmds.polyCube(name="plate", w=2, h=1, d=0.3)
+
+        def _boom(*args, **kwargs):
+            raise HandlerError("forced face_frame_transform failure")
+
+        monkeypatch.setattr(etch, "face_frame_transform", _boom)
+
+        with pytest.raises(HandlerError, match="forced face_frame_transform failure"):
+            etch.etch_text({"mesh": "|plate", "text": "א", "face": 0})
+
+        assert cmds.ls(type="type") == []
+        assert cmds.ls(type="typeExtrude") == []
+
+    def test_sweep_runs_when_create_glyph_itself_fails_after_type_node_created(
+        self, monkeypatch, tmp_path
+    ):
+        # Reproduces the exact orphan path from the review finding: a real
+        # Type network gets created (via CreatePolygonType), then the glyph
+        # builder raises before returning - the old code ran _create_glyph
+        # BEFORE the try, so this sweep never fired.
+        import maya.cmds as cmds
+        import maya.mel as mel
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import etch
+
+        if not cmds.loadPlugin("Type", quiet=True):
+            pytest.skip("Type plugin unavailable in standalone")
+        cmds.file(rename=str(tmp_path / "etch_sweep_create.ma"))
+        cmds.polyCube(name="plate", w=2, h=1, d=0.3)
+
+        def _fake_create_glyph(cmds_arg, text, font):
+            mel.eval("CreatePolygonType;")
+            raise HandlerError("forced create_glyph failure after real node creation")
+
+        monkeypatch.setattr(etch, "_create_glyph", _fake_create_glyph)
+
+        with pytest.raises(HandlerError, match="forced create_glyph failure"):
+            etch.etch_text({"mesh": "|plate", "text": "א", "face": 0})
+
+        assert cmds.ls(type="type") == []
+        assert cmds.ls(type="typeExtrude") == []
