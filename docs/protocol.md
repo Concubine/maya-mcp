@@ -120,3 +120,29 @@ Viewport and camera:
 |---|---|---|
 | `set_viewport` | `{ show_grid?, show_light_icons?, show_camera_icons?, show_locators?, show_manipulators?, show_texture_placements?, wireframe_on_shaded?, display_lights? }` | `{ panel, show_grid, ..., camera }` |
 | `set_camera` | `{ camera?, position?, look_at?, focal_length?, set_active? }` | `{ name, position, rotation, warnings }` |
+
+## Commands (M2)
+
+Perception:
+
+| cmd | params | result |
+|---|---|---|
+| `get_object_info` | `{ name, include? }` | `{ name, transform?, mesh_stats?, uvs?, shading?, history? }` |
+| `capture_turntable` | `{ target?, n_frames?, resolution?, shading?, lighting?, shadows? }` | `{ images: [{index, azimuth, png_b64}], n_frames }` |
+
+Lighting and materials:
+
+| cmd | params | result |
+|---|---|---|
+| `setup_lighting` | `{ preset, intensity?, hdri_path?, replace_existing? }` | `{ preset, lights: [...], removed: [...], checkpoint_id?, warnings }` |
+| `assign_material` | `{ mesh, shader?, params?, name? }` | `{ mesh, material, shading_group, shader, warnings }` |
+| `apply_texture_recipe` | `{ mesh, recipe, params?, slot? }` | `{ mesh, recipe, slot, nodes: [...], warnings }` |
+
+**Server-side only, no plugin command:** `maya_load_reference_image` and
+`maya_compare_to_reference` (the two remaining M2 tools in `src/maya_mcp/server.py`) never
+cross the wire to the plugin. Reference images live in an in-process `ReferenceStore` on the
+MCP server itself — held per server run, not per Maya scene, so they survive `new_scene` and
+never touch the file on disk. `compare_to_reference` composites its stored reference against a
+fresh `capture_viewport` result (a command that IS on the list above) entirely on the server
+side. This is why the M2 tool count (7, README's table) and the M2 command count above (5) don't
+match — reconcile them by the two lists here, not by assuming a 1:1 tool-to-command mapping.
