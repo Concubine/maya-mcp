@@ -76,6 +76,8 @@ class TestRegistration:
             "maya_etch_text",
             "maya_sculpt_ops",
             "maya_deform",
+            "maya_combine",
+            "maya_uv_atlas",
             "maya_remesh_retopo",
             "maya_mesh_cleanup",
             "maya_set_viewport",
