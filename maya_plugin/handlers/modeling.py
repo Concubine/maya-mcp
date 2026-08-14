@@ -22,6 +22,13 @@ PRIMITIVE_KINDS = (
 # form stays faceted instead of Maya's optional fan-subdivided cap.
 _PRISM_SIDES = 3
 _PYRAMID_SIDES = 4
+
+# Widths Maya produces at its default size argument, measured in mayapy on this
+# Maya (see create_primitive's unit-box comment). Their reciprocals are the
+# arguments that give a 1-unit-wide result. Radius-based kinds are not listed:
+# for those the argument is simply half the width.
+_ICOSAHEDRON_WIDTH_AT_UNIT_RADIUS = 1.7013
+_PYRAMID_WIDTH_AT_UNIT_SIDE = 1.4142  # square base across the diagonal
 MAX_DIVISIONS = 200
 # `divisions` is a multiplier, not a face count, and the multiplier differs
 # wildly per kind: cube spends it linearly per axis (6*d^2 faces) while sphere
@@ -153,6 +160,17 @@ def create_primitive(params: Dict[str, Any]) -> Dict[str, Any]:
     cmds = _cmds()
     name = naming.unique_name(cmds, requested)
 
+    # Every kind is built to fill a 1-unit box - largest dimension exactly 1 -
+    # so `scale` means the same thing whichever kind you pick. Maya's own
+    # defaults do not agree: measured in mayapy, cube 1.0 across,
+    # sphere/cone/cylinder/octahedron 2.0, icosahedron 1.701, prism 0.866,
+    # pyramid 1.414, torus 3.0. Swapping `kind` at a fixed scale therefore
+    # silently resized the object, and the gem-brute run built solids at twice
+    # the size it asked for (redmine #584).
+    #
+    # The box, not the width: a triangular prism and a square pyramid have
+    # non-square footprints, so "same width" and "same size" are different
+    # promises and only the box is keepable for every kind.
     creators = {
         "cube": lambda: cmds.polyCube(
             name=name, constructionHistory=False,
@@ -164,36 +182,47 @@ def create_primitive(params: Dict[str, Any]) -> Dict[str, Any]:
             subdivisionsWidth=divisions, subdivisionsHeight=divisions,
         ),
         "sphere": lambda: cmds.polySphere(
-            name=name, constructionHistory=False,
+            name=name, constructionHistory=False, radius=0.5,
             subdivisionsAxis=20 * divisions, subdivisionsHeight=20 * divisions,
         ),
         "cylinder": lambda: cmds.polyCylinder(
-            name=name, constructionHistory=False,
+            name=name, constructionHistory=False, radius=0.5, height=1.0,
             subdivisionsAxis=20 * divisions, subdivisionsHeight=divisions,
         ),
         "cone": lambda: cmds.polyCone(
-            name=name, constructionHistory=False,
+            name=name, constructionHistory=False, radius=0.5, height=1.0,
             subdivisionsAxis=20 * divisions, subdivisionsHeight=divisions,
         ),
+        # Outer diameter = 2 * (radius + sectionRadius); a third and a sixth
+        # keep Maya's 2:1 ring-to-tube proportion inside a unit width.
         "torus": lambda: cmds.polyTorus(
             name=name, constructionHistory=False,
+            radius=1.0 / 3.0, sectionRadius=1.0 / 6.0,
             subdivisionsAxis=20 * divisions, subdivisionsHeight=20 * divisions,
         ),
         # solidType: 1=icosahedron, 2=octahedron (this Maya version) - no
         # subdivision flags exist, so divisions is accepted but has no effect.
         "octahedron": lambda: cmds.polyPlatonicSolid(
-            name=name, constructionHistory=False, solidType=2,
+            name=name, constructionHistory=False, solidType=2, radius=0.5,
         ),
         "icosahedron": lambda: cmds.polyPlatonicSolid(
             name=name, constructionHistory=False, solidType=1,
+            radius=1.0 / _ICOSAHEDRON_WIDTH_AT_UNIT_RADIUS,
         ),
+        # A triangular footprint is not square: at sideLength 1 the prism spans
+        # 1.0 across a corner and 0.866 across the flats, so it already fills
+        # the unit box and only its height needs normalising.
         "prism": lambda: cmds.polyPrism(
             name=name, constructionHistory=False,
+            sideLength=1.0, length=1.0,
             numberOfSides=_PRISM_SIDES, subdivisionsHeight=divisions,
             subdivisionsCaps=0,
         ),
+        # A pyramid's height follows its side length, so a unit-wide pyramid is
+        # half a unit tall. That is the shape, not a normalisation miss.
         "pyramid": lambda: cmds.polyPyramid(
             name=name, constructionHistory=False,
+            sideLength=1.0 / _PYRAMID_WIDTH_AT_UNIT_SIDE,
             numberOfSides=_PYRAMID_SIDES, subdivisionsHeight=divisions,
             subdivisionsCaps=0,
         ),

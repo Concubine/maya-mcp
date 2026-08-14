@@ -666,7 +666,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 "with a fixed face count (divisions has no effect); prism is "
                 "a 3-sided, pyramid a 4-sided low-poly faceted form (divisions "
                 "sets height subdivisions). Use these for cut-gem/crystalline "
-                "forms - a bevelled cube is not the only faceted primitive."
+                "forms - a bevelled cube is not the only faceted primitive. "
+                "Every kind fills the same 1-unit box at scale 1, so switching "
+                "kind never changes the size."
             )),
         ],
         name: Annotated[str, Field(min_length=1, description=(
