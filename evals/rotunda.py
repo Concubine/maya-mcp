@@ -244,6 +244,44 @@ def render(label, angles, zoom=1.25, resolution=768, samples=4):
                             json.dumps(images.pixel_stats(png))))
 
 
+def organise():
+    """Separate the BUILDING from the STUDIO, and say which is which.
+
+    The four backdrop walls and the ground exist only so a render has a
+    background and so transmissive materials have something behind them to
+    refract. They are lighting equipment, not the model - but until now they
+    sat loose in the same namespace as the rotunda, so opening the scene in
+    Maya showed a 26-unit building apparently impaled by 800-unit walls with
+    nothing to say which was which.
+
+    Anything meant to leave this scene as an asset goes under |rotunda.
+    Everything that is scaffolding goes under |studio, so it can be hidden or
+    deleted in one action.
+    """
+    ok(call("group", {"names": ["|" + n for n in _built],
+                      "group_name": "rotunda"}, 180.0), "group the building")
+    ok(call("group", {"names": ["|" + n for n, _k, _t, _r, _s, _c in ENVIRONMENT],
+                      "group_name": "studio"}, 180.0), "group the studio")
+
+
+def export(fbx_path, scene_path):
+    """Write the building alone to FBX, with the studio excluded."""
+    ok(call("save_scene", {"path": scene_path}, 300.0), "save scene")
+    code = (
+        "import maya.cmds as cmds\n"
+        "cmds.loadPlugin('fbxmaya', quiet=True)\n"
+        "cmds.select('|rotunda', replace=True, hierarchy=True)\n"
+        "cmds.file(r'%s', force=True, type='FBX export', pr=True, es=True)\n"
+        "result = cmds.polyEvaluate('|rotunda', triangle=True)\n" % fbx_path
+    )
+    out = ok(call("execute_python", {"code": code}, 300.0), "export fbx")
+    if out.get("traceback"):
+        print("FBX EXPORT FAILED:\n%s" % out["traceback"][:600])
+        sys.exit(1)
+    print("exported %s (tris: %s)" % (os.path.basename(fbx_path),
+                                      out.get("result_repr")))
+
+
 if __name__ == "__main__":
     label = sys.argv[1] if len(sys.argv) > 1 else "r1"
     angles = sys.argv[2].split(",") if len(sys.argv) > 2 else ["three_quarter"]
@@ -252,3 +290,8 @@ if __name__ == "__main__":
     print("%d objects from %d authored rows (%d step copies, %d column copies)"
           % (len(_built), authored, steps, columns))
     render(label, angles, zoom)
+    organise()
+    if os.environ.get("ROTUNDA_EXPORT") == "1":
+        os.makedirs(OUT_DIR, exist_ok=True)
+        export(os.path.join(OUT_DIR, "rotunda.fbx"),
+               os.path.join(OUT_DIR, "rotunda.ma"))
