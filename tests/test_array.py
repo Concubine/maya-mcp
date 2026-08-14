@@ -45,7 +45,16 @@ class FakeCmds:
         grp = "|" + name
         self.objects.append(grp)
         for m in members:
-            self.parents[m] = grp
+            # Maya reparents on group(): the child's long name changes to
+            # <groupLongName>|<childShortName>. Keep self.objects in sync so
+            # naming.require_object (via cmds.ls) still resolves the child.
+            if m in self.objects:
+                self.objects.remove(m)
+            short = m.split("|")[-1]
+            new_long = grp + "|" + short
+            self.objects.append(new_long)
+            self.parents.pop(m, None)
+            self.parents[new_long] = grp
         self.calls.append(("group", grp))
         return grp
 
@@ -96,6 +105,13 @@ class FakeCmds:
         self.calls.append(("polyNormal", name))
 
     def listRelatives(self, name, **kwargs):
+        if kwargs.get("children"):
+            prefix = name + "|"
+            children = [
+                o for o in self.objects
+                if o.startswith(prefix) and "|" not in o[len(prefix):]
+            ]
+            return children or None
         return None
 
     def nodeType(self, name):
@@ -219,6 +235,36 @@ class TestNamingAndGrouping:
         )
         assert result["group"] is not None
         assert ("group", result["group"]) in fake.calls
+        # Grouping reparents the copies, so the names the caller gets back
+        # must be the real post-group long paths, not the stale pre-group
+        # ones - those no longer resolve to anything in the scene.
+        assert len(result["names"]) == 2
+        for name in result["names"]:
+            assert name.startswith(result["group"] + "|")
+            assert name not in ("|tooth_1", "|tooth_2")
+
+    def test_group_reparented_names_reach_the_ledger(self, fake, monkeypatch):
+        """The ledger must be handed the post-group long names, not the
+        stale pre-group ones - otherwise it would silently record paths
+        that no longer resolve in the scene.
+
+        This is mutation-sensitive: deleting the
+        `if len(children) == len(names): names = children` rebind in
+        array.py makes ledger.record get called with the stale `|tooth_N`
+        names instead of `|gear|tooth_N`, and the startswith assertion
+        below catches that.
+        """
+        recorded = []
+        monkeypatch.setattr(
+            array.ledger, "record", lambda cmds, name: recorded.append(name)
+        )
+        result = array.array(
+            {"name": "|tooth", "mode": "radial", "count": 3, "group_name": "gear"}
+        )
+        assert recorded == result["names"]
+        assert recorded  # non-empty: the assertion below isn't vacuous
+        for name in recorded:
+            assert name.startswith(result["group"] + "|")
 
     def test_source_is_never_reparented(self, fake):
         array.array(

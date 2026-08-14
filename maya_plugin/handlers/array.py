@@ -139,7 +139,7 @@ def array(params: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _mirror(cmds, source: str, prefix: str, params: Dict[str, Any]) -> Tuple[List[str], float, List[str]]:
+def _mirror(cmds, source: str, prefix: str, params: Dict[str, Any]) -> Tuple[List[str], Optional[float], List[str]]:
     raise HandlerError(
         "mirror mode is not implemented yet",
         hint="use mode='radial' or mode='linear'",
