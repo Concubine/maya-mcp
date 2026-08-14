@@ -10,7 +10,7 @@ that hid a live-only bug through a green suite in #584.
 import pytest
 
 from maya_plugin.dispatcher import HandlerError
-from maya_plugin.handlers import array
+from maya_plugin.handlers import array, ledger
 
 
 class FakeCmds:
@@ -123,6 +123,13 @@ def fake(monkeypatch):
     f = FakeCmds()
     monkeypatch.setattr(array, "_cmds", lambda: f)
     return f
+
+
+@pytest.fixture(autouse=True)
+def clean_ledger():
+    ledger.clear()
+    yield
+    ledger.clear()
 
 
 class TestValidation:
@@ -273,3 +280,80 @@ class TestNamingAndGrouping:
         # Grouping the user's own object under our new group would silently
         # move it in the hierarchy; only the copies belong to us.
         assert "|tooth" not in fake.parents
+
+
+class TestMirror:
+    def test_makes_exactly_one_copy(self, fake):
+        result = array.array({"name": "|tooth", "mode": "mirror", "axis": "x"})
+        assert len(result["names"]) == 1
+
+    def test_count_is_ignored(self, fake):
+        # A mirror has one image. Accepting count and quietly ignoring it would
+        # be worse than either honouring or rejecting it, so it is documented
+        # as ignored and this test pins that.
+        result = array.array(
+            {"name": "|tooth", "mode": "mirror", "axis": "x", "count": 9}
+        )
+        assert len(result["names"]) == 1
+
+    def test_negative_scale_goes_on_a_group_not_on_the_copy(self, fake):
+        # THE correctness test. Negating scale on the object composes as
+        # T*R*S*M, but a true reflection is M*T*R*S. Those agree only when the
+        # object's rotation commutes with the mirror - i.e. for an unrotated
+        # object. A group carrying the -1 composes on the correct side.
+        array.array({"name": "|tooth", "mode": "mirror", "axis": "x"})
+        scaled = [plug for op, plug in fake.calls if op == "setAttr"]
+        assert scaled, "mirror set no scale at all"
+        assert all("tooth_1" not in plug for plug in scaled), (
+            "the -1 scale was applied to the copy itself: %s" % scaled
+        )
+
+    def test_scale_is_negative_one_on_the_named_axis(self, fake):
+        array.array({"name": "|tooth", "mode": "mirror", "axis": "z"})
+        plug, value = next(
+            (p, fake.attrs[p]) for op, p in fake.calls if op == "setAttr"
+        )
+        assert plug.endswith(".scaleZ")
+        assert value == -1.0
+
+    def test_freezes_before_reversing_normals(self, fake):
+        # Order is load-bearing: polyNormal before the freeze reverses winding
+        # that the freeze then inverts straight back, and the result is a
+        # correctly-placed mesh that renders inside out.
+        array.array({"name": "|tooth", "mode": "mirror", "axis": "x"})
+        ops = [op for op, _ in fake.calls]
+        assert "makeIdentity" in ops and "polyNormal" in ops
+        assert ops.index("makeIdentity") < ops.index("polyNormal")
+
+    def test_reverses_normals_exactly_once(self, fake):
+        array.array({"name": "|tooth", "mode": "mirror", "axis": "x"})
+        assert [op for op, _ in fake.calls].count("polyNormal") == 1
+
+    def test_temporary_group_is_deleted(self, fake):
+        result = array.array({"name": "|tooth", "mode": "mirror", "axis": "x"})
+        deleted = [target for op, target in fake.calls if op == "delete"]
+        assert any("mirror" in d.lower() for d in deleted), (
+            "the temporary mirror group was left in the scene: %s" % deleted
+        )
+        assert result["group"] is None
+
+    def test_warns_when_signed_volume_is_not_positive(self, fake, monkeypatch):
+        # If Maya ever declines to freeze, or a future edit drops the normal
+        # reversal, the tool must say so rather than hand back a black mesh.
+        monkeypatch.setattr(array, "_mesh_signed_volume", lambda cmds, name: -4.0)
+        result = array.array({"name": "|tooth", "mode": "mirror", "axis": "x"})
+        assert result["signed_volume"] == -4.0
+        assert any("winding" in w.lower() for w in result["warnings"])
+
+    def test_no_warning_when_signed_volume_is_positive(self, fake, monkeypatch):
+        monkeypatch.setattr(array, "_mesh_signed_volume", lambda cmds, name: 4.0)
+        result = array.array({"name": "|tooth", "mode": "mirror", "axis": "x"})
+        assert not any("winding" in w.lower() for w in result["warnings"])
+
+    def test_unmeasurable_volume_is_reported_not_guessed(self, fake, monkeypatch):
+        # A non-closed mesh has no meaningful signed volume. Returning None and
+        # saying so beats inventing a number that looks like a pass.
+        monkeypatch.setattr(array, "_mesh_signed_volume", lambda cmds, name: None)
+        result = array.array({"name": "|tooth", "mode": "mirror", "axis": "x"})
+        assert result["signed_volume"] is None
+        assert not any("winding" in w.lower() for w in result["warnings"])

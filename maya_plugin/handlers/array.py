@@ -139,8 +139,74 @@ def array(params: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _mirror(cmds, source: str, prefix: str, params: Dict[str, Any]) -> Tuple[List[str], Optional[float], List[str]]:
-    raise HandlerError(
-        "mirror mode is not implemented yet",
-        hint="use mode='radial' or mode='linear'",
-    )
+def _mesh_signed_volume(cmds, transform: str) -> Optional[float]:
+    """Signed volume of `transform`'s mesh in world space, or None if unmeasurable.
+
+    Positive means outward winding. Negative means the faces point inward,
+    which under Arnold renders black or hollow and reads as a lighting failure.
+    """
+    try:
+        import maya.api.OpenMaya as om  # noqa: PLC0415
+
+        sel = om.MSelectionList()
+        sel.add(transform)
+        dag = sel.getDagPath(0)
+        dag.extendToShape()
+        mesh = om.MFnMesh(dag)
+        points = [(p.x, p.y, p.z) for p in mesh.getPoints(om.MSpace.kWorld)]
+        _counts, indices = mesh.getTriangles()
+        triangles = [
+            (indices[i], indices[i + 1], indices[i + 2])
+            for i in range(0, len(indices), 3)
+        ]
+    except Exception:
+        return None
+    if not triangles:
+        return None
+    return arraymath.signed_volume(points, triangles)
+
+
+def _mirror(
+    cmds, source: str, prefix: str, params: Dict[str, Any]
+) -> Tuple[List[str], Optional[float], List[str]]:
+    """One copy, reflected across the world plane perpendicular to `axis`.
+
+    Two traps, both encoded here.
+
+    The reflection goes on a temporary PARENT GROUP rather than on the copy's
+    own scale. Negating a channel on the object composes as T*R*S*M, but a true
+    reflection is M*T*R*S; those agree only when the object's rotation commutes
+    with the mirror. An arm rotated outward, mirrored the naive way, lands in
+    the wrong orientation - subtly, and invisibly at thumbnail scale.
+
+    Then the freeze inverts face winding, because any negative scale does. The
+    normals are reversed after the freeze (never before - doing it first just
+    gets undone), and the result is MEASURED rather than assumed.
+    """
+    idx = arraymath.axis_index(params.get("axis", "x"))
+    pivot = arraymath.resolve_vec3(params.get("pivot"), "pivot", [0.0, 0.0, 0.0])
+
+    copy = _duplicate(cmds, source, prefix, 1)
+    grp = cmds.group(copy, world=True, name=naming.unique_name(cmds, "%s_mirrorGrp" % prefix))
+    grp = _long(cmds, grp)
+    cmds.xform(grp, worldSpace=True, pivots=tuple(pivot))
+    cmds.setAttr("%s.scale%s" % (grp, "XYZ"[idx]), -1.0)
+    cmds.makeIdentity(grp, apply=True, translate=True, rotate=True, scale=True, normal=0)
+
+    unparented = cmds.parent(copy, world=True) or [copy]
+    copy = _long(cmds, unparented[0])
+    cmds.delete(grp)
+
+    cmds.polyNormal(copy, normalMode=0, constructionHistory=False)
+    cmds.delete(copy, constructionHistory=True)
+
+    signed = _mesh_signed_volume(cmds, copy)
+    warnings: List[str] = []
+    if signed is not None and signed <= 0.0:
+        warnings.append(
+            "%s has signed volume %.4f: its winding is inverted, faces point "
+            "INWARD. It will render black or hollow, which looks like a "
+            "lighting failure and is not one. The mirror's normal reversal "
+            "did not take." % (copy, signed)
+        )
+    return [copy], signed, warnings
