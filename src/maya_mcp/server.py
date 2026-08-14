@@ -777,12 +777,14 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "always makes exactly one copy."
         ))] = 2,
         axis: Annotated[
-            Literal["x", "y", "z"],
+            Optional[Literal["x", "y", "z"]],
             Field(description=(
-                "radial: the axis copies rotate about, right-hand rule. mirror: the "
-                "axis the reflection plane is perpendicular to."
+                "radial: the axis copies rotate about, right-hand rule. Defaults to "
+                "'y' (a ring lying flat in the XZ plane). mirror: the axis the "
+                "reflection plane is perpendicular to. Defaults to 'x' (bilateral "
+                "left/right symmetry)."
             )),
-        ] = "y",
+        ] = None,
         center: Annotated[Optional[List[float]], Field(description=(
             "radial only: world point the axis passes through. There is no radius "
             "parameter - the source's existing distance from this point IS the "

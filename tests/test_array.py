@@ -193,6 +193,21 @@ class TestRadial:
         result = array.array({"name": "|tooth", "mode": "radial", "count": 3})
         assert result["signed_volume"] is None
 
+    def test_defaults_to_y_axis_when_axis_key_is_absent(self, fake):
+        array.array({"name": "|tooth", "mode": "radial", "count": 4})
+        first = fake.xforms[[c[1] for c in fake.calls if c[0] == "rotate"][0]][-1]
+        assert first["rotate"][0] == 0.0 and first["rotate"][2] == 0.0
+        assert first["rotate"][1] != 0.0
+
+    def test_defaults_to_y_axis_when_axis_is_explicitly_none(self, fake):
+        # A tool that always sends the axis key (even when the caller didn't
+        # name one) must forward it as None, not silently drop it - so the
+        # fallback has to survive an explicit None, not just a missing key.
+        array.array({"name": "|tooth", "mode": "radial", "count": 4, "axis": None})
+        first = fake.xforms[[c[1] for c in fake.calls if c[0] == "rotate"][0]][-1]
+        assert first["rotate"][0] == 0.0 and first["rotate"][2] == 0.0
+        assert first["rotate"][1] != 0.0
+
 
 class TestLinear:
     def test_makes_count_minus_one_copies(self, fake):
@@ -325,6 +340,20 @@ class TestMirror:
         )
         assert plug.endswith(".scaleZ")
         assert value == -1.0
+
+    def test_defaults_to_x_axis_when_axis_key_is_absent(self, fake):
+        # Bilateral symmetry is almost always left/right (X), not up/down (Y).
+        array.array({"name": "|tooth", "mode": "mirror"})
+        plug = next(p for op, p in fake.calls if op == "setAttr")
+        assert plug.endswith(".scaleX")
+
+    def test_defaults_to_x_axis_when_axis_is_explicitly_none(self, fake):
+        # The tool always sends the axis key, so an omitted caller value
+        # arrives here as axis=None, not a missing key - the fallback must
+        # survive that or every unspecified mirror flips upside down.
+        array.array({"name": "|tooth", "mode": "mirror", "axis": None})
+        plug = next(p for op, p in fake.calls if op == "setAttr")
+        assert plug.endswith(".scaleX")
 
     def test_freezes_before_reversing_normals(self, fake):
         # Order is load-bearing: polyNormal before the freeze reverses winding

@@ -40,7 +40,7 @@ def _duplicate(cmds, source: str, prefix: str, index: int) -> str:
 
 def _radial(cmds, source: str, prefix: str, params: Dict[str, Any]) -> List[str]:
     count = arraymath.resolve_count(params.get("count"))
-    axis = params.get("axis", "y")
+    axis = params.get("axis") or "y"
     idx = arraymath.axis_index(axis)
     center = arraymath.resolve_vec3(params.get("center"), "center", [0.0, 0.0, 0.0])
     angle = params.get("angle", 360.0)
@@ -202,7 +202,7 @@ def _mirror(
     `count` is ignored: a mirror produces exactly one image, so there is
     nothing for it to control.
     """
-    idx = arraymath.axis_index(params.get("axis", "x"))
+    idx = arraymath.axis_index(params.get("axis") or "x")
     pivot = arraymath.resolve_vec3(params.get("pivot"), "pivot", [0.0, 0.0, 0.0])
 
     copy = _duplicate(cmds, source, prefix, 1)
