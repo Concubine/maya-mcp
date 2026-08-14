@@ -26,6 +26,7 @@ from .handlers import (
     array,
     capture,
     code_exec,
+    combine,
     etch,
     lighting,
     material,
@@ -36,6 +37,7 @@ from .handlers import (
     sculpt,
     session,
     texture_recipes,
+    uvatlas,
     viewport,
 )
 
@@ -90,6 +92,8 @@ def _build_handlers() -> Dict[str, Any]:
         "rename": modeling.rename,
         "delete_objects": modeling.delete_objects,
         "boolean_op": modeling.boolean_op,
+        "combine": combine.combine,
+        "uv_atlas": uvatlas.uv_atlas,
         "remesh_retopo": modeling.remesh_retopo,
         "mesh_cleanup": modeling.mesh_cleanup,
         "etch_text": etch.etch_text,

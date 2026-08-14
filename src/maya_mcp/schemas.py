@@ -7,7 +7,7 @@ plugin versions are ignored rather than fatal.
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -364,3 +364,55 @@ class TextureRecipeResult(BaseModel):
     slot: str = Field(description="Semantic slot driven: color, roughness, or normal.")
     nodes: List[str] = Field(description="Texture nodes created by the recipe.")
     warnings: List[str] = Field(default_factory=list)
+
+
+class CombineResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str = Field(description="Canonical long name of the merged object.")
+    inputs: int = Field(description="How many meshes were consumed.")
+    tris: int
+    verts: int
+    faces: int
+    shells: int = Field(
+        description=(
+            "Separate closed pieces inside the merged mesh. This should equal "
+            "the number of inputs: combine does not weld, so a lower count "
+            "means inputs were already touching as one shell."
+        )
+    )
+    pivot: List[float]
+    pivot_mode: str
+    frozen: bool
+    shading: Dict[str, Any] = Field(
+        description="The single object-level shading group the result carries."
+    )
+    warnings: List[str] = Field(default_factory=list)
+
+
+class UvAtlasMesh(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    uv_bounds: List[float] = Field(
+        description="MEASURED (u_min, v_min, u_max, v_max) after packing."
+    )
+    inside_patch: bool
+
+
+class UvAtlasResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    meshes: List[UvAtlasMesh]
+    atlas: List[int] = Field(description="(cols, rows) of the atlas grid.")
+    patch: List[int] = Field(description="(col, row) written to; row 0 is the TOP row.")
+    patch_rect: List[float]
+    margin: float
+    projection: str
+    normalized: bool
+    all_inside: bool = Field(
+        description=(
+            "False means at least one mesh's UVs escaped its patch, which will "
+            "read as another material's pixels bleeding onto the piece."
+        )
+    )

@@ -25,6 +25,8 @@ from . import images, refstore
 from .connection import MayaConnection
 from .schemas import (
     ArrayResult,
+    CombineResult,
+    UvAtlasResult,
     BooleanResult,
     CameraResult,
     CheckpointResult,
@@ -984,6 +986,102 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         return BooleanResult.model_validate(
             maya.request(
                 "boolean_op", {"a": a, "b": b, "op": op, "new_name": new_name},
+                timeout_s=BOOL_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Combine meshes into one object",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_combine(
+        names: Annotated[List[str], Field(min_length=2, description=(
+            "Two or more meshes to merge. All are consumed."
+        ))],
+        name: Annotated[Optional[str], Field(description=(
+            "Name for the merged object; defaults to <first input>_combined."
+        ))] = None,
+        pivot: Annotated[Literal["center", "origin", "keep"], Field(description=(
+            "Where the result's pivot lands. 'center' (default) is the bounding "
+            "box centre - what a chunk of debris rotates about. 'origin' is the "
+            "world origin, which is what a kit piece authored around 0,0,0 wants."
+        ))] = "center",
+        freeze: Annotated[bool, Field(description=(
+            "Freeze transforms on the result, leaving scale (1,1,1)."
+        ))] = True,
+    ) -> CombineResult:
+        """Merge meshes into ONE object while keeping each as its own shell.
+
+        This is not a boolean union. Nothing is welded, no intersections are
+        recomputed, and coincident faces are left alone - the inputs simply
+        stop being separate objects. That is what you want for a part built
+        out of primitives, and it is far cheaper than union on the same
+        geometry.
+
+        Reports the measured shell count: it should equal the number of
+        inputs, and a lower number means inputs were already fused. Combining
+        meshes with different shaders collapses them to one object-level
+        material and warns, because per-face shading on united meshes is the
+        state that makes later per-face work silently no-op."""
+        return CombineResult.model_validate(
+            maya.request(
+                "combine",
+                {"names": names, "name": name, "pivot": pivot, "freeze": freeze},
+                timeout_s=BOOL_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Pack UVs into an atlas patch",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=True
+        ),
+    )
+    def maya_uv_atlas(
+        names: Annotated[List[str], Field(min_length=1, description=(
+            "Meshes to pack. All of them land in the SAME patch, so pass the "
+            "group of parts that share one material region."
+        ))],
+        patch: Annotated[object, Field(description=(
+            "Which patch to write to: an integer index, or [col, row]. Index 0 "
+            "is the TOP-LEFT patch and counts along the row first - the way the "
+            "atlas image reads in a viewer."
+        ))] = 0,
+        cols: Annotated[int, Field(ge=1, le=64, description="Atlas columns.")] = 4,
+        rows: Annotated[int, Field(ge=1, le=64, description="Atlas rows.")] = 4,
+        margin: Annotated[float, Field(ge=0.0, lt=0.5, description=(
+            "Inset as a FRACTION of the patch, keeping UVs off the patch edge "
+            "so bilinear filtering cannot drag in the neighbouring patch's "
+            "pixels. Default 0.02. Use 0.0 only when the patch has no neighbours."
+        ))] = 0.02,
+        project: Annotated[Literal["box", "planar", "keep"], Field(description=(
+            "'box' (default) re-projects with automatic projection, which suits "
+            "primitives and hard-surface parts. 'planar' projects down -z. "
+            "'keep' preserves an existing layout and only moves it into the patch."
+        ))] = "box",
+        normalize: Annotated[bool, Field(description=(
+            "Normalise UVs to 0..1 collectively before fitting. Leave this on: "
+            "Maya's primitives do not share a UV convention, so without it each "
+            "primitive kind lands in the patch at a different scale."
+        ))] = True,
+    ) -> UvAtlasResult:
+        """Pack meshes' UVs into one patch of a shared texture atlas.
+
+        The reason to do this is downstream, not in Maya: engines batch
+        instanced geometry BY MATERIAL, so geometry drawn tens of thousands of
+        times can afford exactly one material. An atlas is how pieces still
+        look different from each other under that constraint.
+
+        Returns the MEASURED UV bounding box per mesh and an all_inside flag -
+        not a claim that the command ran. If all_inside is false the piece will
+        sample a neighbouring patch and read as the wrong material."""
+        return UvAtlasResult.model_validate(
+            maya.request(
+                "uv_atlas",
+                {"names": names, "patch": patch, "cols": cols, "rows": rows,
+                 "margin": margin, "project": project, "normalize": normalize},
                 timeout_s=BOOL_TIMEOUT_S,
             )
         )
