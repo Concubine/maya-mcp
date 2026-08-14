@@ -201,6 +201,24 @@ def _available_renderers(cmds) -> List[str]:
         return []
 
 
+def _ensure_renderer(cmds, maya_renderer: str) -> List[str]:
+    """Available renderers, loading mtoa first if arnold is wanted and absent.
+
+    A cold Maya lists only mayaSoftware and mayaHardware2 - mtoa loads lazily,
+    so the default renderer is missing until something asks for it. Making the
+    caller load a plugin to use the default is a tool defect, not their mistake
+    (found by the live gate on a freshly launched Maya, redmine #584).
+    """
+    available = _available_renderers(cmds)
+    if maya_renderer != "arnold" or "arnold" in available:
+        return available
+    try:
+        cmds.loadPlugin("mtoa", quiet=True)
+    except Exception:
+        return available  # not installed; the caller gets the hint below
+    return _available_renderers(cmds)
+
+
 def _scene_has_light(cmds) -> bool:
     return bool(cmds.ls(lights=True) or [])
 
@@ -210,10 +228,21 @@ def _hide_non_targets(cmds, isolate: List[str]) -> List[str]:
 
     Panel isolation is a viewport concept and invisible to a render, so
     isolating here means hiding the rest - and putting it back afterwards.
+
+    Everything is compared as LONG names because cmds.ls(geometry=True) returns
+    SHAPES under short names: "gemShape" never matches the transform "|gem" the
+    caller passed, so the first version of this hid the very object it was asked
+    to render and returned a black frame. The live gate caught it; no headless
+    test could have, because a fake that returns long names hides the bug
+    (redmine #584).
     """
+    keep = set()
+    for name in isolate:
+        for long_name in cmds.ls(name, long=True) or [name]:
+            keep.add(long_name)
     hidden = []
-    for name in cmds.ls(geometry=True) or []:
-        if name in isolate or any(name.startswith(t + "|") for t in isolate):
+    for name in cmds.ls(geometry=True, long=True) or []:
+        if name in keep or any(name.startswith(target + "|") for target in keep):
             continue
         try:
             cmds.hide(name)
@@ -241,7 +270,7 @@ def render_scene(params: Dict[str, Any]) -> Dict[str, Any]:
 
     cmds = _cmds()
     maya_renderer = RENDERER_TO_MAYA[renderer]
-    available = _available_renderers(cmds)
+    available = _ensure_renderer(cmds, maya_renderer)
     if available and maya_renderer not in available:
         raise HandlerError(
             "renderer %r is not available in this Maya (have: %s)"

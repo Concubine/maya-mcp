@@ -86,7 +86,7 @@ class FakeCmds:
     was - the house rule for perception tools (capture._PanelState).
     """
 
-    def __init__(self, lights=(), geometry=("|ball", "|floor")):
+    def __init__(self, lights=(), geometry=("|ball|ballShape", "|floor|floorShape")):
         self.attrs = {
             "defaultRenderGlobals.imageFormat": 7,
             "defaultRenderGlobals.imageFilePrefix": "",
@@ -100,8 +100,13 @@ class FakeCmds:
         self.deleted = []
         self.hidden = []
         self.written = []
+        self.loaded_plugins = []
+        self._renderers = ["mayaSoftware", "mayaHardware2", "arnold"]
         self._lights = list(lights)
+        # Geometry is SHAPES, as cmds.ls(geometry=True) returns them - the
+        # distinction that made isolate hide its own subject (redmine #584).
         self._geometry = list(geometry)
+        self._transforms = sorted({s.rsplit("|", 1)[0] for s in self._geometry})
         self.visibility = {name: True for name in self._geometry}
 
     # --- queries
@@ -109,13 +114,21 @@ class FakeCmds:
         if kwargs.get("lights"):
             return list(self._lights)
         if kwargs.get("geometry"):
-            return list(self._geometry)
+            # Real cmds.ls returns SHORT names unless long=True is asked for.
+            # Reproducing that is the whole point: the live gate found isolate
+            # hiding its own subject because "gemShape" never matches "|gem".
+            if kwargs.get("long"):
+                return list(self._geometry)
+            return [name.rsplit("|", 1)[-1] for name in self._geometry]
         if args:
-            return [args[0]]
+            name = args[0]
+            if kwargs.get("long"):
+                return [name if name.startswith("|") else "|" + name]
+            return [name]
         return []
 
     def objExists(self, name):
-        return name in self._geometry or name in self.created
+        return name in self._transforms or name in self._geometry or name in self.created
 
     def exactWorldBoundingBox(self, *targets):
         return [-1.0, -1.0, -1.0, 1.0, 1.0, 1.0]
@@ -126,7 +139,13 @@ class FakeCmds:
         return self.attrs.get(attr, 0)
 
     def renderer(self, *args, **kwargs):
-        return ["mayaSoftware", "mayaHardware2", "arnold"]
+        return list(self._renderers)
+
+    def loadPlugin(self, name, **kwargs):
+        self.loaded_plugins.append(name)
+        if name == "mtoa" and "arnold" not in self._renderers:
+            self._renderers.append("arnold")
+        return [name]
 
     def undoInfo(self, **kwargs):
         return True
@@ -150,7 +169,11 @@ class FakeCmds:
         return name
 
     def listRelatives(self, name, **kwargs):
-        return ["mayaMcpTempKey"]
+        if kwargs.get("parent"):
+            return ["mayaMcpTempKey"]
+        if kwargs.get("allDescendents"):
+            return [s for s in self._geometry if s.startswith(name + "|")]
+        return []
 
     def xform(self, *args, **kwargs):
         return None
@@ -215,9 +238,15 @@ class TestRenderScene:
 
     def test_isolate_hides_non_targets_and_restores_them(self, fake_maya):
         render.render_scene({"angles": ["front"], "isolate": ["|ball"]})
-        assert "|floor" in fake_maya.hidden
-        assert "|ball" not in fake_maya.hidden
+        assert "|floor|floorShape" in fake_maya.hidden
         assert all(fake_maya.visibility.values()), "visibility must be restored"
+
+    def test_isolate_does_not_hide_its_own_subject(self, fake_maya):
+        # cmds.ls(geometry=True) returns SHAPES, and a transform name never
+        # matches one: the live gate caught this hiding the very gem it was
+        # asked to render, and returning a black frame (redmine #584).
+        render.render_scene({"angles": ["front"], "isolate": ["|ball"]})
+        assert "|ball|ballShape" not in fake_maya.hidden
 
     def test_isolate_rejects_a_missing_object(self, fake_maya):
         with pytest.raises(HandlerError):
@@ -256,9 +285,29 @@ class TestRenderScene:
         monkeypatch.setattr(
             fake_maya, "renderer", lambda *a, **k: ["mayaSoftware", "mayaHardware2"]
         )
+        monkeypatch.setattr(
+            fake_maya, "loadPlugin",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("mtoa not installed")),
+        )
         with pytest.raises(HandlerError) as excinfo:
             render.render_scene({"angles": ["front"]})
         assert "hw2" in str(excinfo.value.hint or "")
+
+    def test_mtoa_is_loaded_when_arnold_is_not_listed_yet(self, monkeypatch, tmp_path):
+        # A cold Maya lists only mayaSoftware and mayaHardware2 until something
+        # loads mtoa. Making the caller do that to use the DEFAULT renderer is
+        # a tool defect; the live gate hit it on a freshly launched Maya.
+        fake = FakeCmds(lights=["|keyLightShape"])
+        fake._renderers = ["mayaSoftware", "mayaHardware2"]
+        monkeypatch.setattr(render, "_cmds", lambda: fake)
+        monkeypatch.setattr(render, "_render_frame", _stub_render_frame(tmp_path, fake))
+        out = render.render_scene({"angles": ["front"]})
+        assert fake.loaded_plugins == ["mtoa"]
+        assert out["renderer"] == "arnold"
+
+    def test_mtoa_is_not_loaded_for_an_hw2_render(self, fake_maya):
+        render.render_scene({"angles": ["front"], "renderer": "hw2"})
+        assert fake_maya.loaded_plugins == []
 
     def test_samples_and_resolution_reach_the_render_step(self, fake_maya):
         render.render_scene({"angles": ["front"], "samples": 6, "resolution": 256})
