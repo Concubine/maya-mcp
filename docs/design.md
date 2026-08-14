@@ -111,6 +111,10 @@ maya-mcp/
 │   ├── handlers/
 │   │   ├── scene.py            # scene graph, object info, session ops
 │   │   ├── modeling.py         # primitives, booleans, transforms, cleanup
+│   │   ├── arraymath.py        # pure array placement math: radial angles, linear
+│   │   │                       # steps, point rotation, bbox reflection, signed volume
+│   │   ├── array.py            # array command: duplicate, place, mirror-and-fix-
+│   │   │                       # winding, group, ledger
 │   │   ├── sculpt.py           # sculpt_ops, deformers, soft selection
 │   │   ├── materials.py        # shaders, texture networks
 │   │   ├── lighting.py         # presets, HDRI
@@ -208,6 +212,13 @@ maya_create_primitive(kind: Literal["cube","sphere","cylinder","plane","torus","
                       divisions: int = 1) -> { name }
 
 maya_duplicate(name, new_name, translate=None, rotate=None, scale=None) -> { name }
+maya_array(name: str, mode: Literal["mirror","radial","linear"], count: int = 2,
+          axis=None, center=None, angle: float = 360.0, offset=None,
+          step_rotate=None, step_scale=None, pivot=None, name_prefix=None,
+          group_name=None) -> { names: [str], mode, group, signed_volume, warnings }
+  # mirror reflects one copy across a world plane (needs a single polygon mesh);
+  # radial rings copies about an axis; linear runs copies along a vector, with
+  # step_scale compounding into a geometric taper down the run.
 maya_transform(names: list[str], translate=None, rotate=None, scale=None, relative: bool = True)
 maya_group(names: list[str], group_name: str) / maya_parent(child, parent) / maya_rename / maya_delete_objects
 
@@ -230,9 +241,11 @@ maya_sculpt_ops(mesh: str, ops: list[SculptOp]) -> { applied: int, tris, warning
   #   {op:"bridge", edges_a, edges_b}
   # Applied in order; abort-and-report on first failure, listing which ops landed.
 
-maya_deform(mesh: str, deformer: Literal["bend","lattice","squash","twist","sculpt"],
+maya_deform(mesh: str, deformer: Literal["bend","flare","lattice","sculpt",
+                                          "sine","squash","twist","wave"],
             params: dict, delete_history_after: bool = False)
-  # bend for the golem hunch; lattice for global proportion pushes.
+  # bend for the golem hunch; lattice for global proportion pushes; flare for
+  # a limb thick at one end and thin at the other; sine/wave for ripples.
 
 maya_remesh_retopo(mesh: str, target_polycount: int, keep_original: bool = True)
   # destructive → auto-checkpoint. polyRetopo where available, polyRemesh fallback,

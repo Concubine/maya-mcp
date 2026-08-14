@@ -118,6 +118,7 @@ Environment variables, all optional:
 |---|---|
 | `maya_create_primitive` | Create a polygon primitive (cube/sphere/cylinder/plane/torus/cone) at an optional transform. |
 | `maya_duplicate` | Duplicate an object by name, optionally offsetting the copy. |
+| `maya_array` | Mirror, radial-array, or linear-array an existing object into real duplicates; `count` is the total including the source. |
 | `maya_transform` | Move/rotate/scale one or more objects by name. |
 | `maya_group` | Create a new group transform and parent named objects under it. |
 | `maya_parent` | Reparent one object under another. |
@@ -131,7 +132,7 @@ Environment variables, all optional:
 | `maya_boolean_op` | Boolean two meshes (union/difference/intersection); auto-checkpoints, deletes construction history, collapses shading to one material. |
 | `maya_etch_text` | Carve text into a mesh face in one call (glyph, size, orient to face normal, depth, boolean, cleanup); reuses `boolean_op`'s core. |
 | `maya_sculpt_ops` | Apply a sequence of sculpt ops (`soft_move`, `inflate_region`, `displace_noise`, `smooth`, `extrude_faces`, `bevel_edges`, `crease_edges`, `bridge`) to one mesh. |
-| `maya_deform` | Apply a nonlinear/lattice deformer (bend/lattice/squash/twist/sculpt) to a mesh by name. |
+| `maya_deform` | Apply a nonlinear/lattice deformer (bend/flare/lattice/sculpt/sine/squash/twist/wave) to a mesh by name. |
 | `maya_remesh_retopo` | Retopologize a mesh toward a target polycount (polyRetopo, falling back to polyRemesh, then polyReduce); auto-checkpoints. |
 | `maya_mesh_cleanup` | Merge near-duplicate vertices, conform normals, freeze transforms, and delete construction history. |
 

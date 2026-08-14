@@ -24,6 +24,7 @@ from pydantic import Field
 from . import images, refstore
 from .connection import MayaConnection
 from .schemas import (
+    ArrayResult,
     BooleanResult,
     CameraResult,
     CheckpointResult,
@@ -754,6 +755,91 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         )
 
     @mcp.tool(
+        title="Array copies",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=False
+        ),
+    )
+    def maya_array(
+        name: Annotated[str, Field(description="Source object (canonical long name).")],
+        mode: Annotated[
+            Literal["mirror", "radial", "linear"],
+            Field(description=(
+                "'mirror' reflects one copy across a world plane - the way to build "
+                "anything bilaterally symmetric once instead of twice. Requires the "
+                "source to be a single polygon mesh (not a group, curve, or other "
+                "assembly); mirror each chunk individually and group the results. "
+                "'radial' rotates copies about an axis: gears, colonnades, spokes, "
+                "petals. 'linear' runs copies along a vector: stairs, ribs, fence posts."
+            )),
+        ],
+        count: Annotated[int, Field(ge=2, le=200, description=(
+            "TOTAL elements in the finished array, INCLUDING the source - count=12 "
+            "on a gear tooth gives a 12-tooth gear. Ignored by mirror, which "
+            "always makes exactly one copy."
+        ))] = 2,
+        axis: Annotated[
+            Optional[Literal["x", "y", "z"]],
+            Field(description=(
+                "radial: the axis copies rotate about, right-hand rule. Defaults to "
+                "'y' (a ring lying flat in the XZ plane). mirror: the axis the "
+                "reflection plane is perpendicular to. Defaults to 'x' (bilateral "
+                "left/right symmetry)."
+            )),
+        ] = None,
+        center: Annotated[Optional[List[float]], Field(description=(
+            "radial only: world point the axis passes through. There is no radius "
+            "parameter - the source's existing distance from this point IS the "
+            "radius, so place one element where it belongs and ask for N of them."
+        ))] = None,
+        angle: Annotated[float, Field(ge=-360.0, le=360.0, description=(
+            "radial only: total sweep in degrees. At 360 (the default) the step is "
+            "angle/count, because the seam is where the source already sits. At any "
+            "other value the step is angle/(count-1), so the first and last "
+            "elements land on the arc's endpoints."
+        ))] = 360.0,
+        offset: Annotated[Optional[List[float]], Field(description=(
+            "linear only, required: world displacement between consecutive copies."
+        ))] = None,
+        step_rotate: Annotated[Optional[List[float]], Field(description=(
+            "linear only: degrees added per step, so a run can twist as it goes."
+        ))] = None,
+        step_scale: Annotated[Optional[List[float]], Field(description=(
+            "linear only: per-step size multiplier, COMPOUNDING - 0.9 gives a "
+            "geometric taper down the run. Must be positive."
+        ))] = None,
+        pivot: Annotated[Optional[List[float]], Field(description=(
+            "mirror only: world point the reflection plane passes through. "
+            "Defaults to the origin."
+        ))] = None,
+        name_prefix: Annotated[Optional[str], Field(description=(
+            "Base name for the copies; defaults to the source's short name."
+        ))] = None,
+        group_name: Annotated[Optional[str], Field(description=(
+            "Parent the copies under a new group of this name. The source is "
+            "never reparented."
+        ))] = None,
+    ) -> ArrayResult:
+        """Copy an object into a mirror, a ring, or a run.
+
+        The source never moves and is element 0 of the result. Copies are real
+        duplicates, not instances, so each one takes its own booleans and
+        materials. Mirror reports signed_volume: mirroring inverts face winding,
+        and a mesh whose faces point inward renders black under Arnold - which
+        looks exactly like a lighting bug and is not one."""
+        return ArrayResult.model_validate(
+            maya.request(
+                "array",
+                {"name": name, "mode": mode, "count": count, "axis": axis,
+                 "center": center, "angle": angle, "offset": offset,
+                 "step_rotate": step_rotate, "step_scale": step_scale,
+                 "pivot": pivot, "name_prefix": name_prefix,
+                 "group_name": group_name},
+                timeout_s=BOOL_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
         title="Transform objects",
         annotations=ToolAnnotations(
             read_only_hint=False, destructive_hint=False, idempotent_hint=False
@@ -997,18 +1083,24 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
     def maya_deform(
         mesh: Annotated[str, Field(description="Target mesh (canonical long name).")],
         deformer: Annotated[
-            Literal["bend", "lattice", "squash", "twist", "sculpt"],
+            Literal["bend", "flare", "lattice", "sculpt", "sine", "squash", "twist", "wave"],
             Field(description="Nonlinear/lattice deformer type to apply."),
         ],
         params: Annotated[
             Optional[dict],
             Field(description=(
-                "Deformer parameters, whitelisted per type: bend takes curvature; "
-                "squash takes factor; twist takes startAngle/endAngle; sculpt takes "
-                "maxDisplacement/dropoffDistance; all four also take lowBound/"
-                "highBound; lattice takes divisions:[x,y,z]. Every type also accepts "
-                "translate/rotate, applied to the deformer handle. Unknown keys are "
-                "rejected with that type's whitelist in the error hint."
+                "Deformer parameters, whitelisted per type. bend: curvature. "
+                "squash: factor. twist: startAngle/endAngle. flare: curve, "
+                "startFlareX/Z, endFlareX/Z - THE taper, for a limb thick at "
+                "one end and thin at the other. sine: amplitude, wavelength, "
+                "offset, dropoff - linear ripple. wave: amplitude, wavelength, "
+                "offset, dropoff, minRadius, maxRadius - concentric radial "
+                "ripple; note wave is bounded radially and takes NO lowBound/"
+                "highBound. sculpt: maxDisplacement/dropoffDistance. lattice: "
+                "divisions:[x,y,z]. bend/squash/twist/flare/sine also take "
+                "lowBound/highBound. Every type also accepts translate/rotate, "
+                "applied to the deformer handle. Unknown keys are rejected with "
+                "that type's whitelist in the error hint."
             )),
         ] = None,
         delete_history_after: Annotated[

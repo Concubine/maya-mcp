@@ -196,6 +196,27 @@ class SculptResult(BaseModel):
     )
 
 
+class ArrayResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    names: List[str] = Field(
+        description="Canonical long names of the copies, in array order. The source is not listed."
+    )
+    mode: str
+    group: Optional[str] = Field(
+        default=None, description="Long name of the group holding the copies, when group_name was given."
+    )
+    signed_volume: Optional[float] = Field(
+        default=None,
+        description=(
+            "Mirror mode only. Positive means the mirrored copy's faces point "
+            "outward. Negative means they point inward - it will render black "
+            "or hollow, which looks like a lighting failure and is not one."
+        ),
+    )
+    warnings: List[str] = Field(default_factory=list)
+
+
 class DeformResult(BaseModel):
     model_config = ConfigDict(extra="ignore")
 

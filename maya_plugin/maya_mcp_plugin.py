@@ -23,6 +23,7 @@ from typing import Any, Dict, Optional
 from . import protocol
 from .dispatcher import Dispatcher
 from .handlers import (
+    array,
     capture,
     code_exec,
     etch,
@@ -82,6 +83,7 @@ def _build_handlers() -> Dict[str, Any]:
         "save_scene": session.save_scene,
         "create_primitive": modeling.create_primitive,
         "duplicate": modeling.duplicate,
+        "array": array.array,
         "transform": modeling.transform,
         "group": modeling.group,
         "parent": modeling.parent,

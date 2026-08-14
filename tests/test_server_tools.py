@@ -66,6 +66,7 @@ class TestRegistration:
             "maya_reset_namespace",
             "maya_create_primitive",
             "maya_duplicate",
+            "maya_array",
             "maya_transform",
             "maya_group",
             "maya_parent",
@@ -390,6 +391,39 @@ class TestModelingTools:
         }
         assert conn.calls[0]["timeout_s"] == server_mod.BOOL_TIMEOUT_S
         assert result.structured_content["name"] == "|carved"
+
+    def test_maya_array_forwards_params(self):
+        # Pins the full wire contract: a dropped or renamed key here is
+        # invisible to both the ArrayResult-only schema tests and the
+        # handler's own unit tests, and would only surface live in Maya.
+        # `axis` is omitted by the caller on purpose - the tool must forward
+        # it as None rather than filling in a default, since radial and
+        # mirror need DIFFERENT defaults and only the handler knows which.
+        conn = FakeConn(
+            responses={
+                "array": {
+                    "names": ["|tooth_1"], "mode": "radial", "group": None,
+                    "signed_volume": None, "warnings": [],
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        result = run(
+            mcp.call_tool(
+                "maya_array",
+                {"name": "|tooth", "mode": "radial", "count": 6},
+            )
+        )
+        assert result.is_error is False
+        assert conn.calls[0]["cmd"] == "array"
+        assert conn.calls[0]["params"] == {
+            "name": "|tooth", "mode": "radial", "count": 6, "axis": None,
+            "center": None, "angle": 360.0, "offset": None,
+            "step_rotate": None, "step_scale": None, "pivot": None,
+            "name_prefix": None, "group_name": None,
+        }
+        assert conn.calls[0]["timeout_s"] == server_mod.BOOL_TIMEOUT_S
+        assert result.structured_content["names"] == ["|tooth_1"]
 
     def test_maya_etch_text_forwards_params(self):
         conn = FakeConn(
@@ -935,3 +969,30 @@ class TestDocsExplainWhichShadingModeRevealsWhat:
         tools = {t.name: t for t in run(mcp.list_tools())}
         desc = tools["maya_assign_material"].description
         assert "reuse" in desc.lower() or "reuses" in desc.lower()
+
+
+def test_array_result_accepts_a_mirror_response():
+    from maya_mcp.schemas import ArrayResult
+
+    result = ArrayResult.model_validate(
+        {
+            "names": ["|arm_R"],
+            "mode": "mirror",
+            "group": None,
+            "signed_volume": 3.25,
+            "warnings": [],
+        }
+    )
+    assert result.names == ["|arm_R"]
+    assert result.signed_volume == 3.25
+
+
+def test_array_result_signed_volume_is_optional():
+    from maya_mcp.schemas import ArrayResult
+
+    result = ArrayResult.model_validate(
+        {"names": ["|cog_1", "|cog_2"], "mode": "radial", "group": "|gear"}
+    )
+    assert result.signed_volume is None
+    assert result.group == "|gear"
+    assert result.warnings == []
