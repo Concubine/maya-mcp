@@ -237,6 +237,30 @@ class CleanupResult(BaseModel):
     warnings: List[str] = Field(default_factory=list)
 
 
+class RenderedFrame(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    angle: str
+    opaque_px: int = Field(
+        description="Pixels with a subject in them. Zero means the frame is empty."
+    )
+    total_px: int
+    distinct_colors: int = Field(
+        description="One colour edge to edge means an unlit render or a camera inside geometry."
+    )
+
+
+class RenderResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    renderer: str = Field(description="Renderer used: 'arnold' or 'hw2'.")
+    samples: int
+    fallback_light: bool = Field(
+        description="True if the scene had no light and a temporary key was added for the render."
+    )
+    frames: List[RenderedFrame]
+
+
 class ViewportState(BaseModel):
     model_config = ConfigDict(extra="ignore")
 

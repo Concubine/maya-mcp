@@ -39,6 +39,8 @@ from .schemas import (
     OpenSceneResult,
     ReferenceResult,
     RemeshResult,
+    RenderedFrame,
+    RenderResult,
     ResetNamespaceResult,
     RestoreResult,
     SaveSceneResult,
@@ -62,6 +64,12 @@ Vec3 = Annotated[
 # Transport grace on top of the per-command timeout the plugin enforces itself.
 SCENE_TIMEOUT_S = 30.0
 CAPTURE_TIMEOUT_S = 120.0
+# A rendered frame is seconds, not milliseconds, and four of them at high
+# sample counts is minutes - a capture-sized timeout would kill good renders.
+# This is the plugin dispatcher's MAX_TIMEOUT_S exactly: asking for more is
+# silently clamped there, so four 2048px frames at 8 samples can still run out
+# of time. Raise both together or neither.
+RENDER_TIMEOUT_S = 600.0
 BOOL_TIMEOUT_S = 120.0
 
 
@@ -349,6 +357,94 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         ]
 
     @mcp.tool(
+        title="Render scene",
+        annotations=ToolAnnotations(
+            read_only_hint=True, destructive_hint=False, idempotent_hint=True
+        ),
+    )
+    def maya_render_scene(
+        angles: Annotated[Optional[List[Angle]], Field(max_length=4, description=(
+            "Views to render. Defaults to one three_quarter frame - a rendered "
+            "frame costs seconds, where a viewport capture costs milliseconds. "
+            "'current' has no meaning without a viewport and renders as "
+            "three_quarter."
+        ))] = None,
+        renderer: Annotated[
+            Literal["arnold", "hw2"],
+            Field(description=(
+                "'arnold' (default) ray-traces: transmissive materials refract "
+                "and tint, so gems, glass, ice and water are judgeable. 'hw2' "
+                "is the fast rasteriser and draws transmission as plain "
+                "transparency, exactly as the viewport does."
+            )),
+        ] = "arnold",
+        resolution: Annotated[int, Field(ge=64, le=2048, description=(
+            "Square frame size in pixels."
+        ))] = 512,
+        isolate: Annotated[Optional[List[str]], Field(description=(
+            "Render only these objects; everything else is hidden for the "
+            "render and restored afterwards."
+        ))] = None,
+        samples: Annotated[int, Field(ge=1, le=8, description=(
+            "Arnold AA samples. 3 is judgeable, 1 is fast and noisy. Ignored "
+            "by hw2."
+        ))] = 3,
+        fallback_light: Annotated[bool, Field(description=(
+            "Add a temporary key light when the scene has none, so an unlit "
+            "scene does not come back as an indistinguishable black frame."
+        ))] = True,
+    ) -> list:
+        """Render frames through the render pipeline instead of the viewport.
+
+        Use this over maya_capture_viewport when the material's truth matters -
+        transmission, refraction, real shadows - or when the viewport cannot
+        render at all. Every frame reports its opaque pixel count, because a
+        render of nothing is a valid image."""
+        result = maya.request(
+            "render_scene",
+            {"angles": angles, "renderer": renderer, "resolution": resolution,
+             "isolate": isolate, "samples": samples,
+             "fallback_light": fallback_light},
+            timeout_s=RENDER_TIMEOUT_S,
+        )
+        content: List[Union[Image, str]] = []
+        frames = []
+        for shot in result.get("images", []):
+            stats = images.pixel_stats(base64.b64decode(shot["png_b64"]))
+            frames.append(
+                RenderedFrame(
+                    angle=shot["angle"],
+                    opaque_px=stats["opaque_px"],
+                    total_px=stats["total_px"],
+                    distinct_colors=stats["distinct_colors"],
+                )
+            )
+            content.append(
+                Image(data=images.decode_and_downscale(shot["png_b64"]), format="png")
+            )
+        if frames and all(f.opaque_px == 0 for f in frames):
+            # A render of nothing is a valid PNG and a success status; saying so
+            # out loud is the whole reason the statistics are measured.
+            raise ValueError(
+                "every rendered frame came back blank (0 opaque pixels). The "
+                "scene may be empty, unlit, or outside the camera - check "
+                "maya_get_scene_graph and the light rig, and note that "
+                "fallback_light only adds a key when the scene has NO light."
+            )
+        content.append(
+            RenderResult(
+                renderer=result.get("renderer", renderer),
+                samples=result.get("samples", samples),
+                fallback_light=bool(result.get("fallback_light", False)),
+                frames=frames,
+            ).model_dump_json()
+        )
+        content.append(
+            "camera_positions: " + json.dumps(result.get("camera_positions", []))
+        )
+        return content
+
+    @mcp.tool(
         title="Load reference image",
         annotations=ToolAnnotations(
             read_only_hint=False, destructive_hint=False, idempotent_hint=True
@@ -575,7 +671,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 "with a fixed face count (divisions has no effect); prism is "
                 "a 3-sided, pyramid a 4-sided low-poly faceted form (divisions "
                 "sets height subdivisions). Use these for cut-gem/crystalline "
-                "forms - a bevelled cube is not the only faceted primitive."
+                "forms - a bevelled cube is not the only faceted primitive. "
+                "Every kind fills the same 1-unit box at scale 1, so switching "
+                "kind never changes the size."
             )),
         ],
         name: Annotated[str, Field(min_length=1, description=(

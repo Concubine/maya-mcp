@@ -6,6 +6,10 @@ must be side-effect-free: every panel/scene setting touched is snapshotted and
 restored, temp cameras deleted, selection restored.
 
 The placement math is pure (tested headless); only _capture_one touches maya.
+
+render.py reuses _FOV_DEG, _scene_bbox and camera_placement so the viewport eye
+and the render eye frame a subject identically - keep them in step, and expect
+render_scene to move if this framing changes.
 """
 
 from __future__ import annotations

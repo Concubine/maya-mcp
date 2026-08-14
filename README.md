@@ -151,6 +151,18 @@ Environment variables, all optional:
 | `maya_load_reference_image` | Store a reference image in the server, by id, for later side-by-side comparison; survives `new_scene`. |
 | `maya_compare_to_reference` | One side-by-side image: the reference on the left, your live viewport on the right. |
 
+### Rendering (M2.2)
+
+| Tool | Description |
+|---|---|
+| `maya_render_scene` | Render frames through the render pipeline instead of the viewport: shows transmission and refraction as they really are, and works on a Maya with no visible window. Reports each frame's opaque pixel count, because a render of nothing is still a valid image. |
+
+**Which eye to use.** `maya_capture_viewport` is fast (milliseconds), needs a
+mapped window, and draws transmissive materials as plain transparency — a
+diamond and a plastic block look the same. `maya_render_scene` costs seconds a
+frame, needs no window at all, and under Arnold refracts for real. Judge shape
+and composition with the viewport; judge materials with the renderer.
+
 ### Lighting and materials (M2)
 
 | Tool | Description |

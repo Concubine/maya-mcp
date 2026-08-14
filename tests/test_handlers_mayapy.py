@@ -1611,3 +1611,34 @@ class TestMaterialInMaya:
         shape = cmds.listRelatives("|orphcube", shapes=True, fullPath=True)[0]
         members = cmds.sets(original["shading_group"], query=True) or []
         assert shape.split("|")[-1] in [m.split("|")[-1] for m in members]
+
+
+class TestPrimitiveBaseSize:
+    """Every kind fills a 1-unit box at scale 1 (redmine #584, gem-brute run).
+
+    Maya's own defaults disagree wildly - measured here: cube 1.0 across,
+    sphere/cone/cylinder/octahedron 2.0, icosahedron 1.701, prism 0.866,
+    pyramid 1.414, torus 3.0 - so swapping `kind` at a fixed scale silently
+    resized the object, and the run built solids at twice the size it asked for.
+
+    The guarantee is the BOX, not the width: a triangular prism spans 1.0 across
+    a corner and 0.866 across the flats, so no single kind-independent "width"
+    exists. Largest dimension exactly 1, nothing outside the box.
+    """
+
+    @pytest.mark.parametrize("kind", [
+        "cube", "plane", "sphere", "cone", "cylinder", "torus",
+        "octahedron", "icosahedron", "prism", "pyramid",
+    ])
+    def test_unit_size_at_scale_one(self, kind):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        result = modeling.create_primitive({"kind": kind, "name": "sizeCheck"})
+        bbox = cmds.exactWorldBoundingBox(result["name"])
+        dims = (bbox[3] - bbox[0], bbox[4] - bbox[1], bbox[5] - bbox[2])
+        assert max(dims) == pytest.approx(1.0, abs=0.02), (
+            "%s measures %s; every kind must fill the same unit box"
+            % (kind, tuple(round(d, 3) for d in dims))
+        )
