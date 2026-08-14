@@ -9,7 +9,8 @@ The mirror gate additionally settles four assumptions a code review flagged
 as things only a live Maya can verify (see the mirror_bbox assertion and the
 signed_volume assertions below for which one covers which).
 
-Exits non-zero on the first failure.
+Runs every check to completion (check() accumulates failures; only ok() aborts
+early, on a hard call failure) and exits non-zero if any check failed.
 
 Run:  set MAYA_MCP_PORT=9878 && .venv/Scripts/python.exe evals/array_deform_live.py
 Artifacts: evals/array_deform_live/*.png
@@ -76,6 +77,18 @@ def span_of(objs, name):
     return [hi[i] - lo[i] for i in range(3)]
 
 
+def angle_of(objs, name):
+    """Bearing (degrees, 0..360) of `name`'s centroid around the world Y axis."""
+    c = centroid_of(objs, name)
+    return math.degrees(math.atan2(c[2], c[0])) % 360.0
+
+
+def circular_diff(a, b):
+    """Smallest angular distance between two bearings in degrees."""
+    d = (a - b) % 360.0
+    return min(d, 360.0 - d)
+
+
 _TIGHT_BBOX_CODE = """
 import json
 import maya.api.OpenMaya as om
@@ -90,6 +103,70 @@ ys = [p.y for p in pts]
 zs = [p.z for p in pts]
 print(json.dumps({"lo": [min(xs), min(ys), min(zs)], "hi": [max(xs), max(ys), max(zs)]}))
 """
+
+
+_FLARE_WIDTH_CODE = """
+import json
+import maya.api.OpenMaya as om
+sel = om.MSelectionList()
+sel.add(%r)
+dag = sel.getDagPath(0)
+dag.extendToShape()
+fn = om.MFnMesh(dag)
+pts = fn.getPoints(om.MSpace.kWorld)
+ys = [p.y for p in pts]
+y_lo, y_hi = min(ys), max(ys)
+band = (y_hi - y_lo) * 0.1
+def radial(p):
+    return (p.x ** 2 + p.z ** 2) ** 0.5
+bottom = [radial(p) for p in pts if p.y <= y_lo + band]
+top = [radial(p) for p in pts if p.y >= y_hi - band]
+print(json.dumps({
+    "y_lo": y_lo, "y_hi": y_hi,
+    "width_bottom": max(bottom) if bottom else 0.0,
+    "width_top": max(top) if top else 0.0,
+}))
+"""
+
+
+def flare_widths(name):
+    """Radial extent (world space) of `name`'s bottom 10% vs top 10% by Y.
+
+    Measures the SHAPE the flare produced, not just "something changed" -
+    same idiom as test_flare_actually_tapers in test_handlers_mayapy.py.
+    Radial distance from the local Y axis rather than raw abs(x), because the
+    core's flare tapers both startFlareX/Z and endFlareX/Z together, so the
+    taper shows on both axes and hypot(x, z) is the honest single number for it.
+    """
+    result = ok(call("execute_python", {"code": _FLARE_WIDTH_CODE % name}, 60.0),
+                "flare widths %s" % name)
+    return json.loads(result["stdout"])
+
+
+_TRANSFORM_CODE = """
+import json
+import maya.cmds as cmds
+print(json.dumps({
+    "translate": cmds.getAttr(%r + ".translate")[0],
+    "rotate": cmds.getAttr(%r + ".rotate")[0],
+    "scale": cmds.getAttr(%r + ".scale")[0],
+}))
+"""
+
+
+def own_transform_channels(name):
+    """The literal translate/rotate/scale attribute values on `name`'s own
+    transform node - NOT cmds.xform's worldSpace-decomposed numbers, which
+    would read as identity-ish for any unparented node regardless of whether
+    the parent's old transform was baked into geometry or just handed down
+    onto this node's own channels. Distinguishing those two is the entire
+    point of this check (see Important 1 in task-6-report.md): a world-space
+    measurement (bbox, signed_volume) is invariant to which of them happened,
+    because cmds.parent(world=True) preserves world position either way.
+    """
+    result = ok(call("execute_python", {"code": _TRANSFORM_CODE % (name, name, name)}, 60.0),
+                "transform channels %s" % name)
+    return json.loads(result["stdout"])
 
 
 def tight_world_bbox(name):
@@ -112,10 +189,14 @@ def tight_world_bbox(name):
     return data["lo"], data["hi"]
 
 
-def render(label, target, zoom=1.2):
-    result = ok(call("render_scene", {
+def render(label, target, zoom=1.2, isolate=None):
+    params = {
         "angles": ["three_quarter"], "renderer": "arnold", "resolution": 640,
-        "samples": 3, "target": target, "zoom": zoom}, 900.0), "render %s" % label)
+        "samples": 3, "target": target, "zoom": zoom,
+    }
+    if isolate is not None:
+        params["isolate"] = isolate
+    result = ok(call("render_scene", params, 900.0), "render %s" % label)
     os.makedirs(OUT_DIR, exist_ok=True)
     shot = result["images"][0]
     png = base64.b64decode(shot["png_b64"])
@@ -156,9 +237,28 @@ def gate_gear():
     check(max(gaps) - min(gaps) < 0.5,
           "teeth evenly spaced (gap range %.3f deg)" % (max(gaps) - min(gaps)))
 
+    # Position alone passes for an implementation that translates copies
+    # around the ring WITHOUT rotating them - all teeth facing the same way.
+    # The tooth's scale is [1.2, 1.0, 0.8] (X != Z), so the copy nearest 90
+    # degrees from the source must have its X/Z bbox spans SWAPPED relative
+    # to the source if it actually rotated. Picked by measured bearing, not
+    # list index - group() child order is not a contract this gate should lean on.
+    src_angle = angle_of(objs, "|tooth")
+    target_angle = (src_angle + 90.0) % 360.0
+    ninety = min(result["names"], key=lambda n: circular_diff(angle_of(objs, n), target_angle))
+    ninety_offset = circular_diff(angle_of(objs, ninety), target_angle)
+    src_span, rot_span = span_of(objs, "|tooth"), span_of(objs, ninety)
+    check(
+        abs(rot_span[0] - src_span[2]) < 0.02 and abs(rot_span[2] - src_span[0]) < 0.02,
+        "tooth near 90deg has X/Z bbox spans swapped vs source - actually "
+        "rotated, not just translated (source X=%.3f Z=%.3f, rotated-copy "
+        "X=%.3f Z=%.3f, bearing offset from ideal 90deg %.2fdeg)"
+        % (src_span[0], src_span[2], rot_span[0], rot_span[2], ninety_offset)
+    )
+
     ok(call("setup_lighting", {"preset": "three_point", "intensity": 3.0,
                                "replace_existing": True}, 180.0), "lighting")
-    render("gear", ["hub", "tooth"] + [n.split("|")[-1] for n in result["names"]])
+    render("gear", ["|hub", "|tooth"] + result["names"])
 
 
 def gate_spine():
@@ -175,6 +275,20 @@ def gate_spine():
 
     info = ok(call("get_object_info", {"name": "|core"}, 60.0), "core info")
     check(info["mesh_stats"]["verts"] > 0, "core survived the flare")
+
+    # verts > 0 above passes even for a flare that did NOTHING - it only
+    # proves the mesh survived, not that it tapered. This milestone's
+    # headline feature (3 new nonlinear deformers) had zero live shape
+    # measurement without this: sample the core's own vertices and confirm
+    # the bottom 10% (by Y) is meaningfully wider than the top 10%, same
+    # shape as test_flare_actually_tapers in test_handlers_mayapy.py.
+    flare = flare_widths("|core")
+    ratio = (flare["width_bottom"] / flare["width_top"]) if flare["width_top"] else float("inf")
+    print("  flare widths: bottom=%.4f top=%.4f ratio=%.3f (y range %.3f..%.3f)"
+          % (flare["width_bottom"], flare["width_top"], ratio, flare["y_lo"], flare["y_hi"]))
+    check(flare["width_bottom"] > flare["width_top"] * 1.5,
+          "flare actually tapers the core (bottom %.4f > 1.5x top %.4f, ratio %.3f)"
+          % (flare["width_bottom"], flare["width_top"], ratio))
 
     ok(call("create_primitive", {
         "kind": "cube", "name": "rib", "translate": [0.0, 11.0, 0.0],
@@ -198,7 +312,7 @@ def gate_spine():
 
     ok(call("setup_lighting", {"preset": "three_point", "intensity": 3.0,
                                "replace_existing": True}, 180.0), "lighting")
-    render("spine", ["core", "rib"] + [n.split("|")[-1] for n in result["names"]])
+    render("spine", ["|core", "|rib"] + result["names"])
 
 
 def gate_mirror():
@@ -260,13 +374,31 @@ def gate_mirror():
           "mirrored bbox (off-origin pivot) matches the pure prediction "
           "(worst axis error %.5f)" % worst)
 
+    # The bbox match above is invariant to WHERE the reflection ended up -
+    # cmds.parent(world=True) preserves world position whether makeIdentity
+    # baked the -1 scale into the copy's geometry or just handed it down onto
+    # the copy's own transform channels, and world-space bbox/signed_volume
+    # cannot tell those apart. "Baked into geometry" means the copy's own
+    # transform node ends up identity-ish: scale 1.0 on every axis (NOT -1.0),
+    # no residual rotation from the freeze. Read directly off the node, not
+    # decomposed from a world matrix.
+    xform = own_transform_channels(copy)
+    print("  %s own transform: translate=%s rotate=%s scale=%s"
+          % (copy, xform["translate"], xform["rotate"], xform["scale"]))
+    check(all(abs(s - 1.0) < 1e-4 for s in xform["scale"]),
+          "mirrored copy's own scale channels are identity, not -1 (baked "
+          "into geometry): %s" % [round(s, 6) for s in xform["scale"]])
+    check(all(abs(r) < 1e-3 for r in xform["rotate"]),
+          "mirrored copy's own rotate channels show no residual freeze "
+          "rotation: %s" % [round(r, 6) for r in xform["rotate"]])
+
     check(result["signed_volume"] is not None,
           "signed_volume was measured on the mirrored copy")
     # Assumption 3 (MFnMesh.getTriangles()'s indices pair correctly with
     # getPoints(kWorld)) and assumption 4 (polyNormal(normalMode=0) really is
     # "reverse") are both settled by this assertion: a wrong triangle/point
     # pairing produces a near-random signed volume (as likely negative as
-    # positive, and not reliably matching the pixel cross-check below); a
+    # positive, and not reliably matching the isolated-render check below); a
     # normalMode that doesn't reverse leaves the mirrored copy's inverted
     # winding uncorrected, which is negative by construction.
     check((result["signed_volume"] or 0.0) > 0.0,
@@ -276,13 +408,22 @@ def gate_mirror():
 
     ok(call("setup_lighting", {"preset": "three_point", "intensity": 3.0,
                                "replace_existing": True}, 180.0), "lighting")
-    stats = render("mirror", ["arm", copy.split("|")[-1]])
-    # An inward-facing mesh renders black or hollow: with both halves lit and
-    # only one of them inside out, the frame loses colour variety. This is the
-    # pixel-side cross-check on the signed-volume number.
-    check(stats["distinct_colors"] > 200,
-          "the mirrored pair renders as lit solids (%d distinct colours)"
-          % stats["distinct_colors"])
+    render("mirror", ["|arm", copy])
+    # distinct_colors on a frame with BOTH objects is not a real cross-check:
+    # an anti-aliased Arnold render of one lit solid alone clears 200 unaided
+    # (measured on the gear frame, no inversion risk at all: 1122 distinct
+    # colours), so a fully black mirrored copy next to a correctly lit source
+    # would very likely still pass it. Render the mirrored copy ALONE instead
+    # (target AND isolate, so nothing else is even in frame) and assert
+    # floors on opaque_px and mean_luma - an inside-out mesh under Arnold
+    # renders black or hollow, which tanks both.
+    iso_stats = render("mirror_isolated", [copy], isolate=[copy])
+    check(iso_stats["opaque_px"] > 3000,
+          "mirrored copy ALONE has real opaque coverage, not a near-empty "
+          "frame (%d opaque px)" % iso_stats["opaque_px"])
+    check(iso_stats["mean_luma"] > 3.0,
+          "mirrored copy ALONE is actually lit, not black/hollow "
+          "(mean_luma %.2f)" % iso_stats["mean_luma"])
 
 
 if __name__ == "__main__":

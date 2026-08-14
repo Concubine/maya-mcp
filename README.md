@@ -132,7 +132,7 @@ Environment variables, all optional:
 | `maya_boolean_op` | Boolean two meshes (union/difference/intersection); auto-checkpoints, deletes construction history, collapses shading to one material. |
 | `maya_etch_text` | Carve text into a mesh face in one call (glyph, size, orient to face normal, depth, boolean, cleanup); reuses `boolean_op`'s core. |
 | `maya_sculpt_ops` | Apply a sequence of sculpt ops (`soft_move`, `inflate_region`, `displace_noise`, `smooth`, `extrude_faces`, `bevel_edges`, `crease_edges`, `bridge`) to one mesh. |
-| `maya_deform` | Apply a nonlinear/lattice deformer (bend/lattice/squash/twist/sculpt) to a mesh by name. |
+| `maya_deform` | Apply a nonlinear/lattice deformer (bend/flare/lattice/sculpt/sine/squash/twist/wave) to a mesh by name. |
 | `maya_remesh_retopo` | Retopologize a mesh toward a target polycount (polyRetopo, falling back to polyRemesh, then polyReduce); auto-checkpoints. |
 | `maya_mesh_cleanup` | Merge near-duplicate vertices, conform normals, freeze transforms, and delete construction history. |
 

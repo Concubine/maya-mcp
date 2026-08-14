@@ -234,9 +234,11 @@ maya_sculpt_ops(mesh: str, ops: list[SculptOp]) -> { applied: int, tris, warning
   #   {op:"bridge", edges_a, edges_b}
   # Applied in order; abort-and-report on first failure, listing which ops landed.
 
-maya_deform(mesh: str, deformer: Literal["bend","lattice","squash","twist","sculpt"],
+maya_deform(mesh: str, deformer: Literal["bend","flare","lattice","sculpt",
+                                          "sine","squash","twist","wave"],
             params: dict, delete_history_after: bool = False)
-  # bend for the golem hunch; lattice for global proportion pushes.
+  # bend for the golem hunch; lattice for global proportion pushes; flare for
+  # a limb thick at one end and thin at the other; sine/wave for ripples.
 
 maya_remesh_retopo(mesh: str, target_polycount: int, keep_original: bool = True)
   # destructive → auto-checkpoint. polyRetopo where available, polyRemesh fallback,
