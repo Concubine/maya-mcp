@@ -256,6 +256,33 @@ def test_create_primitive_refuses_a_maya_killing_polycount(monkeypatch):
     assert fake.calls == []
 
 
+def test_primitive_kinds_include_low_poly_faceted_shapes():
+    # F2: a cut gem is 8-16 faces; before this, the only faceted primitive
+    # was a bevelled cube (36/36 chunks in the real art run).
+    assert {"octahedron", "icosahedron", "prism", "pyramid"} <= set(
+        modeling.PRIMITIVE_KINDS
+    )
+
+
+def test_projected_faces_platonic_solids_are_fixed_regardless_of_divisions():
+    # polyPlatonicSolid has no subdivision flags - divisions cannot change
+    # face count, unlike every other kind.
+    assert modeling.projected_faces("octahedron", 1) == 8
+    assert modeling.projected_faces("octahedron", 50) == 8
+    assert modeling.projected_faces("icosahedron", 1) == 20
+    assert modeling.projected_faces("icosahedron", 50) == 20
+
+
+def test_projected_faces_prism_and_pyramid_scale_with_divisions():
+    # Measured live in mayapy: polyPrism(numberOfSides=3, subdivisionsCaps=0)
+    # is ns*sh+2 faces; polyPyramid(numberOfSides=4, subdivisionsCaps=0) is
+    # ns*sh+1 (a single base cap, apex has no cap of its own).
+    assert modeling.projected_faces("prism", 1) == 5
+    assert modeling.projected_faces("prism", 3) == 11
+    assert modeling.projected_faces("pyramid", 1) == 5
+    assert modeling.projected_faces("pyramid", 3) == 13
+
+
 def test_create_primitive_allows_the_largest_safe_divisions(monkeypatch):
     # The limit must not be so blunt that it blocks a legitimately dense mesh:
     # the highest allowed divisions for each kind still goes through.

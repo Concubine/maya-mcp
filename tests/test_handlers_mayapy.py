@@ -290,6 +290,53 @@ class TestModelingInMaya:
         modeling.delete_objects({"names": ["|gp_grp"]})
         assert not cmds.objExists("gp_grp")
 
+    def test_platonic_solid_kinds_build_with_fixed_low_poly_face_counts(self):
+        # F2: octahedron/icosahedron have no subdivision flags in Maya - the
+        # real face count must match projected_faces regardless of divisions,
+        # proving the cap math (max_divisions_for) stays honest for them too.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        oct_low = modeling.create_primitive({"kind": "octahedron", "name": "gem_oct_a"})
+        oct_high = modeling.create_primitive(
+            {"kind": "octahedron", "name": "gem_oct_b", "divisions": 50}
+        )
+        assert cmds.polyEvaluate(oct_low["name"], face=True) == 8
+        assert cmds.polyEvaluate(oct_high["name"], face=True) == 8
+        assert modeling.projected_faces("octahedron", 50) == 8
+
+        ico = modeling.create_primitive({"kind": "icosahedron", "name": "gem_ico"})
+        assert cmds.polyEvaluate(ico["name"], face=True) == 20
+        assert modeling.projected_faces("icosahedron", 1) == 20
+
+    def test_prism_and_pyramid_build_faceted_low_poly_gems(self):
+        # A cut gem is 8-16 faces - these two kinds are the tool gap the real
+        # art run hit (only bevelled cubes were faceted before F2).
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        prism = modeling.create_primitive(
+            {"kind": "prism", "name": "gem_prism", "divisions": 3}
+        )
+        assert cmds.polyEvaluate(prism["name"], face=True) == modeling.projected_faces(
+            "prism", 3
+        )
+
+        pyramid = modeling.create_primitive(
+            {"kind": "pyramid", "name": "gem_pyramid", "divisions": 3}
+        )
+        assert cmds.polyEvaluate(
+            pyramid["name"], face=True
+        ) == modeling.projected_faces("pyramid", 3)
+
+        # divisions=1 defaults land inside the "cut gem is 8-16 faces" band.
+        prism_default = modeling.create_primitive(
+            {"kind": "prism", "name": "gem_prism_default"}
+        )
+        assert 5 <= cmds.polyEvaluate(prism_default["name"], face=True) <= 16
+
 
 class TestBooleanInMaya:
     def test_difference_carves_and_is_clean(self, tmp_path):
@@ -1433,6 +1480,66 @@ class TestTextureRecipesInMaya:
 
 
 class TestMaterialInMaya:
+    def test_transmission_and_ior_actually_set_on_a_real_standardsurface(self, tmp_path):
+        # F1: transmission/ior are the whole optical identity of a gem - this
+        # proves the values land on the real node, not just a fake.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import material
+
+        cmds.file(new=True, force=True)
+        cmds.file(rename=str(tmp_path / "gem_material.ma"))
+        cmds.polyCube(name="gemcube", w=2, h=2, d=2)
+
+        result = material.assign_material({
+            "mesh": "|gemcube", "shader": "standardSurface",
+            "params": {
+                "transmission": 0.92, "transmissionColor": [0.9, 0.97, 1.0],
+                "ior": 1.5, "roughness": 0.05,
+            },
+            "name": "diamond_mat",
+        })
+        mat = result["material"]
+        assert cmds.getAttr(mat + ".transmission") == pytest.approx(0.92)
+        assert cmds.getAttr(mat + ".specularIOR") == pytest.approx(1.5)
+        assert cmds.getAttr(mat + ".transmissionColor")[0] == pytest.approx(
+            (0.9, 0.97, 1.0)
+        )
+
+    def test_same_name_reuses_one_shader_across_two_meshes(self, tmp_path):
+        # F4: three iterations of one-material-per-mesh left ~108 dead
+        # shaders for eight distinct gems in the real art run. Two calls with
+        # the same name for two different meshes must produce ONE shader.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import material
+
+        cmds.file(new=True, force=True)
+        cmds.file(rename=str(tmp_path / "gem_reuse.ma"))
+        cmds.polyCube(name="reuse_a")
+        cmds.polyCube(name="reuse_b")
+
+        first = material.assign_material({
+            "mesh": "|reuse_a", "shader": "standardSurface",
+            "params": {"baseColor": [0.2, 0.6, 0.9]}, "name": "shared_gem",
+        })
+        second = material.assign_material({
+            "mesh": "|reuse_b", "shader": "standardSurface",
+            "params": {"transmission": 0.8}, "name": "shared_gem",
+        })
+
+        assert first["material"] == "shared_gem"
+        assert second["material"] == "shared_gem"
+        assert cmds.ls("shared_gem*", type="standardSurface") == ["shared_gem"]
+        assert cmds.getAttr("shared_gem.transmission") == pytest.approx(0.8)
+
+        shape_a = cmds.listRelatives("|reuse_a", shapes=True, fullPath=True)[0]
+        shape_b = cmds.listRelatives("|reuse_b", shapes=True, fullPath=True)[0]
+        sg = first["shading_group"]
+        members = [m.split("|")[-1] for m in (cmds.sets(sg, query=True) or [])]
+        assert shape_a.split("|")[-1] in members
+        assert shape_b.split("|")[-1] in members
+
     def test_assigned_material_reads_back_through_get_object_info(self, tmp_path):
         import maya.cmds as cmds
 

@@ -226,7 +226,13 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         ] = ["front", "side", "three_quarter"],
         shading: Annotated[
             Literal["smoothShaded", "flatShaded", "wireframe", "textured"],
-            Field(description="Viewport shading mode for the capture."),
+            Field(description=(
+                "Viewport shading mode for the capture. 'textured' reveals "
+                "texture/bump networks; 'flatShaded' reveals facets and "
+                "hard-surface reads (per-face normals, no interpolation); "
+                "'smoothShaded' (the default) hides BOTH - a faceted gem or a "
+                "bump map look identical to a plain shaded blob in it."
+            )),
         ] = "smoothShaded",
         wireframe_overlay: Annotated[
             bool,
@@ -308,7 +314,11 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         ))] = 384,
         shading: Annotated[
             ShadingMode,
-            Field(description="Viewport shading mode for every frame."),
+            Field(description=(
+                "Viewport shading mode for every frame. 'textured' reveals "
+                "texture/bump networks; 'flatShaded' reveals facets and "
+                "hard-surface reads; 'smoothShaded' (the default) hides both."
+            )),
         ] = "smoothShaded",
         lighting: Annotated[
             Literal["default", "scene", "flat"],
@@ -556,8 +566,17 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
     )
     def maya_create_primitive(
         kind: Annotated[
-            Literal["cube", "sphere", "cylinder", "plane", "torus", "cone"],
-            Field(description="Primitive type."),
+            Literal[
+                "cube", "sphere", "cylinder", "plane", "torus", "cone",
+                "octahedron", "icosahedron", "prism", "pyramid",
+            ],
+            Field(description=(
+                "Primitive type. octahedron/icosahedron are platonic solids "
+                "with a fixed face count (divisions has no effect); prism is "
+                "a 3-sided, pyramid a 4-sided low-poly faceted form (divisions "
+                "sets height subdivisions). Use these for cut-gem/crystalline "
+                "forms - a bevelled cube is not the only faceted primitive."
+            )),
         ],
         name: Annotated[str, Field(min_length=1, description=(
             "Requested name; collisions get a deterministic _NNN suffix and the "
@@ -920,7 +939,10 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         Tries polyRetopo, then polyRemesh, then polyReduce, in that order, as
         compatibility fallbacks across Maya versions — the response's method
         field says which one actually ran, and a fallback adds a warning
-        naming what was unavailable."""
+        naming what was unavailable.
+
+        polyRetopo produces uniform quads and smooths the surface - the wrong
+        tool for crystalline/faceted forms, which it will round off."""
         return RemeshResult.model_validate(
             maya.request(
                 "remesh_retopo",
@@ -1087,7 +1109,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         ] = "standardSurface",
         params: Annotated[dict, Field(description=(
             "Whitelisted per shader. standardSurface: baseColor, roughness, "
-            "metalness, emission, emissionColor, specular. lambert: color, "
+            "metalness, emission, emissionColor, specular, transmission "
+            "(0..1), transmissionColor, ior (1.0..3.0 - water 1.33, glass "
+            "1.5, diamond 2.42; the params a gem needs). lambert: color, "
             "transparency, incandescence. blinn adds eccentricity, "
             "specularColor. Colours are [r, g, b] in 0..1. Unknown keys are "
             "rejected with that shader's whitelist in the hint."
@@ -1097,6 +1121,12 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         ))] = None,
     ) -> MaterialResult:
         """Assign one material to a whole mesh (object-level shading only).
+
+        If name matches an existing shader of the SAME shader type, that
+        shader is reused (params are applied to it) instead of minting a new
+        one - the way to share one material across many meshes without
+        leaking a shader node per call. A name that exists as a different
+        node type, or a shader of a different type, is a clear error.
 
         Multi-material looks come from splitting geometry into separate meshes -
         per-face assignment is unreliable on boolean output."""
@@ -1136,7 +1166,11 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             )),
         ] = None,
     ) -> TextureRecipeResult:
-        """Build a named texture network and wire it into the mesh's shader."""
+        """Build a named texture network and wire it into the mesh's shader.
+
+        Capture with shading="textured" to see the result - smoothShaded
+        (the default capture mode) hides texture networks exactly as it
+        hides facets, and you will conclude the recipe did nothing."""
         return TextureRecipeResult.model_validate(
             maya.request(
                 "apply_texture_recipe",

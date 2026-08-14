@@ -796,3 +796,51 @@ class TestReferenceImages:
         with pytest.raises(KeyError) as exc:
             store.get("never_loaded")
         assert "none" in str(exc.value)
+
+
+class TestDocsExplainWhichShadingModeRevealsWhat:
+    # F5: facets are invisible in smoothShaded, exactly as texture networks
+    # are - the run couldn't tell whether a tool had done anything.
+
+    def test_capture_viewport_shading_param_explains_the_modes(self):
+        mcp = server_mod.create_server(FakeConn())
+        tools = {t.name: t for t in run(mcp.list_tools())}
+        desc = tools["maya_capture_viewport"].input_schema["properties"]["shading"][
+            "description"
+        ]
+        assert "textured" in desc and "texture" in desc
+        assert "flatShaded" in desc and "facet" in desc
+        assert "smoothShaded" in desc and "hid" in desc  # "hides"/"hidden"
+
+    def test_capture_turntable_shading_param_explains_the_modes(self):
+        mcp = server_mod.create_server(FakeConn())
+        tools = {t.name: t for t in run(mcp.list_tools())}
+        desc = tools["maya_capture_turntable"].input_schema["properties"]["shading"][
+            "description"
+        ]
+        assert "textured" in desc and "texture" in desc
+        assert "flatShaded" in desc and "facet" in desc
+        assert "smoothShaded" in desc and "hid" in desc
+
+    def test_apply_texture_recipe_description_tells_caller_to_capture_textured(self):
+        mcp = server_mod.create_server(FakeConn())
+        tools = {t.name: t for t in run(mcp.list_tools())}
+        desc = tools["maya_apply_texture_recipe"].description
+        assert "textured" in desc
+
+    def test_remesh_retopo_description_warns_it_is_wrong_for_faceted_forms(self):
+        # F3: polyRetopo produces uniform quads and smooths - the opposite of
+        # what a crystalline/faceted gem chunk needs.
+        mcp = server_mod.create_server(FakeConn())
+        tools = {t.name: t for t in run(mcp.list_tools())}
+        desc = tools["maya_remesh_retopo"].description
+        assert "quad" in desc
+        assert "facet" in desc or "crystalline" in desc
+
+    def test_assign_material_description_explains_reuse_semantics(self):
+        # F4: reusing an existing shader of the same type is the intended way
+        # to share one material across meshes - the tool description must say so.
+        mcp = server_mod.create_server(FakeConn())
+        tools = {t.name: t for t in run(mcp.list_tools())}
+        desc = tools["maya_assign_material"].description
+        assert "reuse" in desc.lower() or "reuses" in desc.lower()
