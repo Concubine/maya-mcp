@@ -91,6 +91,46 @@ def contact_sheet(pngs, cols: int | None = None) -> bytes:
     return _to_png(sheet)
 
 
+# An 8-bit alpha of 8 or less is invisible against any background; counting it
+# as opaque would let a "successful" transparent playblast pass the blank check.
+_ALPHA_FLOOR = 9
+
+
+def pixel_stats(png: bytes) -> dict:
+    """Opaque-pixel and colour counts for one rendered frame.
+
+    The failure mode a render path must catch is a valid PNG of nothing: an
+    unlit scene, a camera aimed at empty space and a window-less playblast all
+    return success and an image with no subject in it. Nothing comes in two
+    shapes, so both are counted - fully transparent (alpha), and a single flat
+    colour edge to edge (an unlit render, or a camera inside an object).
+    """
+    try:
+        img = PILImage.open(io.BytesIO(png))
+        img.load()
+    except Exception as exc:
+        raise ValueError("not a decodable image: %s" % exc) from exc
+
+    total = img.width * img.height
+    rgb = img.convert("RGB")
+    colors = rgb.getcolors(maxcolors=max(1, total)) or []
+    distinct = len(colors)
+
+    if "A" in img.getbands():
+        alpha_hist = img.convert("RGBA").getchannel("A").histogram()
+        opaque = sum(alpha_hist[_ALPHA_FLOOR:])
+    else:
+        # No alpha to go on: black is the background a render leaves behind.
+        opaque = sum(count for count, color in colors if color != (0, 0, 0))
+
+    return {
+        "opaque_px": opaque,
+        "total_px": total,
+        "distinct_colors": distinct,
+        "blank": opaque == 0 or distinct <= 1,
+    }
+
+
 def side_by_side(left_png: bytes, right_png: bytes, gap: int = 8) -> bytes:
     """Reference on the left, current viewport on the right, same scale."""
     left, right = _open(left_png), _open(right_png)
