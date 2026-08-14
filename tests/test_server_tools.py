@@ -10,11 +10,11 @@ import io
 import pytest
 from PIL import Image as PILImage
 
-from maya_mcp import server as server_mod
+from maya_mcp import refstore, server as server_mod
 
 
-def png_b64(width=1024, height=1024):
-    img = PILImage.new("RGB", (width, height), (140, 100, 70))
+def png_b64(width=1024, height=1024, color=(140, 100, 70)):
+    img = PILImage.new("RGB", (width, height), color)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("ascii")
@@ -52,7 +52,9 @@ class TestRegistration:
         assert {t.name for t in tools} == {
             "maya_execute_python",
             "maya_get_scene_graph",
+            "maya_get_object_info",
             "maya_capture_viewport",
+            "maya_capture_turntable",
             "maya_checkpoint",
             "maya_restore_checkpoint",
             "maya_undo",
@@ -76,6 +78,11 @@ class TestRegistration:
             "maya_mesh_cleanup",
             "maya_set_viewport",
             "maya_set_camera",
+            "maya_load_reference_image",
+            "maya_compare_to_reference",
+            "maya_setup_lighting",
+            "maya_assign_material",
+            "maya_apply_texture_recipe",
         }
 
     def test_annotations_declare_read_only_vs_destructive(self):
@@ -91,6 +98,9 @@ class TestRegistration:
         capture = by_name["maya_capture_viewport"].annotations
         assert (capture.read_only_hint, capture.destructive_hint,
                 capture.idempotent_hint) == (True, False, True)
+        lighting = by_name["maya_setup_lighting"].annotations
+        assert (lighting.read_only_hint, lighting.destructive_hint,
+                lighting.idempotent_hint) == (False, True, False)
 
 
 class TestExecutePython:
@@ -543,3 +553,246 @@ class TestSetCamera:
         with pytest.raises(Exception, match="position"):
             run(mcp.call_tool("maya_set_camera", {"position": [1, 2]}))
         assert conn.calls == []  # rejected before reaching Maya
+
+
+class TestSetupLighting:
+    def test_marshals_all_params_and_returns_result(self):
+        conn = FakeConn(
+            responses={
+                "setup_lighting": {
+                    "preset": "three_point",
+                    "lights": ["|mcpLight_key", "|mcpLight_fill", "|mcpLight_rim"],
+                    "removed": ["oldKey"],
+                    "checkpoint_id": "007_auto_lighting",
+                    "warnings": [],
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        result = run(
+            mcp.call_tool(
+                "maya_setup_lighting",
+                {"preset": "three_point", "intensity": 1.5,
+                 "replace_existing": True},
+            )
+        )
+        assert result.is_error is False
+        assert conn.calls[0]["cmd"] == "setup_lighting"
+        assert conn.calls[0]["params"] == {
+            "preset": "three_point", "intensity": 1.5,
+            "hdri_path": None, "replace_existing": True,
+        }
+        assert conn.calls[0]["timeout_s"] == server_mod.SCENE_TIMEOUT_S
+        assert result.structured_content["removed"] == ["oldKey"]
+        assert result.structured_content["checkpoint_id"] == "007_auto_lighting"
+
+    def test_defaults_intensity_and_replace_existing(self):
+        conn = FakeConn(
+            responses={
+                "setup_lighting": {
+                    "preset": "single_sun", "lights": ["|mcpLight_sun"],
+                    "removed": [], "checkpoint_id": None, "warnings": [],
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_setup_lighting", {"preset": "single_sun"}))
+        assert conn.calls[0]["params"]["intensity"] == 1.0
+        assert conn.calls[0]["params"]["replace_existing"] is True
+        assert conn.calls[0]["params"]["hdri_path"] is None
+
+    def test_invalid_preset_rejected_by_schema(self):
+        conn = FakeConn(responses={"setup_lighting": {}})
+        mcp = server_mod.create_server(conn)
+        with pytest.raises(Exception, match="preset"):
+            run(mcp.call_tool("maya_setup_lighting", {"preset": "cinematic"}))
+        assert conn.calls == []  # rejected before reaching Maya
+
+
+class TestCaptureTurntable:
+    def test_forwards_caller_supplied_shading(self):
+        conn = FakeConn(
+            responses={
+                "capture_turntable": {
+                    "images": [{"index": 0, "azimuth": 0.0, "png_b64": png_b64(32, 32)}],
+                    "n_frames": 1,
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        run(
+            mcp.call_tool(
+                "maya_capture_turntable", {"target": "|golem", "shading": "textured"}
+            )
+        )
+        assert conn.calls[0]["cmd"] == "capture_turntable"
+        assert conn.calls[0]["params"]["shading"] == "textured"
+
+    def test_shading_defaults_to_smooth_shaded(self):
+        conn = FakeConn(
+            responses={
+                "capture_turntable": {
+                    "images": [{"index": 0, "azimuth": 0.0, "png_b64": png_b64(32, 32)}],
+                    "n_frames": 1,
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_capture_turntable", {}))
+        assert conn.calls[0]["params"]["shading"] == "smoothShaded"
+
+
+class TestReferenceImages:
+    def test_load_reference_image_returns_metadata(self):
+        conn = FakeConn()
+        mcp = server_mod.create_server(conn)
+        result = run(
+            mcp.call_tool(
+                "maya_load_reference_image",
+                {"source": png_b64(40, 30), "ref_id": "hero"},
+            )
+        )
+        assert result.is_error is False
+        assert result.structured_content == {
+            "ref_id": "hero", "width": 40, "height": 30, "bytes": len(
+                base64.b64decode(png_b64(40, 30))
+            ),
+        }
+        assert conn.calls == []  # server-side store, never touches Maya
+
+    def test_compare_to_reference_returns_side_by_side_image_left_reference_right_viewport(self):
+        # Reference color: bright red; viewport color: bright blue
+        ref_color = (255, 0, 0)
+        viewport_color = (0, 0, 255)
+
+        conn = FakeConn(
+            responses={
+                "capture_viewport": {
+                    "images": [{"angle": "three_quarter", "png_b64": png_b64(64, 64, color=viewport_color)}],
+                    "camera_positions": [],
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        run(
+            mcp.call_tool(
+                "maya_load_reference_image",
+                {"source": png_b64(32, 32, color=ref_color), "ref_id": "hero"},
+            )
+        )
+        result = run(mcp.call_tool("maya_compare_to_reference", {"ref_id": "hero"}))
+        assert result.is_error is False
+        image_blocks = [c for c in result.content if c.type == "image"]
+        text_blocks = [c for c in result.content if c.type == "text"]
+        assert len(image_blocks) == 1
+        composite = PILImage.open(io.BytesIO(base64.b64decode(image_blocks[0].data)))
+        # side-by-side canvas: wider than either source alone, same height
+        assert composite.width > 64
+        assert composite.height == 64
+        assert any("hero" in t.text and "three_quarter" in t.text for t in text_blocks)
+        assert conn.calls[0]["cmd"] == "capture_viewport"
+
+        # Verify the image placement: reference on left, viewport on right.
+        # The 8px gap separates them; sample well inside each half to avoid edges.
+        # Left panel should be at least 32px (the scaled reference width).
+        left_sample_x = 15  # well inside the left half
+        right_sample_x = composite.width - 15  # well inside the right half
+        center_y = composite.height // 2
+
+        left_pixel = composite.getpixel((left_sample_x, center_y))
+        right_pixel = composite.getpixel((right_sample_x, center_y))
+
+        # Left side should have reference color (red)
+        assert left_pixel == ref_color, f"Left pixel {left_pixel} != reference color {ref_color}"
+        # Right side should have viewport color (blue)
+        assert right_pixel == viewport_color, f"Right pixel {right_pixel} != viewport color {viewport_color}"
+
+    def test_compare_to_reference_forwards_caller_supplied_shading(self):
+        conn = FakeConn(
+            responses={
+                "capture_viewport": {
+                    "images": [{"angle": "three_quarter", "png_b64": png_b64(32, 32)}],
+                    "camera_positions": [],
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        run(
+            mcp.call_tool(
+                "maya_load_reference_image",
+                {"source": png_b64(16, 16), "ref_id": "hero"},
+            )
+        )
+        run(
+            mcp.call_tool(
+                "maya_compare_to_reference", {"ref_id": "hero", "shading": "textured"}
+            )
+        )
+        assert conn.calls[0]["cmd"] == "capture_viewport"
+        assert conn.calls[0]["params"]["shading"] == "textured"
+
+    def test_compare_to_reference_shading_defaults_to_smooth_shaded(self):
+        conn = FakeConn(
+            responses={
+                "capture_viewport": {
+                    "images": [{"angle": "three_quarter", "png_b64": png_b64(32, 32)}],
+                    "camera_positions": [],
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        run(
+            mcp.call_tool(
+                "maya_load_reference_image",
+                {"source": png_b64(16, 16), "ref_id": "hero"},
+            )
+        )
+        run(mcp.call_tool("maya_compare_to_reference", {"ref_id": "hero"}))
+        assert conn.calls[0]["params"]["shading"] == "smoothShaded"
+
+    def test_compare_to_reference_oversized_reference_is_capped(self, monkeypatch):
+        # I6: a big reference must not bypass MAYA_MCP_MAX_IMAGE_PX - the
+        # composite (reference | viewport) must land within the cap on its
+        # longest edge, not balloon to the reference's native size.
+        monkeypatch.setenv("MAYA_MCP_MAX_IMAGE_PX", "256")
+        conn = FakeConn(
+            responses={
+                "capture_viewport": {
+                    "images": [{"angle": "three_quarter", "png_b64": png_b64(64, 64)}],
+                    "camera_positions": [],
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        run(
+            mcp.call_tool(
+                "maya_load_reference_image",
+                {"source": png_b64(3000, 3000), "ref_id": "huge"},
+            )
+        )
+        result = run(
+            mcp.call_tool("maya_compare_to_reference", {"ref_id": "huge", "resolution": 200})
+        )
+        image_blocks = [c for c in result.content if c.type == "image"]
+        composite = PILImage.open(io.BytesIO(base64.b64decode(image_blocks[0].data)))
+        assert max(composite.size) <= 256
+
+    def test_compare_to_reference_unknown_ref_id_errors_naming_loaded_ids(self):
+        conn = FakeConn(responses={"capture_viewport": {"images": [], "camera_positions": []}})
+        mcp = server_mod.create_server(conn)
+        run(
+            mcp.call_tool(
+                "maya_load_reference_image",
+                {"source": png_b64(10, 10), "ref_id": "hero"},
+            )
+        )
+        with pytest.raises(Exception, match="hero"):
+            run(mcp.call_tool("maya_compare_to_reference", {"ref_id": "missing"}))
+        assert conn.calls == []  # never reached Maya - failed before the capture
+
+    def test_compare_to_reference_errors_clearly_for_an_unknown_ref_id(self):
+        # The failure a user will actually hit: comparing before loading.
+        store = refstore.ReferenceStore()
+        with pytest.raises(KeyError) as exc:
+            store.get("never_loaded")
+        assert "none" in str(exc.value)

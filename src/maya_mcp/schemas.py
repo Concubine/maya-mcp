@@ -56,6 +56,32 @@ class SceneGraphResult(BaseModel):
     )
 
 
+class ObjectInfoResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str = Field(description="Canonical long name of the object queried.")
+    transform: Optional[dict] = Field(
+        default=None, description="World-space translate/rotate/scale."
+    )
+    mesh_stats: Optional[dict] = Field(
+        default=None,
+        description="tris, verts, faces, boundary_edges, nonmanifold_edges, watertight.",
+    )
+    uvs: Optional[dict] = Field(
+        default=None, description="UV set names and count - a summary, never raw UVs."
+    )
+    shading: Optional[dict] = Field(
+        default=None,
+        description=(
+            "shading_groups, materials, and per_face - per_face=true means "
+            "face-level assignment, which is unreliable on boolean output."
+        ),
+    )
+    history: Optional[dict] = Field(
+        default=None, description="Construction-history node count and distinct node types."
+    )
+
+
 class CheckpointResult(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -236,4 +262,48 @@ class CameraResult(BaseModel):
     name: str
     position: List[float]
     rotation: List[float]
+    warnings: List[str] = Field(default_factory=list)
+
+
+class LightingResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    preset: str
+    lights: List[str] = Field(description="Canonical long names of the lights created.")
+    removed: List[str] = Field(
+        default_factory=list, description="Short names of lights deleted by replace_existing."
+    )
+    checkpoint_id: Optional[str] = Field(
+        default=None,
+        description="Auto-checkpoint taken before deleting lights; None if nothing was deleted.",
+    )
+    warnings: List[str] = Field(default_factory=list)
+
+
+class ReferenceResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    ref_id: str = Field(description="Id to pass to maya_compare_to_reference.")
+    width: int
+    height: int
+    bytes: int = Field(description="Stored size of the reference image.")
+
+
+class MaterialResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    mesh: str
+    material: str = Field(description="Name of the shader node created.")
+    shading_group: str
+    shader: str
+    warnings: List[str] = Field(default_factory=list)
+
+
+class TextureRecipeResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    mesh: str
+    recipe: str
+    slot: str = Field(description="Semantic slot driven: color, roughness, or normal.")
+    nodes: List[str] = Field(description="Texture nodes created by the recipe.")
     warnings: List[str] = Field(default_factory=list)

@@ -80,6 +80,39 @@ class TestCaptureInMayapy:
             capture.capture_viewport({"angles": ["front"]})
 
 
+class TestCaptureLightingInMaya:
+    def test_scene_lighting_changes_the_pixels(self, tmp_path):
+        # Spec 2: a capture must be able to use the scene's own lights.
+        # Asserting the modelEditor flag alone would pass even if VP2 ignored
+        # it - so compare actual pixels between the two modes.
+        import base64
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import capture
+
+        if not cmds.about(query=True, batch=True) is False:
+            pytest.skip("viewport capture needs a GUI Maya")
+
+        cmds.file(rename=str(tmp_path / "lighting.ma"))
+        cmds.polyCube(name="litcube", w=4, h=4, d=4)
+        light = cmds.directionalLight(name="keyish", intensity=3.0)
+        cmds.xform(cmds.listRelatives(light, parent=True)[0], rotation=[-35, 25, 0])
+
+        shots = {}
+        for mode in ("default", "scene"):
+            out = capture.capture_viewport({
+                "angles": ["three_quarter"], "lighting": mode,
+                "wireframe_overlay": False, "resolution": 256,
+                "isolate": ["|litcube"],
+            })
+            shots[mode] = base64.b64decode(out["images"][0]["png_b64"])
+
+        assert shots["default"] != shots["scene"], (
+            "scene lighting produced pixel-identical output to the default "
+            "headlight - displayLights is not reaching VP2"
+        )
+
+
 class TestSessionInMaya:
     def test_checkpoint_restore_roundtrip(self, tmp_path):
         import maya.cmds as cmds
@@ -746,6 +779,43 @@ class TestViewportInMaya:
             viewport.set_camera({"camera": "mb_active_cam"})
 
 
+class TestObjectInfoInMaya:
+    def test_sections_against_a_real_mesh(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import objinfo
+
+        cmds.file(rename=str(tmp_path / "objinfo.ma"))
+        cmds.polyCube(name="infocube", w=2, h=2, d=2)
+        cmds.xform("|infocube", translation=[1, 2, 3])
+
+        info = objinfo.get_object_info(
+            {"name": "|infocube",
+             "include": ["transform", "mesh_stats", "uvs", "shading", "history"]}
+        )
+        assert info["name"] == "|infocube"
+        assert info["transform"]["translate"] == pytest.approx([1.0, 2.0, 3.0])
+        assert info["mesh_stats"]["watertight"] is True
+        assert info["mesh_stats"]["tris"] == 12
+        assert info["uvs"]["count"] >= 1
+        # a fresh polyCube is in initialShadingGroup at object level
+        assert info["shading"]["shading_groups"] == ["initialShadingGroup"]
+        assert info["shading"]["per_face"] is False
+        assert info["history"]["node_count"] >= 1
+
+    def test_group_without_a_shape_rejects_mesh_sections(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import objinfo
+
+        cmds.file(rename=str(tmp_path / "objinfo_group.ma"))
+        cmds.polyCube(name="gchild")
+        cmds.group("|gchild", name="ginfo")
+        with pytest.raises(HandlerError, match="no shape node"):
+            objinfo.get_object_info({"name": "|ginfo", "include": ["mesh_stats"]})
+
+
 class TestDeformRemeshCleanupInMaya:
     def test_bend_deformer_created_and_baked(self):
         import maya.cmds as cmds
@@ -1128,3 +1198,309 @@ class TestM1AcceptanceGate:
 
         if helper_failure:
             raise helper_failure[0]
+
+
+class TestLightingInMaya:
+    def test_replace_existing_removes_exactly_the_prior_lights(self, tmp_path):
+        # A full node-count diff, not a spot check: this tool deletes user
+        # work, and "removed one thing too many" is the failure that matters.
+        #
+        # The fixture also covers I1 (over-deletion, CRITICAL): a light
+        # transform that also carries a mesh shape, and a light transform
+        # with a child node parented under it. cmds.delete(transform)
+        # deletes the whole subtree, so a naive "delete the transform" pass
+        # would take the mesh and the child down with the light - that is
+        # exactly what the old code did, and why an earlier version of this
+        # fixture (light alone, no children, no co-located shapes) missed it.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import lighting
+
+        cmds.file(new=True, force=True)
+        cmds.file(rename=str(tmp_path / "lighting.ma"))
+        cmds.polyCube(name="keepme")
+        cmds.spaceLocator(name="keepme_loc")
+        old_shape = cmds.ls(cmds.directionalLight(name="old_key"), long=True)[0]
+        old_transform = cmds.listRelatives(old_shape, parent=True, fullPath=True)[0]
+
+        # A light transform that ALSO holds a mesh shape (two shapes, one
+        # transform) - reparent a cube's shape onto the light's transform.
+        shared_shape = cmds.ls(cmds.directionalLight(name="old_shared"), long=True)[0]
+        shared_transform = cmds.listRelatives(shared_shape, parent=True, fullPath=True)[0]
+        cube_tf = cmds.polyCube(name="shared_mesh_src")[0]
+        cube_shape = cmds.listRelatives(cube_tf, shapes=True, fullPath=True)[0]
+        cmds.parent(cube_shape, shared_transform, relative=True, shape=True)
+        cmds.delete(cube_tf)  # now-empty source transform; the shape lives on shared_transform
+        mesh_under_shared = [
+            s for s in cmds.listRelatives(shared_transform, shapes=True, fullPath=True) or []
+            if cmds.nodeType(s) == "mesh"
+        ][0]
+
+        # A light transform with a child node (a locator) parented under it.
+        child_shape = cmds.ls(cmds.directionalLight(name="old_with_child"), long=True)[0]
+        child_transform = cmds.listRelatives(child_shape, parent=True, fullPath=True)[0]
+        cmds.spaceLocator(name="old_with_child_loc")
+        cmds.parent("old_with_child_loc", child_transform)
+        child_loc = child_transform + "|old_with_child_loc"
+
+        before = set(cmds.ls(long=True))
+
+        result = lighting.setup_lighting(
+            {"preset": "three_point", "replace_existing": True}
+        )
+
+        assert cmds.objExists("|keepme")
+        assert cmds.objExists("|keepme_loc")
+        # the isolated light: fully removed, transform included
+        assert not cmds.objExists(old_transform)
+        assert not cmds.objExists(old_shape)
+        # the mesh-sharing transform: light shape gone, transform + mesh survive
+        assert not cmds.objExists(shared_shape)
+        assert cmds.objExists(shared_transform)
+        assert cmds.objExists(mesh_under_shared)
+        # the transform with a child locator: light shape gone, transform + child survive
+        assert not cmds.objExists(child_shape)
+        assert cmds.objExists(child_transform)
+        assert cmds.objExists(child_loc)
+
+        assert len(result["lights"]) == 3
+        assert result["removed"] == ["old_key"]
+        assert len(result["warnings"]) == 2, \
+            "the two spared transforms (shared mesh, child locator) must be surfaced"
+
+        # every surviving pre-existing node is still there - a full set
+        # diff against exactly the nodes that were legitimately deleted
+        after = set(cmds.ls(long=True))
+        expected_vanished = {old_transform, old_shape, shared_shape, child_shape}
+        vanished = before - after
+        assert vanished == expected_vanished, (
+            "setup_lighting deleted more or less than the light shapes/isolated "
+            "transform: extra=%s missing=%s"
+            % (vanished - expected_vanished, expected_vanished - vanished)
+        )
+
+    def test_build_hdri_sweeps_orphans_on_forced_connect_failure(self, monkeypatch, tmp_path):
+        # IMPORTANT (I2): _build_hdri creates a light, then a file texture,
+        # then connects them - a failure on the connect must not leave
+        # either behind. This runs after the delete step, so a miss here
+        # means prior lights are already gone AND stray half-built nodes
+        # remain.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import lighting
+
+        cmds.file(new=True, force=True)
+        cmds.file(rename=str(tmp_path / "lighting_hdri_sweep.ma"))
+        before = set(cmds.ls(long=True))
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("forced connectAttr failure")
+
+        monkeypatch.setattr(cmds, "connectAttr", _boom)
+
+        with pytest.raises(RuntimeError, match="forced connectAttr failure"):
+            lighting.setup_lighting({
+                "preset": "hdri",
+                "hdri_path": str(tmp_path / "sky.hdr"),
+                "replace_existing": False,
+            })
+
+        after = set(cmds.ls(long=True))
+        assert after == before, (
+            "the orphaned light + file texture must be swept: %s" % (after - before)
+        )
+
+    def test_build_three_point_sweeps_in_flight_light_on_xform_failure(self, monkeypatch, tmp_path):
+        # IMPORTANT: _build must record a created light's transform BEFORE
+        # the xform() call that can fail on it, mirroring _build_hdri. If it
+        # records only after xform succeeds, a failure on light N leaves
+        # lights 1..N-1 swept but light N itself - already created via
+        # directionalLight() - never makes it into `created`, so it leaks.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import lighting
+
+        cmds.file(new=True, force=True)
+        cmds.file(rename=str(tmp_path / "lighting_xform_sweep.ma"))
+        before = set(cmds.ls(long=True))
+
+        real_xform = cmds.xform
+        calls = []
+
+        def _flaky_xform(*args, **kwargs):
+            calls.append(args)
+            if len(calls) == 2:
+                raise RuntimeError("forced xform failure")
+            return real_xform(*args, **kwargs)
+
+        monkeypatch.setattr(cmds, "xform", _flaky_xform)
+
+        with pytest.raises(RuntimeError, match="forced xform failure"):
+            lighting.setup_lighting({"preset": "three_point", "replace_existing": False})
+
+        after = set(cmds.ls(long=True))
+        assert after == before, (
+            "the in-flight second light must be swept too, not just the "
+            "completed first light: %s" % (after - before)
+        )
+
+    def test_lights_actually_light_the_scene(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import lighting
+
+        cmds.file(new=True, force=True)
+        cmds.file(rename=str(tmp_path / "lighting_shape.ma"))
+        result = lighting.setup_lighting({"preset": "single_sun", "intensity": 2.0})
+        shapes = cmds.listRelatives(result["lights"][0], shapes=True, fullPath=True)
+        assert cmds.nodeType(shapes[0]) == "directionalLight"
+        assert cmds.getAttr(shapes[0] + ".intensity") == pytest.approx(2.0)
+
+
+class TestTextureRecipesInMaya:
+    def test_recipe_connects_and_rejects_missing_file_path_before_creating_nodes(
+        self, tmp_path
+    ):
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import material, texture_recipes
+
+        cmds.file(new=True, force=True)
+        cmds.file(rename=str(tmp_path / "recipes.ma"))
+        cmds.polyCube(name="texcube", w=2, h=2, d=2)
+        material.assign_material({"mesh": "|texcube", "name": "clay"})
+
+        before = set(cmds.ls(long=True))
+        result = texture_recipes.apply_texture_recipe(
+            {"mesh": "|texcube", "recipe": "noise_bump"}
+        )
+        assert len(result["nodes"]) == 2
+        assert cmds.listConnections("clay.normalCamera") != []
+
+        # file_texture's missing-file_path check is its very first line, so
+        # this only proves a pre-flight validation failure has no side
+        # effects - it never exercises the sweep itself (no node exists to
+        # sweep). See test_sweep_removes_real_nodes_after_partial_failure
+        # below for that.
+        mid = set(cmds.ls(long=True))
+        with pytest.raises(HandlerError):
+            texture_recipes.apply_texture_recipe(
+                {"mesh": "|texcube", "recipe": "file_texture"}  # no file_path
+            )
+        assert set(cmds.ls(long=True)) == mid
+
+    def test_sweep_removes_real_nodes_after_partial_failure(self, tmp_path, monkeypatch):
+        # Review finding: the test above's forced failure (file_texture with
+        # no file_path) raises on _file_texture's very first line, before
+        # any cmds.shadingNode call - so `created` is always empty and the
+        # sweep's cmds.delete() path has never run against a real Maya node.
+        # Force the failure AFTER noise_bump has created real noise/bump2d
+        # nodes (both shadingNode calls happen before either connectAttr
+        # call), by making the first connectAttr raise, and assert the full
+        # scene node set - not just the tracked `created` list - returns to
+        # exactly its pre-call snapshot.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import material, texture_recipes
+
+        cmds.file(new=True, force=True)
+        cmds.file(rename=str(tmp_path / "recipes_sweep.ma"))
+        cmds.polyCube(name="texcube2", w=2, h=2, d=2)
+        material.assign_material({"mesh": "|texcube2", "name": "clay2"})
+
+        real_connect_attr = cmds.connectAttr
+        calls = []
+
+        def _flaky_connect_attr(*args, **kwargs):
+            calls.append(args)
+            if len(calls) == 1:
+                raise RuntimeError("forced connectAttr failure")
+            return real_connect_attr(*args, **kwargs)
+
+        monkeypatch.setattr(cmds, "connectAttr", _flaky_connect_attr)
+
+        before = set(cmds.ls(long=True))
+        with pytest.raises(RuntimeError, match="forced connectAttr failure"):
+            texture_recipes.apply_texture_recipe(
+                {"mesh": "|texcube2", "recipe": "noise_bump"}
+            )
+        after = set(cmds.ls(long=True))
+        assert after == before, (
+            "the noise/bump2d nodes created before the forced failure must "
+            "be swept: %s" % (after - before)
+        )
+
+
+class TestMaterialInMaya:
+    def test_assigned_material_reads_back_through_get_object_info(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import material, objinfo
+
+        cmds.file(new=True, force=True)
+        cmds.file(rename=str(tmp_path / "material.ma"))
+        cmds.polyCube(name="matcube", w=2, h=2, d=2)
+
+        result = material.assign_material({
+            "mesh": "|matcube", "shader": "standardSurface",
+            "params": {"baseColor": [0.4, 0.3, 0.25], "roughness": 0.8},
+            "name": "clay",
+        })
+        info = objinfo.get_object_info({"name": "|matcube", "include": ["shading"]})
+        assert info["shading"]["materials"] == [result["material"]]
+        assert info["shading"]["per_face"] is False
+        assert cmds.getAttr(result["material"] + ".specularRoughness") == pytest.approx(0.8)
+
+    def test_assign_takes_no_checkpoint(self, tmp_path):
+        # Look-dev is a loop of small tweaks; checkpointing each would evict
+        # the checkpoints that matter.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import material, session
+
+        cmds.file(new=True, force=True)
+        cmds.file(rename=str(tmp_path / "material_cp.ma"))
+        cmds.polyCube(name="cpcube")
+        before = len(session._existing(session._checkpoint_dir(cmds)))
+        material.assign_material({"mesh": "|cpcube", "params": {"roughness": 0.5}})
+        after = len(session._existing(session._checkpoint_dir(cmds)))
+        assert after == before
+
+    def test_bad_param_type_leaves_scene_node_set_unchanged(self, tmp_path):
+        # I2 (real Maya): the old code built the shader + SG and force-
+        # assigned the mesh to it BEFORE type-checking param values, so a
+        # bad param (scalar where a colour is required) orphaned both nodes
+        # AND left the mesh half-reassigned, losing its prior material. A
+        # full scene node-set diff, not just an orphan spot-check, is the
+        # milestone rule: "after any failed call, scene node counts are
+        # unchanged."
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import material
+
+        cmds.file(new=True, force=True)
+        cmds.file(rename=str(tmp_path / "material_orphan.ma"))
+        cmds.polyCube(name="orphcube", w=2, h=2, d=2)
+        original = material.assign_material(
+            {"mesh": "|orphcube", "shader": "lambert",
+             "params": {"color": [0.1, 0.2, 0.3]}, "name": "orig_mat"}
+        )
+
+        before = set(cmds.ls(long=True))
+        with pytest.raises(HandlerError):
+            material.assign_material({
+                "mesh": "|orphcube", "shader": "standardSurface",
+                "params": {"baseColor": 0.5}, "name": "bad_mat",
+            })
+        after = set(cmds.ls(long=True))
+        assert after == before, (
+            "assign_material left orphan nodes: %s" % (after - before)
+        )
+
+        # the mesh must still be wearing its ORIGINAL material, not
+        # half-reassigned onto the refused call's shading group.
+        shape = cmds.listRelatives("|orphcube", shapes=True, fullPath=True)[0]
+        members = cmds.sets(original["shading_group"], query=True) or []
+        assert shape.split("|")[-1] in [m.split("|")[-1] for m in members]

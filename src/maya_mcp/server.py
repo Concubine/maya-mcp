@@ -9,6 +9,7 @@ Run: `uv run maya-mcp` (stdio transport). Config via MAYA_MCP_* env vars.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import logging.handlers
@@ -20,7 +21,7 @@ from mcp.server.mcpserver import Image
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from . import images
+from . import images, refstore
 from .connection import MayaConnection
 from .schemas import (
     BooleanResult,
@@ -30,15 +31,20 @@ from .schemas import (
     DeformResult,
     DeleteResult,
     ExecuteResult,
+    LightingResult,
+    MaterialResult,
     NameResult,
     NewSceneResult,
+    ObjectInfoResult,
     OpenSceneResult,
+    ReferenceResult,
     RemeshResult,
     ResetNamespaceResult,
     RestoreResult,
     SaveSceneResult,
     SceneGraphResult,
     SculptResult,
+    TextureRecipeResult,
     TransformResult,
     UndoResult,
     ViewportState,
@@ -47,6 +53,7 @@ from .schemas import (
 log = logging.getLogger("maya_mcp.server")
 
 Angle = Literal["front", "side", "back", "top", "three_quarter", "current"]
+ShadingMode = Literal["smoothShaded", "flatShaded", "wireframe", "textured"]
 Vec3 = Annotated[
     Optional[List[float]],
     Field(min_length=3, max_length=3, description="XYZ triple."),
@@ -84,6 +91,11 @@ def _setup_logging() -> None:
 def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
     """Build the MCPServer; the connection is injectable for tests."""
     maya = conn if conn is not None else MayaConnection()
+    # Per-server-process, not per-scene: references survive new_scene, never
+    # dirty the user's file, and cannot be destroyed by a scene operation.
+    # Scoped to this create_server() call (like `maya` above) so tests that
+    # build multiple servers don't share loaded references.
+    _references = refstore.ReferenceStore()
     mcp = MCPServer(
         "maya-mcp",
         instructions=(
@@ -170,6 +182,35 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         )
 
     @mcp.tool(
+        title="Get object info",
+        annotations=ToolAnnotations(
+            read_only_hint=True, destructive_hint=False, idempotent_hint=True
+        ),
+    )
+    def maya_get_object_info(
+        name: Annotated[str, Field(min_length=1, description=(
+            "Canonical long name, e.g. |golem|torso."
+        ))],
+        include: Annotated[
+            List[Literal["transform", "mesh_stats", "uvs", "shading", "history"]],
+            Field(description=(
+                "Sections to return. uvs and history are summaries (counts and "
+                "node types), never raw component data."
+            )),
+        ] = ["transform", "mesh_stats"],
+    ) -> ObjectInfoResult:
+        """Read one object's transform, mesh stats, UV sets, shading, or history.
+
+        The shading section is how you verify a material actually landed."""
+        return ObjectInfoResult.model_validate(
+            maya.request(
+                "get_object_info",
+                {"name": name, "include": list(include)},
+                timeout_s=SCENE_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
         title="Capture viewport",
         annotations=ToolAnnotations(
             read_only_hint=True, destructive_hint=False, idempotent_hint=True
@@ -198,6 +239,16 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 "in beauty renders and show in AO."
             )),
         ] = "beauty",
+        lighting: Annotated[
+            Literal["default", "scene", "flat"],
+            Field(description=(
+                "'scene' renders with the scene's own lights - required to judge "
+                "a lit model; 'default' is Maya's headlight; 'flat' is unlit."
+            )),
+        ] = "default",
+        shadows: Annotated[
+            bool, Field(description="Viewport shadow casting; only meaningful with lighting='scene'.")
+        ] = False,
         isolate: Annotated[
             Optional[List[str]],
             Field(description="Show only these objects (canonical long names)."),
@@ -222,6 +273,8 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 "shading": shading,
                 "wireframe_overlay": wireframe_overlay,
                 "buffer": buffer,
+                "lighting": lighting,
+                "shadows": shadows,
                 "isolate": isolate,
                 "frame_all": frame_all,
                 "resolution": resolution,
@@ -236,6 +289,125 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "camera_positions: " + json.dumps(result.get("camera_positions", []))
         )
         return content
+
+    @mcp.tool(
+        title="Capture turntable",
+        annotations=ToolAnnotations(
+            read_only_hint=True, destructive_hint=False, idempotent_hint=True
+        ),
+    )
+    def maya_capture_turntable(
+        target: Annotated[Optional[str], Field(description=(
+            "Object to orbit and frame; omit to frame the whole scene."
+        ))] = None,
+        n_frames: Annotated[int, Field(ge=2, le=16, description=(
+            "Views around the subject. Returns ONE contact sheet regardless."
+        ))] = 8,
+        resolution: Annotated[int, Field(ge=64, le=1024, description=(
+            "Per-cell resolution, before the sheet is downscaled."
+        ))] = 384,
+        shading: Annotated[
+            ShadingMode,
+            Field(description="Viewport shading mode for every frame."),
+        ] = "smoothShaded",
+        lighting: Annotated[
+            Literal["default", "scene", "flat"],
+            Field(description="'scene' uses the scene's own lights."),
+        ] = "default",
+    ) -> list:
+        """Orbit the subject and return a single contact-sheet image.
+
+        Eight views for the token cost of one image - the final judgement pass."""
+        result = maya.request(
+            "capture_turntable",
+            {"target": target, "n_frames": n_frames,
+             "resolution": resolution, "shading": shading, "lighting": lighting},
+            timeout_s=CAPTURE_TIMEOUT_S,
+        )
+        cells = [
+            images.decode_and_downscale(shot["png_b64"], max_px=resolution)
+            for shot in result.get("images", [])
+        ]
+        sheet = images.contact_sheet(cells)
+        return [
+            Image(data=images.decode_and_downscale(
+                base64.b64encode(sheet).decode("ascii")), format="png"),
+            "turntable: %d frames, azimuths %s" % (
+                result.get("n_frames", 0),
+                json.dumps([s["azimuth"] for s in result.get("images", [])]),
+            ),
+        ]
+
+    @mcp.tool(
+        title="Load reference image",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=True
+        ),
+    )
+    def maya_load_reference_image(
+        source: Annotated[str, Field(min_length=1, description=(
+            "Absolute path to an image file, or raw base64 image data."
+        ))],
+        ref_id: Annotated[str, Field(min_length=1, description=(
+            "Short id you will pass to maya_compare_to_reference, e.g. 'hero_front'."
+        ))],
+    ) -> ReferenceResult:
+        """Store a reference image in the server for later side-by-side comparison.
+
+        Held in the MCP process, not the Maya scene - it survives new_scene and
+        never dirties your file."""
+        return ReferenceResult.model_validate(_references.put(ref_id, source))
+
+    @mcp.tool(
+        title="Compare to reference",
+        annotations=ToolAnnotations(
+            read_only_hint=True, destructive_hint=False, idempotent_hint=True
+        ),
+    )
+    def maya_compare_to_reference(
+        ref_id: Annotated[str, Field(min_length=1, description=(
+            "Id from maya_load_reference_image."
+        ))],
+        angle: Annotated[
+            Literal["front", "side", "back", "top", "three_quarter", "current"],
+            Field(description="Viewport angle to capture for the right-hand panel."),
+        ] = "three_quarter",
+        resolution: Annotated[int, Field(ge=64, le=1024)] = 640,
+        shading: Annotated[
+            ShadingMode,
+            Field(description="Viewport shading mode for the right-hand panel."),
+        ] = "smoothShaded",
+        lighting: Annotated[
+            Literal["default", "scene", "flat"],
+            Field(description="'scene' uses the scene's own lights."),
+        ] = "default",
+    ) -> list:
+        """One side-by-side image: the reference on the left, your viewport on the right.
+
+        Corrects toward a target instead of a vague ideal."""
+        reference = _references.get(ref_id)
+        result = maya.request(
+            "capture_viewport",
+            {"angles": [angle], "shading": shading,
+             "wireframe_overlay": False, "buffer": "beauty", "isolate": None,
+             "frame_all": True, "resolution": resolution,
+             "lighting": lighting, "shadows": False},
+            timeout_s=CAPTURE_TIMEOUT_S,
+        )
+        shots = result.get("images", [])
+        if not shots:
+            raise ValueError("capture returned no image to compare against")
+        current = images.decode_and_downscale(shots[0]["png_b64"], max_px=resolution)
+        reference = images.decode_and_downscale(
+            base64.b64encode(reference).decode("ascii"), max_px=resolution
+        )
+        composite = images.decode_and_downscale(
+            base64.b64encode(images.side_by_side(reference, current)).decode("ascii")
+        )
+        return [
+            Image(data=composite, format="png"),
+            "left: reference %r | right: viewport %s" % (ref_id, angle),
+        ]
 
     SESSION_TIMEOUT_S = 60.0  # checkpoint saves of heavy scenes take a while
 
@@ -862,6 +1034,113 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 "set_camera",
                 {"camera": camera, "position": position, "look_at": look_at,
                  "focal_length": focal_length, "set_active": set_active},
+                timeout_s=SCENE_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Setup lighting",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_setup_lighting(
+        preset: Annotated[
+            Literal["three_point", "single_sun", "hdri"],
+            Field(description="Light rig to build."),
+        ],
+        intensity: Annotated[float, Field(gt=0, le=20, description=(
+            "Overall rig intensity; 1.0 is neutral."
+        ))] = 1.0,
+        hdri_path: Annotated[Optional[str], Field(description=(
+            "Absolute path to an .hdr/.exr. Required for preset='hdri' - no HDRI "
+            "is bundled."
+        ))] = None,
+        replace_existing: Annotated[bool, Field(description=(
+            "Delete existing lights first. Auto-checkpoints before doing so. "
+            "Only light transforms are removed; other nodes are never touched."
+        ))] = True,
+    ) -> LightingResult:
+        """Build a lighting rig so the model can actually be judged.
+
+        Pair with maya_capture_viewport(lighting='scene') to see it."""
+        return LightingResult.model_validate(
+            maya.request(
+                "setup_lighting",
+                {"preset": preset, "intensity": intensity,
+                 "hdri_path": hdri_path, "replace_existing": replace_existing},
+                timeout_s=SCENE_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Assign material",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=False
+        ),
+    )
+    def maya_assign_material(
+        mesh: Annotated[str, Field(min_length=1, description="Canonical long name.")],
+        shader: Annotated[
+            Literal["standardSurface", "lambert", "blinn"],
+            Field(description="Shader type to create."),
+        ] = "standardSurface",
+        params: Annotated[dict, Field(description=(
+            "Whitelisted per shader. standardSurface: baseColor, roughness, "
+            "metalness, emission, emissionColor, specular. lambert: color, "
+            "transparency, incandescence. blinn adds eccentricity, "
+            "specularColor. Colours are [r, g, b] in 0..1. Unknown keys are "
+            "rejected with that shader's whitelist in the hint."
+        ))] = {},
+        name: Annotated[Optional[str], Field(description=(
+            "Material name; defaults to <mesh>_mat. Collisions get a _NNN suffix."
+        ))] = None,
+    ) -> MaterialResult:
+        """Assign one material to a whole mesh (object-level shading only).
+
+        Multi-material looks come from splitting geometry into separate meshes -
+        per-face assignment is unreliable on boolean output."""
+        return MaterialResult.model_validate(
+            maya.request(
+                "assign_material",
+                {"mesh": mesh, "shader": shader, "params": params, "name": name},
+                timeout_s=SCENE_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Apply texture recipe",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=False
+        ),
+    )
+    def maya_apply_texture_recipe(
+        mesh: Annotated[str, Field(min_length=1, description="Canonical long name.")],
+        recipe: Annotated[
+            Literal["noise_bump", "ramp_gradient", "layered_mask", "file_texture"],
+            Field(description=(
+                "noise_bump - surface grain via bump; ramp_gradient - gradient "
+                "into colour; layered_mask - masked blend; file_texture - an "
+                "image file. Requires a material on the mesh first."
+            )),
+        ],
+        params: Annotated[dict, Field(description=(
+            "noise_bump: scale, depth. file_texture: file_path (required). "
+            "Others take no params yet."
+        ))] = {},
+        slot: Annotated[
+            Optional[Literal["color", "roughness", "normal"]],
+            Field(description=(
+                "Override the recipe's default slot. Mapped to the real attribute "
+                "per shader type; a slot the shader lacks is an error, not a no-op."
+            )),
+        ] = None,
+    ) -> TextureRecipeResult:
+        """Build a named texture network and wire it into the mesh's shader."""
+        return TextureRecipeResult.model_validate(
+            maya.request(
+                "apply_texture_recipe",
+                {"mesh": mesh, "recipe": recipe, "params": params, "slot": slot},
                 timeout_s=SCENE_TIMEOUT_S,
             )
         )

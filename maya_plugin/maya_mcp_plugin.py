@@ -26,10 +26,14 @@ from .handlers import (
     capture,
     code_exec,
     etch,
+    lighting,
+    material,
     modeling,
+    objinfo,
     scene,
     sculpt,
     session,
+    texture_recipes,
     viewport,
 )
 
@@ -64,7 +68,9 @@ def _build_handlers() -> Dict[str, Any]:
         "execute_python": code_exec.execute_python,
         "reset_namespace": code_exec.reset_namespace,
         "get_scene_graph": scene.get_scene_graph,
+        "get_object_info": objinfo.get_object_info,
         "capture_viewport": capture.capture_viewport,
+        "capture_turntable": capture.capture_turntable,
         "checkpoint": session.checkpoint,
         "restore_checkpoint": session.restore_checkpoint,
         "undo": session.undo,
@@ -87,6 +93,9 @@ def _build_handlers() -> Dict[str, Any]:
         "deform": sculpt.deform,
         "set_viewport": viewport.set_viewport,
         "set_camera": viewport.set_camera,
+        "setup_lighting": lighting.setup_lighting,
+        "assign_material": material.assign_material,
+        "apply_texture_recipe": texture_recipes.apply_texture_recipe,
     }
 
 

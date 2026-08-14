@@ -14,7 +14,7 @@ import base64
 import math
 import os
 import tempfile
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from ..dispatcher import HandlerError
 from . import naming
@@ -22,6 +22,10 @@ from . import naming
 VALID_ANGLES = ("front", "side", "back", "top", "three_quarter", "current")
 VALID_SHADING = ("smoothShaded", "flatShaded", "wireframe", "textured")
 VALID_BUFFERS = ("beauty", "ssao")
+# displayLights modes we expose. "scene" is the one that makes a lit model
+# judgeable; "default" is Maya's headlight (what every capture did before M2).
+VALID_LIGHTING = ("default", "scene", "flat")
+_LIGHTING_TO_DISPLAY = {"default": "default", "scene": "all", "flat": "flat"}
 MAX_ANGLES_PER_CALL = 4
 DEFAULT_ANGLES = ["front", "side", "three_quarter"]
 DEFAULT_RESOLUTION = 768
@@ -73,15 +77,16 @@ def clamp_resolution(resolution: Optional[int]) -> int:
     return max(MIN_RESOLUTION, min(MAX_RESOLUTION, resolution))
 
 
-def camera_placement(
-    angle: str, bbox_min: Sequence[float], bbox_max: Sequence[float]
+def _placement(
+    azimuth_deg: float, elevation_deg: float,
+    bbox_min: Sequence[float], bbox_max: Sequence[float]
 ) -> Tuple[Tuple[float, float, float], Tuple[float, float, float]]:
-    """Camera position and euler rotation (deg, Maya xyz order) for an angle.
+    """Camera position and euler rotation (deg, Maya xyz order) for an azimuth/
+    elevation pair.
 
     Points the camera at the bbox center from far enough away that the bounding
     sphere fits inside the field of view; viewFit refines the framing afterwards.
     """
-    azimuth_deg, elevation_deg = _ANGLE_DIRECTIONS[angle]
     center = [(lo + hi) / 2.0 for lo, hi in zip(bbox_min, bbox_max)]
     radius = math.dist(bbox_min, bbox_max) / 2.0
     radius = max(radius, 0.5)  # degenerate/empty bbox still gets a sane distance
@@ -98,6 +103,23 @@ def camera_placement(
     # yaw = azimuth, no roll, default xyz rotate order.
     rotation = (-elevation_deg, azimuth_deg, 0.0)
     return position, rotation
+
+
+def camera_placement(
+    angle: str, bbox_min: Sequence[float], bbox_max: Sequence[float]
+) -> Tuple[Tuple[float, float, float], Tuple[float, float, float]]:
+    """Camera position and euler rotation (deg, Maya xyz order) for a named angle."""
+    azimuth_deg, elevation_deg = _ANGLE_DIRECTIONS[angle]
+    return _placement(azimuth_deg, elevation_deg, bbox_min, bbox_max)
+
+
+def camera_placement_azimuth(azimuth_deg: float, bbox_min, bbox_max):
+    """Same framing math as camera_placement, at an arbitrary azimuth.
+
+    Elevation is fixed at the three_quarter value so a turntable reads as one
+    orbit rather than a wobble.
+    """
+    return _placement(azimuth_deg, 27.938, bbox_min, bbox_max)
 
 
 # ------------------------------------------------------------------- handler
@@ -117,6 +139,15 @@ def capture_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
             "unknown buffer %r" % buffer,
             hint="valid buffers: %s" % ", ".join(VALID_BUFFERS),
         )
+    lighting = params.get("lighting", "default")
+    if lighting not in VALID_LIGHTING:
+        raise HandlerError(
+            "unknown lighting mode %r" % lighting,
+            hint="valid lighting modes: %s ('scene' lights the model with the "
+            "scene's own lights; 'default' is Maya's headlight)"
+            % ", ".join(VALID_LIGHTING),
+        )
+    shadows = bool(params.get("shadows", False))
     wireframe_overlay = bool(params.get("wireframe_overlay", True))
     frame_all = bool(params.get("frame_all", True))
     resolution = clamp_resolution(params.get("resolution"))
@@ -133,7 +164,8 @@ def capture_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
     camera_positions = []
     for angle in angles:
         shot = _capture_one(
-            angle, shading, wireframe_overlay, buffer, isolate, frame_all, resolution
+            angle, shading, wireframe_overlay, buffer, isolate, frame_all, resolution,
+            lighting, shadows,
         )
         images.append({"angle": angle, "png_b64": shot["png_b64"]})
         camera_positions.append(
@@ -145,6 +177,60 @@ def capture_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
             }
         )
     return {"images": images, "camera_positions": camera_positions}
+
+
+TURNTABLE_DEFAULT_FRAMES = 8
+TURNTABLE_MAX_FRAMES = 16
+
+
+def capture_turntable(params: Dict[str, Any]) -> Dict[str, Any]:
+    """N evenly-spaced azimuths around the subject, for one composite image.
+
+    The frame cap is about grid legibility, not tokens: this returns ONE
+    contact sheet regardless of n_frames, so capture_viewport's 4-image
+    ceiling does not apply - but a 32-cell sheet is unreadable at any sane
+    resolution.
+    """
+    n_frames = params.get("n_frames", TURNTABLE_DEFAULT_FRAMES)
+    if (
+        not isinstance(n_frames, int) or isinstance(n_frames, bool)
+        or not (2 <= n_frames <= TURNTABLE_MAX_FRAMES)
+    ):
+        raise HandlerError(
+            "n_frames must be an integer 2..%d" % TURNTABLE_MAX_FRAMES,
+            hint="the cap is grid legibility - the result is one contact sheet",
+        )
+    target = params.get("target")
+    isolate = [str(target)] if target else None
+    shading = params.get("shading", "smoothShaded")
+    if shading not in VALID_SHADING:
+        raise HandlerError(
+            "unknown shading mode %r" % shading,
+            hint="valid shading modes: %s" % ", ".join(VALID_SHADING),
+        )
+    lighting = params.get("lighting", "default")
+    if lighting not in VALID_LIGHTING:
+        raise HandlerError(
+            "unknown lighting mode %r" % lighting,
+            hint="valid lighting modes: %s" % ", ".join(VALID_LIGHTING),
+        )
+    resolution = clamp_resolution(params.get("resolution") or 384)
+    shadows = bool(params.get("shadows", False))
+
+    images_out = []
+    for i in range(n_frames):
+        azimuth = 360.0 * i / n_frames
+        shot = _capture_one(
+            ("azimuth", azimuth), shading, False, "beauty", isolate, True,
+            resolution, lighting, shadows,
+        )
+        images_out.append(
+            {"index": i, "azimuth": azimuth, "png_b64": shot["png_b64"]}
+        )
+    return {"images": images_out, "n_frames": n_frames}
+
+
+capture_turntable.no_undo_chunk = True
 
 
 # ------------------------------------------------------------- maya internals
@@ -241,6 +327,14 @@ class _PanelState:
         self.locators = me(locators=True)
         self.manipulators = me(manipulators=True)
         self.textures = me(textures=True)
+        # Scene-lighting state. These are NOT the icon-visibility flags above:
+        # displayLights selects which lights actually light the shaded view,
+        # and shadows toggles viewport shadow casting. Neither was snapshotted
+        # before M2 because nothing set them - capture rendered in Maya's
+        # default headlight regardless of the scene's own rig, which is
+        # exactly the gap this task closes (spec 2).
+        self.display_lights = me(displayLights=True)
+        self.shadows = bool(me(shadows=True))
         # Isolate ("View Selected") state. Membership lives in the panel's
         # ViewSelectedSet objectSet (modelEditor -q -viewObjects); it is only
         # meaningful while viewSelected is on. isolate_dirty is flipped by
@@ -271,6 +365,8 @@ class _PanelState:
                 locators=self.locators,
                 manipulators=self.manipulators,
                 textures=self.textures,
+                displayLights=self.display_lights,
+                shadows=self.shadows,
             )
         except Exception:
             pass
@@ -311,13 +407,15 @@ class _PanelState:
 
 
 def _capture_one(
-    angle: str,
+    angle: Union[str, Tuple[str, float]],
     shading: str,
     wireframe_overlay: bool,
     buffer: str,
     isolate: Optional[List[str]],
     frame_all: bool,
     resolution: int,
+    lighting: str = "default",
+    shadows: bool = False,
 ) -> Dict[str, Any]:
     cmds = _cmds()
     panel = find_model_panel(cmds)
@@ -334,7 +432,12 @@ def _capture_one(
             capture_cam = state.camera
         else:
             bbox_min, bbox_max = _scene_bbox(cmds, isolate)
-            position, rotation = camera_placement(angle, bbox_min, bbox_max)
+            if isinstance(angle, (tuple, list)) and angle[0] == "azimuth":
+                position, rotation = camera_placement_azimuth(
+                    float(angle[1]), bbox_min, bbox_max
+                )
+            else:
+                position, rotation = camera_placement(angle, bbox_min, bbox_max)
             # cmds.camera(name=...) does NOT rename the transform on this
             # Maya (verified live: it always yields "camera1"/"camera2", the
             # same broken idiom set_camera works around) - create unnamed,
@@ -381,6 +484,8 @@ def _capture_one(
             "locators": False,
             "manipulators": False,
             "textures": False,
+            "displayLights": _LIGHTING_TO_DISPLAY[lighting],
+            "shadows": shadows,
         }
         cmds.modelEditor(panel, edit=True, **editor_kwargs)
         cmds.setAttr("hardwareRenderingGlobals.ssaoEnable", buffer == "ssao")

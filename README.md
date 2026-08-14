@@ -3,8 +3,10 @@
 An MCP server that lets an LLM (Claude Desktop / Claude Code) model, texture, light, and
 render 3D content in a live Autodesk Maya session through an iterative visual feedback loop.
 
-**Status: M1** — the perceive/act loop (M0) plus modeling primitives, `boolean_op`, `etch_text`,
-sculpt/deform, remesh/cleanup, session safety (checkpoint/undo/redo), and viewport/camera control.
+**Status: M2** — M1 (perceive/act loop, modeling primitives, `boolean_op`, `etch_text`,
+sculpt/deform, remesh/cleanup, session safety, viewport/camera control) plus object readback
+(`get_object_info`), turntable capture, reference-image comparison, lighting rigs
+(`setup_lighting`), and materials/texturing (`assign_material`, `apply_texture_recipe`).
 See [docs/design.md](docs/design.md) for the full design and milestones.
 
 ## Security warning
@@ -86,8 +88,8 @@ Environment variables, all optional:
 ## Tools
 
 `src/maya_mcp/server.py` is the authoritative source — the table below enumerates its
-`@mcp.tool` wrappers (26 total: 3 from M0, 23 added in M1). Schemas (`src/maya_mcp/schemas.py`)
-are the reference for exact fields; each row here is one sentence.
+`@mcp.tool` wrappers (33 total: 3 from M0, 23 added in M1, 7 added in M2). Schemas
+(`src/maya_mcp/schemas.py`) are the reference for exact fields; each row here is one sentence.
 
 ### Perception (M0)
 
@@ -139,6 +141,23 @@ are the reference for exact fields; each row here is one sentence.
 |---|---|
 | `maya_set_viewport` | Persistently configure the working viewport (grid/icon/manipulator visibility, lighting mode). |
 | `maya_set_camera` | Create/position a named camera and, by default, make it the active viewport camera. |
+
+### Perception and judgement (M2)
+
+| Tool | Description |
+|---|---|
+| `maya_get_object_info` | Read one object's transform, mesh stats, UV sets, shading, or history — how you verify a material actually landed. |
+| `maya_capture_turntable` | Orbit the subject and return a single contact-sheet image (up to 16 frames for the token cost of one). |
+| `maya_load_reference_image` | Store a reference image in the server, by id, for later side-by-side comparison; survives `new_scene`. |
+| `maya_compare_to_reference` | One side-by-side image: the reference on the left, your live viewport on the right. |
+
+### Lighting and materials (M2)
+
+| Tool | Description |
+|---|---|
+| `maya_setup_lighting` | Build a preset lighting rig (three-point/single-sun/HDRI) so the model can actually be judged; the only tool that deletes existing scene lights. |
+| `maya_assign_material` | Assign one shader (standardSurface/lambert/blinn) to a whole mesh, object-level only. |
+| `maya_apply_texture_recipe` | Build a named texture network (noise bump, ramp gradient, layered mask, file texture) and wire it into a mesh's shader. |
 
 ### Checkpoint directory and undo contract
 
