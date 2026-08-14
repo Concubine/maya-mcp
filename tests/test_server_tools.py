@@ -66,6 +66,7 @@ class TestRegistration:
             "maya_reset_namespace",
             "maya_create_primitive",
             "maya_duplicate",
+            "maya_array",
             "maya_transform",
             "maya_group",
             "maya_parent",
@@ -935,3 +936,30 @@ class TestDocsExplainWhichShadingModeRevealsWhat:
         tools = {t.name: t for t in run(mcp.list_tools())}
         desc = tools["maya_assign_material"].description
         assert "reuse" in desc.lower() or "reuses" in desc.lower()
+
+
+def test_array_result_accepts_a_mirror_response():
+    from maya_mcp.schemas import ArrayResult
+
+    result = ArrayResult.model_validate(
+        {
+            "names": ["|arm_R"],
+            "mode": "mirror",
+            "group": None,
+            "signed_volume": 3.25,
+            "warnings": [],
+        }
+    )
+    assert result.names == ["|arm_R"]
+    assert result.signed_volume == 3.25
+
+
+def test_array_result_signed_volume_is_optional():
+    from maya_mcp.schemas import ArrayResult
+
+    result = ArrayResult.model_validate(
+        {"names": ["|cog_1", "|cog_2"], "mode": "radial", "group": "|gear"}
+    )
+    assert result.signed_volume is None
+    assert result.group == "|gear"
+    assert result.warnings == []
