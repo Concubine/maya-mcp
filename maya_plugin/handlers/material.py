@@ -14,7 +14,7 @@ checkpointing each would evict genuinely valuable checkpoints from the ring.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ..dispatcher import HandlerError
 from . import meshcheck, naming
@@ -25,7 +25,7 @@ SHADERS = ("standardSurface", "lambert", "blinn")
 PARAM_WHITELIST = {
     "standardSurface": {
         "baseColor", "roughness", "metalness", "emission", "emissionColor",
-        "specular",
+        "specular", "transmission", "transmissionColor", "ior",
     },
     "lambert": {"color", "transparency", "incandescence"},
     "blinn": {"color", "transparency", "incandescence", "eccentricity",
@@ -38,6 +38,8 @@ _ATTR = {
         "baseColor": "baseColor", "roughness": "specularRoughness",
         "metalness": "metalness", "emission": "emission",
         "emissionColor": "emissionColor", "specular": "specular",
+        "transmission": "transmission", "transmissionColor": "transmissionColor",
+        "ior": "specularIOR",
     },
     "lambert": {
         "color": "color", "transparency": "transparency",
@@ -62,7 +64,22 @@ SHADER_SLOTS = {
 }
 
 _COLOR_ATTRS = {"baseColor", "color", "emissionColor", "specularColor",
-                "incandescence", "transparency"}
+                "incandescence", "transparency", "transmissionColor"}
+
+# Sensible authoring ranges for params where an out-of-range value is a typo,
+# not a creative choice - keyed by the whitelist name the caller passes, not
+# the real attribute. ior is unbounded in Maya's own node (no hard max), but
+# 1.0..3.0 covers every real dielectric a gem run needs (water 1.33, glass
+# 1.5, diamond 2.42) and catches "ior=150" before it silently builds a
+# black-mirror gem.
+_RANGES = {
+    "transmission": (0.0, 1.0),
+    "ior": (1.0, 3.0),
+}
+_RANGE_HINTS = {
+    "transmission": "0 = opaque, 1 = fully transmissive",
+    "ior": "water 1.33, glass 1.5, diamond 2.42",
+}
 
 
 def _cmds():
@@ -121,8 +138,20 @@ def _validate_param_values(shader: str, values: Dict[str, Any]) -> Dict[str, tup
                 raise HandlerError(
                     "%s must be a number" % key, hint="got %r" % (value,)
                 )
+            bounds = _RANGES.get(key)
+            if bounds is not None and not (bounds[0] <= value <= bounds[1]):
+                raise HandlerError(
+                    "%s must be %s..%s" % (key, bounds[0], bounds[1]),
+                    hint="got %r; %s" % (value, _RANGE_HINTS[key]),
+                )
             validated[attr] = ((float(value),), {})
     return validated
+
+
+def _shading_group_of(cmds, mat: str) -> Optional[str]:
+    """The shading group already wired to `mat`'s outColor, if any."""
+    conns = cmds.listConnections(mat + ".outColor", type="shadingEngine") or []
+    return conns[0] if conns else None
 
 
 def assign_material(params: Dict[str, Any]) -> Dict[str, Any]:
@@ -141,16 +170,57 @@ def assign_material(params: Dict[str, Any]) -> Dict[str, Any]:
             "unknown params for %s: %s" % (shader, ", ".join(sorted(unknown))),
             hint="valid params: %s" % ", ".join(sorted(PARAM_WHITELIST[shader])),
         )
+
+    # A `name` that already names an existing shader of the SAME type is a
+    # reuse request (one material shared across meshes), not a collision to
+    # uniquify - that reuse is what stops one-material-per-mesh from leaking
+    # a shader per call. Existing non-shader nodes, or shaders of a different
+    # type, must fail loudly rather than being silently reused as the wrong
+    # thing. This is a pure read (objExists/nodeType), so it belongs with the
+    # rest of the validation below, before anything is built or touched.
+    explicit_name = params.get("name")
+    reuse_target: Optional[str] = None
+    if explicit_name and cmds.objExists(str(explicit_name)):
+        existing_type = cmds.nodeType(str(explicit_name))
+        if existing_type != shader:
+            if existing_type not in SHADERS:
+                raise HandlerError(
+                    "%r already exists and is not a shader node (it is a %s)"
+                    % (explicit_name, existing_type),
+                    hint="pass a different name, or omit name to auto-derive one",
+                )
+            raise HandlerError(
+                "%r is an existing %s shader, not %s"
+                % (explicit_name, existing_type, shader),
+                hint="use a different name, or set shader=%r to match the "
+                "existing material" % existing_type,
+            )
+        reuse_target = str(explicit_name)
+
     # Everything above is validation; the type-check pass below is too - only
-    # once it succeeds is it safe to create nodes or touch the mesh's shading.
+    # once it succeeds is it safe to create/reuse nodes or touch the mesh's
+    # shading.
     validated = _validate_param_values(shader, values)
 
-    requested = params.get("name") or (mesh_long.split("|")[-1] + "_mat")
-    mat_name = naming.unique_name(cmds, str(requested))
-    mat = cmds.shadingNode(shader, asShader=True, name=mat_name)
-    sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True,
-                   name=mat_name + "SG")
-    cmds.connectAttr(mat + ".outColor", sg + ".surfaceShader", force=True)
+    warnings: List[str] = []
+    if reuse_target is not None:
+        mat = reuse_target
+        sg = _shading_group_of(cmds, mat)
+        if sg is None:
+            # A shader that exists but was never wired to a shading group
+            # (built outside assign_material) - give it one rather than fail.
+            sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True,
+                           name=mat + "SG")
+            cmds.connectAttr(mat + ".outColor", sg + ".surfaceShader", force=True)
+        warnings.append("reused existing material %s" % mat)
+    else:
+        requested = explicit_name or (mesh_long.split("|")[-1] + "_mat")
+        mat_name = naming.unique_name(cmds, str(requested))
+        mat = cmds.shadingNode(shader, asShader=True, name=mat_name)
+        sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True,
+                       name=mat_name + "SG")
+        cmds.connectAttr(mat + ".outColor", sg + ".surfaceShader", force=True)
+
     # Force the assignment now: every mesh already belongs to some default SG
     # (initialShadingGroup / openPBR_shaderSGn) with clean object-level
     # membership, so ensure_object_shading below would read that pre-existing
@@ -162,7 +232,6 @@ def assign_material(params: Dict[str, Any]) -> Dict[str, Any]:
         cmds.setAttr("%s.%s" % (mat, attr), *args, **kwargs)
 
     shading = meshcheck.ensure_object_shading(cmds, shape, sg)
-    warnings: List[str] = []
     if shading["sg"] != sg:
         warnings.append(
             "assignment collapsed onto existing shading group %s" % shading["sg"]

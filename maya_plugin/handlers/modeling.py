@@ -13,7 +13,15 @@ from typing import Any, Dict, List, Optional
 from ..dispatcher import HandlerError
 from . import ledger, naming
 
-PRIMITIVE_KINDS = ("cube", "sphere", "cylinder", "plane", "torus", "cone")
+PRIMITIVE_KINDS = (
+    "cube", "sphere", "cylinder", "plane", "torus", "cone",
+    "octahedron", "icosahedron", "prism", "pyramid",
+)
+# prism/pyramid always build with this fixed side count and a flat (single
+# n-gon) cap - divisions maps only to subdivisionsHeight - so a low-poly gem
+# form stays faceted instead of Maya's optional fan-subdivided cap.
+_PRISM_SIDES = 3
+_PYRAMID_SIDES = 4
 MAX_DIVISIONS = 200
 # `divisions` is a multiplier, not a face count, and the multiplier differs
 # wildly per kind: cube spends it linearly per axis (6*d^2 faces) while sphere
@@ -43,6 +51,20 @@ def projected_faces(kind: str, divisions: int) -> int:
         # side quads plus the cap fan(s): cylinder caps both ends, cone one.
         caps = 2 if kind == "cylinder" else 1
         return (20 * d) * d + caps * (20 * d)
+    if kind in ("octahedron", "icosahedron"):
+        # polyPlatonicSolid has no subdivision flags at all (radius/axis only)
+        # - divisions has NO effect on face count for these two kinds. Fixed
+        # counts measured live in mayapy (Maya's solidType: 1=icosahedron,
+        # 2=octahedron in this Maya version).
+        return 8 if kind == "octahedron" else 20
+    if kind in ("prism", "pyramid"):
+        # Measured live in mayapy with subdivisionsCaps=0 (each cap a single
+        # flat n-gon face, not Maya's optional fan-subdivided one): sides =
+        # ns*sh either way; prism has TWO caps, pyramid has ONE (apex is a
+        # point with no cap of its own).
+        ns = _PRISM_SIDES if kind == "prism" else _PYRAMID_SIDES
+        caps = 2 if kind == "prism" else 1
+        return ns * d + caps
     raise HandlerError("unknown primitive kind %r" % kind)
 
 
@@ -156,6 +178,24 @@ def create_primitive(params: Dict[str, Any]) -> Dict[str, Any]:
         "torus": lambda: cmds.polyTorus(
             name=name, constructionHistory=False,
             subdivisionsAxis=20 * divisions, subdivisionsHeight=20 * divisions,
+        ),
+        # solidType: 1=icosahedron, 2=octahedron (this Maya version) - no
+        # subdivision flags exist, so divisions is accepted but has no effect.
+        "octahedron": lambda: cmds.polyPlatonicSolid(
+            name=name, constructionHistory=False, solidType=2,
+        ),
+        "icosahedron": lambda: cmds.polyPlatonicSolid(
+            name=name, constructionHistory=False, solidType=1,
+        ),
+        "prism": lambda: cmds.polyPrism(
+            name=name, constructionHistory=False,
+            numberOfSides=_PRISM_SIDES, subdivisionsHeight=divisions,
+            subdivisionsCaps=0,
+        ),
+        "pyramid": lambda: cmds.polyPyramid(
+            name=name, constructionHistory=False,
+            numberOfSides=_PYRAMID_SIDES, subdivisionsHeight=divisions,
+            subdivisionsCaps=0,
         ),
     }
     created = creators[kind]()[0]
