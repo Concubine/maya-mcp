@@ -100,6 +100,37 @@ def resolve_samples(samples: Optional[int]) -> int:
     return samples
 
 
+DEFAULT_ZOOM = 1.0
+MIN_ZOOM, MAX_ZOOM = 0.2, 8.0
+
+
+def resolve_zoom(zoom: Optional[float]) -> float:
+    if zoom is None:
+        return DEFAULT_ZOOM
+    if (
+        not isinstance(zoom, (int, float)) or isinstance(zoom, bool)
+        or not (MIN_ZOOM <= float(zoom) <= MAX_ZOOM)
+    ):
+        raise HandlerError(
+            "zoom must be a number %.1f..%.1f" % (MIN_ZOOM, MAX_ZOOM),
+            hint="1.0 fits the framed objects; 2.0 is twice as close",
+        )
+    return float(zoom)
+
+
+def zoomed_position(position, bbox_min, bbox_max, zoom: float):
+    """Move the camera along its own sight line by `zoom`.
+
+    Pure, so the framing maths stays testable without Maya. Dividing the
+    centre-to-camera offset keeps the direction and therefore the angle - only
+    the distance changes, which is what a zoom is.
+    """
+    center = [(lo + hi) / 2.0 for lo, hi in zip(bbox_min, bbox_max)]
+    return tuple(
+        c + (p - c) / zoom for c, p in zip(center, position)
+    )
+
+
 def frame_prefix(call_id: str, index: int, angle: str) -> str:
     """Image name for one frame.
 
@@ -249,6 +280,57 @@ def _scene_has_light(cmds) -> bool:
     return bool(cmds.ls(lights=True, visible=True) or [])
 
 
+# setup_lighting names everything it builds "mcpLight_*". That prefix is the
+# boundary for relighting: OUR rig follows the camera, a rig the user authored
+# is theirs and is never touched.
+_RIG_PREFIX = "mcpLight"
+
+
+def _rig_lights(cmds) -> Dict[str, float]:
+    """Transforms of the tool's own light rig, mapped to their original yaw."""
+    rig = {}
+    for light in cmds.ls(lights=True, long=True) or []:
+        parents = cmds.listRelatives(light, parent=True, fullPath=True) or []
+        transform = parents[0] if parents else light
+        leaf = transform.rsplit("|", 1)[-1]
+        if _RIG_PREFIX not in leaf and _TEMP_LIGHT not in leaf:
+            continue
+        try:
+            rig[transform] = float(
+                cmds.xform(transform, query=True, rotation=True, worldSpace=True)[1]
+            )
+        except Exception:
+            pass
+    return rig
+
+
+def _orient_rig(cmds, rig: Dict[str, float], azimuth_deg: float) -> None:
+    """Swing the tool's rig to sit behind the camera at `azimuth_deg`.
+
+    setup_lighting builds a WORLD-locked rig while render_scene orbits the
+    subject, so a side or back angle renders nearly black - measured on the
+    #585 run: key at yaw +30, camera at yaw 90. Yaw only: the rig's elevation
+    is the look, and only its bearing needs to follow the camera.
+    """
+    for transform, original_yaw in rig.items():
+        try:
+            cmds.xform(transform, edit=True, rotateAxis=(0, 0, 0))
+        except Exception:
+            pass
+        try:
+            cmds.setAttr(transform + ".rotateY", original_yaw + azimuth_deg)
+        except Exception:
+            pass
+
+
+def _restore_rig(cmds, rig: Dict[str, float]) -> None:
+    for transform, original_yaw in rig.items():
+        try:
+            cmds.setAttr(transform + ".rotateY", original_yaw)
+        except Exception:
+            pass
+
+
 def _hide_non_targets(cmds, isolate: List[str]) -> List[str]:
     """Hide every piece of geometry that is not in `isolate`; return what was hidden.
 
@@ -282,21 +364,37 @@ def _hide_non_targets(cmds, isolate: List[str]) -> List[str]:
     return hidden
 
 
+def _name_list(params: Dict[str, Any], key: str, example: str):
+    value = params.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(n, str) for n in value):
+        raise HandlerError(
+            "%s must be a list of object names" % key,
+            hint='e.g. %s=["%s"]; call maya_get_scene_graph for names'
+            % (key, example),
+        )
+    return value
+
+
 def render_scene(params: Dict[str, Any]) -> Dict[str, Any]:
     """Render named angles through the render pipeline; no viewport involved."""
     angles = resolve_angles(params.get("angles"))
     renderer = resolve_renderer(params.get("renderer"))
     resolution = clamp_resolution(params.get("resolution"))
     samples = resolve_samples(params.get("samples"))
+    zoom = resolve_zoom(params.get("zoom"))
     fallback_light = bool(params.get("fallback_light", True))
-    isolate = params.get("isolate")
-    if isolate is not None and (
-        not isinstance(isolate, list) or not all(isinstance(n, str) for n in isolate)
-    ):
-        raise HandlerError(
-            "isolate must be a list of object names",
-            hint='e.g. isolate=["|golem"]; call maya_get_scene_graph for names',
-        )
+    relight = bool(params.get("relight", True))
+    isolate = _name_list(params, "isolate", "|golem")
+    # Framing and visibility are separate questions. Welding them meant a
+    # close-up of a gem also hid the backdrop it needed to refract, so the
+    # material could not be judged at the only size where it is visible
+    # (redmine #585). `target` frames; `isolate` hides; either may be used
+    # alone. With no target, framing falls back to the isolate set, which is
+    # what a caller passing only isolate means.
+    target = _name_list(params, "target", "|golem|chest")
+    frame_on = target or isolate
 
     cmds = _cmds()
     maya_renderer = RENDERER_TO_MAYA[renderer]
@@ -312,18 +410,20 @@ def render_scene(params: Dict[str, Any]) -> Dict[str, Any]:
     call_id = uuid.uuid4().hex[:8]
     state = _RenderGlobalsState(cmds)
     hidden: List[str] = []
+    rig: Dict[str, float] = {}
     temp_camera = None
     temp_light = None
     prev_undo = cmds.undoInfo(query=True, state=True)
     cmds.undoInfo(stateWithoutFlush=False)
     try:
-        if isolate:
-            missing = [n for n in isolate if not cmds.objExists(n)]
+        for key, names in (("isolate", isolate), ("target", target)):
+            missing = [n for n in (names or []) if not cmds.objExists(n)]
             if missing:
                 raise HandlerError(
-                    "isolate objects not found: %s" % ", ".join(missing),
+                    "%s objects not found: %s" % (key, ", ".join(missing)),
                     hint="call maya_get_scene_graph to list objects",
                 )
+        if isolate:
             hidden = _hide_non_targets(cmds, isolate)
 
         if fallback_light and not _scene_has_light(cmds):
@@ -335,16 +435,26 @@ def render_scene(params: Dict[str, Any]) -> Dict[str, Any]:
             temp_light = cmds.rename(parent, naming.unique_name(cmds, _TEMP_LIGHT))
             cmds.xform(temp_light, rotation=[-35, 25, 0])
 
-        bbox_min, bbox_max = capture._scene_bbox(cmds, isolate)
+        # Snapshot the rig AFTER any fallback key exists, so the fallback swings
+        # with the camera too - it is our light, and an unlit back view is the
+        # exact failure it was added to prevent.
+        rig = _rig_lights(cmds) if relight else {}
+
+        bbox_min, bbox_max = capture._scene_bbox(cmds, frame_on)
         images_out = []
         positions = []
         for index, angle in enumerate(angles):
             # "current" has no meaning without a panel to read a camera from;
             # it degrades to the default judging angle rather than failing a
             # render the caller could not have known was panel-dependent.
+            resolved_angle = "three_quarter" if angle == "current" else angle
             position, rotation = capture.camera_placement(
-                "three_quarter" if angle == "current" else angle, bbox_min, bbox_max
+                resolved_angle, bbox_min, bbox_max
             )
+            if zoom != 1.0:
+                position = zoomed_position(position, bbox_min, bbox_max, zoom)
+            if relight:
+                _orient_rig(cmds, rig, capture._ANGLE_DIRECTIONS[resolved_angle][0])
             if temp_camera is None:
                 created = cmds.camera()[0]
                 temp_camera = cmds.rename(created, naming.unique_name(cmds, _TEMP_CAM))
@@ -392,8 +502,11 @@ def render_scene(params: Dict[str, Any]) -> Dict[str, Any]:
             "renderer": renderer,
             "samples": samples,
             "fallback_light": temp_light is not None,
+            "zoom": zoom,
+            "relit_lights": len(rig),
         }
     finally:
+        _restore_rig(cmds, rig)
         for name in hidden:
             try:
                 cmds.showHidden(name)

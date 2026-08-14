@@ -95,6 +95,10 @@ def contact_sheet(pngs, cols: int | None = None) -> bytes:
 # as opaque would let a "successful" transparent playblast pass the blank check.
 _ALPHA_FLOOR = 9
 
+# A channel at 250+ of 255 is blown: the detail that was there is gone and no
+# amount of grading brings it back.
+_CLIP_LEVEL = 250
+
 
 def pixel_stats(png: bytes) -> dict:
     """Opaque-pixel and colour counts for one rendered frame.
@@ -123,11 +127,26 @@ def pixel_stats(png: bytes) -> dict:
         # No alpha to go on: black is the background a render leaves behind.
         opaque = sum(count for count, color in colors if color != (0, 0, 0))
 
+    # Exposure, measured rather than guessed. The #585 art run took four passes
+    # to land an exposure because nothing reported one: the first render blew
+    # every surface to flat saturated primaries, which looks exactly like a
+    # material failure and is not one. Computed over the whole frame, so a
+    # transparent background counts as black - read mean_luma against a
+    # comparable frame, not as an absolute.
+    clipped = sum(count for count, color in colors if max(color) >= _CLIP_LEVEL)
+    luma_sum = sum(
+        count * (0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2])
+        for count, color in colors
+    )
+
     return {
         "opaque_px": opaque,
         "total_px": total,
         "distinct_colors": distinct,
         "blank": opaque == 0 or distinct <= 1,
+        "clipped_px": clipped,
+        "clipped_fraction": round(clipped / total, 4) if total else 0.0,
+        "mean_luma": round(luma_sum / total, 1) if total else 0.0,
     }
 
 

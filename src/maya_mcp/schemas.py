@@ -248,6 +248,18 @@ class RenderedFrame(BaseModel):
     distinct_colors: int = Field(
         description="One colour edge to edge means an unlit render or a camera inside geometry."
     )
+    clipped_fraction: float = Field(
+        default=0.0,
+        description=(
+            "Fraction of the frame blown out (any channel at 250+). Above ~0.15 on a "
+            "lit subject the exposure is too hot and surfaces read as flat saturated "
+            "colour - which looks exactly like a material failure and is not one."
+        ),
+    )
+    mean_luma: float = Field(
+        default=0.0,
+        description="Mean luminance 0-255 over the whole frame. Compare between passes, not absolutely.",
+    )
 
 
 class RenderResult(BaseModel):

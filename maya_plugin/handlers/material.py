@@ -25,7 +25,8 @@ SHADERS = ("standardSurface", "lambert", "blinn")
 PARAM_WHITELIST = {
     "standardSurface": {
         "baseColor", "roughness", "metalness", "emission", "emissionColor",
-        "specular", "transmission", "transmissionColor", "ior",
+        "specular", "transmission", "transmissionColor", "transmissionDepth",
+        "ior", "coat", "coatRoughness",
     },
     "lambert": {"color", "transparency", "incandescence"},
     "blinn": {"color", "transparency", "incandescence", "eccentricity",
@@ -39,6 +40,8 @@ _ATTR = {
         "metalness": "metalness", "emission": "emission",
         "emissionColor": "emissionColor", "specular": "specular",
         "transmission": "transmission", "transmissionColor": "transmissionColor",
+        "transmissionDepth": "transmissionDepth",
+        "coat": "coat", "coatRoughness": "coatRoughness",
         "ior": "specularIOR",
     },
     "lambert": {
@@ -75,10 +78,21 @@ _COLOR_ATTRS = {"baseColor", "color", "emissionColor", "specularColor",
 _RANGES = {
     "transmission": (0.0, 1.0),
     "ior": (1.0, 3.0),
+    # Absorption distance in scene units: how far light travels through the
+    # material before transmissionColor has fully tinted it. 0 disables
+    # depth-based absorption, which is what makes a saturated transmissionColor
+    # behave like paint (redmine #585).
+    "transmissionDepth": (0.0, 100.0),
+    "coat": (0.0, 1.0),
+    "coatRoughness": (0.0, 1.0),
 }
 _RANGE_HINTS = {
     "transmission": "0 = opaque, 1 = fully transmissive",
     "ior": "water 1.33, glass 1.5, diamond 2.42",
+    "transmissionDepth": "scene units light travels before transmissionColor "
+    "fully tints it; roughly the object's own size for a gem",
+    "coat": "0 = raw surface, 1 = full clear coat (a cut gem's polish)",
+    "coatRoughness": "0 = mirror polish, 0.3 = satin",
 }
 
 
