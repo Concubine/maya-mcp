@@ -548,6 +548,14 @@ def test_turntable_defaults_to_eight_frames_evenly_spaced(monkeypatch):
     result = capture.capture_turntable({"target": "|golem"})
     assert result["n_frames"] == 8
     assert [i["azimuth"] for i in result["images"]] == [0, 45, 90, 135, 180, 225, 270, 315]
+    # the ("azimuth", float) tuple handoff to _capture_one - _capture_one's
+    # `angle` param accepts this alongside the plain Angle strings, and this
+    # is the only thing that actually proves the tuple form reaches it.
+    assert seen == [
+        ("azimuth", 0.0), ("azimuth", 45.0), ("azimuth", 90.0),
+        ("azimuth", 135.0), ("azimuth", 180.0), ("azimuth", 225.0),
+        ("azimuth", 270.0), ("azimuth", 315.0),
+    ]
 
 
 def test_turntable_caps_at_sixteen_frames(monkeypatch):

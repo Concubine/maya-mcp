@@ -53,6 +53,7 @@ from .schemas import (
 log = logging.getLogger("maya_mcp.server")
 
 Angle = Literal["front", "side", "back", "top", "three_quarter", "current"]
+ShadingMode = Literal["smoothShaded", "flatShaded", "wireframe", "textured"]
 Vec3 = Annotated[
     Optional[List[float]],
     Field(min_length=3, max_length=3, description="XYZ triple."),
@@ -305,6 +306,10 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         resolution: Annotated[int, Field(ge=64, le=1024, description=(
             "Per-cell resolution, before the sheet is downscaled."
         ))] = 384,
+        shading: Annotated[
+            ShadingMode,
+            Field(description="Viewport shading mode for every frame."),
+        ] = "smoothShaded",
         lighting: Annotated[
             Literal["default", "scene", "flat"],
             Field(description="'scene' uses the scene's own lights."),
@@ -316,7 +321,7 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         result = maya.request(
             "capture_turntable",
             {"target": target, "n_frames": n_frames,
-             "resolution": resolution, "lighting": lighting},
+             "resolution": resolution, "shading": shading, "lighting": lighting},
             timeout_s=CAPTURE_TIMEOUT_S,
         )
         cells = [
@@ -368,6 +373,10 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             Field(description="Viewport angle to capture for the right-hand panel."),
         ] = "three_quarter",
         resolution: Annotated[int, Field(ge=64, le=1024)] = 640,
+        shading: Annotated[
+            ShadingMode,
+            Field(description="Viewport shading mode for the right-hand panel."),
+        ] = "smoothShaded",
         lighting: Annotated[
             Literal["default", "scene", "flat"],
             Field(description="'scene' uses the scene's own lights."),
@@ -379,7 +388,7 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         reference = _references.get(ref_id)
         result = maya.request(
             "capture_viewport",
-            {"angles": [angle], "shading": "smoothShaded",
+            {"angles": [angle], "shading": shading,
              "wireframe_overlay": False, "buffer": "beauty", "isolate": None,
              "frame_all": True, "resolution": resolution,
              "lighting": lighting, "shadows": False},
@@ -389,7 +398,12 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         if not shots:
             raise ValueError("capture returned no image to compare against")
         current = images.decode_and_downscale(shots[0]["png_b64"], max_px=resolution)
-        composite = images.side_by_side(reference, current)
+        reference = images.decode_and_downscale(
+            base64.b64encode(reference).decode("ascii"), max_px=resolution
+        )
+        composite = images.decode_and_downscale(
+            base64.b64encode(images.side_by_side(reference, current)).decode("ascii")
+        )
         return [
             Image(data=composite, format="png"),
             "left: reference %r | right: viewport %s" % (ref_id, angle),

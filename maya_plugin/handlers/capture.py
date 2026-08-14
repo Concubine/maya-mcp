@@ -14,7 +14,7 @@ import base64
 import math
 import os
 import tempfile
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from ..dispatcher import HandlerError
 from . import naming
@@ -407,7 +407,7 @@ class _PanelState:
 
 
 def _capture_one(
-    angle: str,
+    angle: Union[str, Tuple[str, float]],
     shading: str,
     wireframe_overlay: bool,
     buffer: str,

@@ -67,6 +67,35 @@ def test_noise_bump_builds_and_connects_to_the_normal_slot(monkeypatch):
     assert any(dst.endswith(".normalCamera") for _, dst in fake.connections)
 
 
+def test_noise_bump_bad_scale_type_raises_hinted_handler_error(monkeypatch):
+    # I2: scale/depth used to go straight to float(), so a bad type raised a
+    # raw ValueError with no hint - and did so AFTER the noise node was
+    # already created. Must now be a HandlerError, and must leave no orphan.
+    fake = FakeCmds()
+    monkeypatch.setattr(texture_recipes, "_cmds", lambda: fake)
+    before = set(fake.objects)
+    with pytest.raises(HandlerError) as exc:
+        texture_recipes.apply_texture_recipe(
+            {"mesh": "|torso", "recipe": "noise_bump",
+             "params": {"scale": "big"}}
+        )
+    assert "scale" in str(exc.value)
+    assert fake.objects == before
+
+
+def test_noise_bump_bad_depth_type_raises_hinted_handler_error(monkeypatch):
+    fake = FakeCmds()
+    monkeypatch.setattr(texture_recipes, "_cmds", lambda: fake)
+    before = set(fake.objects)
+    with pytest.raises(HandlerError) as exc:
+        texture_recipes.apply_texture_recipe(
+            {"mesh": "|torso", "recipe": "noise_bump",
+             "params": {"depth": [1, 2]}}
+        )
+    assert "depth" in str(exc.value)
+    assert fake.objects == before
+
+
 def test_unknown_recipe_lists_the_valid_ones(monkeypatch):
     fake = FakeCmds()
     monkeypatch.setattr(texture_recipes, "_cmds", lambda: fake)

@@ -92,6 +92,39 @@ def resolve_slot(shader_type: str, slot: str) -> str:
     return slots[slot]
 
 
+def _validate_param_values(shader: str, values: Dict[str, Any]) -> Dict[str, tuple]:
+    """Pure type-check pass: every value verified BEFORE anything is built.
+
+    Mirrors lighting.setup_lighting's validate-everything-first shape - the
+    scene must never be mutated on a call that is about to be refused.
+    Returns {real_attr_name: (setAttr_args_tuple, kwargs)} ready to apply.
+    """
+    validated: Dict[str, tuple] = {}
+    for key, value in values.items():
+        attr = _ATTR[shader][key]
+        if attr in _COLOR_ATTRS:
+            if (
+                not isinstance(value, (list, tuple)) or len(value) != 3
+                or not all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                           for v in value)
+            ):
+                raise HandlerError(
+                    "%s must be [r, g, b]" % key,
+                    hint="got %r; colour components are 0..1" % (value,),
+                )
+            validated[attr] = (
+                (float(value[0]), float(value[1]), float(value[2])),
+                {"type": "double3"},
+            )
+        else:
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise HandlerError(
+                    "%s must be a number" % key, hint="got %r" % (value,)
+                )
+            validated[attr] = ((float(value),), {})
+    return validated
+
+
 def assign_material(params: Dict[str, Any]) -> Dict[str, Any]:
     cmds = _cmds()
     mesh_long, shape = naming.require_mesh(cmds, str(params.get("mesh") or ""))
@@ -108,6 +141,9 @@ def assign_material(params: Dict[str, Any]) -> Dict[str, Any]:
             "unknown params for %s: %s" % (shader, ", ".join(sorted(unknown))),
             hint="valid params: %s" % ", ".join(sorted(PARAM_WHITELIST[shader])),
         )
+    # Everything above is validation; the type-check pass below is too - only
+    # once it succeeds is it safe to create nodes or touch the mesh's shading.
+    validated = _validate_param_values(shader, values)
 
     requested = params.get("name") or (mesh_long.split("|")[-1] + "_mat")
     mat_name = naming.unique_name(cmds, str(requested))
@@ -122,26 +158,8 @@ def assign_material(params: Dict[str, Any]) -> Dict[str, Any]:
     # ensure_object_shading only as the defensive repair check it's for.
     cmds.sets(shape, edit=True, forceElement=sg)
 
-    for key, value in values.items():
-        attr = "%s.%s" % (mat, _ATTR[shader][key])
-        if _ATTR[shader][key] in _COLOR_ATTRS:
-            if (
-                not isinstance(value, (list, tuple)) or len(value) != 3
-                or not all(isinstance(v, (int, float)) and not isinstance(v, bool)
-                           for v in value)
-            ):
-                raise HandlerError(
-                    "%s must be [r, g, b]" % key,
-                    hint="got %r; colour components are 0..1" % (value,),
-                )
-            cmds.setAttr(attr, float(value[0]), float(value[1]), float(value[2]),
-                         type="double3")
-        else:
-            if not isinstance(value, (int, float)) or isinstance(value, bool):
-                raise HandlerError(
-                    "%s must be a number" % key, hint="got %r" % (value,)
-                )
-            cmds.setAttr(attr, float(value))
+    for attr, (args, kwargs) in validated.items():
+        cmds.setAttr("%s.%s" % (mat, attr), *args, **kwargs)
 
     shading = meshcheck.ensure_object_shading(cmds, shape, sg)
     warnings: List[str] = []

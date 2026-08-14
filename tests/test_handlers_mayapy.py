@@ -102,7 +102,7 @@ class TestCaptureLightingInMaya:
         for mode in ("default", "scene"):
             out = capture.capture_viewport({
                 "angles": ["three_quarter"], "lighting": mode,
-                "wireframe_overlay": False, "resolution": [256, 256],
+                "wireframe_overlay": False, "resolution": 256,
                 "isolate": ["|litcube"],
             })
             shots[mode] = base64.b64decode(out["images"][0]["png_b64"])
@@ -1466,3 +1466,41 @@ class TestMaterialInMaya:
         material.assign_material({"mesh": "|cpcube", "params": {"roughness": 0.5}})
         after = len(session._existing(session._checkpoint_dir(cmds)))
         assert after == before
+
+    def test_bad_param_type_leaves_scene_node_set_unchanged(self, tmp_path):
+        # I2 (real Maya): the old code built the shader + SG and force-
+        # assigned the mesh to it BEFORE type-checking param values, so a
+        # bad param (scalar where a colour is required) orphaned both nodes
+        # AND left the mesh half-reassigned, losing its prior material. A
+        # full scene node-set diff, not just an orphan spot-check, is the
+        # milestone rule: "after any failed call, scene node counts are
+        # unchanged."
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import material
+
+        cmds.file(new=True, force=True)
+        cmds.file(rename=str(tmp_path / "material_orphan.ma"))
+        cmds.polyCube(name="orphcube", w=2, h=2, d=2)
+        original = material.assign_material(
+            {"mesh": "|orphcube", "shader": "lambert",
+             "params": {"color": [0.1, 0.2, 0.3]}, "name": "orig_mat"}
+        )
+
+        before = set(cmds.ls(long=True))
+        with pytest.raises(HandlerError):
+            material.assign_material({
+                "mesh": "|orphcube", "shader": "standardSurface",
+                "params": {"baseColor": 0.5}, "name": "bad_mat",
+            })
+        after = set(cmds.ls(long=True))
+        assert after == before, (
+            "assign_material left orphan nodes: %s" % (after - before)
+        )
+
+        # the mesh must still be wearing its ORIGINAL material, not
+        # half-reassigned onto the refused call's shading group.
+        shape = cmds.listRelatives("|orphcube", shapes=True, fullPath=True)[0]
+        members = cmds.sets(original["shading_group"], query=True) or []
+        assert shape.split("|")[-1] in [m.split("|")[-1] for m in members]

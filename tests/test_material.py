@@ -48,6 +48,28 @@ def test_assign_creates_shader_and_object_level_sg(monkeypatch):
     ]
 
 
+def test_bad_param_type_leaves_no_orphan_nodes(monkeypatch):
+    # I2: a bad param value must be caught before any node is created, sg
+    # built, or the mesh's shading is touched - the scene's node set (and
+    # shading-group membership) must be byte-for-byte unchanged after a
+    # failed call.
+    fake = FakeCmds()
+    fake.sg_members["initialShadingGroup"] = ["|torso|torsoShape"]
+    monkeypatch.setattr(material, "_cmds", lambda: fake)
+    objects_before = set(fake.objects)
+    sg_before = {k: list(v) for k, v in fake.sg_members.items()}
+    with pytest.raises(HandlerError):
+        material.assign_material({
+            "mesh": "|torso", "shader": "standardSurface",
+            "params": {"baseColor": 0.5},
+        })
+    assert fake.objects == objects_before, (
+        "assign_material left orphan nodes: %s"
+        % (fake.objects - objects_before)
+    )
+    assert fake.sg_members == sg_before, "mesh shading assignment was mutated"
+
+
 def test_assign_replaces_an_existing_default_shading_assignment(monkeypatch):
     # Every freshly created Maya mesh already belongs to a default SG
     # (initialShadingGroup / openPBR_shaderSG1) with clean object-level

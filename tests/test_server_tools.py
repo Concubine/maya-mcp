@@ -609,6 +609,39 @@ class TestSetupLighting:
         assert conn.calls == []  # rejected before reaching Maya
 
 
+class TestCaptureTurntable:
+    def test_forwards_caller_supplied_shading(self):
+        conn = FakeConn(
+            responses={
+                "capture_turntable": {
+                    "images": [{"index": 0, "azimuth": 0.0, "png_b64": png_b64(32, 32)}],
+                    "n_frames": 1,
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        run(
+            mcp.call_tool(
+                "maya_capture_turntable", {"target": "|golem", "shading": "textured"}
+            )
+        )
+        assert conn.calls[0]["cmd"] == "capture_turntable"
+        assert conn.calls[0]["params"]["shading"] == "textured"
+
+    def test_shading_defaults_to_smooth_shaded(self):
+        conn = FakeConn(
+            responses={
+                "capture_turntable": {
+                    "images": [{"index": 0, "azimuth": 0.0, "png_b64": png_b64(32, 32)}],
+                    "n_frames": 1,
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_capture_turntable", {}))
+        assert conn.calls[0]["params"]["shading"] == "smoothShaded"
+
+
 class TestReferenceImages:
     def test_load_reference_image_returns_metadata(self):
         conn = FakeConn()
@@ -673,6 +706,76 @@ class TestReferenceImages:
         assert left_pixel == ref_color, f"Left pixel {left_pixel} != reference color {ref_color}"
         # Right side should have viewport color (blue)
         assert right_pixel == viewport_color, f"Right pixel {right_pixel} != viewport color {viewport_color}"
+
+    def test_compare_to_reference_forwards_caller_supplied_shading(self):
+        conn = FakeConn(
+            responses={
+                "capture_viewport": {
+                    "images": [{"angle": "three_quarter", "png_b64": png_b64(32, 32)}],
+                    "camera_positions": [],
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        run(
+            mcp.call_tool(
+                "maya_load_reference_image",
+                {"source": png_b64(16, 16), "ref_id": "hero"},
+            )
+        )
+        run(
+            mcp.call_tool(
+                "maya_compare_to_reference", {"ref_id": "hero", "shading": "textured"}
+            )
+        )
+        assert conn.calls[0]["cmd"] == "capture_viewport"
+        assert conn.calls[0]["params"]["shading"] == "textured"
+
+    def test_compare_to_reference_shading_defaults_to_smooth_shaded(self):
+        conn = FakeConn(
+            responses={
+                "capture_viewport": {
+                    "images": [{"angle": "three_quarter", "png_b64": png_b64(32, 32)}],
+                    "camera_positions": [],
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        run(
+            mcp.call_tool(
+                "maya_load_reference_image",
+                {"source": png_b64(16, 16), "ref_id": "hero"},
+            )
+        )
+        run(mcp.call_tool("maya_compare_to_reference", {"ref_id": "hero"}))
+        assert conn.calls[0]["params"]["shading"] == "smoothShaded"
+
+    def test_compare_to_reference_oversized_reference_is_capped(self, monkeypatch):
+        # I6: a big reference must not bypass MAYA_MCP_MAX_IMAGE_PX - the
+        # composite (reference | viewport) must land within the cap on its
+        # longest edge, not balloon to the reference's native size.
+        monkeypatch.setenv("MAYA_MCP_MAX_IMAGE_PX", "256")
+        conn = FakeConn(
+            responses={
+                "capture_viewport": {
+                    "images": [{"angle": "three_quarter", "png_b64": png_b64(64, 64)}],
+                    "camera_positions": [],
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        run(
+            mcp.call_tool(
+                "maya_load_reference_image",
+                {"source": png_b64(3000, 3000), "ref_id": "huge"},
+            )
+        )
+        result = run(
+            mcp.call_tool("maya_compare_to_reference", {"ref_id": "huge", "resolution": 200})
+        )
+        image_blocks = [c for c in result.content if c.type == "image"]
+        composite = PILImage.open(io.BytesIO(base64.b64decode(image_blocks[0].data)))
+        assert max(composite.size) <= 256
 
     def test_compare_to_reference_unknown_ref_id_errors_naming_loaded_ids(self):
         conn = FakeConn(responses={"capture_viewport": {"images": [], "camera_positions": []}})

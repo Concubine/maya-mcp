@@ -57,9 +57,17 @@ def _shader_of(cmds, shape: str):
     return shader, cmds.nodeType(shader)
 
 
+def _validate_number(name: str, value: Any) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise HandlerError(
+            "%s must be a number" % name, hint="got %r" % (value,)
+        )
+    return float(value)
+
+
 def _noise_bump(cmds, tracker, shader, attr, params) -> None:
-    scale = float(params.get("scale", 1.0))
-    depth = float(params.get("depth", 0.4))
+    scale = _validate_number("scale", params.get("scale", 1.0))
+    depth = _validate_number("depth", params.get("depth", 0.4))
     noise = tracker(cmds.shadingNode("noise", asTexture=True,
                                      name=naming.unique_name(cmds, "mcpTex_noise")))
     bump = tracker(cmds.shadingNode("bump2d", asUtility=True,
