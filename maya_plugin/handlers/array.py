@@ -144,23 +144,39 @@ def _mesh_signed_volume(cmds, transform: str) -> Optional[float]:
 
     Positive means outward winding. Negative means the faces point inward,
     which under Arnold renders black or hollow and reads as a lighting failure.
+
+    `cmds` is unused here - it exists only so this function's signature
+    matches what the tests monkeypatch it with (`lambda cmds, name: ...`).
     """
     try:
         import maya.api.OpenMaya as om  # noqa: PLC0415
+    except ImportError:
+        # Not running inside Maya - an environment fact, not a mesh
+        # property. Caught on its own so it can't mask a real bug below.
+        return None
 
+    # Only the OpenMaya calls that can legitimately fail on a valid mesh -
+    # e.g. one with no shape, an ambiguous shape, or otherwise non-standard
+    # topology - are caught here. A typo or API misuse in the surrounding
+    # Python (the list comprehensions below) is a genuine programming error
+    # and must surface, not collapse into the same "unmeasurable" result as
+    # a legitimately-untriangulable mesh.
+    try:
         sel = om.MSelectionList()
         sel.add(transform)
         dag = sel.getDagPath(0)
         dag.extendToShape()
         mesh = om.MFnMesh(dag)
-        points = [(p.x, p.y, p.z) for p in mesh.getPoints(om.MSpace.kWorld)]
+        raw_points = mesh.getPoints(om.MSpace.kWorld)
         _counts, indices = mesh.getTriangles()
-        triangles = [
-            (indices[i], indices[i + 1], indices[i + 2])
-            for i in range(0, len(indices), 3)
-        ]
     except Exception:
         return None
+
+    points = [(p.x, p.y, p.z) for p in raw_points]
+    triangles = [
+        (indices[i], indices[i + 1], indices[i + 2])
+        for i in range(0, len(indices), 3)
+    ]
     if not triangles:
         return None
     return arraymath.signed_volume(points, triangles)
@@ -182,6 +198,9 @@ def _mirror(
     Then the freeze inverts face winding, because any negative scale does. The
     normals are reversed after the freeze (never before - doing it first just
     gets undone), and the result is MEASURED rather than assumed.
+
+    `count` is ignored: a mirror produces exactly one image, so there is
+    nothing for it to control.
     """
     idx = arraymath.axis_index(params.get("axis", "x"))
     pivot = arraymath.resolve_vec3(params.get("pivot"), "pivot", [0.0, 0.0, 0.0])
@@ -193,7 +212,13 @@ def _mirror(
     cmds.setAttr("%s.scale%s" % (grp, "XYZ"[idx]), -1.0)
     cmds.makeIdentity(grp, apply=True, translate=True, rotate=True, scale=True, normal=0)
 
-    unparented = cmds.parent(copy, world=True) or [copy]
+    # cmds.group() above reparented `copy` under `grp`, so the path we are
+    # still holding (e.g. "|tooth_1") no longer resolves to anything -
+    # Maya raises rather than returning falsy. Re-resolve the child from the
+    # group first; that is robust to Maya renaming the node on reparent,
+    # which string concatenation is not.
+    child = (cmds.listRelatives(grp, children=True, fullPath=True) or [copy])[0]
+    unparented = cmds.parent(child, world=True) or [child]
     copy = _long(cmds, unparented[0])
     cmds.delete(grp)
 
@@ -202,7 +227,24 @@ def _mirror(
 
     signed = _mesh_signed_volume(cmds, copy)
     warnings: List[str] = []
-    if signed is not None and signed <= 0.0:
+    if signed is None:
+        # Absence of evidence is not evidence of absence: a genuinely
+        # black, inward-facing mesh must not come back with a clean
+        # warnings list just because the measurement itself never ran.
+        warnings.append(
+            "signed volume could not be measured on %s: the mirrored "
+            "copy's face orientation is UNVERIFIED - check it renders "
+            "solid rather than black." % copy
+        )
+    elif signed == 0.0:
+        # Exactly zero means an open or degenerate mesh, not inverted
+        # winding - the two are different failures with different fixes.
+        warnings.append(
+            "%s has signed volume 0.0: the mesh is open or degenerate, so "
+            "orientation can't be judged from a zero volume - check it "
+            "renders solid rather than black." % copy
+        )
+    elif signed < 0.0:
         warnings.append(
             "%s has signed volume %.4f: its winding is inverted, faces point "
             "INWARD. It will render black or hollow, which looks like a "

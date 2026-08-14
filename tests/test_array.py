@@ -59,9 +59,19 @@ class FakeCmds:
         return grp
 
     def parent(self, child, target=None, world=False, **kwargs):
-        self.parents.pop(child, None)
+        if child not in self.objects:
+            raise RuntimeError("No object matches name: %s" % child)
         self.calls.append(("parent", child))
-        return [child]
+        # Maya renames on reparent too: the new long path is rooted wherever
+        # it lands (here, world) plus the child's short name. Keep
+        # self.objects in sync the same way group() does, so a stale path
+        # handed to a later call fails the same way it would in live Maya.
+        self.objects.remove(child)
+        short = child.split("|")[-1]
+        new_path = "|" + short
+        self.objects.append(new_path)
+        self.parents.pop(child, None)
+        return [new_path]
 
     def delete(self, name, **kwargs):
         self.calls.append(("delete", name))
@@ -331,11 +341,16 @@ class TestMirror:
 
     def test_temporary_group_is_deleted(self, fake):
         result = array.array({"name": "|tooth", "mode": "mirror", "axis": "x"})
+        ops = [op for op, _ in fake.calls]
         deleted = [target for op, target in fake.calls if op == "delete"]
         assert any("mirror" in d.lower() for d in deleted), (
             "the temporary mirror group was left in the scene: %s" % deleted
         )
         assert result["group"] is None
+        # Order is load-bearing: deleting the group before the copy is
+        # unparented from it would destroy the copy along with the group
+        # in live Maya, yet every other assertion here would stay green.
+        assert ops.index("parent") < ops.index("delete")
 
     def test_warns_when_signed_volume_is_not_positive(self, fake, monkeypatch):
         # If Maya ever declines to freeze, or a future edit drops the normal
@@ -357,3 +372,21 @@ class TestMirror:
         result = array.array({"name": "|tooth", "mode": "mirror", "axis": "x"})
         assert result["signed_volume"] is None
         assert not any("winding" in w.lower() for w in result["warnings"])
+
+    def test_unmeasurable_volume_produces_a_warning(self, fake, monkeypatch):
+        # Silently swallowing the measurement failure would let a genuinely
+        # black, inward-facing mesh come back with a clean warnings list
+        # just because the check never ran.
+        monkeypatch.setattr(array, "_mesh_signed_volume", lambda cmds, name: None)
+        result = array.array({"name": "|tooth", "mode": "mirror", "axis": "x"})
+        assert result["signed_volume"] is None
+        assert any("could not be measured" in w for w in result["warnings"])
+
+    def test_warns_when_signed_volume_is_exactly_zero(self, fake, monkeypatch):
+        # Exactly zero means an open or degenerate mesh, not inverted
+        # winding - it must not be reported as an inverted-winding failure.
+        monkeypatch.setattr(array, "_mesh_signed_volume", lambda cmds, name: 0.0)
+        result = array.array({"name": "|tooth", "mode": "mirror", "axis": "x"})
+        assert result["signed_volume"] == 0.0
+        assert result["warnings"]
+        assert not any("inverted" in w.lower() for w in result["warnings"])
