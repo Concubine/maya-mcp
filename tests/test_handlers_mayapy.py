@@ -1090,6 +1090,56 @@ class TestDeformRemeshCleanupInMaya:
         # ~4% (barely moves); the fix lands close to the 400 target.
         assert after_faces <= 500
 
+    def test_flare_sine_and_wave_apply_and_bake(self):
+        # Attribute names come from Maya, not from documentation: this test is
+        # what makes the whitelist trustworthy.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import sculpt
+
+        cases = [
+            ("flare", {"curve": 0.4, "startFlareX": 1.4, "endFlareX": 0.4}),
+            ("sine", {"amplitude": 0.3, "wavelength": 2.0}),
+            ("wave", {"amplitude": 0.2, "wavelength": 1.5, "maxRadius": 3.0}),
+        ]
+        for kind, params in cases:
+            cmds.file(new=True, force=True)
+            cmds.polyCylinder(name="stalk", height=6, subdivisionsY=12)
+            before = cmds.xform("stalk", query=True, boundingBox=True)
+            result = sculpt.deform(
+                {"mesh": "|stalk", "deformer": kind, "params": params,
+                 "delete_history_after": True}
+            )
+            after = cmds.xform("stalk", query=True, boundingBox=True)
+            assert result["baked"] is True, kind
+            assert before != after, "%s deformed nothing" % kind
+
+    def test_flare_actually_tapers(self):
+        # The whole reason flare is in this milestone: a limb that is wide at
+        # one end and narrow at the other. Asserting "the bbox changed" would
+        # pass for any deformer; this asserts the SHAPE.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import sculpt
+
+        cmds.file(new=True, force=True)
+        cmds.polyCylinder(name="limb", height=6, subdivisionsY=16)
+        sculpt.deform(
+            {"mesh": "|limb", "deformer": "flare",
+             "params": {"startFlareX": 1.8, "startFlareZ": 1.8,
+                        "endFlareX": 0.4, "endFlareZ": 0.4},
+             "delete_history_after": True}
+        )
+        verts = cmds.xform("limb.vtx[*]", query=True, worldSpace=True, translation=True)
+        points = [verts[i:i + 3] for i in range(0, len(verts), 3)]
+        low = [p for p in points if p[1] < -2.0]
+        high = [p for p in points if p[1] > 2.0]
+        width_low = max(abs(p[0]) for p in low)
+        width_high = max(abs(p[0]) for p in high)
+        assert width_low > width_high * 1.5, (
+            "flare did not taper: bottom %.3f, top %.3f" % (width_low, width_high)
+        )
+
 
 class TestM1AcceptanceGate:
     def test_boolean_rune_cavity_undo_restore_zero_orphans(self, tmp_path):

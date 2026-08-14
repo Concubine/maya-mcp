@@ -598,3 +598,101 @@ def test_mesh_cleanup_delete_history_false_skips_delete(monkeypatch):
     monkeypatch.setattr(meshcheck, "mesh_stats", _fake_mesh_stats([]))
     modeling.mesh_cleanup({"mesh": "|dirty", "delete_history": False})
     assert not any(c[0] == "delete" for c in fake.calls)
+
+
+class _FakeDeformCmds:
+    """Enough cmds for deform(). Records what was passed where."""
+
+    def __init__(self):
+        self.nonlinear_kwargs = None
+        self.set_attrs = {}
+        self.deleted = []
+
+    def ls(self, name, long=False, **kwargs):
+        return [name]
+
+    def listRelatives(self, name, **kwargs):
+        return ["%sShape" % name]
+
+    def nodeType(self, name):
+        return "mesh"
+
+    def nonLinear(self, mesh, **kwargs):
+        self.nonlinear_kwargs = kwargs
+        kind = kwargs.get("type", "bend")
+        return ["%s1" % kind, "%s1Handle" % kind]
+
+    def setAttr(self, plug, *values, **kwargs):
+        self.set_attrs[plug] = values[0] if len(values) == 1 else list(values)
+
+    def xform(self, name, **kwargs):
+        return None
+
+    def delete(self, name, **kwargs):
+        self.deleted.append(name)
+
+    def objExists(self, name):
+        return True
+
+
+def test_deform_accepts_the_three_new_nonlinear_types():
+    from maya_plugin.handlers import sculpt
+
+    for kind in ("flare", "sine", "wave"):
+        assert kind in sculpt.DEFORMER_WHITELIST
+
+
+def test_flare_whitelists_the_taper_params():
+    from maya_plugin.handlers import sculpt
+
+    assert {"curve", "startFlareX", "startFlareZ", "endFlareX", "endFlareZ"} <= (
+        sculpt.DEFORMER_WHITELIST["flare"]
+    )
+
+
+def test_wave_has_radial_bounds_and_not_axial_ones():
+    from maya_plugin.handlers import sculpt
+
+    # wave is bounded radially in the XZ plane, not along an axis. Copying
+    # sine's whitelist wholesale would accept lowBound/highBound and set
+    # attributes that do not exist on the node.
+    assert {"minRadius", "maxRadius"} <= sculpt.DEFORMER_WHITELIST["wave"]
+    assert "lowBound" not in sculpt.DEFORMER_WHITELIST["wave"]
+    assert "highBound" in sculpt.DEFORMER_WHITELIST["sine"]
+
+
+def test_deform_rejects_a_sine_param_on_flare(monkeypatch):
+    from maya_plugin.dispatcher import HandlerError
+    from maya_plugin.handlers import sculpt
+
+    fake = _FakeDeformCmds()
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError):
+        sculpt.deform({"mesh": "|blob", "deformer": "flare",
+                       "params": {"wavelength": 2.0}})
+
+
+def test_nonlinear_params_are_set_as_attributes_not_creation_flags(monkeypatch):
+    from maya_plugin.handlers import sculpt
+
+    # One uniform path for all six nonLinear types removes the "is this name a
+    # command flag or an attribute?" question entirely - the question that made
+    # adding three types risky in the first place.
+    fake = _FakeDeformCmds()
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    sculpt.deform({"mesh": "|blob", "deformer": "flare",
+                   "params": {"curve": 0.5, "endFlareX": 0.3}})
+    assert fake.nonlinear_kwargs == {"type": "flare"}
+    assert fake.set_attrs["flare1.curve"] == 0.5
+    assert fake.set_attrs["flare1.endFlareX"] == 0.3
+
+
+def test_handle_transform_params_are_not_set_as_attributes(monkeypatch):
+    from maya_plugin.handlers import sculpt
+
+    fake = _FakeDeformCmds()
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    sculpt.deform({"mesh": "|blob", "deformer": "twist",
+                   "params": {"startAngle": 40.0, "translate": [0, 2, 0]}})
+    assert not any(".translate" in plug for plug in fake.set_attrs)
+    assert fake.set_attrs["twist1.startAngle"] == 40.0

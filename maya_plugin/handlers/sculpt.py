@@ -288,10 +288,25 @@ def sculpt_ops(params: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# cmds.nonLinear's six types. sculpt and lattice are separate commands with
+# separate return shapes and are handled on their own branches below.
+NONLINEAR_TYPES = frozenset({"bend", "flare", "sine", "squash", "twist", "wave"})
+
 DEFORMER_WHITELIST = {
     "bend": {"curvature", "lowBound", "highBound", "rotate", "translate"},
     "squash": {"factor", "lowBound", "highBound", "rotate", "translate"},
     "twist": {"startAngle", "endAngle", "lowBound", "highBound", "rotate", "translate"},
+    # The taper. Without this, "a limb thick at the shoulder and thin at the
+    # wrist" is not expressible and every limb is a uniform tube.
+    "flare": {"curve", "startFlareX", "startFlareZ", "endFlareX", "endFlareZ",
+              "lowBound", "highBound", "rotate", "translate"},
+    "sine": {"amplitude", "wavelength", "offset", "dropoff",
+             "lowBound", "highBound", "rotate", "translate"},
+    # wave is bounded RADIALLY in the XZ plane, not along an axis - it has no
+    # lowBound/highBound at all. The whitelist is per-type precisely so this
+    # asymmetry is enforced rather than merely documented.
+    "wave": {"amplitude", "wavelength", "offset", "dropoff",
+             "minRadius", "maxRadius", "rotate", "translate"},
     "sculpt": {"maxDisplacement", "dropoffDistance", "translate", "rotate"},
     "lattice": {"divisions", "translate", "rotate"},
 }
@@ -334,7 +349,15 @@ def deform(params: Dict[str, Any]) -> Dict[str, Any]:
         # nodes[1]-is-the-handle convention below. Verified live in mayapy.
         nodes = cmds.sculpt(mesh_long, **dparams)
     else:
-        nodes = cmds.nonLinear(mesh_long, type=deformer, **dparams)
+        # Create bare, then set each param as an ATTRIBUTE. Passing them as
+        # creation flags works for some names and not others, and which is
+        # which is not documented anywhere - that ambiguity is what made
+        # adding new types risky. Every param in the whitelist above is an
+        # attribute on the resulting deform* node under exactly this name, so
+        # one path serves all six types and the question stops existing.
+        nodes = cmds.nonLinear(mesh_long, type=deformer)
+        for attr, value in dparams.items():
+            cmds.setAttr("%s.%s" % (nodes[0], attr), value)
     # nodes[1] is the movable handle for every branch: nonLinear returns
     # [deformer, handle] (2 elements, so nodes[1] == nodes[-1]); lattice and
     # sculpt both return 3-element lists where nodes[1] is the deforming

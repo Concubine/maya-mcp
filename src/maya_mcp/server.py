@@ -1081,18 +1081,24 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
     def maya_deform(
         mesh: Annotated[str, Field(description="Target mesh (canonical long name).")],
         deformer: Annotated[
-            Literal["bend", "lattice", "squash", "twist", "sculpt"],
+            Literal["bend", "flare", "lattice", "sculpt", "sine", "squash", "twist", "wave"],
             Field(description="Nonlinear/lattice deformer type to apply."),
         ],
         params: Annotated[
             Optional[dict],
             Field(description=(
-                "Deformer parameters, whitelisted per type: bend takes curvature; "
-                "squash takes factor; twist takes startAngle/endAngle; sculpt takes "
-                "maxDisplacement/dropoffDistance; all four also take lowBound/"
-                "highBound; lattice takes divisions:[x,y,z]. Every type also accepts "
-                "translate/rotate, applied to the deformer handle. Unknown keys are "
-                "rejected with that type's whitelist in the error hint."
+                "Deformer parameters, whitelisted per type. bend: curvature. "
+                "squash: factor. twist: startAngle/endAngle. flare: curve, "
+                "startFlareX/Z, endFlareX/Z - THE taper, for a limb thick at "
+                "one end and thin at the other. sine: amplitude, wavelength, "
+                "offset, dropoff - linear ripple. wave: amplitude, wavelength, "
+                "offset, dropoff, minRadius, maxRadius - concentric radial "
+                "ripple; note wave is bounded radially and takes NO lowBound/"
+                "highBound. sculpt: maxDisplacement/dropoffDistance. lattice: "
+                "divisions:[x,y,z]. bend/squash/twist/flare/sine also take "
+                "lowBound/highBound. Every type also accepts translate/rotate, "
+                "applied to the deformer handle. Unknown keys are rejected with "
+                "that type's whitelist in the error hint."
             )),
         ] = None,
         delete_history_after: Annotated[
