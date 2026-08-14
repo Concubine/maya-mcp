@@ -1,0 +1,253 @@
+{
+  "units": "maya default (cm); 1 unit = 1 metre if imported at 100x",
+  "convention": "each structure is a group of separate closed meshes; origin is the centre of the footprint at ground level (y=0); +Y up; no construction history",
+  "structures": [
+    {
+      "name": "rotunda",
+      "chunks": 21,
+      "tris": 3382,
+      "size_whd": [
+        26.0,
+        19.2,
+        26.0
+      ],
+      "bbox_min": [
+        -13.0,
+        0.0,
+        -13.0
+      ],
+      "bbox_max": [
+        13.0,
+        19.2,
+        13.0
+      ],
+      "chunk_names": [
+        "altar",
+        "architrave",
+        "column",
+        "column_1",
+        "column_2",
+        "column_3",
+        "column_4",
+        "column_5",
+        "column_6",
+        "column_7",
+        "column_8",
+        "column_9",
+        "cornice",
+        "dome",
+        "finial",
+        "gem",
+        "innerFloor",
+        "step_1",
+        "step_2",
+        "step_base",
+        "stylobate"
+      ],
+      "files": [
+        "rotunda.fbx",
+        "rotunda.ma",
+        "rotunda.png"
+      ]
+    },
+    {
+      "name": "water_tower",
+      "chunks": 16,
+      "tris": 4852,
+      "size_whd": [
+        14.2,
+        29.05,
+        14.2
+      ],
+      "bbox_min": [
+        -7.1,
+        -0.045,
+        -7.1
+      ],
+      "bbox_max": [
+        7.1,
+        29.0,
+        7.1
+      ],
+      "chunk_names": [
+        "band_1",
+        "band_2",
+        "band_3",
+        "band_base",
+        "beacon",
+        "brace",
+        "footing",
+        "leg",
+        "leg_1",
+        "leg_2",
+        "leg_3",
+        "platform",
+        "tank",
+        "tankFloor",
+        "tankRoof",
+        "vent"
+      ],
+      "files": [
+        "water_tower.fbx",
+        "water_tower.ma",
+        "water_tower.png"
+      ]
+    },
+    {
+      "name": "clock_tower",
+      "chunks": 20,
+      "tris": 948,
+      "size_whd": [
+        13.0,
+        37.1,
+        13.0
+      ],
+      "bbox_min": [
+        -6.5,
+        0.0,
+        -6.5
+      ],
+      "bbox_max": [
+        6.5,
+        37.1,
+        6.5
+      ],
+      "chunk_names": [
+        "belfry",
+        "belfryCap",
+        "bell",
+        "clockDial",
+        "clockDial_1",
+        "clockDial_2",
+        "clockDial_3",
+        "clockFace",
+        "clockFace_1",
+        "clockFace_2",
+        "clockFace_3",
+        "course_1",
+        "course_2",
+        "course_3",
+        "course_4",
+        "course_base",
+        "plinth",
+        "roof",
+        "shaft",
+        "spike"
+      ],
+      "files": [
+        "clock_tower.fbx",
+        "clock_tower.ma",
+        "clock_tower.png"
+      ]
+    },
+    {
+      "name": "gate",
+      "chunks": 20,
+      "tris": 236,
+      "size_whd": [
+        30.0,
+        26.2,
+        12.0
+      ],
+      "bbox_min": [
+        -15.0,
+        0.0,
+        -6.0
+      ],
+      "bbox_max": [
+        15.0,
+        26.2,
+        6.0
+      ],
+      "chunk_names": [
+        "attic",
+        "entablature",
+        "inscription",
+        "lamp",
+        "pier",
+        "pierCap",
+        "pierCap_R_1",
+        "pierPlinth",
+        "pierPlinth_R_1",
+        "pier_R_1",
+        "roadbed",
+        "voussoir",
+        "voussoir_1",
+        "voussoir_2",
+        "voussoir_3",
+        "voussoir_4",
+        "voussoir_5",
+        "voussoir_6",
+        "voussoir_7",
+        "voussoir_8"
+      ],
+      "files": [
+        "gate.fbx",
+        "gate.ma",
+        "gate.png"
+      ]
+    }
+  ],
+  "materials": {
+    "limestone": {
+      "baseColor": [
+        0.74,
+        0.71,
+        0.64
+      ],
+      "roughness": 0.76,
+      "metalness": 0.0,
+      "emissive": false
+    },
+    "shadowStone": {
+      "baseColor": [
+        0.26,
+        0.25,
+        0.24
+      ],
+      "roughness": 0.82,
+      "metalness": 0.0,
+      "emissive": false
+    },
+    "brick": {
+      "baseColor": [
+        0.42,
+        0.26,
+        0.2
+      ],
+      "roughness": 0.85,
+      "metalness": 0.0,
+      "emissive": false
+    },
+    "iron": {
+      "baseColor": [
+        0.34,
+        0.35,
+        0.38
+      ],
+      "roughness": 0.58,
+      "metalness": 0.68,
+      "emissive": false
+    },
+    "bronze": {
+      "baseColor": [
+        0.6,
+        0.41,
+        0.18
+      ],
+      "roughness": 0.34,
+      "metalness": 0.7,
+      "emissive": false
+    },
+    "glow": {
+      "baseColor": [
+        0.45,
+        0.3,
+        0.03
+      ],
+      "roughness": 0.05,
+      "metalness": 0.0,
+      "emissive": true
+    }
+  }
+}
