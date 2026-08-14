@@ -348,7 +348,7 @@ def deform(params: Dict[str, Any]) -> Dict[str, Any]:
         # origin locator) pushes/pulls the mesh, matching the shared
         # nodes[1]-is-the-handle convention below. Verified live in mayapy.
         nodes = cmds.sculpt(mesh_long, **dparams)
-    else:
+    elif deformer in NONLINEAR_TYPES:
         # Create bare, then set each param as an ATTRIBUTE. Passing them as
         # creation flags works for some names and not others, and which is
         # which is not documented anywhere - that ambiguity is what made
@@ -358,6 +358,16 @@ def deform(params: Dict[str, Any]) -> Dict[str, Any]:
         nodes = cmds.nonLinear(mesh_long, type=deformer)
         for attr, value in dparams.items():
             cmds.setAttr("%s.%s" % (nodes[0], attr), value)
+    else:
+        # Reached only if a type is added to DEFORMER_WHITELIST without also
+        # adding it to NONLINEAR_TYPES (or wiring a lattice/sculpt-style
+        # branch for it) - fail loudly rather than silently falling into the
+        # nonLinear path with an unrecognised type name.
+        raise HandlerError(
+            "deformer %r is whitelisted but not wired to a dispatch branch" % deformer,
+            hint="valid nonLinear types: %s; sculpt and lattice are separate "
+            "commands with their own branches" % ", ".join(sorted(NONLINEAR_TYPES)),
+        )
     # nodes[1] is the movable handle for every branch: nonLinear returns
     # [deformer, handle] (2 elements, so nodes[1] == nodes[-1]); lattice and
     # sculpt both return 3-element lists where nodes[1] is the deforming

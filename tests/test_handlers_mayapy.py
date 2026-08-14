@@ -1090,9 +1090,12 @@ class TestDeformRemeshCleanupInMaya:
         # ~4% (barely moves); the fix lands close to the 400 target.
         assert after_faces <= 500
 
-    def test_flare_sine_and_wave_apply_and_bake(self):
+    def test_flare_sine_wave_and_squash_apply_and_bake(self):
         # Attribute names come from Maya, not from documentation: this test is
-        # what makes the whitelist trustworthy.
+        # what makes the whitelist trustworthy. squash is here too - it's one
+        # of the pre-existing types (bend/squash/twist) whose param wiring the
+        # refactor to a uniform create-then-setAttr path changed, and it was
+        # otherwise verified nowhere against real Maya.
         import maya.cmds as cmds
 
         from maya_plugin.handlers import sculpt
@@ -1101,6 +1104,7 @@ class TestDeformRemeshCleanupInMaya:
             ("flare", {"curve": 0.4, "startFlareX": 1.4, "endFlareX": 0.4}),
             ("sine", {"amplitude": 0.3, "wavelength": 2.0}),
             ("wave", {"amplitude": 0.2, "wavelength": 1.5, "maxRadius": 3.0}),
+            ("squash", {"factor": 0.5}),
         ]
         for kind, params in cases:
             cmds.file(new=True, force=True)
@@ -1134,6 +1138,10 @@ class TestDeformRemeshCleanupInMaya:
         points = [verts[i:i + 3] for i in range(0, len(verts), 3)]
         low = [p for p in points if p[1] < -2.0]
         high = [p for p in points if p[1] > 2.0]
+        assert low and high, (
+            "no vertices found beyond y=-2.0/+2.0 - flare's Y range moved, "
+            "so the taper comparison below has nothing to measure"
+        )
         width_low = max(abs(p[0]) for p in low)
         width_high = max(abs(p[0]) for p in high)
         assert width_low > width_high * 1.5, (
