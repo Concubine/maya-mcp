@@ -1358,7 +1358,9 @@ class TestLightingInMaya:
 
 
 class TestTextureRecipesInMaya:
-    def test_recipe_connects_and_leaves_no_orphans_on_failure(self, tmp_path):
+    def test_recipe_connects_and_rejects_missing_file_path_before_creating_nodes(
+        self, tmp_path
+    ):
         import maya.cmds as cmds
 
         from maya_plugin.dispatcher import HandlerError
@@ -1376,13 +1378,58 @@ class TestTextureRecipesInMaya:
         assert len(result["nodes"]) == 2
         assert cmds.listConnections("clay.normalCamera") != []
 
-        # a failing recipe must return the scene to exactly this state
+        # file_texture's missing-file_path check is its very first line, so
+        # this only proves a pre-flight validation failure has no side
+        # effects - it never exercises the sweep itself (no node exists to
+        # sweep). See test_sweep_removes_real_nodes_after_partial_failure
+        # below for that.
         mid = set(cmds.ls(long=True))
         with pytest.raises(HandlerError):
             texture_recipes.apply_texture_recipe(
                 {"mesh": "|texcube", "recipe": "file_texture"}  # no file_path
             )
         assert set(cmds.ls(long=True)) == mid
+
+    def test_sweep_removes_real_nodes_after_partial_failure(self, tmp_path, monkeypatch):
+        # Review finding: the test above's forced failure (file_texture with
+        # no file_path) raises on _file_texture's very first line, before
+        # any cmds.shadingNode call - so `created` is always empty and the
+        # sweep's cmds.delete() path has never run against a real Maya node.
+        # Force the failure AFTER noise_bump has created real noise/bump2d
+        # nodes (both shadingNode calls happen before either connectAttr
+        # call), by making the first connectAttr raise, and assert the full
+        # scene node set - not just the tracked `created` list - returns to
+        # exactly its pre-call snapshot.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import material, texture_recipes
+
+        cmds.file(new=True, force=True)
+        cmds.file(rename=str(tmp_path / "recipes_sweep.ma"))
+        cmds.polyCube(name="texcube2", w=2, h=2, d=2)
+        material.assign_material({"mesh": "|texcube2", "name": "clay2"})
+
+        real_connect_attr = cmds.connectAttr
+        calls = []
+
+        def _flaky_connect_attr(*args, **kwargs):
+            calls.append(args)
+            if len(calls) == 1:
+                raise RuntimeError("forced connectAttr failure")
+            return real_connect_attr(*args, **kwargs)
+
+        monkeypatch.setattr(cmds, "connectAttr", _flaky_connect_attr)
+
+        before = set(cmds.ls(long=True))
+        with pytest.raises(RuntimeError, match="forced connectAttr failure"):
+            texture_recipes.apply_texture_recipe(
+                {"mesh": "|texcube2", "recipe": "noise_bump"}
+            )
+        after = set(cmds.ls(long=True))
+        assert after == before, (
+            "the noise/bump2d nodes created before the forced failure must "
+            "be swept: %s" % (after - before)
+        )
 
 
 class TestMaterialInMaya:
