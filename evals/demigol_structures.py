@@ -1,37 +1,35 @@
-"""Four Demigol structures, built to the STRUCTURE MODEL CONTRACT.
+"""Four whole destructible HERO buildings for Demigol.
 
-These are not sculptures that get cut up later. The game destroys buildings cell
-by cell, flood-fills what is still connected and drops the rest as rigid bodies,
-so a welded building mesh is indestructible scenery - the one thing the game must
-not contain. Every building here is therefore authored AS a set of chunk meshes
-on a 3 m lattice from the first line.
+The model IS the building, structurally as well as visually. Nothing is
+generated underneath to hold the art up: the chunk manifest defines the
+simulation grid, so a building that looks right but has no continuous path to
+the ground collapses the moment the level loads.
 
-Contract conformance, point by point:
+That inverts the usual authoring order. Here the FRAME is designed first and
+the cladding is hung on what is left, and the generator refuses to emit a
+building that would not stand:
 
-  units      metres, Y-up. The scene is switched to linear='m' before anything
-             is created, so 1 unit IS 1 metre and the FBX carries it.
-  lattice    cell = 3 m. Every chunk is an axis-aligned box whose bounds land on
-             cell boundaries by construction - sizes are whole cell counts and
-             positions are computed from cell indices, so straddling is not
-             expressible rather than merely avoided.
-  footprint  every horizontal axis is (bays * 3 + 1) cells.
-  chunks     every chunk is a polyCube: closed, watertight, 12 triangles, well
-             under the 200-triangle budget for a 1-cell chunk.
-  pivots     polyCube builds centred on the origin and is then MOVED, never
-             scaled, so each transform's pivot is already the chunk's own centre
-             and scale is left at (1,1,1). Nothing needs freezing because
-             nothing is ever non-uniformly scaled.
-  history    created with ch=False; no construction history exists to delete.
-  limits     max 48 cells, max 6 cells span, max 4 storeys - asserted per chunk
-             at emit time, so a violating design fails here rather than in a
-             build.
-  names      <role>_x##_y##_z##, generated from the same cell indices that place
-             the geometry, so a name cannot disagree with its position.
-  materials  one flat colour per role, procedural, no textures, no authored
-             material assets.
+  * steel columns run continuously from storey 0 up, on the 9 m bay lattice
+  * every storey ties its columns together with a concrete beam grid - a
+    column touching no concrete at its own storey is a stilt and is reported
+  * infill / brick / glass carry nothing and are placed only in cells the
+    frame does not need
+  * glass is emitted one cell at a time, so no glass span can ever exceed the
+    2-cell limit that would leave the course above it unsupported
+
+THE ONE-ACTION SELF-CHECK IS IMPLEMENTED, not asserted. After building, every
+infill/brick/glass chunk is discarded and the remaining steel+concrete is
+flood-filled from the ground through face-adjacency. Anything unreached is an
+unsupported chunk and fails the build. This is the same question the game's
+solver asks on load, asked here first.
+
+Footprints match the four archetypes, so each is a drop-in replacement in the
+generated district rather than something that has to be placed by hand:
+
+  tower  13x13x14   block  19x19x6   slab  10x19x8   stump  10x10x4
 
 Run:  set MAYA_MCP_PORT=9878 && .venv/Scripts/python.exe evals/demigol_structures.py
-Package: evals/demigol_structures/  (4 fbx + manifest.json + README.md + pngs)
+Package: evals/demigol_structures/
 """
 
 from __future__ import annotations
@@ -41,6 +39,7 @@ import base64
 import json
 import os
 import sys
+from collections import deque
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
@@ -52,15 +51,13 @@ from maya_mcp import images  # noqa: E402
 OUT_DIR = os.path.join(_HERE, "demigol_structures")
 
 CELL = 3.0
-BAY = 3               # cells between structural column lines (9 m)
-MAX_CELLS = 48
-MAX_SPAN = 6
-MAX_STOREYS = 4
+BAY = 3                      # cells between column lines (9 m)
+MAX_CELLS, MAX_SPAN, MAX_STOREYS = 48, 6, 4
 
-ROLES = ("steel", "concrete", "brick", "infill", "glass")
+STRUCTURAL = ("steel", "concrete")
+CLADDING = ("brick", "infill", "glass")
+ROLES = STRUCTURAL + CLADDING
 
-# A colour per role and nothing else - the contract asks for procedural colour,
-# so these are values for the game's own shader to consume, not a look.
 ROLE_COLOUR = {
     "steel":    [0.34, 0.37, 0.42],
     "concrete": [0.62, 0.61, 0.58],
@@ -69,45 +66,161 @@ ROLE_COLOUR = {
     "glass":    [0.36, 0.55, 0.62],
 }
 
+# Glass carries nothing, so a glass run wider than 2 cells leaves the course
+# above it unsupported. Emitting glass one cell at a time makes that
+# unreachable rather than merely checked.
+MAX_RUN = {"steel": 4, "concrete": 4, "brick": 2, "infill": 2, "glass": 1}
 
-class Chunk:
-    """One breakable box, addressed in CELLS and only ever in cells.
 
-    Metres are derived at the end. Nothing in a building definition is allowed
-    to speak in metres, which is what makes straddling a cell boundary
-    impossible to express rather than merely discouraged.
+def bay_lines(n):
+    """Column lines for an n-cell axis: every 3rd cell, and the far edge."""
+    return sorted(set(list(range(0, n, BAY)) + [n - 1]))
+
+
+class Building:
+    """A cell grid that becomes chunks, never the other way round.
+
+    Cells are claimed one at a time and a second claim on the same cell is an
+    error, so the manifest is an unambiguous statement of what each cell is
+    made of - which is what the solver reads it as.
     """
 
+    def __init__(self, label, nx, nz, storeys, note=""):
+        for axis, n in (("x", nx), ("z", nz)):
+            if n < 4 or (n - 1) % BAY != 0:
+                raise ValueError("%s: %s axis of %d cells is not (bays*3+1)"
+                                 % (label, axis, n))
+        self.label, self.nx, self.nz, self.storeys = label, nx, nz, storeys
+        self.note = note
+        self.bx, self.bz = bay_lines(nx), bay_lines(nz)
+        self.cells = {}                     # (x, y, z) -> role
+
+    def put(self, role, x, y, z):
+        if role not in ROLES:
+            raise ValueError("unknown role %r" % role)
+        key = (x, y, z)
+        if key in self.cells:
+            raise ValueError("%s: cell %s claimed twice (%s then %s)"
+                             % (self.label, key, self.cells[key], role))
+        self.cells[key] = role
+
+    # ---------------------------------------------------------------- frame
+    def frame(self, storeys=None, lobby_open=()):
+        """Columns on every bay-line intersection, tied by a beam grid.
+
+        The beam grid is the tie: at each storey, every cell with exactly one
+        coordinate on a bay line becomes a concrete beam, so each column is
+        face-adjacent to the grid that joins it to its neighbours.
+
+        Corner columns are the exception and need care. A corner's only two
+        face-adjacent cells are both on the perimeter ring, so if the ring
+        between columns is cladding the corner touches nothing structural and
+        is a stilt. One cell beside each corner is therefore a concrete
+        spandrel rather than cladding.
+        """
+        storeys = self.storeys if storeys is None else storeys
+        for y in range(storeys):
+            for x in self.bx:
+                for z in self.bz:
+                    self.put("steel", x, y, z)
+            for x in range(self.nx):
+                for z in range(self.nz):
+                    on_x, on_z = x in self.bx, z in self.bz
+                    if on_x and on_z:
+                        continue                      # column, already placed
+                    if on_x != on_z and self._interior(x, z):
+                        self.put("concrete", x, y, z)  # beam grid
+            for x, z in self._corner_spandrels():
+                self.put("concrete", x, y, z)
+
+    def _interior(self, x, z):
+        return 0 < x < self.nx - 1 and 0 < z < self.nz - 1
+
+    def _corner_spandrels(self):
+        return [(1, 0), (self.nx - 2, 0), (1, self.nz - 1), (self.nx - 2, self.nz - 1)]
+
+    # -------------------------------------------------------------- cladding
+    def clad(self, role_for, storeys=None, skip_storeys=()):
+        """Hang cladding in every perimeter cell the frame did not take.
+
+        `role_for(y)` picks the material per storey. Skipping a storey leaves
+        an open colonnade - allowed explicitly, because the columns are still
+        there; only the curtain is missing.
+        """
+        storeys = self.storeys if storeys is None else storeys
+        for y in range(storeys):
+            if y in skip_storeys:
+                continue
+            role = role_for(y)
+            for x in range(self.nx):
+                for z in range(self.nz):
+                    if not (x in (0, self.nx - 1) or z in (0, self.nz - 1)):
+                        continue
+                    if (x, y, z) in self.cells:
+                        continue
+                    self.put(role, x, y, z)
+
+    # ---------------------------------------------------------------- chunks
+    def chunks(self):
+        """Merge runs of like cells into chunks, then emit them.
+
+        Columns merge VERTICALLY into segments of up to 4 storeys, which is
+        both the contract's storey ceiling and the behaviour the roles imply -
+        a steel frame should fall as large bent sections, not as a shower of
+        1 m cubes. Everything else merges along X then Z within its own run
+        limit.
+        """
+        remaining = dict(self.cells)
+        out = []
+
+        def take(x, y, z, role):
+            if remaining.get((x, y, z)) == role:
+                del remaining[(x, y, z)]
+                return True
+            return False
+
+        for (x, y, z) in sorted(self.cells, key=lambda k: (k[1], k[0], k[2])):
+            role = remaining.get((x, y, z))
+            if role is None:
+                continue
+            del remaining[(x, y, z)]
+            sx = sy = sz = 1
+            if role == "steel":
+                while sy < MAX_RUN[role] and take(x, y + sy, z, role):
+                    sy += 1
+            else:
+                limit = MAX_RUN[role]
+                while sx < limit and take(x + sx, y, z, role):
+                    sx += 1
+                if sx == 1:
+                    while sz < limit and take(x, y, z + sz, role):
+                        sz += 1
+            out.append(Chunk(role, x, y, z, sx, sy, sz))
+        return out
+
+
+class Chunk:
     __slots__ = ("role", "x", "y", "z", "sx", "sy", "sz")
 
     def __init__(self, role, x, y, z, sx=1, sy=1, sz=1):
-        if role not in ROLES:
-            raise ValueError("unknown role %r (valid: %s)" % (role, ", ".join(ROLES)))
         cells = sx * sy * sz
-        if cells > MAX_CELLS:
-            raise ValueError("chunk %s at %d,%d,%d is %d cells (max %d)"
-                             % (role, x, y, z, cells, MAX_CELLS))
-        if max(sx, sz) > MAX_SPAN:
-            raise ValueError("chunk %s at %d,%d,%d spans %dx%d cells (max %d)"
-                             % (role, x, y, z, sx, sz, MAX_SPAN))
-        if sy > MAX_STOREYS:
-            raise ValueError("chunk %s at %d,%d,%d is %d storeys (max %d)"
-                             % (role, x, y, z, sy, MAX_STOREYS))
+        if cells > MAX_CELLS or max(sx, sz) > MAX_SPAN or sy > MAX_STOREYS:
+            raise ValueError("chunk %s at %d,%d,%d is %dx%dx%d cells - over limits"
+                             % (role, x, y, z, sx, sy, sz))
         self.role, self.x, self.y, self.z = role, x, y, z
         self.sx, self.sy, self.sz = sx, sy, sz
 
     @property
     def name(self):
-        # Multi-cell chunks are named for their MIN-CORNER cell. See the
-        # deviations note in the manifest - the contract defines x/z as "cell
-        # coords from the min corner" for a chunk, and min-corner is the only
-        # reading that stays well defined once a chunk spans cells.
         return "%s_x%02d_y%02d_z%02d" % (self.role, self.x, self.y, self.z)
 
+    def cells_occupied(self):
+        for i in range(self.sx):
+            for j in range(self.sy):
+                for k in range(self.sz):
+                    yield (self.x + i, self.y + j, self.z + k)
+
     def as_dict(self):
-        # Cell i's centre sits at i*CELL, so a run of n cells starting at i is
-        # centred half a cell past its midpoint. Bounds then land exactly on
-        # cell boundaries (i*CELL - CELL/2) for every chunk, at every size.
         return dict(
             name=self.name, role=self.role,
             cell=[self.x, self.y, self.z], size_cells=[self.sx, self.sy, self.sz],
@@ -118,207 +231,127 @@ class Chunk:
         )
 
 
-def check_footprint(nx, nz, label):
-    for axis, n in (("x", nx), ("z", nz)):
-        if n < 4 or (n - 1) % BAY != 0:
-            raise ValueError("%s: %s footprint of %d cells is not (bays*3+1)"
-                             % (label, axis, n))
+# ====================================================== the structural check
+# The contract's one-action self-check, executed rather than asserted.
 
+def structural_report(chunks):
+    """Delete all cladding; can the rest stand on its own?
 
-def perimeter_runs(nx, nz, span):
-    """Wall panel runs around a footprint, as (x, z, sx, sz) in cells.
-
-    Corners are emitted once, as part of the runs along x, so no cell is
-    covered twice - a doubled chunk is two rigid bodies in one place, which
-    reads as a flicker rather than as a wall.
+    Support is flood-fill from the ground through face-adjacency between
+    structural chunks - the same question the game's solver asks every tick.
+    A chunk is grounded if it holds a cell at storey 0; everything else must
+    be reachable from something that is.
     """
-    runs = []
-    for z in (0, nz - 1):
-        x = 0
-        while x < nx:
-            w = min(span, nx - x)
-            runs.append((x, z, w, 1))
-            x += w
-    for x in (0, nx - 1):
-        z = 1
-        while z < nz - 1:
-            d = min(span, nz - 1 - z)
-            runs.append((x, z, 1, d))
-            z += d
-    return runs
+    frame = [c for c in chunks if c.role in STRUCTURAL]
+    owner = {}
+    for i, c in enumerate(frame):
+        for cell in c.cells_occupied():
+            owner[cell] = i
+
+    adj = {i: set() for i in range(len(frame))}
+    for i, c in enumerate(frame):
+        for (x, y, z) in c.cells_occupied():
+            for nb in ((x + 1, y, z), (x - 1, y, z), (x, y + 1, z),
+                       (x, y - 1, z), (x, y, z + 1), (x, y, z - 1)):
+                j = owner.get(nb)
+                if j is not None and j != i:
+                    adj[i].add(j)
+                    adj[j].add(i)
+
+    grounded = [i for i, c in enumerate(frame) if c.y == 0]
+    seen, queue = set(grounded), deque(grounded)
+    while queue:
+        i = queue.popleft()
+        for j in adj[i]:
+            if j not in seen:
+                seen.add(j)
+                queue.append(j)
+
+    floating = [frame[i].name for i in range(len(frame)) if i not in seen]
+
+    # A column touching no concrete at its own storey is a stilt: it stands,
+    # but it is tied to nothing and the storey has no diaphragm.
+    concrete_cells = {cell for c in frame if c.role == "concrete"
+                      for cell in c.cells_occupied()}
+    stilts = []
+    for c in frame:
+        if c.role != "steel":
+            continue
+        tied = False
+        for (x, y, z) in c.cells_occupied():
+            if any(nb in concrete_cells for nb in
+                   ((x + 1, y, z), (x - 1, y, z), (x, y, z + 1), (x, y, z - 1))):
+                tied = True
+                break
+        if not tied:
+            stilts.append(c.name)
+
+    # Every bay-line column must reach the ground without a gap.
+    columns = {}
+    for c in frame:
+        if c.role != "steel":
+            continue
+        for (x, y, z) in c.cells_occupied():
+            columns.setdefault((x, z), set()).add(y)
+    broken = []
+    for (x, z), ys in sorted(columns.items()):
+        if 0 not in ys:
+            broken.append("column x%02d z%02d does not reach the ground" % (x, z))
+        elif sorted(ys) != list(range(min(ys), max(ys) + 1)):
+            broken.append("column x%02d z%02d has a gap in it" % (x, z))
+
+    wide_glass = [c.name for c in chunks
+                  if c.role == "glass" and max(c.sx, c.sz) > 2]
+
+    return dict(frame_chunks=len(frame), floating=floating, stilts=stilts,
+                broken_columns=broken, wide_glass=wide_glass,
+                standing=not (floating or broken or wide_glass))
 
 
-def floor_slabs(nx, nz, y, role="concrete", span=5):
-    """Tile a storey's floor with slabs no wider than `span` cells."""
-    out, x = [], 0
-    while x < nx:
-        w = min(span, nx - x)
-        z = 0
-        while z < nz:
-            d = min(span, nz - z)
-            out.append(Chunk(role, x, y, z, w, 1, d))
-            z += d
-        x += w
-    return out
+# ================================================================= buildings
+
+def tower():
+    """13x13x14 - the Tower archetype. Full frame, glazed shaft, open lobby."""
+    b = Building("tower", 13, 13, 14,
+                 note="Ground storey is an open lobby: cladding omitted, columns "
+                      "present. Top two storeys glazed as a crown.")
+    b.frame()
+    b.clad(lambda y: "glass" if (y >= b.storeys - 2 or y % 3 == 2) else "infill",
+           skip_storeys=(0,))
+    return b
 
 
-# ================================================================== buildings
-# Character comes from MASSING and role distribution, because it has to: a
-# tapered or curved chunk cannot have bounds on cell boundaries, so the
-# vocabulary here is deliberately boxes, arranged.
-
-def campanile():
-    """4x4 cells, 14 storeys - 12 x 12 x 42 m. Slender; topples as one piece.
-
-    One bay square. The character is the belfry: the top two storeys swap brick
-    for steel and open up to glass, so the silhouette has a lantern on it and
-    the shear line is somewhere a player can read.
-    """
-    nx = nz = 4
-    storeys = 14
-    check_footprint(nx, nz, "campanile")
-    chunks = []
-    for y in range(storeys):
-        belfry = y >= storeys - 2
-        corner_role = "steel" if belfry else "brick"
-        wall_role = "glass" if belfry else "brick"
-        for x, z in ((0, 0), (nx - 1, 0), (0, nz - 1), (nx - 1, nz - 1)):
-            chunks.append(Chunk(corner_role, x, y, z))
-        for x, z, sx, sz in perimeter_runs(nx, nz, span=2):
-            if (x, z) in ((0, 0), (nx - 1, 0), (0, nz - 1), (nx - 1, nz - 1)) and sx == 1 and sz == 1:
-                continue
-            # Trim runs that would re-cover a corner already placed above.
-            if sz == 1 and sx > 1:
-                if x == 0:
-                    x, sx = x + 1, sx - 1
-                if x + sx == nx:
-                    sx -= 1
-            if sx <= 0 or sz <= 0:
-                continue
-            chunks.append(Chunk(wall_role, x, y, z, sx, 1, sz))
-        chunks.extend(floor_slabs(nx, nz, y, "concrete", span=4))
-    return dict(nx=nx, nz=nz, storeys=storeys, chunks=chunks,
-                note="Belfry: top two storeys are steel corners with glass infill.")
+def block():
+    """19x19x6 - the Block archetype. Heavy brick perimeter, wide and squat."""
+    b = Building("block", 19, 19, 6,
+                 note="Brick perimeter with a glazed top storey; open colonnade "
+                      "at ground level on all four sides.")
+    b.frame()
+    b.clad(lambda y: "glass" if y == b.storeys - 1 else "brick", skip_storeys=(0,))
+    return b
 
 
-def framed_tower():
-    """10x10 cells, 12 storeys - 30 x 30 x 36 m. The canonical framed block.
-
-    Steel columns on the 9 m bay lines, concrete floors, curtain infill hung
-    between - so cutting a column line drops everything the frame was carrying,
-    which is the whole point of the archetype.
-    """
-    nx = nz = 10
-    storeys = 12
-    check_footprint(nx, nz, "framed_tower")
-    bay_lines = list(range(0, nx, BAY)) + [nx - 1]
-    bay_lines = sorted(set(bay_lines))
-    chunks = []
-    for y in range(storeys):
-        for x in bay_lines:
-            for z in bay_lines:
-                chunks.append(Chunk("steel", x, y, z))
-        for x, z, sx, sz in perimeter_runs(nx, nz, span=BAY):
-            if sx == 1 and sz == 1 and x in bay_lines and z in bay_lines:
-                continue
-            # Every third storey is a glazed band: it reads as a floor line
-            # from outside and it is the weakest ring in the elevation.
-            role = "glass" if y % 3 == 2 else "infill"
-            chunks.append(Chunk(role, x, y, z, sx, 1, sz))
-        chunks.extend(floor_slabs(nx, nz, y, "concrete", span=5))
-    return dict(nx=nx, nz=nz, storeys=storeys, chunks=chunks,
-                note="Glazed band every third storey; steel on 9 m bay lines.")
+def slab():
+    """10x19x8 - the Slab archetype. Long glazed flanks, solid ends."""
+    b = Building("slab", 10, 19, 8,
+                 note="Alternating glazed and infill storeys the full height; "
+                      "no open lobby, so the ground storey is fully clad.")
+    b.frame()
+    b.clad(lambda y: "glass" if y % 2 == 1 else "infill")
+    return b
 
 
-def warehouse():
-    """19x10 cells, 4 storeys - 57 x 30 x 12 m. Long, low, brick, industrial.
-
-    A sawtooth roof on the top storey gives it a profile that is not a box, and
-    gives the game a row of light chunks that come off first.
-    """
-    nx, nz = 19, 10
-    storeys = 4
-    check_footprint(nx, nz, "warehouse")
-    bay_x = sorted(set(list(range(0, nx, BAY)) + [nx - 1]))
-    bay_z = sorted(set(list(range(0, nz, BAY)) + [nz - 1]))
-    chunks = []
-    for y in range(storeys):
-        for x in bay_x:
-            for z in bay_z:
-                chunks.append(Chunk("steel", x, y, z))
-        for x, z, sx, sz in perimeter_runs(nx, nz, span=BAY):
-            if sx == 1 and sz == 1 and x in bay_x and z in bay_z:
-                continue
-            role = "glass" if (y == storeys - 2 and sx > 1) else "brick"
-            chunks.append(Chunk(role, x, y, z, sx, 1, sz))
-        chunks.extend(floor_slabs(nx, nz, y, "concrete", span=5))
-    # Sawtooth: alternating ridges along the long axis, one storey above the
-    # roof slab. Each is a single cell, so they shed individually.
-    for x in range(0, nx, 2):
-        for z in range(0, nz, 3):
-            chunks.append(Chunk("steel", x, storeys, z))
-            if z + 1 < nz:
-                chunks.append(Chunk("glass", x, storeys, z + 1))
-    return dict(nx=nx, nz=nz, storeys=storeys + 1, chunks=chunks,
-                note="Sawtooth roof ridges on the storey above the roof slab.")
+def stump():
+    """10x10x4 - the Stump archetype. Industrial brick, minimal glazing."""
+    b = Building("stump", 10, 10, 4,
+                 note="All brick except a glazed band at the top storey.")
+    b.frame()
+    b.clad(lambda y: "glass" if y == b.storeys - 1 else "brick")
+    return b
 
 
-def gatehouse():
-    """19x7 cells, 5 storeys - 57 x 21 x 15 m. Wide, with a void driven through.
-
-    The ground floor carries a 3-cell arch void on the centre bay, so the mass
-    above it is supported at only two points. It is the only one of the four
-    whose failure is not straight down: take a flanking pier and the span over
-    the void comes with it.
-    """
-    nx, nz = 19, 7
-    storeys = 5
-    check_footprint(nx, nz, "gatehouse")
-    bay_x = sorted(set(list(range(0, nx, BAY)) + [nx - 1]))
-    bay_z = sorted(set(list(range(0, nz, BAY)) + [nz - 1]))
-    void_x = range(8, 11)          # the opening, centre bay of the long axis
-    chunks = []
-    for y in range(storeys):
-        for x in bay_x:
-            for z in bay_z:
-                if y == 0 and x in void_x:
-                    continue
-                chunks.append(Chunk("steel", x, y, z))
-        for x, z, sx, sz in perimeter_runs(nx, nz, span=BAY):
-            if sx == 1 and sz == 1 and x in bay_x and z in bay_z:
-                continue
-            if y == 0 and any(cx in void_x for cx in range(x, x + sx)):
-                continue
-            role = "glass" if y == storeys - 1 else "brick"
-            chunks.append(Chunk(role, x, y, z, sx, 1, sz))
-        if y == 0:
-            # Floor at ground level exists only outside the opening.
-            for slab in floor_slabs(nx, nz, y, "concrete", span=5):
-                if any(cx in void_x for cx in range(slab.x, slab.x + slab.sx)):
-                    continue
-                chunks.append(slab)
-        else:
-            chunks.extend(floor_slabs(nx, nz, y, "concrete", span=5))
-    # The lintel over the void. Authored first as a single 3x7 beam, which the
-    # Chunk guard rejected at emit time: 7 cells is over the 6-cell span limit.
-    # Split along the short axis into two beams that each fall as their own
-    # body - which is also better destruction than one 21-cell slab would be.
-    z = 0
-    while z < nz:
-        depth = min(MAX_SPAN - 2, nz - z)
-        chunks.append(Chunk("concrete", 8, 1, z, 3, 1, depth))
-        z += depth
-    return dict(nx=nx, nz=nz, storeys=storeys, chunks=chunks,
-                note="3-cell ground-floor void on the centre bay, spanned by a "
-                     "concrete lintel at storey 1.")
-
-
-BUILDINGS = [
-    ("campanile", campanile, 1.35),
-    ("framed_tower", framed_tower, 1.35),
-    ("warehouse", warehouse, 1.3),
-    ("gatehouse", gatehouse, 1.3),
-]
+BUILDINGS = [("tower", tower, 1.3), ("block", block, 1.3),
+             ("slab", slab, 1.3), ("stump", stump, 1.25)]
 
 
 # =============================================================== Maya bridge
@@ -330,7 +363,7 @@ def ok(resp, what):
     return resp["result"]
 
 
-def run(code, what, timeout=900.0):
+def run(code, what, timeout=1800.0):
     out = ok(call("execute_python", {"code": code}, timeout), what)
     if out.get("traceback"):
         print("PYTHON FAILED (%s):\n%s" % (what, out["traceback"][:1500]))
@@ -338,22 +371,17 @@ def run(code, what, timeout=900.0):
     return out
 
 
-# Built inside Maya: one pass creates every chunk, one pass verifies the
-# contract against the geometry that actually exists rather than against the
-# intent that produced it.
 BUILD_CODE = r'''
 import json, maya.cmds as cmds
 spec = json.loads(SPEC)
 label = spec["label"]
 cmds.currentUnit(linear="m")
-
 by_role = {}
 for c in spec["chunks"]:
     node = cmds.polyCube(w=c["dim"][0], h=c["dim"][1], d=c["dim"][2],
                          name=c["name"], ch=False)[0]
     cmds.move(c["pos"][0], c["pos"][1], c["pos"][2], node, absolute=True)
     by_role.setdefault(c["role"], []).append(node)
-
 for role, colour in spec["colours"].items():
     if role not in by_role:
         continue
@@ -362,74 +390,53 @@ for role, colour in spec["colours"].items():
     sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=role + "SG")
     cmds.connectAttr(shader + ".outColor", sg + ".surfaceShader", force=True)
     cmds.sets(by_role[role], edit=True, forceElement=sg)
-
 grp = cmds.group([n for nodes in by_role.values() for n in nodes], name=label)
 cmds.xform(grp, worldSpace=True, pivots=(0, 0, 0))
-result = {"group": grp, "chunks": sum(len(v) for v in by_role.values())}
+result = {"chunks": sum(len(v) for v in by_role.values())}
 result
 '''
 
 CHECK_CODE = r'''
 import maya.cmds as cmds
 CELL, EPS = 3.0, 1e-4
-label = LABEL
-kids = cmds.listRelatives("|" + label, children=True, fullPath=True) or []
+kids = cmds.listRelatives("|" + LABEL, children=True, fullPath=True) or []
 fails, tris = [], 0
-
 def on_lattice(v):
-    # Cell boundaries sit at i*CELL - CELL/2, so a bound is legal exactly when
-    # (v + CELL/2) is a whole number of cells.
-    return abs(((v + CELL / 2.0) / CELL) - round((v + CELL / 2.0) / CELL)) < EPS
-
+    t = (v + CELL / 2.0) / CELL
+    return abs(t - round(t)) < EPS
 for node in kids:
     short = node.split("|")[-1]
     shapes = cmds.listRelatives(node, shapes=True, fullPath=True) or []
     if not shapes:
         fails.append((short, "no shape")); continue
     tris += cmds.polyEvaluate(shapes[0], triangle=True)
-
-    # closed: a watertight box has no boundary edges
-    edges = cmds.polyEvaluate(shapes[0], edge=True)
-    faces = cmds.polyEvaluate(shapes[0], face=True)
-    verts = cmds.polyEvaluate(shapes[0], vertex=True)
-    if verts - edges + faces != 2:
-        fails.append((short, "not closed (V-E+F=%d)" % (verts - edges + faces)))
-
+    v = cmds.polyEvaluate(shapes[0], vertex=True)
+    e = cmds.polyEvaluate(shapes[0], edge=True)
+    f = cmds.polyEvaluate(shapes[0], face=True)
+    if v - e + f != 2:
+        fails.append((short, "not closed (V-E+F=%d)" % (v - e + f)))
     if [round(s, 6) for s in cmds.getAttr(node + ".scale")[0]] != [1.0, 1.0, 1.0]:
-        fails.append((short, "non-uniform/left-over scale"))
-    if [round(r, 6) for r in cmds.getAttr(node + ".rotate")[0]] != [0.0, 0.0, 0.0]:
-        fails.append((short, "unfrozen rotation"))
-
+        fails.append((short, "left-over scale"))
     bb = cmds.exactWorldBoundingBox(node)
-    if not all(on_lattice(v) for v in bb):
-        fails.append((short, "bounds off the 3 m lattice: %s"
-                      % [round(v, 4) for v in bb]))
-
+    if not all(on_lattice(q) for q in bb):
+        fails.append((short, "bounds off lattice"))
     centre = [(bb[i] + bb[i + 3]) / 2.0 for i in range(3)]
-    pivot = cmds.xform(node, query=True, worldSpace=True, rotatePivot=True)
-    if any(abs(pivot[i] - centre[i]) > 1e-3 for i in range(3)):
-        fails.append((short, "pivot not at chunk centre"))
-
-    # name must parse AND agree with where the chunk actually is
+    piv = cmds.xform(node, query=True, worldSpace=True, rotatePivot=True)
+    if any(abs(piv[i] - centre[i]) > 1e-3 for i in range(3)):
+        fails.append((short, "pivot not centred"))
     try:
-        role, sx, sy, sz = short.split("_")[0], *[int(p[1:]) for p in short.split("_")[1:4]]
+        parts = short.split("_")
+        cx, cy, cz = (int(p[1:]) for p in parts[1:4])
     except Exception:
         fails.append((short, "name does not parse")); continue
-    want = [sx * CELL - CELL / 2.0, sy * CELL - CELL / 2.0, sz * CELL - CELL / 2.0]
+    want = [cx * CELL - CELL / 2.0, cy * CELL - CELL / 2.0, cz * CELL - CELL / 2.0]
     if any(abs(bb[i] - want[i]) > 1e-3 for i in range(3)):
-        fails.append((short, "name disagrees with position: min corner %s vs %s"
-                      % ([round(bb[i], 3) for i in range(3)],
-                         [round(w, 3) for w in want])))
-
-    cells = [int(round((bb[i + 3] - bb[i]) / CELL)) for i in range(3)]
-    if cells[0] * cells[1] * cells[2] > 48 or max(cells[0], cells[2]) > 6 or cells[1] > 4:
-        fails.append((short, "over chunk limits: %s cells" % cells))
-
-bb = cmds.exactWorldBoundingBox("|" + label)
-result = {"chunks": len(kids), "tris": tris, "fails": fails[:25],
+        fails.append((short, "name disagrees with position"))
+bb = cmds.exactWorldBoundingBox("|" + LABEL)
+result = {"chunks": len(kids), "tris": tris, "fails": fails[:20],
           "fail_count": len(fails),
-          "bbox_min": [round(v, 3) for v in bb[:3]],
-          "bbox_max": [round(v, 3) for v in bb[3:]]}
+          "bbox_min": [round(q, 3) for q in bb[:3]],
+          "bbox_max": [round(q, 3) for q in bb[3:]]}
 result
 '''
 
@@ -441,7 +448,6 @@ try:
     mel.eval('FBXExportFileVersion -v FBX202000')
     mel.eval('FBXExportUpAxis y')
     mel.eval('FBXExportConvertUnitString m')
-    mel.eval('FBXExportSmoothingGroups -v true')
     mel.eval('FBXExportInputConnections -v false')
 except Exception:
     pass
@@ -453,123 +459,132 @@ result
 
 
 def build_one(label, builder, zoom):
-    spec = builder()
-    chunks = spec["chunks"]
-    payload = json.dumps({
-        "label": label,
-        "colours": ROLE_COLOUR,
-        "chunks": [c.as_dict() for c in chunks],
-    })
+    b = builder()
+    chunks = b.chunks()
+    report = structural_report(chunks)
+    if not report["standing"]:
+        print("%s WOULD COLLAPSE ON LOAD:" % label)
+        for key in ("broken_columns", "floating", "wide_glass"):
+            for item in report[key][:12]:
+                print("    %-18s %s" % (key, item))
+        sys.exit(1)
 
-    ok(call("new_scene", {"confirm": True}, 240.0), "new_scene")
+    payload = json.dumps({"label": label, "colours": ROLE_COLOUR,
+                          "chunks": [c.as_dict() for c in chunks]})
+    ok(call("new_scene", {"confirm": True}, 300.0), "new_scene")
     run("SPEC = %r\n%s" % (payload, BUILD_CODE), "build %s" % label)
     check = ast.literal_eval(
         run("LABEL = %r\n%s" % (label, CHECK_CODE), "check %s" % label)["result_repr"])
-
     fbx = os.path.join(OUT_DIR, "%s.fbx" % label).replace("\\", "/")
     run("LABEL = %r\nFBX = %r\n%s" % (label, fbx, EXPORT_CODE), "export %s" % label)
 
-    # A render, so a human can see what the numbers describe. Lighting is added
-    # after the check so it can never be mistaken for part of the asset.
-    # Flat lambert role colours are much brighter than the shaded stone these
-    # rigs were tuned against - the first run measured clipped_fraction 0.10-0.14
-    # where anything over ~0.15 has lost its detail outright.
     ok(call("setup_lighting", {"preset": "three_point", "intensity": 1.5,
                                "replace_existing": True}, 180.0), "lighting")
     shot = ok(call("render_scene", {
         "angles": ["three_quarter"], "renderer": "arnold", "resolution": 768,
-        "samples": 3, "zoom": zoom, "target": ["|" + label]}, 900.0),
+        "samples": 3, "zoom": zoom, "target": ["|" + label]}, 1200.0),
         "render %s" % label)["images"][0]
     png = base64.b64decode(shot["png_b64"])
     with open(os.path.join(OUT_DIR, "%s.png" % label), "wb") as fh:
         fh.write(png)
 
-    size = [round(check["bbox_max"][i] - check["bbox_min"][i], 2) for i in range(3)]
     roles = {}
     for c in chunks:
         roles[c.role] = roles.get(c.role, 0) + 1
+    size = [round(check["bbox_max"][i] - check["bbox_min"][i], 2) for i in range(3)]
     return dict(
-        name=label, footprint_cells=[spec["nx"], spec["nz"]],
-        storeys=spec["storeys"], size_m=size,
-        bbox_min=check["bbox_min"], bbox_max=check["bbox_max"],
+        name=label, archetype_footprint_cells=[b.nx, b.nz], storeys=b.storeys,
+        size_m=size, bbox_min=check["bbox_min"], bbox_max=check["bbox_max"],
         chunks=check["chunks"], triangles=check["tris"],
         tris_per_chunk=round(check["tris"] / max(1, check["chunks"]), 1),
-        roles=roles, note=spec["note"],
+        roles=roles, frame_chunks=report["frame_chunks"],
+        stilt_columns=report["stilts"], note=b.note,
         files=["%s.fbx" % label, "%s.png" % label],
         chunk_list=[c.as_dict() for c in chunks],
-    ), check, images.pixel_stats(png)
+    ), check, report, images.pixel_stats(png)
 
 
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
-    entries, all_ok = [], True
+    entries, clean = [], True
     for label, builder, zoom in BUILDINGS:
-        entry, check, stats = build_one(label, builder, zoom)
-        status = "OK" if check["fail_count"] == 0 else "FAIL"
-        print("%-14s %-4s %4d chunks  %6d tris (%.1f/chunk)  %s m  render %s"
-              % (label, status, entry["chunks"], entry["triangles"],
-                 entry["tris_per_chunk"], entry["size_m"],
-                 json.dumps({k: stats[k] for k in ("opaque_px", "clipped_fraction")})))
-        if check["fail_count"]:
-            all_ok = False
-            for short, why in check["fails"]:
-                print("    %-28s %s" % (short, why))
+        entry, check, report, stats = build_one(label, builder, zoom)
+        geom_ok = check["fail_count"] == 0
+        clean = clean and geom_ok
+        print("%-7s %-4s %4d chunks (%d frame)  %6d tris  %s m  stilts %d  "
+              "render clip %.4f"
+              % (label, "OK" if geom_ok else "FAIL", entry["chunks"],
+                 entry["frame_chunks"], entry["triangles"], entry["size_m"],
+                 len(report["stilts"]), stats["clipped_fraction"]))
+        for short, why in check["fails"]:
+            print("    %-26s %s" % (short, why))
         entries.append(entry)
 
     manifest = {
         "contract": "Demigol STRUCTURE MODEL CONTRACT",
+        "scope": "four whole destructible hero buildings; not a parts library",
         "units": "metres, Y-up, 1 unit = 1 m, cell = 3 m",
-        "origin": "min-corner cell CENTRE at local (0,0,0); the floor plane is "
-                  "therefore at y = -1.5",
-        "naming": "<role>_x##_y##_z##; x/z are cell indices from the min corner, "
-                  "y is the storey (0 = ground)",
+        "origin": "min-corner cell CENTRE at local (0,0,0); floor plane at y = -1.5",
+        "naming": "<role>_x##_y##_z##; x/z cell indices from the min corner, "
+                  "y = storey (0 = ground). Multi-cell chunks are named for "
+                  "their min-corner cell.",
         "roles": list(ROLES),
         "role_colours": ROLE_COLOUR,
-        "self_check": "every chunk verified in-scene after build: closed "
-                      "(V-E+F=2), bounds on 3 m boundaries, pivot at chunk "
-                      "centre, scale (1,1,1) and rotation zero, name parses and "
-                      "agrees with measured position, within 48 cells / 6 span / "
-                      "4 storeys",
+        "structural_model":
+            "Columns are steel on every bay-line intersection, merged into "
+            "segments of up to 4 storeys so the frame falls as large sections. "
+            "Every storey carries a concrete beam grid on the bay lines, which "
+            "is what ties the columns. Cladding is hung only in perimeter cells "
+            "the frame does not need, so no cell is ever claimed twice and the "
+            "manifest is an unambiguous statement of what each cell is made of.",
+        "one_action_self_check":
+            "IMPLEMENTED IN THE GENERATOR, not asserted. All brick/infill/glass "
+            "is discarded and the remaining steel+concrete is flood-filled from "
+            "storey 0 through face-adjacency. A build with any unreachable "
+            "frame chunk, any column that does not reach the ground or has a "
+            "gap, or any glass wider than 2 cells, exits non-zero and produces "
+            "no FBX. All four pass.",
+        "geometry_self_check":
+            "every chunk re-measured in-scene: closed (V-E+F=2), bounds on 3 m "
+            "boundaries, pivot at chunk centre, scale (1,1,1), name parses and "
+            "agrees with measured position",
         "deviations": [
-            {"item": "multi-cell chunk naming",
-             "what": "A chunk spanning several cells is named for its MIN-CORNER "
-                     "cell, not its centre.",
-             "why": "The contract defines x/z as 'cell coords from the min "
-                    "corner', which is unambiguous for a 1-cell chunk and needs "
-                    "a choice once a chunk spans cells. Min-corner is the only "
-                    "reading consistent with that wording, and the self-check "
-                    "asserts each name against the chunk's measured min corner, "
-                    "so if you want centre-naming instead it is a one-line "
-                    "change and the check will enforce it."},
             {"item": "vertical sense of the origin",
-             "what": "The min-corner cell CENTRE is at local y = 0, so the floor "
-                     "plane sits at y = -1.5.",
-             "why": "'Model origin = the MIN-CORNER CELL CENTRE, at y = 1.5 "
-                    "(half a cell above the floor)' reads as the origin being "
-                    "that cell centre, with the parenthetical saying where it "
-                    "sits relative to the floor. The other reading puts the "
-                    "floor at y = 0 and the origin 1.5 above it. If that is the "
-                    "one you meant, every building needs a single +1.5 m Y "
+             "what": "min-corner cell CENTRE at local y = 0, so the floor plane "
+                     "is at y = -1.5.",
+             "why": "'Model origin = the MIN-CORNER CELL CENTRE, at y = 1.5' "
+                    "reads as the origin being that cell centre, with the "
+                    "parenthetical locating it above the floor. If you meant "
+                    "the floor at y = 0, every building needs one +1.5 m Y "
                     "offset - no regeneration."},
-            {"item": "flare / taper not used",
-             "what": "None of the four uses the taper deformer, though the "
-                     "toolset has it.",
-             "why": "A tapered or curved chunk cannot have bounds that land on "
-                    "cell boundaries. Lattice conformance outranks ornament, so "
-                    "the vocabulary here is boxes, arranged - character comes "
-                    "from massing and role distribution instead."},
-            {"item": "materials",
-             "what": "Five flat lambert colours named exactly for the roles. No "
-                     "authored materials, no textures, nothing to flag.",
-             "why": "Contract point 8 - procedural colour per role."},
+            {"item": "corner spandrels",
+             "what": "One cell beside each corner column is concrete, not "
+                     "cladding.",
+             "why": "A corner column's only two face-adjacent cells are both on "
+                    "the perimeter ring. With cladding there it touches nothing "
+                    "structural and is a stilt by your own definition. The "
+                    "spandrel gives it a tie; the stilt count in the manifest "
+                    "is the evidence."},
+            {"item": "no taper or curve",
+             "what": "Every chunk is an axis-aligned box.",
+             "why": "A tapered chunk cannot have bounds on cell boundaries. "
+                    "Lattice conformance outranks ornament; character comes "
+                    "from massing, glazing pattern and open lobbies instead."},
+            {"item": "coplanar faces",
+             "what": "Adjacent chunks share exact faces and will z-fight.",
+             "why": "Bounds must land on cell boundaries, which forces it. "
+                    "Point 4 encourages deep interpenetration as the escape, "
+                    "but that conflicts with exact bounds. Cheapest fix is "
+                    "shrinking the RENDER mesh a few mm inside the lattice "
+                    "bounds. Wants a decision before more buildings."},
         ],
         "structures": entries,
     }
     with open(os.path.join(OUT_DIR, "manifest.json"), "w") as fh:
         json.dump(manifest, fh, indent=2)
-    print("\nwrote manifest.json  (self-check: %s)"
-          % ("all four clean" if all_ok else "FAILURES ABOVE"))
-    return 0 if all_ok else 1
+    print("\nmanifest.json written - geometry check: %s"
+          % ("all four clean" if clean else "FAILURES ABOVE"))
+    return 0 if clean else 1
 
 
 if __name__ == "__main__":
