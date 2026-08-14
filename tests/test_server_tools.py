@@ -55,6 +55,7 @@ class TestRegistration:
             "maya_get_object_info",
             "maya_capture_viewport",
             "maya_capture_turntable",
+            "maya_render_scene",
             "maya_checkpoint",
             "maya_restore_checkpoint",
             "maya_undo",
@@ -163,6 +164,96 @@ class TestSceneGraph:
         assert result.is_error is False
         params = conn.calls[0]["params"]
         assert params == {"filter": "mesh", "max_objects": 50, "cursor": "10"}
+
+
+def lit_png_b64(size=(64, 64)):
+    """A frame with a subject in it - pixel_stats must call this non-blank."""
+    img = PILImage.new("RGB", size, (0, 0, 0))
+    for x in range(8):
+        for y in range(8):
+            img.putpixel((x, y), (200, 40 + x, 30))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def blank_png_b64(size=(64, 64)):
+    """What a render of nothing looks like: valid PNG, no subject."""
+    buf = io.BytesIO()
+    PILImage.new("RGBA", size, (0, 0, 0, 0)).save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+class TestRenderScene:
+    def _response(self, png_list):
+        return {
+            "render_scene": {
+                "images": [{"angle": a, "png_b64": p} for a, p in png_list],
+                "camera_positions": [],
+                "renderer": "arnold",
+                "samples": 3,
+                "fallback_light": False,
+            }
+        }
+
+    def test_marshals_params_and_reports_pixel_statistics(self):
+        conn = FakeConn(responses=self._response([("front", lit_png_b64())]))
+        mcp = server_mod.create_server(conn)
+        result = run(
+            mcp.call_tool(
+                "maya_render_scene",
+                {"angles": ["front"], "renderer": "arnold", "resolution": 256,
+                 "samples": 5, "isolate": ["|gem"], "fallback_light": False},
+            )
+        )
+        assert result.is_error is False
+        assert conn.calls[0]["cmd"] == "render_scene"
+        params = conn.calls[0]["params"]
+        assert params["renderer"] == "arnold"
+        assert params["samples"] == 5
+        assert params["isolate"] == ["|gem"]
+        assert params["fallback_light"] is False
+        assert len([c for c in result.content if c.type == "image"]) == 1
+        text = " ".join(c.text for c in result.content if c.type == "text")
+        assert "opaque_px" in text and "arnold" in text
+
+    def test_all_blank_frames_raise_instead_of_returning_black_squares(self):
+        # The failure this tool exists to make visible: a valid PNG of nothing
+        # arriving with a success status.
+        conn = FakeConn(responses=self._response([("front", blank_png_b64())]))
+        mcp = server_mod.create_server(conn)
+        with pytest.raises(Exception, match="blank"):
+            run(mcp.call_tool("maya_render_scene", {"angles": ["front"]}))
+
+    def test_one_good_frame_among_blanks_still_returns(self):
+        conn = FakeConn(responses=self._response(
+            [("front", blank_png_b64()), ("side", lit_png_b64())]
+        ))
+        mcp = server_mod.create_server(conn)
+        result = run(
+            mcp.call_tool("maya_render_scene", {"angles": ["front", "side"]})
+        )
+        assert result.is_error is False
+        assert len([c for c in result.content if c.type == "image"]) == 2
+
+    def test_defaults_are_arnold_and_512(self):
+        conn = FakeConn(responses=self._response([("three_quarter", lit_png_b64())]))
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_render_scene", {}))
+        params = conn.calls[0]["params"]
+        assert params["renderer"] == "arnold"
+        assert params["resolution"] == 512
+        assert params["samples"] == 3
+
+    def test_rejects_a_fifth_angle_before_reaching_maya(self):
+        conn = FakeConn(responses=self._response([]))
+        mcp = server_mod.create_server(conn)
+        with pytest.raises(Exception):
+            run(mcp.call_tool(
+                "maya_render_scene",
+                {"angles": ["front", "side", "back", "top", "three_quarter"]},
+            ))
+        assert conn.calls == []
 
 
 class TestCaptureViewport:
