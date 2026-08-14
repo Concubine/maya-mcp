@@ -97,7 +97,6 @@ Scene ops:
 |---|---|---|
 | `create_primitive` | `{ kind, name, translate?, rotate?, scale?, divisions? }` | `{ name, warnings }` |
 | `duplicate` | `{ name, new_name, translate?, rotate?, scale? }` | `{ name, warnings }` |
-| `array` | `{ name, mode, count?, axis?, center?, angle?, offset?, step_rotate?, step_scale?, pivot?, name_prefix?, group_name? }` | `{ names: [...], mode, group, signed_volume, warnings }` |
 | `transform` | `{ names, translate?, rotate?, scale?, relative? }` | `{ objects: [...], warnings }` |
 | `group` | `{ names, group_name }` | `{ name, warnings }` |
 | `parent` | `{ child, parent }` | `{ name, warnings }` |
@@ -172,3 +171,9 @@ never touch the file on disk. `compare_to_reference` composites its stored refer
 fresh `capture_viewport` result (a command that IS on the list above) entirely on the server
 side. This is why the M2 tool count (7, README's table) and the M2 command count above (5) don't
 match — reconcile them by the two lists here, not by assuming a 1:1 tool-to-command mapping.
+
+## Commands (M2.4)
+
+| cmd | params | result |
+|---|---|---|
+| `array` | `{ name, mode, count?, axis?, center?, angle?, offset?, step_rotate?, step_scale?, pivot?, name_prefix?, group_name? }` | `{ names: [...], mode, group, signed_volume, warnings }` |

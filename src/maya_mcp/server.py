@@ -766,9 +766,11 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             Literal["mirror", "radial", "linear"],
             Field(description=(
                 "'mirror' reflects one copy across a world plane - the way to build "
-                "anything bilaterally symmetric once instead of twice. 'radial' "
-                "rotates copies about an axis: gears, colonnades, spokes, petals. "
-                "'linear' runs copies along a vector: stairs, ribs, fence posts."
+                "anything bilaterally symmetric once instead of twice. Requires the "
+                "source to be a single polygon mesh (not a group, curve, or other "
+                "assembly); mirror each chunk individually and group the results. "
+                "'radial' rotates copies about an axis: gears, colonnades, spokes, "
+                "petals. 'linear' runs copies along a vector: stairs, ribs, fence posts."
             )),
         ],
         count: Annotated[int, Field(ge=2, le=200, description=(

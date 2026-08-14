@@ -123,9 +123,26 @@ def array(params: Dict[str, Any]) -> Dict[str, Any]:
         # invented would move it in the hierarchy behind their back.
         grp = cmds.group(*names, name=naming.unique_name(cmds, group_name.strip()))
         group = _long(cmds, grp)
+
+        # cmds.group() reparents every copy, changing its long name. Query
+        # Maya's actual post-group paths rather than trusting listRelatives'
+        # ordering to match `names` positionally - Maya may auto-rename a
+        # child on collision, same trap modeling.group() solves the same way.
         children = cmds.listRelatives(group, children=True, fullPath=True) or []
-        if len(children) == len(names):
-            names = children
+        resolved: List[str] = []
+        for old_long in names:
+            old_short = _short(old_long)
+            new_long = next((c for c in children if _short(c) == old_short), None)
+            if new_long is None:
+                raise HandlerError(
+                    "copy %r vanished while grouping into %r" % (old_long, group),
+                    hint=(
+                        "Maya may have renamed it on a name collision; call "
+                        "maya_get_scene_graph to find its current name"
+                    ),
+                )
+            resolved.append(new_long)
+        names = resolved
 
     for name in names:
         ledger.record(cmds, name)
@@ -201,9 +218,20 @@ def _mirror(
 
     `count` is ignored: a mirror produces exactly one image, so there is
     nothing for it to control.
+
+    Requires a single-shape polygon mesh: `cmds.polyNormal` below and the
+    signed-volume winding check both assume one mesh shape, and radial/linear
+    legitimately accept groups or curves that `_mirror` cannot make sense of.
     """
     idx = arraymath.axis_index(params.get("axis") or "x")
     pivot = arraymath.resolve_vec3(params.get("pivot"), "pivot", [0.0, 0.0, 0.0])
+    try:
+        naming.require_mesh(cmds, source)
+    except HandlerError as exc:
+        raise HandlerError(
+            str(exc),
+            hint="mirror needs a single polygon mesh; mirror each chunk and group the results",
+        ) from exc
 
     copy = _duplicate(cmds, source, prefix, 1)
     grp = cmds.group(copy, world=True, name=naming.unique_name(cmds, "%s_mirrorGrp" % prefix))

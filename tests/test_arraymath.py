@@ -79,6 +79,14 @@ class TestRadialAngles:
     def test_negative_arc_sweeps_the_other_way(self):
         assert arraymath.radial_angles(3, -180.0) == pytest.approx([-90.0, -180.0])
 
+    def test_rejects_zero_angle(self):
+        # step = angle / (count - 1) = 0 / n stacks every copy exactly on the
+        # source - coincident geometry, the exact thing the full-circle rule
+        # (dividing by count instead of count-1) exists to avoid at the seam.
+        with pytest.raises(HandlerError) as exc:
+            arraymath.radial_angles(4, 0.0)
+        assert exc.value.hint
+
 
 class TestRotatePoint:
     def test_right_hand_rule_about_y_takes_z_to_x(self):

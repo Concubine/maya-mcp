@@ -14,8 +14,17 @@ from maya_plugin.handlers import array, ledger
 
 
 class FakeCmds:
-    def __init__(self, objects=("|tooth",)):
+    def __init__(self, objects=("|tooth",), shapes=None):
         self.objects = list(objects)
+        # long transform -> (shape long name, node type). Defaults to giving
+        # every initial object a mesh shape, since most of this module's tests
+        # (mirror included) assume the source is a mesh; pass shapes={} (or a
+        # dict omitting an object) to model a non-mesh transform instead.
+        self.shapes = (
+            dict(shapes)
+            if shapes is not None
+            else {o: (o + "Shape", "mesh") for o in self.objects}
+        )
         self.calls = []           # (command, primary_target) in order
         self.attrs = {}           # "node.attr" -> value
         self.xforms = {}          # long name -> dict of relative deltas applied
@@ -122,9 +131,15 @@ class FakeCmds:
                 if o.startswith(prefix) and "|" not in o[len(prefix):]
             ]
             return children or None
+        if kwargs.get("shapes"):
+            entry = self.shapes.get(name)
+            return [entry[0]] if entry else None
         return None
 
     def nodeType(self, name):
+        for shape, ntype in self.shapes.values():
+            if shape == name:
+                return ntype
         return "mesh"
 
 
@@ -306,6 +321,56 @@ class TestNamingAndGrouping:
         # move it in the hierarchy; only the copies belong to us.
         assert "|tooth" not in fake.parents
 
+    def test_matches_children_by_short_name_despite_reordering(self, fake, monkeypatch):
+        # Positional matching (`if len(children) == len(names): names =
+        # children`) assumes listRelatives returns children in creation
+        # order - Maya makes no such promise. modeling.group() solves this by
+        # matching each pre-group long name to its post-group long name BY
+        # SHORT NAME; this proves array.py's copy of that fix does the same,
+        # rather than trusting whichever child happens to sit at the same
+        # list index.
+        real_list_relatives = fake.listRelatives
+
+        def reordering_list_relatives(name, **kwargs):
+            result = real_list_relatives(name, **kwargs)
+            if kwargs.get("children") and result and len(result) > 1:
+                return list(reversed(result))
+            return result
+
+        monkeypatch.setattr(fake, "listRelatives", reordering_list_relatives)
+
+        result = array.array(
+            {"name": "|tooth", "mode": "radial", "count": 3, "group_name": "gear"}
+        )
+        # tooth_1 is the first radial copy (rotated by one step), tooth_2 the
+        # second (rotated by two steps). Even with listRelatives reversed,
+        # the returned order must stay [tooth_1, tooth_2] - under positional
+        # matching it would silently come back swapped.
+        assert result["names"][0].endswith("|tooth_1")
+        assert result["names"][1].endswith("|tooth_2")
+
+    def test_raises_with_hint_when_a_copy_vanishes_during_grouping(
+        self, fake, monkeypatch
+    ):
+        real_list_relatives = fake.listRelatives
+
+        def dropping_list_relatives(name, **kwargs):
+            result = real_list_relatives(name, **kwargs)
+            if kwargs.get("children") and result:
+                # Simulate Maya renaming tooth_2 unrecognizably on collision:
+                # no post-group child's short name matches it any more.
+                return [c for c in result if not c.endswith("tooth_2")]
+            return result
+
+        monkeypatch.setattr(fake, "listRelatives", dropping_list_relatives)
+
+        with pytest.raises(HandlerError) as exc:
+            array.array(
+                {"name": "|tooth", "mode": "radial", "count": 3, "group_name": "gear"}
+            )
+        assert "tooth_2" in str(exc.value)
+        assert exc.value.hint
+
 
 class TestMirror:
     def test_makes_exactly_one_copy(self, fake):
@@ -419,3 +484,20 @@ class TestMirror:
         assert result["signed_volume"] == 0.0
         assert result["warnings"]
         assert not any("inverted" in w.lower() for w in result["warnings"])
+
+    def test_rejects_non_mesh_source(self, monkeypatch):
+        # Radial and linear legitimately accept a group, curve, or other
+        # assembly (naming.require_object doesn't care). Mirror cannot: it
+        # calls cmds.polyNormal and measures signed volume, both of which
+        # assume exactly one mesh shape. Without this guard, mirroring a
+        # group either dies on polyNormal with a raw Maya traceback (leaving
+        # the copy behind) or comes back with signed_volume: None and a
+        # useless "UNVERIFIED" warning - the winding instrument silently not
+        # applying at all.
+        f = FakeCmds(objects=("|rig",), shapes={})
+        monkeypatch.setattr(array, "_cmds", lambda: f)
+        with pytest.raises(HandlerError) as exc:
+            array.array({"name": "|rig", "mode": "mirror", "axis": "x"})
+        assert "mirror needs a single polygon mesh" in exc.value.hint
+        # Fails fast: no duplicate was made and left behind in the scene.
+        assert not any(op == "duplicate" for op, _ in f.calls)

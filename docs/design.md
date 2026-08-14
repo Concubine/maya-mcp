@@ -212,6 +212,13 @@ maya_create_primitive(kind: Literal["cube","sphere","cylinder","plane","torus","
                       divisions: int = 1) -> { name }
 
 maya_duplicate(name, new_name, translate=None, rotate=None, scale=None) -> { name }
+maya_array(name: str, mode: Literal["mirror","radial","linear"], count: int = 2,
+          axis=None, center=None, angle: float = 360.0, offset=None,
+          step_rotate=None, step_scale=None, pivot=None, name_prefix=None,
+          group_name=None) -> { names: [str], mode, group, signed_volume, warnings }
+  # mirror reflects one copy across a world plane (needs a single polygon mesh);
+  # radial rings copies about an axis; linear runs copies along a vector, with
+  # step_scale compounding into a geometric taper down the run.
 maya_transform(names: list[str], translate=None, rotate=None, scale=None, relative: bool = True)
 maya_group(names: list[str], group_name: str) / maya_parent(child, parent) / maya_rename / maya_delete_objects
 

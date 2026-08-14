@@ -90,6 +90,11 @@ def radial_angles(count: int, angle: float = 360.0) -> List[float]:
     explicit here and directly tested.
     """
     count = resolve_count(count)
+    if float(angle) == 0.0:
+        raise HandlerError(
+            "angle must not be 0 - every copy would land exactly on the source",
+            hint="use angle=360 for a full ring, or a nonzero arc for a partial one",
+        )
     closed = abs(abs(float(angle)) - 360.0) < _FULL_CIRCLE_EPS
     step = float(angle) / (count if closed else (count - 1))
     return [step * i for i in range(1, count)]
