@@ -66,6 +66,9 @@ SCENE_TIMEOUT_S = 30.0
 CAPTURE_TIMEOUT_S = 120.0
 # A rendered frame is seconds, not milliseconds, and four of them at high
 # sample counts is minutes - a capture-sized timeout would kill good renders.
+# This is the plugin dispatcher's MAX_TIMEOUT_S exactly: asking for more is
+# silently clamped there, so four 2048px frames at 8 samples can still run out
+# of time. Raise both together or neither.
 RENDER_TIMEOUT_S = 600.0
 BOOL_TIMEOUT_S = 120.0
 
@@ -362,7 +365,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
     def maya_render_scene(
         angles: Annotated[Optional[List[Angle]], Field(max_length=4, description=(
             "Views to render. Defaults to one three_quarter frame - a rendered "
-            "frame costs seconds, where a viewport capture costs milliseconds."
+            "frame costs seconds, where a viewport capture costs milliseconds. "
+            "'current' has no meaning without a viewport and renders as "
+            "three_quarter."
         ))] = None,
         renderer: Annotated[
             Literal["arnold", "hw2"],

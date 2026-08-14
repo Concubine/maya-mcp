@@ -102,6 +102,10 @@ class FakeCmds:
         self.written = []
         self.loaded_plugins = []
         self._renderers = ["mayaSoftware", "mayaHardware2", "arnold"]
+        # Arnold registers its renderer through a DEFERRED callback, so on a
+        # real Maya the renderer list can still omit it right after a
+        # successful load. Set this to reproduce that window.
+        self.renderer_list_lags = False
         self._lights = list(lights)
         # Geometry is SHAPES, as cmds.ls(geometry=True) returns them - the
         # distinction that made isolate hide its own subject (redmine #584).
@@ -136,6 +140,8 @@ class FakeCmds:
     def getAttr(self, attr):
         if attr.endswith(".translate") or attr.endswith(".rotate"):
             return [(0.0, 0.0, 0.0)]
+        if attr.endswith(".visibility"):
+            return self.visibility.get(attr[: -len(".visibility")], True)
         return self.attrs.get(attr, 0)
 
     def renderer(self, *args, **kwargs):
@@ -143,9 +149,15 @@ class FakeCmds:
 
     def loadPlugin(self, name, **kwargs):
         self.loaded_plugins.append(name)
-        if name == "mtoa" and "arnold" not in self._renderers:
-            self._renderers.append("arnold")
+        if name == "mtoa" and not self.renderer_list_lags:
+            if "arnold" not in self._renderers:
+                self._renderers.append("arnold")
         return [name]
+
+    def pluginInfo(self, name, **kwargs):
+        if kwargs.get("loaded"):
+            return name in self.loaded_plugins
+        return None
 
     def undoInfo(self, **kwargs):
         return True
@@ -241,6 +253,17 @@ class TestRenderScene:
         assert "|floor|floorShape" in fake_maya.hidden
         assert all(fake_maya.visibility.values()), "visibility must be restored"
 
+    def test_isolate_leaves_already_hidden_objects_hidden(self, monkeypatch, tmp_path):
+        # Restoring visibility on something WE did not hide would show the user
+        # an object they deliberately hid - a perception tool editing the scene.
+        fake = FakeCmds(lights=["|keyLightShape"])
+        fake.visibility["|floor|floorShape"] = False
+        monkeypatch.setattr(render, "_cmds", lambda: fake)
+        monkeypatch.setattr(render, "_render_frame", _stub_render_frame(tmp_path, fake))
+        render.render_scene({"angles": ["front"], "isolate": ["|ball"]})
+        assert fake.visibility["|floor|floorShape"] is False
+        assert "|floor|floorShape" not in fake.hidden
+
     def test_isolate_does_not_hide_its_own_subject(self, fake_maya):
         # cmds.ls(geometry=True) returns SHAPES, and a transform name never
         # matches one: the live gate caught this hiding the very gem it was
@@ -308,6 +331,22 @@ class TestRenderScene:
     def test_mtoa_is_not_loaded_for_an_hw2_render(self, fake_maya):
         render.render_scene({"angles": ["front"], "renderer": "hw2"})
         assert fake_maya.loaded_plugins == []
+
+    def test_a_loaded_mtoa_counts_even_while_the_renderer_list_lags(
+        self, monkeypatch, tmp_path
+    ):
+        # Arnold registers its renderer through a deferred callback, so for a
+        # moment after a SUCCESSFUL load the renderer list still omits it.
+        # Trusting that list rejected arnold on a just-started Maya; the
+        # authoritative answer is whether the plugin is loaded.
+        fake = FakeCmds(lights=["|keyLightShape"])
+        fake._renderers = ["mayaSoftware", "mayaHardware2"]
+        fake.renderer_list_lags = True
+        monkeypatch.setattr(render, "_cmds", lambda: fake)
+        monkeypatch.setattr(render, "_render_frame", _stub_render_frame(tmp_path, fake))
+        out = render.render_scene({"angles": ["front"]})
+        assert fake.loaded_plugins == ["mtoa"]
+        assert out["renderer"] == "arnold"
 
     def test_samples_and_resolution_reach_the_render_step(self, fake_maya):
         render.render_scene({"angles": ["front"], "samples": 6, "resolution": 256})

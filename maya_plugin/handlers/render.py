@@ -191,7 +191,13 @@ def _render_frame(cmds, camera, prefix, renderer, resolution, samples) -> str:
             cmds.setAttr("defaultArnoldRenderOptions.AASamples", samples)
         except Exception:
             pass  # mtoa exposes this only once its globals node exists
-    return str(cmds.render(camera, x=resolution, y=resolution))
+    written = cmds.render(camera, x=resolution, y=resolution)
+    # Some Maya versions hand back a list of written files rather than one path;
+    # str() of a list is a path that cannot exist, which would surface as a
+    # baffling "produced no image file" instead of the real result.
+    if isinstance(written, (list, tuple)):
+        written = written[0] if written else ""
+    return str(written)
 
 
 def _available_renderers(cmds) -> List[str]:
@@ -216,11 +222,31 @@ def _ensure_renderer(cmds, maya_renderer: str) -> List[str]:
         cmds.loadPlugin("mtoa", quiet=True)
     except Exception:
         return available  # not installed; the caller gets the hint below
-    return _available_renderers(cmds)
+    available = _available_renderers(cmds)
+    if "arnold" in available:
+        return available
+    try:
+        loaded = bool(cmds.pluginInfo("mtoa", query=True, loaded=True))
+    except Exception:
+        loaded = False
+    if loaded:
+        # mtoa registers its renderer through a DEFERRED callback, so the
+        # renderer list lags a successful load by a moment - long enough that a
+        # render on a just-started Maya was rejected for a renderer that was in
+        # fact there. Whether the plugin is loaded is the authoritative answer;
+        # the list is a view that catches up.
+        return available + ["arnold"]
+    return available
 
 
 def _scene_has_light(cmds) -> bool:
-    return bool(cmds.ls(lights=True) or [])
+    """Is anything actually lighting this scene?
+
+    Visible, not merely present: a hidden light does not illuminate, so a scene
+    whose only light is hidden renders as black - the case fallback_light exists
+    to catch.
+    """
+    return bool(cmds.ls(lights=True, visible=True) or [])
 
 
 def _hide_non_targets(cmds, isolate: List[str]) -> List[str]:
@@ -245,6 +271,10 @@ def _hide_non_targets(cmds, isolate: List[str]) -> List[str]:
         if name in keep or any(name.startswith(target + "|") for target in keep):
             continue
         try:
+            if not cmds.getAttr(name + ".visibility"):
+                # Already hidden by the user. Hiding it changes nothing, but
+                # RESTORING it would show them an object they deliberately hid.
+                continue
             cmds.hide(name)
             hidden.append(name)
         except Exception:
