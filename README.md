@@ -118,6 +118,7 @@ Environment variables, all optional:
 |---|---|
 | `maya_create_primitive` | Create a polygon primitive (cube/sphere/cylinder/plane/torus/cone) at an optional transform. |
 | `maya_duplicate` | Duplicate an object by name, optionally offsetting the copy. |
+| `maya_array` | Mirror, radial-array, or linear-array an existing object into real duplicates; `count` is the total including the source. |
 | `maya_transform` | Move/rotate/scale one or more objects by name. |
 | `maya_group` | Create a new group transform and parent named objects under it. |
 | `maya_parent` | Reparent one object under another. |

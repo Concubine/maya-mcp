@@ -111,6 +111,10 @@ maya-mcp/
 │   ├── handlers/
 │   │   ├── scene.py            # scene graph, object info, session ops
 │   │   ├── modeling.py         # primitives, booleans, transforms, cleanup
+│   │   ├── arraymath.py        # pure array placement math: radial angles, linear
+│   │   │                       # steps, point rotation, bbox reflection, signed volume
+│   │   ├── array.py            # array command: duplicate, place, mirror-and-fix-
+│   │   │                       # winding, group, ledger
 │   │   ├── sculpt.py           # sculpt_ops, deformers, soft selection
 │   │   ├── materials.py        # shaders, texture networks
 │   │   ├── lighting.py         # presets, HDRI
