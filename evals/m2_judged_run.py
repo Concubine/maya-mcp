@@ -60,13 +60,20 @@ def main():
     lit = call("setup_lighting", {"preset": "three_point", "intensity": 1.2})
     print("  lights:", lit["lights"], "removed:", lit["removed"])
 
+    # Isolate the subject and drop the wireframe overlay for every judged
+    # capture: this runs against whatever scene is open, and framing the whole
+    # scene (or drawing topology over it) makes the artifacts unreadable as
+    # evidence of what the LOOK tools did.
+    def shot(name, **overrides):
+        params = {"angles": ["three_quarter"], "resolution": 640,
+                  "wireframe_overlay": False, "isolate": [subject],
+                  "lighting": "scene"}
+        params.update(overrides)
+        return save(call("capture_viewport", params), name)
+
     print("3. unlit vs lit - the spec 2 requirement, visible")
-    save(call("capture_viewport", {"angles": ["three_quarter"],
-                                   "lighting": "default", "resolution": 640}),
-         "01_default_lighting.png")
-    save(call("capture_viewport", {"angles": ["three_quarter"],
-                                   "lighting": "scene", "resolution": 640}),
-         "02_scene_lighting.png")
+    shot("01_default_lighting.png", lighting="default")
+    shot("02_scene_lighting.png", lighting="scene")
 
     print("4. material + texture")
     mat = call("assign_material", {
@@ -78,9 +85,13 @@ def main():
                                         "recipe": "noise_bump",
                                         "params": {"scale": 2.0, "depth": 0.5}})
     print("  texture nodes:", tex["nodes"])
-    save(call("capture_viewport", {"angles": ["three_quarter"],
-                                   "lighting": "scene", "resolution": 640}),
-         "03_materialed.png")
+    shot("03_materialed.png")
+    # A bump/texture network is invisible in smoothShaded - VP2 only evaluates
+    # texture and bump connections when displayTextures is on, which is what
+    # shading="textured" sets. Judging apply_texture_recipe from a smoothShaded
+    # capture would report "the recipe did nothing" for a network that is
+    # wired correctly.
+    shot("04_materialed_textured.png", shading="textured")
 
     print("5. readback check")
     info = call("get_object_info", {"name": subject, "include": ["shading"]})
