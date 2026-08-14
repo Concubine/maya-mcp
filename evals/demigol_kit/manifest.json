@@ -1,0 +1,535 @@
+{
+  "contract": "Demigol KIT OF PARTS",
+  "scope": "one-cell pieces, not buildings",
+  "units": "metres, Y-up, 1 unit = 1 m, cell = 3 m",
+  "envelope": "3 x 3 x 3 m, render geometry inset 0.005 m",
+  "pivot": "cell centre (0,0,0) on every piece",
+  "authored_facing": "+Z; the shell rotates in 90 degree steps. Corner pieces read from +Z AND +X.",
+  "material": {
+    "shared": true,
+    "shader": "kit_material (standardSurface)",
+    "atlas": "kit_atlas.png",
+    "atlas_grid": [
+      4,
+      4
+    ],
+    "patches": {
+      "brick": {
+        "index": 0,
+        "rgb": [
+          115,
+          61,
+          46
+        ]
+      },
+      "brick_dark": {
+        "index": 1,
+        "rgb": [
+          78,
+          41,
+          31
+        ]
+      },
+      "concrete": {
+        "index": 2,
+        "rgb": [
+          158,
+          156,
+          148
+        ]
+      },
+      "concrete_dark": {
+        "index": 3,
+        "rgb": [
+          112,
+          110,
+          104
+        ]
+      },
+      "steel": {
+        "index": 4,
+        "rgb": [
+          87,
+          94,
+          107
+        ]
+      },
+      "steel_dark": {
+        "index": 5,
+        "rgb": [
+          56,
+          61,
+          70
+        ]
+      },
+      "glass": {
+        "index": 6,
+        "rgb": [
+          92,
+          140,
+          158
+        ]
+      },
+      "glass_bright": {
+        "index": 7,
+        "rgb": [
+          140,
+          186,
+          199
+        ]
+      },
+      "infill": {
+        "index": 8,
+        "rgb": [
+          189,
+          184,
+          168
+        ]
+      },
+      "infill_dark": {
+        "index": 9,
+        "rgb": [
+          140,
+          136,
+          124
+        ]
+      },
+      "amber": {
+        "index": 10,
+        "rgb": [
+          222,
+          143,
+          32
+        ]
+      },
+      "shadow": {
+        "index": 11,
+        "rgb": [
+          28,
+          28,
+          30
+        ]
+      },
+      "rust": {
+        "index": 12,
+        "rgb": [
+          128,
+          74,
+          44
+        ]
+      },
+      "trim": {
+        "index": 13,
+        "rgb": [
+          206,
+          203,
+          194
+        ]
+      },
+      "grime": {
+        "index": 14,
+        "rgb": [
+          74,
+          72,
+          68
+        ]
+      },
+      "sky_glass": {
+        "index": 15,
+        "rgb": [
+          110,
+          158,
+          175
+        ]
+      }
+    },
+    "note": "every piece samples one 128 px patch of the single atlas, so the whole kit draws in one batch"
+  },
+  "budgets": {
+    "interior": 20,
+    "default": 120,
+    "tris_per_box": 12
+  },
+  "totals": {
+    "pieces": 37,
+    "triangles": 1956,
+    "shading_groups": [
+      "kit_materialSG"
+    ],
+    "widest_extent_m": 1.495,
+    "uv_range": [
+      0.0075,
+      0.9925
+    ]
+  },
+  "self_check": {
+    "budget": "arithmetic, before the build: every piece is boxes at 12 tris each, so the count is exact",
+    "envelope": "every box checked against the inset cell before build, then every finished piece re-measured in-scene",
+    "closed": "boundary_edges == 0 and no non-manifold edges per piece",
+    "uv": "every piece's UV bbox measured inside 0..1",
+    "failures": 0
+  },
+  "pieces": [
+    {
+      "name": "kit_concrete_interior_a",
+      "role": "concrete",
+      "context": "interior",
+      "variant": "a",
+      "triangles": 12,
+      "boxes": 1,
+      "budget": 20
+    },
+    {
+      "name": "kit_brick_interior_a",
+      "role": "brick",
+      "context": "interior",
+      "variant": "a",
+      "triangles": 12,
+      "boxes": 1,
+      "budget": 20
+    },
+    {
+      "name": "kit_steel_column_a",
+      "role": "steel",
+      "context": "column",
+      "variant": "a",
+      "triangles": 36,
+      "boxes": 3,
+      "budget": 120
+    },
+    {
+      "name": "kit_steel_column_b",
+      "role": "steel",
+      "context": "column",
+      "variant": "b",
+      "triangles": 60,
+      "boxes": 5,
+      "budget": 120
+    },
+    {
+      "name": "kit_steel_column_c",
+      "role": "steel",
+      "context": "column",
+      "variant": "c",
+      "triangles": 48,
+      "boxes": 4,
+      "budget": 120
+    },
+    {
+      "name": "kit_steel_beam_a",
+      "role": "steel",
+      "context": "beam",
+      "variant": "a",
+      "triangles": 36,
+      "boxes": 3,
+      "budget": 120
+    },
+    {
+      "name": "kit_steel_beam_b",
+      "role": "steel",
+      "context": "beam",
+      "variant": "b",
+      "triangles": 60,
+      "boxes": 5,
+      "budget": 120
+    },
+    {
+      "name": "kit_steel_lobby_a",
+      "role": "steel",
+      "context": "lobby",
+      "variant": "a",
+      "triangles": 60,
+      "boxes": 5,
+      "budget": 120
+    },
+    {
+      "name": "kit_concrete_beam_a",
+      "role": "concrete",
+      "context": "beam",
+      "variant": "a",
+      "triangles": 24,
+      "boxes": 2,
+      "budget": 120
+    },
+    {
+      "name": "kit_concrete_beam_b",
+      "role": "concrete",
+      "context": "beam",
+      "variant": "b",
+      "triangles": 36,
+      "boxes": 3,
+      "budget": 120
+    },
+    {
+      "name": "kit_concrete_base_a",
+      "role": "concrete",
+      "context": "base",
+      "variant": "a",
+      "triangles": 36,
+      "boxes": 3,
+      "budget": 120
+    },
+    {
+      "name": "kit_concrete_base_b",
+      "role": "concrete",
+      "context": "base",
+      "variant": "b",
+      "triangles": 48,
+      "boxes": 4,
+      "budget": 120
+    },
+    {
+      "name": "kit_concrete_roof_a",
+      "role": "concrete",
+      "context": "roof",
+      "variant": "a",
+      "triangles": 24,
+      "boxes": 2,
+      "budget": 120
+    },
+    {
+      "name": "kit_concrete_roof_b",
+      "role": "concrete",
+      "context": "roof",
+      "variant": "b",
+      "triangles": 48,
+      "boxes": 4,
+      "budget": 120
+    },
+    {
+      "name": "kit_concrete_soffit_a",
+      "role": "concrete",
+      "context": "soffit",
+      "variant": "a",
+      "triangles": 60,
+      "boxes": 5,
+      "budget": 120
+    },
+    {
+      "name": "kit_brick_facade_a",
+      "role": "brick",
+      "context": "facade",
+      "variant": "a",
+      "triangles": 48,
+      "boxes": 4,
+      "budget": 120
+    },
+    {
+      "name": "kit_brick_facade_b",
+      "role": "brick",
+      "context": "facade",
+      "variant": "b",
+      "triangles": 72,
+      "boxes": 6,
+      "budget": 120
+    },
+    {
+      "name": "kit_brick_facade_c",
+      "role": "brick",
+      "context": "facade",
+      "variant": "c",
+      "triangles": 48,
+      "boxes": 4,
+      "budget": 120
+    },
+    {
+      "name": "kit_brick_corner_a",
+      "role": "brick",
+      "context": "corner",
+      "variant": "a",
+      "triangles": 72,
+      "boxes": 6,
+      "budget": 120
+    },
+    {
+      "name": "kit_brick_corner_b",
+      "role": "brick",
+      "context": "corner",
+      "variant": "b",
+      "triangles": 96,
+      "boxes": 8,
+      "budget": 120
+    },
+    {
+      "name": "kit_brick_roof_a",
+      "role": "brick",
+      "context": "roof",
+      "variant": "a",
+      "triangles": 24,
+      "boxes": 2,
+      "budget": 120
+    },
+    {
+      "name": "kit_brick_roof_b",
+      "role": "brick",
+      "context": "roof",
+      "variant": "b",
+      "triangles": 48,
+      "boxes": 4,
+      "budget": 120
+    },
+    {
+      "name": "kit_brick_soffit_a",
+      "role": "brick",
+      "context": "soffit",
+      "variant": "a",
+      "triangles": 60,
+      "boxes": 5,
+      "budget": 120
+    },
+    {
+      "name": "kit_brick_lobby_a",
+      "role": "brick",
+      "context": "lobby",
+      "variant": "a",
+      "triangles": 36,
+      "boxes": 3,
+      "budget": 120
+    },
+    {
+      "name": "kit_infill_facade_a",
+      "role": "infill",
+      "context": "facade",
+      "variant": "a",
+      "triangles": 60,
+      "boxes": 5,
+      "budget": 120
+    },
+    {
+      "name": "kit_infill_facade_b",
+      "role": "infill",
+      "context": "facade",
+      "variant": "b",
+      "triangles": 72,
+      "boxes": 6,
+      "budget": 120
+    },
+    {
+      "name": "kit_infill_facade_c",
+      "role": "infill",
+      "context": "facade",
+      "variant": "c",
+      "triangles": 72,
+      "boxes": 6,
+      "budget": 120
+    },
+    {
+      "name": "kit_infill_corner_a",
+      "role": "infill",
+      "context": "corner",
+      "variant": "a",
+      "triangles": 72,
+      "boxes": 6,
+      "budget": 120
+    },
+    {
+      "name": "kit_infill_corner_b",
+      "role": "infill",
+      "context": "corner",
+      "variant": "b",
+      "triangles": 48,
+      "boxes": 4,
+      "budget": 120
+    },
+    {
+      "name": "kit_infill_roof_a",
+      "role": "infill",
+      "context": "roof",
+      "variant": "a",
+      "triangles": 24,
+      "boxes": 2,
+      "budget": 120
+    },
+    {
+      "name": "kit_infill_soffit_a",
+      "role": "infill",
+      "context": "soffit",
+      "variant": "a",
+      "triangles": 60,
+      "boxes": 5,
+      "budget": 120
+    },
+    {
+      "name": "kit_glass_facade_a",
+      "role": "glass",
+      "context": "facade",
+      "variant": "a",
+      "triangles": 72,
+      "boxes": 6,
+      "budget": 120
+    },
+    {
+      "name": "kit_glass_facade_b",
+      "role": "glass",
+      "context": "facade",
+      "variant": "b",
+      "triangles": 84,
+      "boxes": 7,
+      "budget": 120
+    },
+    {
+      "name": "kit_glass_facade_c",
+      "role": "glass",
+      "context": "facade",
+      "variant": "c",
+      "triangles": 96,
+      "boxes": 8,
+      "budget": 120
+    },
+    {
+      "name": "kit_glass_corner_a",
+      "role": "glass",
+      "context": "corner",
+      "variant": "a",
+      "triangles": 72,
+      "boxes": 6,
+      "budget": 120
+    },
+    {
+      "name": "kit_glass_roof_a",
+      "role": "glass",
+      "context": "roof",
+      "variant": "a",
+      "triangles": 36,
+      "boxes": 3,
+      "budget": 120
+    },
+    {
+      "name": "kit_glass_lobby_a",
+      "role": "glass",
+      "context": "lobby",
+      "variant": "a",
+      "triangles": 84,
+      "boxes": 7,
+      "budget": 120
+    }
+  ],
+  "tiling_proof": {
+    "what": "a 6 x 5 wall built from the kit on the real 3 m lattice, mixing brick, infill, glass, steel and a corner run",
+    "pieces": 30,
+    "measured_bbox": [
+      -1.495,
+      -1.495,
+      -1.495,
+      16.495,
+      13.495,
+      1.495
+    ],
+    "expected_bbox": [
+      -1.5,
+      -1.5,
+      -1.5,
+      16.5,
+      13.5,
+      1.5
+    ],
+    "lattice_conformant": true,
+    "corner_rule": "rotating the authored (+Z,+X) corner by 90 degree steps gives (+X,-Z), (-Z,-X), (-X,+Z) - exactly the four corners of a rectangular plan. A wall that simply ENDS needs (+Z,-X), which is a mirror, not a rotation, and is not in this kit."
+  },
+  "files": [
+    "demigol_kit.fbx",
+    "kit_atlas.png",
+    "contact_sheet.png",
+    "tiling_proof.png"
+  ]
+}
