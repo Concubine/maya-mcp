@@ -382,9 +382,26 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "Square frame size in pixels."
         ))] = 512,
         isolate: Annotated[Optional[List[str]], Field(description=(
-            "Render only these objects; everything else is hidden for the "
-            "render and restored afterwards."
+            "VISIBILITY: render only these objects; everything else is hidden "
+            "for the render and restored afterwards. Note that hiding the "
+            "surroundings also removes what a transmissive material refracts - "
+            "use `target` instead when you want a close-up that keeps the room."
         ))] = None,
+        target: Annotated[Optional[List[str]], Field(description=(
+            "FRAMING: point the camera at these objects while everything else "
+            "stays visible. Independent of `isolate`; with neither, the whole "
+            "scene is framed."
+        ))] = None,
+        zoom: Annotated[float, Field(ge=0.2, le=8.0, description=(
+            "1.0 fits the framed objects; 2.0 is twice as close. Judging a "
+            "material needs it large in frame - at 40 pixels a gem and paint "
+            "look identical."
+        ))] = 1.0,
+        relight: Annotated[bool, Field(description=(
+            "Swing maya_setup_lighting's own rig to follow the camera, so side "
+            "and back angles are not rendered nearly black by a world-locked "
+            "key light. Lights you authored yourself are never touched."
+        ))] = True,
         samples: Annotated[int, Field(ge=1, le=8, description=(
             "Arnold AA samples. 3 is judgeable, 1 is fast and noisy. Ignored "
             "by hw2."
@@ -403,7 +420,8 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         result = maya.request(
             "render_scene",
             {"angles": angles, "renderer": renderer, "resolution": resolution,
-             "isolate": isolate, "samples": samples,
+             "isolate": isolate, "target": target, "zoom": zoom,
+             "relight": relight, "samples": samples,
              "fallback_light": fallback_light},
             timeout_s=RENDER_TIMEOUT_S,
         )
@@ -417,6 +435,8 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                     opaque_px=stats["opaque_px"],
                     total_px=stats["total_px"],
                     distinct_colors=stats["distinct_colors"],
+                    clipped_fraction=stats["clipped_fraction"],
+                    mean_luma=stats["mean_luma"],
                 )
             )
             content.append(
@@ -1208,11 +1228,19 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         params: Annotated[dict, Field(description=(
             "Whitelisted per shader. standardSurface: baseColor, roughness, "
             "metalness, emission, emissionColor, specular, transmission "
-            "(0..1), transmissionColor, ior (1.0..3.0 - water 1.33, glass "
-            "1.5, diamond 2.42; the params a gem needs). lambert: color, "
-            "transparency, incandescence. blinn adds eccentricity, "
-            "specularColor. Colours are [r, g, b] in 0..1. Unknown keys are "
-            "rejected with that shader's whitelist in the hint."
+            "(0..1), transmissionColor, transmissionDepth (0..100), ior "
+            "(1.0..3.0 - water 1.33, glass 1.5, diamond 2.42), coat, "
+            "coatRoughness. lambert: color, transparency, incandescence. blinn "
+            "adds eccentricity, specularColor. Colours are [r, g, b] in 0..1. "
+            "Unknown keys are rejected with that shader's whitelist in the hint."
+            "\n\nGEM/GLASS WARNING: transmissionColor is an ABSORPTION tint, "
+            "not a paint colour - light that gets through is multiplied by it. "
+            "Saturating it (e.g. [0.75, 0.04, 0.09] for a ruby) absorbs almost "
+            "everything and renders a dark solid indistinguishable from opaque "
+            "paint. Use a PALE tint with transmission 1.0, and set "
+            "transmissionDepth to roughly the object's own size to control the "
+            "colour physically. A cut gem also wants coat 1.0 with a low "
+            "coatRoughness for its polish."
         ))] = {},
         name: Annotated[Optional[str], Field(description=(
             "Material name; defaults to <mesh>_mat. Collisions get a _NNN suffix."

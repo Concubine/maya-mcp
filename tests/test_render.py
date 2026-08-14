@@ -11,7 +11,7 @@ import math
 import pytest
 
 from maya_plugin.dispatcher import HandlerError
-from maya_plugin.handlers import render
+from maya_plugin.handlers import capture, render
 
 
 class TestFocalLength:
@@ -106,6 +106,9 @@ class FakeCmds:
         # real Maya the renderer list can still omit it right after a
         # successful load. Set this to reproduce that window.
         self.renderer_list_lags = False
+        # World rotation reported for a light transform, keyed by name.
+        self.light_yaw_query = {}
+        self.yaw_history = []
         self._lights = list(lights)
         # Geometry is SHAPES, as cmds.ls(geometry=True) returns them - the
         # distinction that made isolate hide its own subject (redmine #584).
@@ -116,6 +119,8 @@ class FakeCmds:
     # --- queries
     def ls(self, *args, **kwargs):
         if kwargs.get("lights"):
+            return list(self._lights)
+        if kwargs.get("type") == "light":
             return list(self._lights)
         if kwargs.get("geometry"):
             # Real cmds.ls returns SHORT names unless long=True is asked for.
@@ -165,6 +170,8 @@ class FakeCmds:
     # --- mutations
     def setAttr(self, attr, *values, **kwargs):
         self.attrs[attr] = values[0] if len(values) == 1 else list(values)
+        if attr.endswith(".rotateY"):
+            self.yaw_history.append(values[0])
 
     def camera(self, *args, **kwargs):
         self.created.append("camera1")
@@ -182,12 +189,16 @@ class FakeCmds:
 
     def listRelatives(self, name, **kwargs):
         if kwargs.get("parent"):
+            if "Shape" in name and name.startswith("|"):
+                return [name.rsplit("|", 1)[0]]
             return ["mayaMcpTempKey"]
         if kwargs.get("allDescendents"):
             return [s for s in self._geometry if s.startswith(name + "|")]
         return []
 
     def xform(self, *args, **kwargs):
+        if kwargs.get("query") and kwargs.get("rotation"):
+            return list(self.light_yaw_query.get(args[0], (0.0, 0.0, 0.0)))
         return None
 
     def hide(self, name):
@@ -347,6 +358,73 @@ class TestRenderScene:
         out = render.render_scene({"angles": ["front"]})
         assert fake.loaded_plugins == ["mtoa"]
         assert out["renderer"] == "arnold"
+
+    def test_target_frames_without_hiding_anything(self, fake_maya):
+        # The #585 blocker: framing a gem for a close-up must not hide the
+        # backdrop it needs behind it to refract.
+        render.render_scene({"angles": ["front"], "target": ["|ball"]})
+        assert fake_maya.hidden == []
+
+    def test_isolate_still_frames_when_no_target_is_given(self, fake_maya):
+        render.render_scene({"angles": ["front"], "isolate": ["|ball"]})
+        assert "|floor|floorShape" in fake_maya.hidden
+
+    def test_target_and_isolate_can_disagree(self, fake_maya):
+        # Frame the ball, hide only the floor: both questions answered
+        # independently, which is the point of the split.
+        render.render_scene({
+            "angles": ["front"], "target": ["|ball"], "isolate": ["|ball"]})
+        assert "|floor|floorShape" in fake_maya.hidden
+
+    def test_target_rejects_a_missing_object(self, fake_maya):
+        with pytest.raises(HandlerError):
+            render.render_scene({"angles": ["front"], "target": ["|nope"]})
+
+    def test_zoom_moves_the_camera_closer_without_changing_the_angle(self):
+        bbox_min, bbox_max = [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]
+        position, _ = capture.camera_placement("front", bbox_min, bbox_max)
+        closer = render.zoomed_position(position, bbox_min, bbox_max, 2.0)
+        assert closer[2] == pytest.approx(position[2] / 2.0)
+        assert closer[0] == pytest.approx(position[0])
+        assert closer[1] == pytest.approx(position[1])
+
+    def test_zoom_validation(self):
+        assert render.resolve_zoom(None) == 1.0
+        for bad in (0.0, 0.1, 20.0, "2x", True):
+            with pytest.raises(HandlerError):
+                render.resolve_zoom(bad)
+
+    def test_the_rig_follows_the_camera_and_is_put_back(self, monkeypatch, tmp_path):
+        # setup_lighting builds a WORLD-locked rig while render_scene orbits, so
+        # a side render came back nearly black: key at yaw +30, camera at 90.
+        fake = FakeCmds(lights=["|mcpLight_key|mcpLight_keyShape"])
+        fake.light_yaw_query["|mcpLight_key"] = (-35.0, 30.0, 0.0)
+        monkeypatch.setattr(render, "_cmds", lambda: fake)
+        monkeypatch.setattr(render, "_render_frame", _stub_render_frame(tmp_path, fake))
+        out = render.render_scene({"angles": ["side"]})
+        assert out["relit_lights"] == 1
+        # side is azimuth 90: the key swings to 120 for the render...
+        assert fake.yaw_history == [120.0, 30.0]
+        # ...and 30 is where it ends up, because the rig is the user's scene.
+        assert fake.attrs["|mcpLight_key.rotateY"] == 30.0
+
+    def test_a_user_authored_rig_is_never_touched(self, monkeypatch, tmp_path):
+        fake = FakeCmds(lights=["|myKeyLight|myKeyLightShape"])
+        fake.light_yaw_query["|myKeyLight"] = (-35.0, 30.0, 0.0)
+        monkeypatch.setattr(render, "_cmds", lambda: fake)
+        monkeypatch.setattr(render, "_render_frame", _stub_render_frame(tmp_path, fake))
+        out = render.render_scene({"angles": ["side"]})
+        assert out["relit_lights"] == 0
+        assert fake.yaw_history == []
+
+    def test_relight_can_be_declined(self, monkeypatch, tmp_path):
+        fake = FakeCmds(lights=["|mcpLight_key|mcpLight_keyShape"])
+        fake.light_yaw_query["|mcpLight_key"] = (-35.0, 30.0, 0.0)
+        monkeypatch.setattr(render, "_cmds", lambda: fake)
+        monkeypatch.setattr(render, "_render_frame", _stub_render_frame(tmp_path, fake))
+        out = render.render_scene({"angles": ["side"], "relight": False})
+        assert out["relit_lights"] == 0
+        assert fake.yaw_history == []
 
     def test_samples_and_resolution_reach_the_render_step(self, fake_maya):
         render.render_scene({"angles": ["front"], "samples": 6, "resolution": 256})
