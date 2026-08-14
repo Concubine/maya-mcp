@@ -138,6 +138,29 @@ Lighting and materials:
 | `assign_material` | `{ mesh, shader?, params?, name? }` | `{ mesh, material, shading_group, shader, warnings }` |
 | `apply_texture_recipe` | `{ mesh, recipe, params?, slot? }` | `{ mesh, recipe, slot, nodes: [...], warnings }` |
 
+## Commands (M2.2)
+
+| cmd | params | result |
+|---|---|---|
+| `render_scene` | `{ angles?, renderer?, resolution?, isolate?, samples?, fallback_light? }` | `{ images: [{angle, png_b64}], camera_positions: [...], renderer, samples, fallback_light }` |
+
+`render_scene` is the second eye. `capture_viewport` reads the VP2 viewport, so
+it is fast, needs a mapped window, and draws transmission as plain transparency -
+a gem and a plastic block look alike. `render_scene` goes through the render
+pipeline: seconds per frame, no window required (it works on an agent-launched
+Maya, where every playblast comes back fully transparent), and under `arnold` it
+refracts for real.
+
+Two details worth knowing before calling it:
+
+- `isolate` here **hides** the non-targets rather than isolating a panel, since
+  panel isolation is invisible to a renderer. Visibility is restored afterwards,
+  along with the render globals the call had to change.
+- The MCP tool wrapping this command reports `opaque_px`, `total_px` and
+  `distinct_colors` per frame, and errors when every frame is blank. A render of
+  an empty or unlit scene is a valid PNG with a success status, so blankness has
+  to be measured rather than assumed away.
+
 **Server-side only, no plugin command:** `maya_load_reference_image` and
 `maya_compare_to_reference` (the two remaining M2 tools in `src/maya_mcp/server.py`) never
 cross the wire to the plugin. Reference images live in an in-process `ReferenceStore` on the

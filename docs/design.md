@@ -169,6 +169,18 @@ maya_capture_turntable(target: str | None = None, n_frames: int = 8, resolution:
   -> ONE contact-sheet image (grid composited server-side by images.py)
   # 8 views for the token cost of one image. Used for final judgment passes.
 
+maya_render_scene(angles: list[str] = ["three_quarter"], renderer: "arnold" | "hw2" = "arnold",
+                  resolution: int = 512, isolate: list[str] | None = None,
+                  samples: int = 3, fallback_light: bool = True)
+  -> images + per-frame {opaque_px, total_px, distinct_colors}
+  # The second eye (M2.2, redmine #584). capture_viewport reads the VIEWPORT, so it needs
+  # a mapped window and inherits VP2's approximations - transmission draws as plain
+  # transparency, making gems, glass, ice and water un-judgeable. cmds.render needs
+  # neither: it renders from a Maya with no visible window (where every playblast comes
+  # back transparent) and under arnold it refracts for real. Isolate HIDES the
+  # non-targets here, because panel isolation is invisible to a renderer. Render globals
+  # are scene state and are snapshotted/restored around every call.
+
 maya_load_reference_image(source: str, ref_id: str)      # path or base64; stored server-side
 maya_compare_to_reference(ref_id: str, angle: str = "three_quarter", resolution: int = 640)
   -> one side-by-side composite image (reference | current viewport)
@@ -303,6 +315,8 @@ maya_reset_namespace()
 | **M0 — the loop** | Protocol, plugin skeleton, `execute_python`, `get_scene_graph`, `capture_viewport` | Claude builds a snowman with carrot nose using only these three tools, correcting proportions from screenshots |
 | **M1 — hands** | All §5.3 modeling tools + §5.6 session safety, undo-chunk discipline | Scripted test: boolean a rune cavity into a cube, undo it, restore a checkpoint; zero orphan history nodes |
 | **M2 — eyes & skin** | Materials, texture networks, lighting, turntable, reference compare, SSAO buffer | Claude matches a provided reference silhouette within 3 correction rounds; turntable contact sheet renders |
+| **M2.1 — gem gaps** | transmission/ior params, faceted primitives, material reuse (from a real art run) | The gem-brute run's tool gaps closed |
+| **M2.2 — headless render** | `render_scene`: cmds.render path, arnold by default, blank-frame detection | From an AGENT-launched Maya: a lit scene renders non-blank, and a transmissive gem measurably differs from an identical opaque one (`evals/render_scene_live.py`) |
 | **M3 — ceiling raise** | AI provider adapters, async job flow, import + auto-cleanup pipeline | Text prompt → Meshy mesh lands in scene, retopo'd to 30k tris, materialed |
 | **M4 — proof** | Golem benchmark run, evals, README, install.py polish | §8.3 rubric passes; MCP Inspector shows all schemas valid |
 
