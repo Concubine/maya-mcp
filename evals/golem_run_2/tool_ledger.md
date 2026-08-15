@@ -23,6 +23,8 @@ not escapes and are not listed.
 | 16 | mirror the 11 left chunks | array (mirror) | 11 | no | one call per mesh — mirror takes a single polygon mesh, so the shape of the tool sets the count |
 | 17 | strip the `_1` the mirror appended | rename | 11 | no | **should not have been required** — see finding below |
 | — | place the 11 right pivots | *(none needed)* | 0 | no | the plan budgeted 11 calls here; `array` had already mirrored them — see finding below |
+| 18 | parent the 29 into one tree | parent | 28 | no | one child per call, confirmed from the signature before counting |
+| 19 | swing the left arm and put it back | transform (rotate) | 2 | no | the rig test — the point of Tasks 1–3 and 8 together |
 
 ## Notes
 
@@ -140,6 +142,28 @@ they want.
 **Task 7 — every mirror reported positive `signed_volume` and zero warnings.** The
 inverted-normals trap the tool description warns about did not fire on any of the
 11. Recorded because a check that never fails still has to be run to know that.
+
+**Task 8 — parenting cost 28 calls and lost nothing.** `maya_parent` takes one
+child per call; that was read off the signature before the count was written down,
+rather than assumed from the plan. All 29 chunks kept their world pivot AND their
+world geometry to 1e-3. One root, 28 descendants.
+
+**Task 8 — the rig works, and here is the number that says so.** Rotating
+`golem_L_upperarm` 40° about its shoulder pivot moved every descendant while
+preserving each one's distance from that pivot **exactly**: upperarm 0.6,
+elbow gasket 1.19236, forearm 1.875, wrist gasket 2.54627, fist 2.875 — all
+unchanged to six decimals. The fist travelled 1.9666 and the shoulder ball did not
+move at all. That is a rigid rotation about the socket, which is the entire point
+of #603, the `pivots` map, and this task taken together. The arm was returned to
+rest and the full 29-chunk state re-verified against the pre-parent snapshot.
+
+**Task 8 — a bbox check on a hierarchy is not a geometry check.** The first pass
+reported 14 chunks as "moved". Every one of them was a node that had just gained
+children, because `exactWorldBoundingBox` on a transform includes its descendants:
+the pelvis now measures the whole golem. The 15 leaf nodes were all clean. Measured
+again at shape level, nothing had moved. Same error family as the etch depth in
+Task 6 — the measurement changed meaning under me while the numbers stayed
+plausible.
 
 **Step 5 — one proportion was wrong and was caught by looking.** The head sat
 0.6 of its 1.0 height inside the chest girdle and the figure measured 4.5 against
