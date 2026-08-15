@@ -20,7 +20,7 @@ import socket
 import threading
 from typing import Any, Dict, Optional
 
-from . import protocol
+from . import protocol, version
 from .dispatcher import Dispatcher
 from .handlers import (
     array,
@@ -66,9 +66,19 @@ def is_maya_available() -> bool:
         return False
 
 
+def _ping(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Liveness AND identity: which copy of the plugin is actually running.
+
+    The live Maya imports <Documents>/maya/scripts/maya_plugin, not the repo, so
+    callers need a way to tell whether a green result describes their code. See
+    version.py; clients feed `plugin` to version.compare().
+    """
+    return {"pong": True, "maya": is_maya_available(), "plugin": version.plugin_info()}
+
+
 def _build_handlers() -> Dict[str, Any]:
     return {
-        "ping": lambda params: {"pong": True, "maya": is_maya_available()},
+        "ping": _ping,
         "execute_python": code_exec.execute_python,
         "reset_namespace": code_exec.reset_namespace,
         "get_scene_graph": scene.get_scene_graph,

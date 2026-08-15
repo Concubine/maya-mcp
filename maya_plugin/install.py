@@ -14,6 +14,9 @@ import os
 import shutil
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from maya_plugin import version  # noqa: E402 - after the sys.path fix-up above
+
 MARKER = "# >>> maya-mcp autoload >>>"
 AUTOLOAD_SNIPPET = """
 {marker}
@@ -75,6 +78,21 @@ def main() -> int:
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "install.py"),
     )
     print("Copied plugin to %s" % target)
+
+    # Stamp the copy with what it was cut from. Without this a live check can
+    # pass against a plugin that predates the code under test - the failure mode
+    # that cost hours at M2.4 and again on the revision-2 art run.
+    repo = os.path.dirname(source)
+    git = version.git_stamp(repo)
+    stamp = version.write_stamp(target, commit=git["commit"], dirty=git["dirty"])
+    print(
+        "Stamped as %s%s (digest %s)"
+        % (
+            (stamp["commit"] or "no-git")[:12],
+            "+dirty" if stamp["dirty"] else "",
+            (stamp["digest"] or "unknown")[:12],
+        )
+    )
 
     existing = ""
     if os.path.exists(user_setup):

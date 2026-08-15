@@ -5,6 +5,8 @@ undo hooks), and execute_python is pure Python — so the full M0 spine
 (client -> TCP -> dispatcher -> handler -> response) is exercised for real.
 """
 
+import os
+
 import pytest
 
 from maya_mcp.connection import MayaConnection, MayaError
@@ -49,6 +51,19 @@ class TestLoop:
         result = conn.request("ping", {}, timeout_s=5)
         assert result["pong"] is True
         assert result["maya"] is False  # headless test environment
+        conn.close()
+
+    def test_ping_identifies_which_copy_of_the_plugin_is_running(self, plugin_server):
+        """The staleness handshake: a caller must be able to tell whether a green
+        result came from its own code or from a deployed copy weeks behind it."""
+        from maya_plugin import version
+
+        srv = plugin_server()
+        conn = MayaConnection(port=srv.port)
+        plugin = conn.request("ping", {}, timeout_s=5)["plugin"]
+        assert plugin["package_dir"] == os.path.dirname(os.path.abspath(version.__file__))
+        assert version.compare(plugin, plugin["digest"]) is None
+        assert version.compare(plugin, "a-different-tree") is not None
         conn.close()
 
     def test_handler_needing_maya_returns_traceback_error(self, plugin_server):
