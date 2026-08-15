@@ -18,6 +18,7 @@ not escapes and are not listed.
 | 11 | carve the aleph | etch_text | 1 | no | one call, glyph to recess |
 | 12 | re-place 3 pivots after the booleans | transform (pivot) | 3 | no | **required** — see finding below |
 | 13 | rename 2 boolean results | rename | 2 | no | **should not have been required** — see finding below |
+| 14 | chamfer the chest girdle | sculpt_ops (bevel_edges) | 1 | no | the chunk Task 5's `soft_move` silently missed; caught by capturing, not by a number |
 
 ## Notes
 
@@ -100,6 +101,17 @@ requested 0.5 cuts 0.5. The brow's floor is 0.08 below its own plate plane, with
 0.12 of wall left behind. **No defect.** The lesson is that a min/max over a whole
 mesh is not a depth measurement, and two independent wrong numbers agreed with
 each other well enough to look like a finding.
+
+**Task 6, row 14 — the silent miss had a visible cost, and only a capture found
+it.** Every headless number for the chest girdle was green through Tasks 4–6:
+watertight, right dimensions, pivot in place. It was the one chunk carrying no
+shaping at all, because Task 5's `soft_move` missed it without saying so, and in
+the first Task 6 capture it read as a plank laid across the chest. `bevel_edges`
+at width 0.14, 2 segments took it from 8 to 48 verts and gave it chamfers that
+hold a highlight; bbox is unchanged at 2.2 x 1.213 x 1.454, so nothing about the
+proportions moved. `bevel_edges` is cmds-based and **preserved the pivot**, which
+is the contrast that makes the boolean finding above concrete rather than
+theoretical: same scene, same chunk, one op keeps the rig and the other does not.
 
 **Step 5 — one proportion was wrong and was caught by looking.** The head sat
 0.6 of its 1.0 height inside the chest girdle and the figure measured 4.5 against
