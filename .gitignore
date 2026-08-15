@@ -14,3 +14,6 @@ evals/_tool_gaps_maps/
 # golem look-dev work copies and their auto-checkpoints (generated)
 evals/golem_run/golem_m1_pass.mb
 evals/golem_run/checkpoints/
+
+# Arnold's auto-generated tiled textures, written next to any map it renders
+*.tx
