@@ -62,6 +62,15 @@ def check_delivery(path, ceiling_m, lattice_m=1.5):
                 "file is out by a factor of %.4g"
                 % (label, axis, pitch, lattice_m, pitch / lattice_m))
 
+    # The declaration must agree with the numbers. Metre vertices declared as
+    # centimetres is not a lesser error than the original - it is the same
+    # class, just inverted, and Demigol measures unit scale on import.
+    if facts.unit_scale_factor != fbx_probe.DECLARES_METRES:
+        out.append(
+            "%s: header declares UnitScaleFactor %r, expected %g (metres) - the "
+            "vertices are metres, so the file contradicts itself"
+            % (label, facts.unit_scale_factor, fbx_probe.DECLARES_METRES))
+
     biggest = 0.0
     for verts in facts.meshes:
         for v in verts:

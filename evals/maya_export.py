@@ -68,3 +68,19 @@ mel.eval('FBXExportScaleFactor %g' % EXPORT_SCALE_FACTOR)
 # does get a 0.01 conversion node, which is what made 100 look right earlier -
 # it was cancelling a conversion that no longer happens.
 EXPORT_SCALE_FACTOR = 1.0
+
+# Both manifests carry this verbatim. Per Demigol #606, the failure class is a
+# manifest field a consumer cannot tell apart from a wish - so the `units`
+# claim states how it is enforced and where, and a reader can go look.
+UNITS_GATE = (
+    "MEASURED AND GATED, not aspirational. The units claim is asserted against "
+    "the exported FBX BYTES, never against the Maya scene: "
+    "tests/test_delivery_units.py parses every delivered .fbx with no Maya in "
+    "the loop and requires metre-magnitude vertices inside the contract "
+    "envelope, ZERO non-identity node scales, and chunk translations on the 3 m "
+    "lattice. The generator runs the same check immediately after export and "
+    "exits non-zero rather than write a delivery that fails it. This is "
+    "artifact-level on purpose: the defect it guards is written by the FBX "
+    "exporter and is absent from the scene, so every in-scene check passed "
+    "green while three revisions shipped at 100x (maya-mcp #596, #600, #629)."
+)

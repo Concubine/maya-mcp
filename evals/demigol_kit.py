@@ -44,6 +44,7 @@ sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "src"))
 
 import delivery_units  # noqa: E402 - the artifact-level unit gate
+import fbx_probe  # noqa: E402 - reads and corrects the delivered FBX
 import maya_export  # noqa: E402 - one place the delivery unit is decided
 from live_call import call  # noqa: E402
 from maya_mcp import images  # noqa: E402
@@ -926,6 +927,10 @@ def main():
     run("NAMES = %r\nFBX = %r\nEXPORT_SCALE_FACTOR = %r\n%s"
         % (names, fbx, maya_export.EXPORT_SCALE_FACTOR, EXPORT_CODE), "export")
 
+    # Maya writes a centimetre declaration for a metre-native scene and gives
+    # no way to change it, so the declaration is corrected on the artifact.
+    fbx_probe.set_unit_scale_factor(fbx)
+
     violations = delivery_units.check_delivery(fbx, delivery_units.KIT_CEILING_M)
     if violations:
         print("DELIVERY IS NOT METRE-TRUE - refusing to ship %s:" % fbx)
@@ -1059,6 +1064,7 @@ def main():
         "contract": "Demigol KIT OF PARTS",
         "scope": "one-cell pieces, not buildings",
         "units": "metres, Y-up, 1 unit = 1 m, cell = 3 m",
+        "units_gate": maya_export.UNITS_GATE,
         "envelope": {
             "cell_m": CELL,
             "inset_m": INSET,

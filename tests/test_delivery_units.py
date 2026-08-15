@@ -42,6 +42,17 @@ def test_reader_strips_the_fbx_name_separator():
     assert not any("\x00" in n for n in names)
 
 
+def test_every_delivery_declares_metres():
+    # Maya writes 1.0 (centimetres) for a metre-native scene and offers no way
+    # to change it, so the generator corrects the declaration on the artifact.
+    # Without this the file contradicts itself and Demigol, who MEASURE unit
+    # scale on import rather than trusting the header, would read 0.01 again.
+    for path in [KIT] + [STRUCTURES / ("%s.fbx" % h) for h in HEROES]:
+        facts = fbx_probe.read_fbx(path)
+        assert facts.unit_scale_factor == fbx_probe.DECLARES_METRES, (
+            "%s declares %r" % (path.name, facts.unit_scale_factor))
+
+
 def test_reader_defaults_absent_records_to_identity():
     facts = fbx_probe.read_fbx(TOWER)
     # 673 chunks are written without an Lcl Scaling record; only the group Null
@@ -89,7 +100,8 @@ def test_check_passes_a_clean_delivery(monkeypatch):
         version=7700,
         nodes=[fbx_probe.FbxNode(name="kit_steel_column_a", kind="Mesh",
                                  translation=(1.5, 0.0, 3.0))],
-        meshes=[(1.5, -1.5, 0.75)])
+        meshes=[(1.5, -1.5, 0.75)],
+        unit_scale_factor=fbx_probe.DECLARES_METRES)
     monkeypatch.setattr(fbx_probe, "read_fbx", lambda _path: facts)
 
     assert delivery_units.check_delivery(

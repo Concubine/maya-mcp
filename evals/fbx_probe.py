@@ -38,6 +38,9 @@ class FbxFacts:
     nodes: list = field(default_factory=list)
     meshes: list = field(default_factory=list)
     unit_scale_factor: Optional[float] = None
+    # Byte offset of the UnitScaleFactor double, so the declaration can be
+    # corrected in place. See set_unit_scale_factor.
+    unit_scale_offset: Optional[int] = None
 
 
 def _clean(raw):
@@ -92,7 +95,9 @@ def read_fbx(path):
             pos += nlen
 
             values = []
+            starts = []
             for _ in range(nprops):
+                starts.append(pos + 1)   # skip the typecode byte
                 val, pos = prop(pos)
                 values.append(val)
 
@@ -102,6 +107,7 @@ def read_fbx(path):
                 key = values[0]
                 if key == "UnitScaleFactor":
                     facts.unit_scale_factor = float(values[-1])
+                    facts.unit_scale_offset = starts[-1]
                 elif node is not None and key in ("Lcl Scaling", "Lcl Translation"):
                     triple = tuple(float(v) for v in values[-3:])
                     if key == "Lcl Scaling":
@@ -122,3 +128,30 @@ def read_fbx(path):
 
     walk(27, len(data), None)
     return facts
+
+
+# FBX declares its unit as centimetres-per-file-unit: 1.0 means the numbers are
+# centimetres, 100.0 means they are metres.
+DECLARES_METRES = 100.0
+
+
+def set_unit_scale_factor(path, value=DECLARES_METRES):
+    """Correct the unit DECLARATION in place, leaving all geometry untouched.
+
+    Maya's exporter writes 1.0 here for a metre-native scene and offers no way
+    to change it - measured across nine combinations of currentUnit,
+    UnitsSelector, DynamicScaleConversion and FBXExportScaleFactor, every one
+    byte-identical. That leaves the file self-contradictory: metre-magnitude
+    vertices declared as centimetres, so a correct consumer reads a 3 m piece
+    as 3 cm.
+
+    This overwrites one IEEE-754 double with another of the same width, so no
+    offset, length or nested record in the file moves.
+    """
+    facts = read_fbx(path)
+    if facts.unit_scale_offset is None:
+        raise ValueError("%s declares no UnitScaleFactor" % path)
+    with open(path, "r+b") as fh:
+        fh.seek(facts.unit_scale_offset)
+        fh.write(struct.pack("<d", float(value)))
+    return read_fbx(path).unit_scale_factor

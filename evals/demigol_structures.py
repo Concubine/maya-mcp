@@ -53,6 +53,7 @@ sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "src"))
 
 import delivery_units  # noqa: E402 - the artifact-level unit gate
+import fbx_probe  # noqa: E402 - reads and corrects the delivered FBX
 import demigol_kit as kit  # noqa: E402 - shared atlas, patches and density
 import maya_export  # noqa: E402 - one place the delivery unit is decided
 from live_call import call  # noqa: E402
@@ -1106,6 +1107,10 @@ def build_one(label, builder, zoom):
         % (label, fbx, maya_export.EXPORT_SCALE_FACTOR, EXPORT_CODE),
         "export %s" % label)
 
+    # Maya writes a centimetre declaration for a metre-native scene and gives
+    # no way to change it, so the declaration is corrected on the artifact.
+    fbx_probe.set_unit_scale_factor(fbx)
+
     # The artifact is the deliverable, so the artifact is what gets asserted.
     # An in-Maya check cannot see this class of defect at all: the scene reads
     # 3.0 m at scale [1,1,1] frozen and exports as 300.0 (maya-mcp #629).
@@ -1182,6 +1187,7 @@ def main():
         "contract": "Demigol STRUCTURE MODEL CONTRACT",
         "scope": "four whole destructible hero buildings; not a parts library",
         "units": "metres, Y-up, 1 unit = 1 m, cell = 3 m",
+        "units_gate": maya_export.UNITS_GATE,
         "origin": "min-corner cell CENTRE at local (0,0,0); floor plane at y = -1.5",
         "naming": "<role>_x##_y##_z##; x/z cell indices from the min corner, "
                   "y = storey (0 = ground). Multi-cell chunks are named for "

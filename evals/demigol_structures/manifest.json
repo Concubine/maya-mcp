@@ -2,6 +2,7 @@
   "contract": "Demigol STRUCTURE MODEL CONTRACT",
   "scope": "four whole destructible hero buildings; not a parts library",
   "units": "metres, Y-up, 1 unit = 1 m, cell = 3 m",
+  "units_gate": "MEASURED AND GATED, not aspirational. The units claim is asserted against the exported FBX BYTES, never against the Maya scene: tests/test_delivery_units.py parses every delivered .fbx with no Maya in the loop and requires metre-magnitude vertices inside the contract envelope, ZERO non-identity node scales, and chunk translations on the 3 m lattice. The generator runs the same check immediately after export and exits non-zero rather than write a delivery that fails it. This is artifact-level on purpose: the defect it guards is written by the FBX exporter and is absent from the scene, so every in-scene check passed green while three revisions shipped at 100x (maya-mcp #596, #600, #629).",
   "origin": "min-corner cell CENTRE at local (0,0,0); floor plane at y = -1.5",
   "naming": "<role>_x##_y##_z##; x/z cell indices from the min corner, y = storey (0 = ground). Multi-cell chunks are named for their min-corner cell.",
   "roles": [
