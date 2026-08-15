@@ -1013,14 +1013,24 @@ git commit -m "chore(golem): one tree, rooted at the pelvis"
 
 ---
 
-### Task 9: UVs, material, and the glow that travels with the body
+### Task 9: UVs, material, and the tracer eye
+
+**AMENDED 2026-08-15, after the build reached this task.** The original Task 9 hung
+the glow off the aleph rune at `[0, 4.15, 0.72]`. That rune was deleted in Task 6 at
+the user's direction — "this guy is shaping up to be an iron giant, keep with the
+place" — and the brow became a visor. The user then set the replacement design:
+*"the glow should come from a tracer eye scan effect like old sci fi robot."*
+
+So the light source moves from a carved word to a scanning eye, and the falloff that
+was anchored on the rune is anchored on the visor slot instead. Steps 4–6 below are
+rewritten; steps 1–3 are unchanged.
 
 **Files:**
 - Modify: `evals/golem_run_2/tool_ledger.md`
 
 **Interfaces:**
 - Consumes: all 29 chunks, parented.
-- Produces: every chunk shaded, with per-chunk emission.
+- Produces: every chunk shaded, a slotted visor, and an emissive tracer bar inside it.
 
 - [ ] **Step 1: Checkpoint**
 
@@ -1047,21 +1057,55 @@ cracked kiln plates over matte terracotta, roughness ~0.85. This is claim 2 of #
 the kit steel was authored for a building, so record honestly whether a creature's
 chunk shapes read acceptably against maps authored for flat plates.
 
-- [ ] **Step 4: Bake the seam glow per chunk**
+- [ ] **Step 4: Cut the scan slot into the visor**
 
-Emission is per chunk, NOT a world-space network — the design's reason is that a
-world ramp would change an arm's glow the moment the arm moves.
+Measure the brow's shape-level bbox first — the plate's own front face, not the
+transform's bbox, which now includes nothing but is worth confirming since the brow
+is a leaf. Then `mcp__maya__maya_create_primitive` a thin cube spanning the plate's
+full width and punching through its depth, and `mcp__maya__maya_boolean_op`
+`difference` to sink it.
 
-Compute each chunk's rest distance from the rune at [0, 4.15, 0.72], then set that
-chunk's emission from a falloff over that distance: brightest at the brow, near dead
-at the feet. Use `mcp__maya__maya_assign_material` per chunk with the computed
-emission value.
+The slot is a recess, not a window: the cutter must break the *front* surface and
+stop short of the back, so the bar has somewhere to sit and the light has a housing.
+That is the same geometry lesson Task 6 learned the hard way — a cutter fully inside
+the host yields a sealed void, one that punches clean through yields a hole. Verify
+`shells == 1` and that the brow's depth is unchanged at the rear.
+
+**`boolean_op` will discard the brow's pivot** — that is Task 6's finding, now a
+known cost. Re-place it at `[0, 4.5, 0.3]` with `mcp__maya__maya_transform` `pivot`
+immediately after, and re-verify, because the brow is parented and a moved pivot
+would rotate wrong under the head.
+
+- [ ] **Step 5: The tracer bar**
+
+`mcp__maya__maya_create_primitive` a narrow cube sized to sit *inside* the slot —
+shorter than the slot's width, so it reads as caught mid-sweep rather than filling
+the recess. Position it off-centre along the slot. Then
+`mcp__maya__maya_parent` it under `golem_C_brow` so it travels with the head, and
+give it its own emissive material via `mcp__maya__maya_assign_material`: high
+emission, cool white-cyan core.
+
+The trail is the second half of the effect. Two or three shorter, dimmer bars behind
+the core along the sweep axis give a smear rather than KITT's discrete segments —
+each one a fraction of the last one's emission. Build them the same way; record the
+call count honestly, because "a scanning eye costs N primitives" is exactly the kind
+of number this run exists to produce.
+
+- [ ] **Step 6: Body seams take their cue from the head**
+
+Emission stays per chunk, NOT a world-space network — a world ramp would change an
+arm's glow the moment the arm moves.
+
+Compute each chunk's rest distance from **the slot centre** (the eye, not the deleted
+rune), then set emission from a falloff over that distance: brightest at the brow,
+near dead at the feet, and cooler/dimmer overall than the tracer itself so the eye
+stays visibly the source. Use `mcp__maya__maya_assign_material` per chunk.
 
 Distances are a measurement, so computing them via `execute_python` is not an escape.
 Setting the material is a build — if it goes through `execute_python` rather than
 `maya_assign_material`, that is an escape and must be recorded.
 
-- [ ] **Step 5: Verify the falloff is monotonic down the body**
+- [ ] **Step 7: Verify the falloff is monotonic down the body**
 
 ```python
 import maya.cmds as cmds
@@ -1072,16 +1116,16 @@ import maya.cmds as cmds
            "golem_C_pelvis", "golem_L_shin", "golem_L_foot")]
 ```
 
-Expected: values decreasing down that list. If the attribute path differs on the
-shader this build produced, read it off `maya_get_object_info`'s shading section
-instead — but do confirm the ordering, because "the glow dims with distance from the
-word" is the whole material story.
+Expected: values decreasing down that list, and the tracer bar above all of them. If
+the attribute path differs on the shader this build produced, read it off
+`maya_get_object_info`'s shading section instead — but do confirm the ordering,
+because "the glow dims with distance from the eye" is the whole material story.
 
-- [ ] **Step 6: Ledger and commit**
+- [ ] **Step 8: Ledger and commit**
 
 ```bash
 git add evals/golem_run_2/tool_ledger.md
-git commit -m "chore(golem): clay, cracks, and a glow that travels with the chunk"
+git commit -m "chore(golem): clay, cracks, and an eye that scans"
 ```
 
 ---
@@ -1130,7 +1174,7 @@ Write every image under `evals/golem_run_2/`. Name them for what they show:
 Three questions from the design, answered honestly in the ledger file:
 - Does the silhouette read at thumbnail size — squat, crouched, arms to mid-shin?
 - Do the joins carry under SSAO?
-- Does the glow logic read as one idea, rune → seams → key?
+- Does the glow logic read as one idea, tracer eye → seams → key?
 
 If any answer is no, say so. A benchmark that reports a golem it did not build is
 worth nothing.
