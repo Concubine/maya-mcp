@@ -628,3 +628,67 @@ class TestTieredFrameAndCladding:
         assert (2, 0, 0) not in b.cells          # the open lobby
         assert (6, 1, 6) in b.cells              # a bay-line column
         assert (7, 1, 7) not in b.cells          # interior, claimed by nothing
+
+
+class TestTerraces:
+    """One roofing rule: cap what the storey above does not cover.
+
+    At the top that is the whole footprint, exactly as before. At a setback it
+    is a terrace - and the golem roof-slams, so several decks at several
+    heights is the play surface #600 item 1 asked for, arriving as a
+    consequence of the silhouette rather than as a second feature.
+    """
+
+    def setback(self, storeys=6):
+        return st.Building("t", 10, 10, storeys,
+                           tiers=[(0, (0, 9, 0, 9)), (3, (0, 6, 0, 6))])
+
+    def test_a_setback_lays_a_terrace_at_the_tier_boundary(self):
+        b = self.setback()
+        b.frame()
+        b.roof()
+        terrace = {(x, z) for (x, y, z) in b.roofed if y == 3}
+        assert terrace == b.foot_cells(2) - b.foot_cells(3)
+
+    def test_the_top_deck_still_covers_the_whole_top_footprint(self):
+        b = self.setback()
+        b.frame()
+        b.roof()
+        top = {(x, z) for (x, y, z) in b.roofed if y == b.storeys}
+        assert top == b.foot_cells(b.storeys - 1)
+
+    def test_every_column_of_cells_tops_out_in_a_roofed_cell(self):
+        # V5, generalised. Revision 2.5 asserted `y == storeys`, which stops
+        # being true the moment a terrace exists.
+        b = self.setback()
+        b.frame()
+        b.roof()
+        b.clad(lambda y: "brick")
+        tops = {}
+        for (x, y, z) in b.cells:
+            if (x, z) not in tops or y > tops[(x, z)]:
+                tops[(x, z)] = y
+        for (x, z), y in tops.items():
+            assert (x, y, z) in b.roofed, "%s tops out at storey %d, unroofed" % ((x, z), y)
+
+    def test_a_terraced_building_still_stands(self):
+        b = self.setback()
+        b.frame()
+        b.roof()
+        b.clad(lambda y: "brick")
+        report = st.structural_report(b.chunks())
+        assert report["standing"], report
+
+    def test_the_terrace_is_structural_not_cladding(self):
+        b = self.setback()
+        b.frame()
+        b.roof()
+        for cell in b.roofed:
+            assert b.cells[cell] in st.STRUCTURAL
+
+    def test_roofing_a_tiered_building_twice_is_still_an_error(self):
+        b = self.setback()
+        b.frame()
+        b.roof()
+        with pytest.raises(ValueError, match="claimed twice"):
+            b.roof()

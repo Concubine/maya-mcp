@@ -293,11 +293,21 @@ class Building:
         Steel is deliberately absent. A column's run merges vertically, and
         continuing it into the roof would make the deck part of the column
         segment rather than a thing the column carries.
+
+        REVISION 3 generalises the rule to: cap every cell a storey occupies
+        that the storey above does not. At the top that is the whole footprint,
+        which is what it always did. At a setback it is a TERRACE - so the
+        several decks at several heights that a roof-slamming golem wants come
+        out of the silhouette instead of being a second feature bolted on.
+
+        A terrace ring carries: it sits on the wider tier's perimeter, which
+        holds bay-line columns, and the ring is contiguous concrete, so the
+        flood fill in `structural_report` reaches all of it from the ground.
         """
-        y = self.storeys
-        for x in range(self.nx):
-            for z in range(self.nz):
-                self.put("concrete", x, y, z)
+        for y in range(self.storeys):
+            for (x, z) in sorted(self.foot_cells(y) - self.foot_cells(y + 1)):
+                self.put("concrete", x, y + 1, z)
+                self.roofed.add((x, y + 1, z))
 
     # ---------------------------------------------------------------- chunks
     def chunks(self):
