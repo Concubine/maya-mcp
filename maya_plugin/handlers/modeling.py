@@ -289,10 +289,11 @@ def transform(params: Dict[str, Any]) -> Dict[str, Any]:
     translate = _vec3(params, "translate")
     rotate = _vec3(params, "rotate")
     scale = _vec3(params, "scale")
-    if translate is None and rotate is None and scale is None:
+    pivot = _vec3(params, "pivot")
+    if translate is None and rotate is None and scale is None and pivot is None:
         raise HandlerError(
             "nothing to do",
-            hint="pass at least one of translate, rotate, scale",
+            hint="pass at least one of translate, rotate, scale, pivot",
         )
     relative = params.get("relative", True) is not False
     resolved = [naming.require_object(cmds, str(n)) for n in names]
@@ -303,6 +304,11 @@ def transform(params: Dict[str, Any]) -> Dict[str, Any]:
         moved = ledger.check(cmds, name)
         if moved:
             warnings.append(moved)
+        # Pivot FIRST: a relative rotation in the same call must turn about the
+        # new pivot, not the old one. `pivots` moves the pivot without moving
+        # the geometry, which is the whole point - a rig is pivots.
+        if pivot is not None:
+            cmds.xform(name, worldSpace=True, pivots=tuple(pivot))
         _apply_xform(cmds, name, translate, rotate, scale, relative)
         ledger.record(cmds, name)
         objects.append(
@@ -311,6 +317,7 @@ def transform(params: Dict[str, Any]) -> Dict[str, Any]:
                 "translate": cmds.xform(name, query=True, worldSpace=True, translation=True),
                 "rotate": cmds.xform(name, query=True, worldSpace=True, rotation=True),
                 "scale": cmds.xform(name, query=True, worldSpace=True, scale=True),
+                "pivot": cmds.xform(name, query=True, worldSpace=True, rotatePivot=True),
             }
         )
     return {"objects": objects, "warnings": warnings}

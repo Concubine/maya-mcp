@@ -14,6 +14,7 @@ class FakeCmds:
         self.shapes = shapes or {}  # long transform -> (shape_long, node_type)
         self.calls = []
         self.xf = {}
+        self.pivots = {}
         self.face_count = 1000
         self.reduced_percentage = None
         self.selection = []
@@ -75,7 +76,11 @@ class FakeCmds:
                 return list(t)
             if kw.get("rotation"):
                 return list(r)
+            if kw.get("rotatePivot") or kw.get("pivots"):
+                return list(self.pivots.get(name, (0, 0, 0)))
             return list(s)
+        if "pivots" in kw:
+            self.pivots[name] = tuple(kw["pivots"])
         self.calls.append(("xform", name, kw))
 
     def delete(self, *names, **kw):
@@ -317,6 +322,44 @@ def test_transform_reports_user_moved_warning(monkeypatch):
     fake.xf["|a"] = ((5, 0, 0), (0, 0, 0), (1, 1, 1))  # user dragged it
     result = modeling.transform({"names": ["|a"], "translate": [1, 0, 0]})
     assert any("outside" in w for w in result["warnings"])
+
+
+def test_transform_pivot_alone_is_enough(monkeypatch):
+    fake = FakeCmds(objects={"|a"})
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    result = modeling.transform({"names": ["|a"], "pivot": [1.0, 2.0, 3.0]})
+    assert result["objects"][0]["pivot"] == [1.0, 2.0, 3.0]
+    pivot_calls = [c for c in fake.calls if c[0] == "xform" and "pivots" in c[2]]
+    assert len(pivot_calls) == 1
+    assert pivot_calls[0][2]["pivots"] == (1.0, 2.0, 3.0)
+    assert pivot_calls[0][2]["worldSpace"] is True
+
+
+def test_transform_pivot_applied_before_rotate(monkeypatch):
+    fake = FakeCmds(objects={"|a"})
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    modeling.transform({"names": ["|a"], "pivot": [0.0, 5.0, 0.0],
+                        "rotate": [0.0, 90.0, 0.0]})
+    kinds = [c[2] for c in fake.calls if c[0] == "xform"]
+    pivot_at = next(i for i, kw in enumerate(kinds) if "pivots" in kw)
+    rotate_at = next(i for i, kw in enumerate(kinds) if "rotation" in kw)
+    assert pivot_at < rotate_at, "pivot must be set before the rotation uses it"
+
+
+def test_transform_pivot_rejects_bad_shape(monkeypatch):
+    fake = FakeCmds(objects={"|a"})
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        modeling.transform({"names": ["|a"], "pivot": [1.0, 2.0]})
+    assert "pivot" in str(exc.value)
+
+
+def test_transform_still_refuses_an_empty_call(monkeypatch):
+    fake = FakeCmds(objects={"|a"})
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        modeling.transform({"names": ["|a"]})
+    assert "pivot" in exc.value.hint
 
 
 def test_delete_objects_lists_all_missing(monkeypatch):
