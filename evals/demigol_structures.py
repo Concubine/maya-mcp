@@ -191,6 +191,36 @@ class Building:
                         continue
                     self.put(role, x, y, z)
 
+    # ------------------------------------------------------------------ roof
+    def roof(self):
+        """Frame the roof: a beam grid on the bay lines, and the deck it carries.
+
+        #600 item 1, the top-ranked miss - every revision 2 render is an open
+        egg-crate seen from above, and the golem roof-slams, so a rooftop is a
+        primary play surface that did not exist. The cause was total: nothing
+        was ever claimed above the top storey, so the building simply stopped.
+
+        THE ROOF IS A STOREY, not a hat. It occupies real cells at
+        `y == storeys`, and that matters for more than bookkeeping: collision
+        is generated from the grid and never from the art, so a deck modelled
+        as ornament over an empty cell would be visually right and physically
+        absent - the golem would fall through a floor it can see.
+
+        Built from STRUCTURAL roles only. Per the division agreed with the
+        Demigol side, the hero frames the roof and the kit sheathes it: beams
+        and substrate here collapse when destroyed, while the finish, parapet
+        and rooftop plant come off without dropping the building. That is the
+        existing frame/cladding split rotated into the horizontal.
+
+        Steel is deliberately absent. A column's run merges vertically, and
+        continuing it into the roof would make the deck part of the column
+        segment rather than a thing the column carries.
+        """
+        y = self.storeys
+        for x in range(self.nx):
+            for z in range(self.nz):
+                self.put("concrete", x, y, z)
+
     # ---------------------------------------------------------------- chunks
     def chunks(self):
         """Merge runs of like cells into chunks, then emit them.
@@ -335,19 +365,31 @@ def hero_material_block():
 # the budget stays arithmetic: an 8-box chunk is 96 against 200 per cell.
 
 def _exposure(ch, occupied, storeys):
-    """Which of a chunk's faces can actually be seen from outside."""
+    """Which of a chunk's faces can actually be seen from outside.
+
+    `storeys` is retained for callers but is no longer what decides `top`.
+    Revision 2 computed it as `(ch.y + ch.sy) >= storeys` - arithmetic on the
+    storey count rather than a look at the neighbours - which was true while
+    nothing was ever built above the top storey. Now that `Building.roof()`
+    claims a storey of its own, that test would call BOTH the roof and the
+    storey underneath it "top" and crown them each.
+
+    Probing +Y against the occupied set is the same question the four vertical
+    faces already ask, and it stays right whatever is built above.
+    """
     faces = {}
     for axis, sign, key in (("x", -1, "nx"), ("x", 1, "px"),
-                            ("z", -1, "nz"), ("z", 1, "pz")):
+                            ("z", -1, "nz"), ("z", 1, "pz"),
+                            ("y", 1, "top")):
         exposed = False
+        idx = {"x": 0, "y": 1, "z": 2}[axis]
         for cell in ch.cells_occupied():
             probe = list(cell)
-            probe[0 if axis == "x" else 2] += sign
+            probe[idx] += sign
             if tuple(probe) not in occupied:
                 exposed = True
                 break
         faces[key] = exposed
-    faces["top"] = (ch.y + ch.sy) >= storeys
     faces["ground"] = ch.y == 0
     return faces
 
@@ -529,6 +571,7 @@ def tower():
     b.frame()
     b.clad(lambda y: "glass" if (y >= b.storeys - 2 or y % 3 == 2) else "infill",
            skip_storeys=(0,))
+    b.roof()
     return b
 
 
@@ -539,6 +582,7 @@ def block():
                       "at ground level on all four sides.")
     b.frame()
     b.clad(lambda y: "glass" if y == b.storeys - 1 else "brick", skip_storeys=(0,))
+    b.roof()
     return b
 
 
@@ -549,6 +593,7 @@ def slab():
                       "no open lobby, so the ground storey is fully clad.")
     b.frame()
     b.clad(lambda y: "glass" if y % 2 == 1 else "infill")
+    b.roof()
     return b
 
 
@@ -558,6 +603,7 @@ def stump():
                  note="All brick except a glazed band at the top storey.")
     b.frame()
     b.clad(lambda y: "glass" if y == b.storeys - 1 else "brick")
+    b.roof()
     return b
 
 

@@ -281,6 +281,133 @@ class TestLoadPath:
         assert not report["standing"]
 
 
+# ===================================================================== roofs
+
+class TestRoofFraming:
+    """#600 item 1, the top-ranked miss: every render is an open egg-crate.
+
+    The cause was hero-side and total - `_exposure` computed `faces["top"]`
+    and the crown band read it, but no box was ever placed on the +Y face
+    itself and no cell was ever claimed above the top storey. The building
+    simply stopped.
+
+    Per the user's direction the hero FRAMES the roof (beams on the bay lines
+    plus a deck substrate, in frame roles, structural, collapses) and the kit
+    SHEATHES it (finish, parapet, plant, cladding roles, peels off). This is
+    the existing frame/cladding split rotated into the horizontal.
+    """
+
+    def test_roof_claims_a_storey_above_the_top_one(self):
+        b = st.Building("t", 7, 7, 3)
+        b.frame()
+        b.roof()
+        assert any(y == 3 for (_, y, _) in b.cells)
+
+    def test_the_roof_is_built_from_frame_roles_not_cladding(self):
+        b = st.Building("t", 7, 7, 3)
+        b.frame()
+        b.roof()
+        for (_, y, _), role in b.cells.items():
+            if y == 3:
+                assert role in st.STRUCTURAL, role
+
+    def test_the_roof_covers_the_whole_footprint(self):
+        b = st.Building("t", 7, 7, 2)
+        b.frame()
+        b.roof()
+        roofed = {(x, z) for (x, y, z) in b.cells if y == 2}
+        assert roofed == {(x, z) for x in range(7) for z in range(7)}
+
+    def test_the_roof_does_not_disturb_the_storeys_below(self):
+        b = st.Building("t", 7, 7, 3)
+        b.frame()
+        before = {k: v for k, v in b.cells.items() if k[1] < 3}
+        b.roof()
+        assert {k: v for k, v in b.cells.items() if k[1] < 3} == before
+
+    def test_roofing_twice_is_an_error_rather_than_a_silent_overwrite(self):
+        b = st.Building("t", 7, 7, 2)
+        b.frame()
+        b.roof()
+        with pytest.raises(ValueError, match="claimed twice"):
+            b.roof()
+
+    def test_the_roof_ties_the_columns_it_sits_on(self):
+        # Beams land on the bay lines, so every column below has structure
+        # directly above it - the roof is the top tie, not a hat.
+        b = st.Building("t", 7, 7, 2)
+        b.frame()
+        b.roof()
+        for x in b.bx:
+            for z in b.bz:
+                assert (x, 2, z) in b.cells
+
+
+class TestRoofedBuildingsStillStand:
+    def test_a_roofed_building_passes_the_load_path(self):
+        b = st.Building("t", 7, 7, 3)
+        b.frame()
+        b.roof()
+        b.clad(lambda y: "brick")
+        assert st.structural_report(b.chunks())["standing"]
+
+    def test_the_roof_merges_into_runs_rather_than_per_cell_confetti(self):
+        # A floor that comes down in slabs reads as a floor collapsing; the
+        # same floor as 169 tiles reads as confetti. MAX_RUN concrete = 4.
+        b = st.Building("t", 13, 13, 2)
+        b.frame()
+        b.roof()
+        roof_chunks = [c for c in b.chunks() if c.y == 2]
+        assert roof_chunks
+        assert any(c.sx > 1 or c.sz > 1 for c in roof_chunks)
+        assert len(roof_chunks) < 169
+
+    def test_only_the_roof_reports_an_exposed_top_face(self):
+        # Revision 2 decided `top` by arithmetic on the storey count, which was
+        # true only because nothing was ever built above the top storey. Once
+        # roof() claims a storey, that test crowns the roof AND the storey
+        # under it. Probing +Y is the same question the vertical faces ask.
+        b = st.Building("t", 7, 7, 3)
+        b.frame()
+        b.roof()
+        chunks = b.chunks()
+        occupied = set()
+        for c in chunks:
+            occupied.update(c.cells_occupied())
+        for c in chunks:
+            expo = st._exposure(c, occupied, b.storeys)
+            if c.y + c.sy - 1 < 3:
+                assert not expo["top"], "%s crowned under a roof" % c.name
+
+    def test_a_buried_chunk_has_no_exposed_face_at_all(self):
+        b = st.Building("t", 13, 13, 3)
+        b.frame()
+        b.roof()
+        b.clad(lambda y: "brick")
+        chunks = b.chunks()
+        occupied = set()
+        for c in chunks:
+            occupied.update(c.cells_occupied())
+        buried = [c for c in chunks
+                  if not any(st._exposure(c, occupied, b.storeys)[k]
+                             for k in ("nx", "px", "nz", "pz", "top"))]
+        assert buried, "nothing is buried - the exposure probe is not working"
+
+    def test_no_occupied_cell_is_left_with_nothing_above_it_but_sky(self):
+        # V5 from the revision 3 spec, and the check that would have failed
+        # revision 2 outright. Every column of cells must top out in a roof
+        # cell rather than in whatever the top storey happened to be.
+        b = st.Building("t", 7, 7, 3)
+        b.frame()
+        b.roof()
+        b.clad(lambda y: "brick")
+        tops = {}
+        for (x, y, z) in b.cells:
+            tops[(x, z)] = max(tops.get((x, z), -1), y)
+        for (x, z), y in tops.items():
+            assert y == 3, "column %s tops out at storey %d" % ((x, z), y)
+
+
 # ================================================================ the kit side
 
 class TestKitPieces:
