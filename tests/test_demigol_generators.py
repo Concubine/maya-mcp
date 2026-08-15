@@ -408,6 +408,73 @@ class TestRoofedBuildingsStillStand:
             assert y == 3, "column %s tops out at storey %d" % ((x, z), y)
 
 
+class TestBoxesFitTheirAtlasPatch:
+    """Found by the live gate, not by any test: every hero chunk's UVs spilled
+    outside its atlas patch, worst 2.94x, and the worst was a brick WALL - so
+    this predates revision 3 and shipped in revision 2.
+
+    Each box is packed into its patch individually, before combine, at a fixed
+    `world_scale` so texel density is constant. A box LARGER than that envelope
+    cannot fit and bleeds into neighbouring patches. Kit pieces are one cell so
+    they always fit; hero boxes span whole chunks, up to 4 cells.
+
+    Splitting at cell boundaries fixes it without touching density, MAX_RUN, or
+    the destruction unit - the pieces combine back into one mesh.
+    """
+
+    def test_a_box_within_one_cell_is_left_alone(self):
+        boxes = [{"pos": [0.0, 0.0, 0.0], "dim": [2.99, 2.99, 2.99], "patch": "brick"}]
+        assert st.split_oversized(boxes) == boxes
+
+    def test_a_long_box_is_split_into_cell_sized_pieces(self):
+        boxes = [{"pos": [0.0, 0.0, 0.0], "dim": [11.99, 2.99, 2.99], "patch": "concrete"}]
+        out = st.split_oversized(boxes)
+        assert len(out) == 4
+        assert all(b["dim"][0] <= st.CELL + 1e-9 for b in out)
+
+    def test_splitting_preserves_the_occupied_volume(self):
+        boxes = [{"pos": [0.0, 0.0, 0.0], "dim": [11.99, 2.99, 2.99], "patch": "concrete"}]
+        out = st.split_oversized(boxes)
+        lo = min(b["pos"][0] - b["dim"][0] / 2.0 for b in out)
+        hi = max(b["pos"][0] + b["dim"][0] / 2.0 for b in out)
+        assert lo == pytest.approx(-11.99 / 2.0)
+        assert hi == pytest.approx(11.99 / 2.0)
+
+    def test_splitting_keeps_the_patch(self):
+        boxes = [{"pos": [0.0, 0.0, 0.0], "dim": [11.99, 2.99, 2.99], "patch": "concrete"}]
+        assert all(b["patch"] == "concrete" for b in st.split_oversized(boxes))
+
+    def test_a_box_long_on_two_axes_splits_on_both(self):
+        boxes = [{"pos": [0.0, 0.0, 0.0], "dim": [5.99, 2.99, 8.99], "patch": "concrete"}]
+        out = st.split_oversized(boxes)
+        assert len(out) == 2 * 3
+
+    def test_no_box_in_any_archetype_exceeds_one_cell(self):
+        for _, fn, _ in st.BUILDINGS:
+            b = fn()
+            chunks = b.chunks()
+            occupied = set()
+            for c in chunks:
+                occupied.update(c.cells_occupied())
+            for c in chunks:
+                for bx in st.chunk_boxes(c, occupied, b.storeys):
+                    for i in range(3):
+                        assert bx["dim"][i] <= st.CELL + 1e-6, (
+                            "%s box %.3f on axis %d" % (c.name, bx["dim"][i], i))
+
+    def test_chunks_stay_within_the_triangle_budget_after_splitting(self):
+        for _, fn, _ in st.BUILDINGS:
+            b = fn()
+            chunks = b.chunks()
+            occupied = set()
+            for c in chunks:
+                occupied.update(c.cells_occupied())
+            for c in chunks:
+                n = len(st.chunk_boxes(c, occupied, b.storeys))
+                budget = c.sx * c.sy * c.sz * st.TRI_BUDGET_PER_CELL
+                assert n * st.TRIS_PER_BOX <= budget, c.name
+
+
 # ================================================================ the kit side
 
 class TestKitPieces:

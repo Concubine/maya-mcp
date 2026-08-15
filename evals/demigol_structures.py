@@ -481,7 +481,65 @@ def chunk_boxes(ch, occupied, storeys):
             dim[axis] = 0.40
             if len(boxes) - 1 < budget_boxes:
                 boxes.append({"pos": pos, "dim": dim, "patch": "concrete"})
-    return boxes
+    return split_oversized(boxes)
+
+
+def split_oversized(boxes):
+    """Cut every box down to at most one cell on each axis.
+
+    Found by the LIVE gate and by nothing else. The roof rendered with teal
+    stripes across it - the glass patch, bleeding in from two columns over -
+    because a 4-cell roof deck is a single 11.99 m box.
+
+    Boxes are already packed one at a time, before combine, at a fixed
+    `world_scale`, which makes texel density a constant instead of a function
+    of object size. The cost of that choice is that a box BIGGER than the
+    envelope cannot be made to fit: its projection simply lays out wider than
+    one patch and spills into its neighbours. Measured, packing single boxes
+    into the concrete patch (u 0.5075-0.7425, v 0.7575-0.9925):
+
+        3.00 x 3.00 x 3.00   ->  u 0.513-0.737   inside
+        3.00 x 0.84 x 0.40   ->  u 0.582-0.668   inside
+       12.00 x 3.00 x 3.00   ->  u 0.444-0.806   SPILLS, both sides
+
+    So it is size, not shape - non-cubic boxes pack correctly, oversized ones
+    do not. Kit pieces never hit this because a piece is one cell.
+
+    Splitting at cell boundaries costs nothing else. Density is untouched,
+    `MAX_RUN` is untouched - which matters, because the Demigol side explicitly
+    rejected granulating chunks - and the pieces combine straight back into one
+    mesh, so the destruction unit is exactly what it was. Only the triangle
+    count moves, 44-54 to 73-78 against a 200-per-cell budget.
+
+    NOTE for anyone re-measuring this: a COMBINED chunk legitimately spans more
+    than one patch, because its body and its trim use different patches. Checking
+    a chunk's overall UV bbox against a single patch width therefore reports
+    every chunk as overflowing and means nothing. Measure per box, before
+    combine, or measure against the union of the patches the chunk actually
+    uses.
+    """
+    out = []
+    for b in boxes:
+        counts = [max(1, int(round(b["dim"][i] / CELL - 1e-6 + 0.5))) or 1
+                  for i in range(3)]
+        counts = [c if b["dim"][i] > CELL + 1e-9 else 1
+                  for i, c in enumerate(counts)]
+        if counts == [1, 1, 1]:
+            out.append(b)
+            continue
+        step = [b["dim"][i] / counts[i] for i in range(3)]
+        start = [b["pos"][i] - b["dim"][i] / 2.0 for i in range(3)]
+        for i in range(counts[0]):
+            for j in range(counts[1]):
+                for k in range(counts[2]):
+                    idx = (i, j, k)
+                    out.append({
+                        "pos": [start[a] + step[a] * (idx[a] + 0.5)
+                                for a in range(3)],
+                        "dim": list(step),
+                        "patch": b["patch"],
+                    })
+    return out
 
 
 # ====================================================== the structural check
