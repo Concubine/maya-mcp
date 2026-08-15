@@ -20,6 +20,9 @@ not escapes and are not listed.
 | 13 | rename 2 boolean results | rename | 2 | no | **should not have been required** — see finding below |
 | 14 | chamfer the chest girdle | sculpt_ops (bevel_edges) | 1 | no | the chunk Task 5's `soft_move` silently missed; caught by capturing, not by a number |
 | 15 | drop the aleph, keep the visor | delete_objects + create_primitive + bevel_edges + transform | 4 | no | art direction; the rune is carved INTO the brow, so removing one meant rebuilding the other |
+| 16 | mirror the 11 left chunks | array (mirror) | 11 | no | one call per mesh — mirror takes a single polygon mesh, so the shape of the tool sets the count |
+| 17 | strip the `_1` the mirror appended | rename | 11 | no | **should not have been required** — see finding below |
+| — | place the 11 right pivots | *(none needed)* | 0 | no | the plan budgeted 11 calls here; `array` had already mirrored them — see finding below |
 
 ## Notes
 
@@ -113,6 +116,30 @@ hold a highlight; bbox is unchanged at 2.2 x 1.213 x 1.454, so nothing about the
 proportions moved. `bevel_edges` is cmds-based and **preserved the pivot**, which
 is the contrast that makes the boolean finding above concrete rather than
 theoretical: same scene, same chunk, one op keeps the rig and the other does not.
+
+**Task 7 — `array` mirror DOES carry the pivot, reflected.** The plan asserted the
+opposite ("a mirrored chunk's pivot is not automatically the mirror of its source
+pivot") and budgeted 11 `transform` calls to fix it. Measured before spending
+them: all 11 right chunks already sat at the exact negated-X mirror of their
+source, to 1e-3. Eleven calls saved, and the plan's assumption was simply wrong.
+
+Read against the boolean finding above, this is the useful pair. Two ops in the
+same scene rebuild a mesh; `array` preserves the rig and `boolean_op` discards it.
+So pivot loss is a property of specific ops, not an inevitable consequence of
+rebuilding geometry — which means `boolean_op` could carry the pivot and does not.
+
+**Task 7, row 17 — `name_prefix` is a prefix, not a name.** All 11 mirror calls
+returned `golem_R_<part>_1`. Nothing else in the scene held those names, so the
+suffix is unconditional rather than collision avoidance — `array` numbers copies
+because an array of 12 needs 12 distinct names, and mirror inherits that even
+though it makes exactly one copy. Cost: 11 `rename` calls to undo, doubling the
+task's tool count from 11 to 22. Worth ranking, because `mirror` is the one mode
+where the copy count is always exactly one and the caller always knows the name
+they want.
+
+**Task 7 — every mirror reported positive `signed_volume` and zero warnings.** The
+inverted-normals trap the tool description warns about did not fire on any of the
+11. Recorded because a check that never fails still has to be run to know that.
 
 **Step 5 — one proportion was wrong and was caught by looking.** The head sat
 0.6 of its 1.0 height inside the chest girdle and the figure measured 4.5 against
