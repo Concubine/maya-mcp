@@ -2,17 +2,31 @@
   "contract": "Demigol KIT OF PARTS",
   "scope": "one-cell pieces, not buildings",
   "units": "metres, Y-up, 1 unit = 1 m, cell = 3 m",
-  "envelope": "3 x 3 x 3 m, render geometry inset 0.005 m",
+  "envelope": {
+    "cell_m": 3.0,
+    "inset_m": 0.005,
+    "inset_note": "faces that meet a neighbouring cell inset 0.005 m - the z-fight fix",
+    "max_outset_m": 0.5,
+    "outset_note": "ornament may oversail the cell face by up to 0.5 m; declared per piece as outset_m. The lattice constrains which CELLS a piece occupies, never the render mesh, because collision is generated from the grid.",
+    "pieces_with_outset": 9,
+    "max_declared_outset_m": 0.34
+  },
   "pivot": "cell centre (0,0,0) on every piece",
   "authored_facing": "+Z; the shell rotates in 90 degree steps. Corner pieces read from +Z AND +X.",
   "material": {
     "shared": true,
     "shader": "kit_material (standardSurface)",
-    "atlas": "kit_atlas.png",
+    "maps": {
+      "albedo": "kit_albedo.png",
+      "normal": "kit_normal.png (tangent space)",
+      "mask": "kit_mask.png (R = metallic, G = smoothness, A = smoothness; A is where Unity's Standard shader reads smoothness from, G keeps it readable by eye)"
+    },
+    "atlas_px": 4096,
     "atlas_grid": [
       4,
       4
     ],
+    "patch_px": 1024,
     "patches": {
       "brick": {
         "index": 0,
@@ -20,7 +34,9 @@
           115,
           61,
           46
-        ]
+        ],
+        "metallic": 0.0,
+        "smoothness": 0.14
       },
       "brick_dark": {
         "index": 1,
@@ -28,7 +44,9 @@
           78,
           41,
           31
-        ]
+        ],
+        "metallic": 0.0,
+        "smoothness": 0.12
       },
       "concrete": {
         "index": 2,
@@ -36,7 +54,9 @@
           158,
           156,
           148
-        ]
+        ],
+        "metallic": 0.0,
+        "smoothness": 0.22
       },
       "concrete_dark": {
         "index": 3,
@@ -44,23 +64,29 @@
           112,
           110,
           104
-        ]
+        ],
+        "metallic": 0.0,
+        "smoothness": 0.18
       },
       "steel": {
         "index": 4,
         "rgb": [
-          87,
-          94,
-          107
-        ]
+          140,
+          148,
+          162
+        ],
+        "metallic": 1.0,
+        "smoothness": 0.62
       },
       "steel_dark": {
         "index": 5,
         "rgb": [
-          56,
-          61,
-          70
-        ]
+          92,
+          99,
+          112
+        ],
+        "metallic": 1.0,
+        "smoothness": 0.48
       },
       "glass": {
         "index": 6,
@@ -68,7 +94,9 @@
           92,
           140,
           158
-        ]
+        ],
+        "metallic": 0.0,
+        "smoothness": 0.95
       },
       "glass_bright": {
         "index": 7,
@@ -76,7 +104,9 @@
           140,
           186,
           199
-        ]
+        ],
+        "metallic": 0.0,
+        "smoothness": 0.97
       },
       "infill": {
         "index": 8,
@@ -84,7 +114,9 @@
           189,
           184,
           168
-        ]
+        ],
+        "metallic": 0.0,
+        "smoothness": 0.36
       },
       "infill_dark": {
         "index": 9,
@@ -92,7 +124,9 @@
           140,
           136,
           124
-        ]
+        ],
+        "metallic": 0.0,
+        "smoothness": 0.3
       },
       "amber": {
         "index": 10,
@@ -100,7 +134,9 @@
           222,
           143,
           32
-        ]
+        ],
+        "metallic": 0.0,
+        "smoothness": 0.45
       },
       "shadow": {
         "index": 11,
@@ -108,7 +144,9 @@
           28,
           28,
           30
-        ]
+        ],
+        "metallic": 0.0,
+        "smoothness": 0.08
       },
       "rust": {
         "index": 12,
@@ -116,7 +154,9 @@
           128,
           74,
           44
-        ]
+        ],
+        "metallic": 0.0,
+        "smoothness": 0.1
       },
       "trim": {
         "index": 13,
@@ -124,7 +164,9 @@
           206,
           203,
           194
-        ]
+        ],
+        "metallic": 0.0,
+        "smoothness": 0.32
       },
       "grime": {
         "index": 14,
@@ -132,7 +174,9 @@
           74,
           72,
           68
-        ]
+        ],
+        "metallic": 0.0,
+        "smoothness": 0.1
       },
       "sky_glass": {
         "index": 15,
@@ -140,10 +184,21 @@
           110,
           158,
           175
-        ]
+        ],
+        "metallic": 0.0,
+        "smoothness": 0.95
       }
     },
-    "note": "every piece samples one 128 px patch of the single atlas, so the whole kit draws in one batch"
+    "note": "three maps on ONE atlas layout under ONE material: zero extra draw calls, zero extra triangles. The mask is what stops glass, steel and brick reflecting light identically."
+  },
+  "texel_density": {
+    "px_per_metre": 113.8,
+    "world_scale_m_per_patch": 9.0,
+    "how_it_is_achieved": "uv_atlas world_scale mode: UV scale is derived from real-world size, so a 0.5 m band and a 3 m slab carry identical pixels per metre. Family 1 normalised each box to fill its patch, so density varied ~6x between pieces and was not knowable from the manifest - that unknowability was the defect.",
+    "why_not_170": "A box auto-projection lays a piece's six faces side by side: measured live, a cube's UV bbox spans 2.858 face-widths, not one. So a patch covers ~9 m of layout, not one 3 m face, and px/m is patch_px / world_scale. The contract's ~170 px/m assumed one patch per face; reaching it under box projection would need a 6144 atlas. 4096 gives 113.8 px/m.",
+    "brick_courses_per_metre": 13.0,
+    "brick_courses_per_3m_face": 39,
+    "brick_note": "drawn at real-world scale: 117 courses across the 9 m patch, so a 3 m face reads ~39. Family 1 drew 8 per patch, putting ~7 courses on a 3 m face - about 5x oversize."
   },
   "budgets": {
     "interior": 20,
@@ -151,15 +206,15 @@
     "tris_per_box": 12
   },
   "totals": {
-    "pieces": 37,
-    "triangles": 1956,
+    "pieces": 41,
+    "triangles": 2364,
     "shading_groups": [
       "kit_materialSG"
     ],
-    "widest_extent_m": 1.495,
+    "widest_extent_m": 1.84,
     "uv_range": [
-      0.0075,
-      0.9925
+      0.0079,
+      0.9921
     ]
   },
   "self_check": {
@@ -177,7 +232,8 @@
       "variant": "a",
       "triangles": 12,
       "boxes": 1,
-      "budget": 20
+      "budget": 20,
+      "outset_m": 0.0
     },
     {
       "name": "kit_brick_interior_a",
@@ -186,7 +242,8 @@
       "variant": "a",
       "triangles": 12,
       "boxes": 1,
-      "budget": 20
+      "budget": 20,
+      "outset_m": 0.0
     },
     {
       "name": "kit_steel_column_a",
@@ -195,16 +252,18 @@
       "variant": "a",
       "triangles": 36,
       "boxes": 3,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.0
     },
     {
       "name": "kit_steel_column_b",
       "role": "steel",
       "context": "column",
       "variant": "b",
-      "triangles": 60,
-      "boxes": 5,
-      "budget": 120
+      "triangles": 72,
+      "boxes": 6,
+      "budget": 120,
+      "outset_m": 0.24
     },
     {
       "name": "kit_steel_column_c",
@@ -213,7 +272,8 @@
       "variant": "c",
       "triangles": 48,
       "boxes": 4,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.0
     },
     {
       "name": "kit_steel_beam_a",
@@ -222,7 +282,8 @@
       "variant": "a",
       "triangles": 36,
       "boxes": 3,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.0
     },
     {
       "name": "kit_steel_beam_b",
@@ -231,7 +292,8 @@
       "variant": "b",
       "triangles": 60,
       "boxes": 5,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.0
     },
     {
       "name": "kit_steel_lobby_a",
@@ -240,7 +302,8 @@
       "variant": "a",
       "triangles": 60,
       "boxes": 5,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.0
     },
     {
       "name": "kit_concrete_beam_a",
@@ -249,7 +312,8 @@
       "variant": "a",
       "triangles": 24,
       "boxes": 2,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.0
     },
     {
       "name": "kit_concrete_beam_b",
@@ -258,7 +322,8 @@
       "variant": "b",
       "triangles": 36,
       "boxes": 3,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.0
     },
     {
       "name": "kit_concrete_base_a",
@@ -267,7 +332,8 @@
       "variant": "a",
       "triangles": 36,
       "boxes": 3,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.15
     },
     {
       "name": "kit_concrete_base_b",
@@ -276,7 +342,8 @@
       "variant": "b",
       "triangles": 48,
       "boxes": 4,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.15
     },
     {
       "name": "kit_concrete_roof_a",
@@ -285,16 +352,18 @@
       "variant": "a",
       "triangles": 24,
       "boxes": 2,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.0
     },
     {
       "name": "kit_concrete_roof_b",
       "role": "concrete",
       "context": "roof",
       "variant": "b",
-      "triangles": 48,
-      "boxes": 4,
-      "budget": 120
+      "triangles": 72,
+      "boxes": 6,
+      "budget": 120,
+      "outset_m": 0.34
     },
     {
       "name": "kit_concrete_soffit_a",
@@ -303,7 +372,8 @@
       "variant": "a",
       "triangles": 60,
       "boxes": 5,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.0
     },
     {
       "name": "kit_brick_facade_a",
@@ -312,25 +382,28 @@
       "variant": "a",
       "triangles": 48,
       "boxes": 4,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.16
     },
     {
       "name": "kit_brick_facade_b",
       "role": "brick",
       "context": "facade",
       "variant": "b",
-      "triangles": 72,
-      "boxes": 6,
-      "budget": 120
+      "triangles": 84,
+      "boxes": 7,
+      "budget": 120,
+      "outset_m": 0.14
     },
     {
       "name": "kit_brick_facade_c",
       "role": "brick",
       "context": "facade",
       "variant": "c",
-      "triangles": 48,
-      "boxes": 4,
-      "budget": 120
+      "triangles": 72,
+      "boxes": 6,
+      "budget": 120,
+      "outset_m": 0.22
     },
     {
       "name": "kit_brick_corner_a",
@@ -339,7 +412,8 @@
       "variant": "a",
       "triangles": 72,
       "boxes": 6,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.0
     },
     {
       "name": "kit_brick_corner_b",
@@ -348,7 +422,8 @@
       "variant": "b",
       "triangles": 96,
       "boxes": 8,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.0
     },
     {
       "name": "kit_brick_roof_a",
@@ -357,16 +432,18 @@
       "variant": "a",
       "triangles": 24,
       "boxes": 2,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.0
     },
     {
       "name": "kit_brick_roof_b",
       "role": "brick",
       "context": "roof",
       "variant": "b",
-      "triangles": 48,
-      "boxes": 4,
-      "budget": 120
+      "triangles": 60,
+      "boxes": 5,
+      "budget": 120,
+      "outset_m": 0.3
     },
     {
       "name": "kit_brick_soffit_a",
@@ -375,7 +452,8 @@
       "variant": "a",
       "triangles": 60,
       "boxes": 5,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.0
     },
     {
       "name": "kit_brick_lobby_a",
@@ -384,7 +462,8 @@
       "variant": "a",
       "triangles": 36,
       "boxes": 3,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.0
     },
     {
       "name": "kit_infill_facade_a",
@@ -393,7 +472,8 @@
       "variant": "a",
       "triangles": 60,
       "boxes": 5,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.0
     },
     {
       "name": "kit_infill_facade_b",
@@ -402,7 +482,8 @@
       "variant": "b",
       "triangles": 72,
       "boxes": 6,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.0
     },
     {
       "name": "kit_infill_facade_c",
@@ -411,7 +492,8 @@
       "variant": "c",
       "triangles": 72,
       "boxes": 6,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.0
     },
     {
       "name": "kit_infill_corner_a",
@@ -420,7 +502,8 @@
       "variant": "a",
       "triangles": 72,
       "boxes": 6,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.0
     },
     {
       "name": "kit_infill_corner_b",
@@ -429,7 +512,8 @@
       "variant": "b",
       "triangles": 48,
       "boxes": 4,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.0
     },
     {
       "name": "kit_infill_roof_a",
@@ -438,7 +522,8 @@
       "variant": "a",
       "triangles": 24,
       "boxes": 2,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.0
     },
     {
       "name": "kit_infill_soffit_a",
@@ -447,16 +532,18 @@
       "variant": "a",
       "triangles": 60,
       "boxes": 5,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.0
     },
     {
       "name": "kit_glass_facade_a",
       "role": "glass",
       "context": "facade",
       "variant": "a",
-      "triangles": 72,
-      "boxes": 6,
-      "budget": 120
+      "triangles": 84,
+      "boxes": 7,
+      "budget": 120,
+      "outset_m": 0.16
     },
     {
       "name": "kit_glass_facade_b",
@@ -465,7 +552,8 @@
       "variant": "b",
       "triangles": 84,
       "boxes": 7,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.0
     },
     {
       "name": "kit_glass_facade_c",
@@ -474,7 +562,8 @@
       "variant": "c",
       "triangles": 96,
       "boxes": 8,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.0
     },
     {
       "name": "kit_glass_corner_a",
@@ -483,7 +572,8 @@
       "variant": "a",
       "triangles": 72,
       "boxes": 6,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.0
     },
     {
       "name": "kit_glass_roof_a",
@@ -492,7 +582,48 @@
       "variant": "a",
       "triangles": 36,
       "boxes": 3,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.0
+    },
+    {
+      "name": "kit_brick_endcap_a",
+      "role": "brick",
+      "context": "endcap",
+      "variant": "a",
+      "triangles": 72,
+      "boxes": 6,
+      "budget": 120,
+      "outset_m": 0.0
+    },
+    {
+      "name": "kit_brick_endcap_b",
+      "role": "brick",
+      "context": "endcap",
+      "variant": "b",
+      "triangles": 96,
+      "boxes": 8,
+      "budget": 120,
+      "outset_m": 0.0
+    },
+    {
+      "name": "kit_infill_endcap_a",
+      "role": "infill",
+      "context": "endcap",
+      "variant": "a",
+      "triangles": 72,
+      "boxes": 6,
+      "budget": 120,
+      "outset_m": 0.0
+    },
+    {
+      "name": "kit_glass_endcap_a",
+      "role": "glass",
+      "context": "endcap",
+      "variant": "a",
+      "triangles": 72,
+      "boxes": 6,
+      "budget": 120,
+      "outset_m": 0.0
     },
     {
       "name": "kit_glass_lobby_a",
@@ -501,7 +632,8 @@
       "variant": "a",
       "triangles": 84,
       "boxes": 7,
-      "budget": 120
+      "budget": 120,
+      "outset_m": 0.0
     }
   ],
   "tiling_proof": {
@@ -509,13 +641,13 @@
     "pieces": 30,
     "measured_bbox": [
       -1.495,
-      -1.495,
-      -1.495,
+      -1.5,
+      -1.524,
       16.495,
-      13.495,
-      1.495
+      13.5,
+      1.84
     ],
-    "expected_bbox": [
+    "lattice_bbox": [
       -1.5,
       -1.5,
       -1.5,
@@ -523,12 +655,26 @@
       13.5,
       1.5
     ],
-    "lattice_conformant": true,
+    "oversail_per_face_m": [
+      -0.005,
+      0.0,
+      0.024,
+      -0.005,
+      0.0,
+      0.34
+    ],
+    "allowance_m": [
+      -0.005,
+      0.5
+    ],
+    "within_allowance": true,
     "corner_rule": "rotating the authored (+Z,+X) corner by 90 degree steps gives (+X,-Z), (-Z,-X), (-X,+Z) - exactly the four corners of a rectangular plan. A wall that simply ENDS needs (+Z,-X), which is a mirror, not a rotation, and is not in this kit."
   },
   "files": [
     "demigol_kit.fbx",
-    "kit_atlas.png",
+    "kit_albedo.png",
+    "kit_normal.png",
+    "kit_mask.png",
     "contact_sheet.png",
     "tiling_proof.png"
   ]
