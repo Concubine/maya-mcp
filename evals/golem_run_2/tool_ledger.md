@@ -33,6 +33,10 @@ not escapes and are not listed.
 | 25 | atlas all 29 into patch 0 | uv_atlas | 1 | no | **2 calls attempted** — `patch: 0` was refused, see finding |
 | 26 | the kit's three maps on all 29 | assign_pbr | 1 | no | claim 2 of #601 — one material, 29 meshes |
 | 27 | seam glow on the 6 chunks nearest the eye | assign_pbr | 5 | no | `params` is the only way to keep the maps AND vary emission — see finding |
+| 28 | light it | setup_lighting | 4 | no | environment → three_point → environment; three of the four were diagnosis, see finding |
+| 29 | prove the dome was dead | create_primitive + assign_material | 2 | no | a 50% grey probe sphere; the call that turned a suspicion into a defect |
+| 30 | hero renders | render_scene | 11 | no | **8 of the 11 were diagnosis**, not pictures — see finding |
+| 31 | the per-chunk sheet | render_sheet | 2 | no | 29 cells in ONE call against the kit's 41; the second call was the Arnold retry that timed out |
 
 ## Notes
 
@@ -242,6 +246,117 @@ the city's material rather than dressed in a picture of it, which is the whole
 reason to match density rather than pick a flattering hero number. Recorded because
 "maps authored for flat plates, used on a creature" is exactly the kind of thing a
 benchmark should test rather than assume.
+
+**Task 10, rows 28–30 — THE DOME LIT NOTHING, and it is the run's most
+consequential finding.** `maya_setup_lighting(preset='environment')` built an
+`aiSkyDomeLight` that drew as *background* and illuminated nothing at all. Not
+dim — a plain 50%-grey `standardSurface` probe sphere rendered **pure black**
+while the dome's own sky blew out behind it (`clipped_fraction` 0.45), at
+intensity 1.0 and at 4.0 alike, so it was never a scaling problem.
+
+Cause: `_build_dome` used `cmds.createNode("aiSkyDomeLight")`, which builds the
+node but never wires it into Maya's lighting network. Fixed at `aa91c0f` by
+building it with `cmds.shadingNode(..., asLight=True)`, plus two regression
+tests; 833 green, and gated live — the same call that rendered a black golem now
+renders brickwork, a horizon and a lit visor.
+
+Four hypotheses died first, and they are recorded so nobody re-derives them: it
+is **not** the ramp on `.color`, **not** `defaultLightSet` membership, **not**
+the `lightList` connection, and **not** `render_scene`'s `relight`. Each was
+applied to a live `createNode` dome and each produced a **byte-identical** frame
+(mean_luma 177.9, 2753 distinct colours, five times running). Even renaming the
+node out of the `mcpLight` prefix and matching every attribute to a stock dome
+left it black. A light has to be *built* as a light.
+
+What makes it matter is what the preset is FOR. Its own docstring says a
+three-point rig physically cannot show a metal — metalness 1.0 renders black
+there — and that only an environment can fix it. So the tool's answer to its own
+measured failure was inert from the day it was written, and **every metallic
+material ever judged through `environment` or `hdri` was judged unlit**. That
+includes the kit steel this very golem is dressed in.
+
+Honest note on cost: my first guess was the metalness trap, and metalness
+measured 0.0. Diagnosis ran to 8 renders and 4 wrong hypotheses. It was worth
+it, but the sequence is itself the lesson — the tool reported `warnings: []` at
+every step and `fallback_light: false`, i.e. it believed the scene was lit.
+
+**Task 10 — `render_scene` with a dome and no `target` frames the DOME.** The
+first hero render put the camera at **5294 units** from a 5 m subject and came
+back as a photograph of the sky. The guard that exists for exactly this —
+"a render of nothing is a valid image" — did not fire, because it counts
+`opaque_px`, and a dome fills the frame with opaque pixels: it reported
+409600/409600. Passing `target` fixes it, but nothing warns you, and the failure
+looks like a successful render. Worth ranking: the dome preset and the framing
+default are individually reasonable and together produce a confident picture of
+nothing.
+
+**Task 10, row 31 — `render_sheet`'s `isolate` keeps the subject's DESCENDANTS.**
+On a parented rig that is not a kit sheet. 14 of the 29 cells came back as
+sub-assemblies rather than chunks — `golem_C_pelvis` rendered the entire golem,
+`golem_C_head` rendered head + brow + tracer bars. Only the 15 leaf nodes were
+right. The sheet is built for a flat kit, and nothing in it notices that the
+subjects form a tree. Either `isolate` should hide descendants that are
+themselves subjects, or the tool should warn when a subject contains another.
+
+**Task 10 — `render_sheet` has no `timeout_s`, and its own timeout hint tells
+you to pass one.** 29 Arnold cells at 256 px and 1 sample exceeded the 600 s
+limit; the error hint reads "pass a larger timeout_s", but the tool's schema
+exposes no such parameter, so the advice cannot be followed. Meanwhile the
+session stays blocked until the render finishes. The workable answer is
+`renderer='hw2'` — which is fast, and which **cannot show a dome at all**, since
+image-based lighting is a render feature. So on a dome-lit scene the sheet is a
+choice between correct-and-untakeable and fast-and-unlit.
+
+**Task 10 — `capture_viewport` has the same dome-framing failure, and no way
+out.** `frame_all` framed the dome, put the camera at **5498 units** from a 5 m
+subject, and returned a **blank white image**. Unlike `render_scene` it has no
+`target` parameter, so the only way to frame the subject is `isolate` — which is
+precisely the code path #618 was about. With `isolate` it framed correctly at 9
+units. Two tools, the same defect, and the one with fewer escapes is the one
+that returns a plausible-looking blank.
+
+**Task 10 — no image tool can write to disk, and the artifacts are a
+deliverable.** `render_scene`, `render_sheet`, `capture_viewport` and
+`capture_turntable` all return the image as the call's value and clean up after
+themselves; the project's images folder held exactly one stale temp file. So a
+run whose plan says "write every image under `evals/golem_run_2/`" **cannot do
+it through the tool surface at all**. The three hero stills here were produced by
+escaping to `execute_python` and calling the plugin's own `render._render_frame`
+— reusing the real pipeline rather than reimplementing it, so the #615 display
+transform still applies. **Recorded as an escape.** The contact sheet, turntable
+and SSAO frames were NOT written, because writing them means reimplementing each
+tool's compositing; they exist only in the run transcript. A `path` parameter on
+the four image tools would close this outright, and it is the cheapest high-value
+fix on the list.
+
+## Task 10 — the rubric, answered honestly
+
+The design set three questions. Two pass, one fails, and one passes only on the
+measurement rather than on the eye.
+
+**1. Does the silhouette read at thumbnail size — squat, crouched, arms to
+mid-shin? YES.** At 900 px and again at contact-sheet scale the figure reads
+immediately: wide shoulders over a short pelvis, forward hunch, fists ending
+level with mid-shin. The head reads as a distinct blue-grey helmet against a rust
+body — an accident of world-space projection sampling a different atlas region at
+head height, not a decision, but it works and it is what makes the visor the
+focal point.
+
+**2. Do the joins carry under SSAO? NO.** The AO capture shows almost no contact
+darkening at the gasket collars. They read as separate balls threaded on the
+limb rather than as joins that sell a hinge — which is the exact failure the #574
+design named and asked to be checked for. The gaskets are doing silhouette work,
+not shading work. This is the honest answer and it is a real note against the
+model, not against the tool.
+
+**3. Does the glow read as one idea, tracer eye → seams → key? PARTLY.** The eye
+reads strongly and unmistakably as the source. The body seam glow does not read
+at all: at 0.013–0.315 emission against a dome-lit body it is measurable
+(monotonic, verified) and invisible. So the falloff is correct and pointless at
+these values. Either the body needs an order of magnitude more emission, or the
+scene needs to be darker for it to have anything to be brighter than. Recorded
+rather than quietly re-tuned, because "the number is right and the picture does
+not show it" is worth more to the report than a dialled-in value.
 
 **Step 5 — one proportion was wrong and was caught by looking.** The head sat
 0.6 of its 1.0 height inside the chest girdle and the figure measured 4.5 against
