@@ -20,6 +20,7 @@ class FakeCmds:
         self.deleted = []
         self.uv_calls = []
         self.fail_on = None
+        self.pivots = {}
 
     def _add(self, name, kind="mesh"):
         long = "|" + name.lstrip("|")
@@ -91,9 +92,13 @@ class FakeCmds:
     # --- transforms
     def xform(self, node, **kw):
         if kw.get("query"):
+            if kw.get("rotatePivot") or kw.get("pivots"):
+                return list(self.pivots.get(node, (0.0, 0.0, 0.0)))
             return [0.0, 0.0, 0.0]
         if "pivots" in kw:
-            self.calls.append(("pivot", node))
+            value = tuple(kw["pivots"])
+            self.pivots[node] = value
+            self.calls.append(("pivot", node, value))
             return None
         for key in ("scale", "rotation", "translation"):
             if key in kw:
@@ -459,6 +464,10 @@ class TestPivots:
         })
         arm = next(o for o in result["objects"] if o["name"].endswith("arm"))
         assert arm["pivot"] == [0.0, 3.0, 0.0]
+        # The reported dict field alone doesn't prove the Maya-side mutation
+        # ran - assert the real cmds.xform(pivots=...) call happened too, on
+        # the merged node, with the caller's vector (not the "center" mode's).
+        assert ("pivot", arm["name"], (0.0, 3.0, 0.0)) in fake.calls
 
     def test_assemble_pivots_reach_single_part_chunks(self, monkeypatch):
         fake = FakeCmds()
@@ -469,6 +478,10 @@ class TestPivots:
             "pivots": {"fist": [1.0, 2.0, 3.0]},
         })
         assert result["objects"][0]["pivot"] == [1.0, 2.0, 3.0]
+        # Same proof for the single-part branch: the dict field is computed
+        # from `wanted` independently of whether cmds.xform ever ran, so
+        # assert the real call too.
+        assert ("pivot", result["objects"][0]["name"], (1.0, 2.0, 3.0)) in fake.calls
 
     def test_assemble_unlisted_chunks_keep_the_mode(self, monkeypatch):
         fake = FakeCmds()
