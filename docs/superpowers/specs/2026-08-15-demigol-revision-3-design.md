@@ -190,6 +190,21 @@ defensible and the answer depends on how the plates actually behave once built. 
 made once, recorded in the manifest as a stated property, and checked — sub-project 2 is not
 complete while it is still open.
 
+**One input to that decision, recorded now.** The user's longer-term intent is a **destructible
+city floor**, with buildings sitting on top of it. That is a Demigol concern and not part of any
+Maya delivery — heroes describe themselves from their own origin (min-corner cell centre at local
+`y = 0`, floor plane at `y = −1.5`) and say nothing about ground.
+
+But it invalidates an assumption the hero contract currently bakes in: the load-path check
+**flood-fills the frame from storey 0**, which treats ground as an immovable anchor and makes
+"reaches storey 0" the definition of supported. If the floor beneath a building can be destroyed,
+that definition no longer holds, and Demigol's `SupportSolver` needs another anchor.
+
+This argues *for* floor plates being structural — a building with internal load paths survives
+losing part of its base, where one relying solely on ground contact does not. Not decisive on its
+own, but it should be weighed when §4.4 is settled, and flagged to the Demigol side as a contract
+assumption with a known expiry.
+
 ---
 
 ## 5. Sub-project 3 — hero finish
