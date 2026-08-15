@@ -4,7 +4,9 @@
 
 **Goal:** Make `render_scene` return a *displayable* image instead of raw linear pixels, so an asset's colour and value can be judged from a render.
 
-**Architecture:** The defect and the fix both live in `maya_plugin/handlers/render.py`. A calibration helper renders a surface of known albedo under a known light and asserts the returned 8-bit value, which turns "does the image look right" into a number. Task 1 is a time-boxed spike that decides between two fixes; Tasks 2–4 implement whichever it selects. The fix must be **plugin-side**, not MCP-server-side, because the eval scripts talk to the plugin directly over TCP (`evals/live_call.py`) and never pass through the server.
+**Architecture:** The defect and the fix both live in `maya_plugin/handlers/render.py`. A calibration helper renders a surface of known albedo under a known light and asserts the returned 8-bit value, which turns "does the image look right" into a number. Task 1 is a time-boxed spike that establishes *how* to reach Path A, not *whether* to take it. The fix must be **plugin-side**, not MCP-server-side, because the eval scripts talk to the plugin directly over TCP (`evals/live_call.py`) and never pass through the server.
+
+**Path A — having Arnold apply the transform in float — is the committed target, chosen for durability and image quality rather than cost.** Task 2 exists only for the case where Path A proves impossible on this mtoa version, and taking it requires saying so on #615.
 
 **Tech Stack:** Python 3, `maya.cmds`, `maya.api.OpenMaya.MImage`, pytest, `uv`.
 
@@ -107,8 +109,13 @@ cmds.arnoldRender(camera=cam, width=res, height=res, batch=True)
 
 - [ ] **Step 3: Decide and record**
 
-- **Path A** if any probe returns ~188: Arnold applies the transform. Preferred — full float precision, no banding.
-- **Path B** if none do: post-correct in the handler with a byte LUT. Costs shadow banding, since the source is already 8-bit linear. Acceptable (the manual correction of `stump.png` retained 2,769 distinct colours) but strictly worse.
+**Path A is the committed target. Hours are not the tie-breaker — durability and image quality are (user's call, 2026-08-15).**
+
+- **Path A — Arnold applies the transform.** The conversion happens in float *inside* Arnold, before the result is quantised to 8 bits, so there is no banding. It also reads the scene's colour management, which means it stays correct if the OCIO config or rendering space changes later. This is both the more durable and the better-looking answer.
+- **Escalate within Path A rather than falling back.** If the driver attribute alone will not do it, changing the arnold render call from `cmds.render` to `cmds.arnoldRender` is in scope for this plan. Keep `cmds.render` for `hw2` and branch on renderer; the existing comment at `render.py:215` explains why `cmds.render` was chosen, and that reasoning only ever applied to picking up `currentRenderer`, not to colour management.
+- **Path B is a documented compromise, not a fallback of convenience.** Take it only if Path A is demonstrably impossible on this mtoa version. It post-corrects data that is *already* 8-bit linear, so shadow detail lost to quantisation cannot be recovered and gradients will band. The manual correction of `stump.png` retained 2,769 distinct colours, which is tolerable but strictly worse. If Path B is taken, say so on #615 and open a follow-up to revisit Path A.
+
+**Rejected as less durable, not more:** rendering to float EXR and applying the transform ourselves. It sounds like the most controllable option, but it adds an EXR decode/encode stage, a per-pixel pass that is either slow in pure Python or dependent on Maya's numpy, and a second place for the transform to be wrong — more machinery for the same visual result Path A gives for free.
 
 Post the outcome and the measured numbers to #615. Then delete the probe and restore the lights.
 
