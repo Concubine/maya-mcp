@@ -504,3 +504,152 @@ class TestRenderSheet:
 
     def test_a_sheet_does_not_pollute_the_undo_queue(self):
         assert render.render_sheet.no_undo_chunk is True
+
+
+class FakeArnoldCmds(FakeCmds):
+    """FakeCmds plus the mtoa-side surface _render_frame touches.
+
+    Seeded with the scene as found on 9877: the driver on Use Output Transform
+    with output transforms DISABLED, which is the configuration in which mode 2
+    silently degrades to Raw (redmine #615).
+    """
+
+    def __init__(self, tmp_path, output_transforms=None, arnold_render_raises=False):
+        super().__init__(lights=["|keyLightShape"])
+        self.tmp_path = tmp_path
+        self.attrs["defaultArnoldDriver.colorManagement"] = 0
+        self.attrs["defaultArnoldDriver.aiTranslator"] = "exr"
+        self.output_transforms = (
+            ["Un-tone-mapped (sRGB)", "ACES 1.0 SDR-video (sRGB)"]
+            if output_transforms is None
+            else list(output_transforms)
+        )
+        self.cm_prefs = {
+            "outputTransformEnabled": False,
+            "outputTransformName": "ACES 1.0 SDR-video (sRGB)",
+            "viewTransformName": "ACES 1.0 SDR-video (sRGB)",
+        }
+        self.arnold_render_raises = arnold_render_raises
+        self.arnold_renders = []
+        self.legacy_renders = []
+        self.during = []  # colour-management state at the moment of rendering
+
+    def colorManagementPrefs(self, *args, **kwargs):
+        if kwargs.get("query"):
+            if kwargs.get("outputTransformNames"):
+                return list(self.output_transforms)
+            for key in ("outputTransformEnabled", "outputTransformName",
+                        "viewTransformName"):
+                if kwargs.get(key):
+                    return self.cm_prefs[key]
+            return None
+        for key in ("outputTransformEnabled", "outputTransformName",
+                    "viewTransformName"):
+            if key in kwargs:
+                self.cm_prefs[key] = kwargs[key]
+        return None
+
+    def renderSettings(self, **kwargs):
+        prefix = self.attrs["defaultRenderGlobals.imageFilePrefix"]
+        return [str(self.tmp_path / (prefix + ".png"))]
+
+    def _snapshot(self):
+        return {
+            "colorManagement": self.attrs["defaultArnoldDriver.colorManagement"],
+            "aiTranslator": self.attrs["defaultArnoldDriver.aiTranslator"],
+            "outputTransformEnabled": self.cm_prefs["outputTransformEnabled"],
+            "outputTransformName": self.cm_prefs["outputTransformName"],
+        }
+
+    def arnoldRender(self, **kwargs):
+        self.during.append(self._snapshot())
+        if self.arnold_render_raises:
+            raise RuntimeError("arnoldRender exploded")
+        self.arnold_renders.append(kwargs)
+        self._write_image(self.renderSettings()[0])
+
+    def render(self, camera, **kwargs):
+        self.during.append(self._snapshot())
+        self.legacy_renders.append({"camera": camera, **kwargs})
+        prefix = self.attrs["defaultRenderGlobals.imageFilePrefix"]
+        path = str(self.tmp_path / (prefix + "_legacy.png"))
+        self._write_image(path)
+        return path
+
+    @staticmethod
+    def _write_image(path):
+        from PIL import Image as PILImage
+
+        PILImage.new("RGB", (8, 8), (188, 188, 188)).save(path)
+
+
+@pytest.fixture
+def arnold_cmds(tmp_path):
+    return FakeArnoldCmds(tmp_path)
+
+
+def _frame(fake, renderer="arnold"):
+    return render._render_frame(fake, "|cam|camShape", "shot0", renderer, 256, 3)
+
+
+class TestDisplayTransform:
+    """#615: every frame this tool returned was raw linear, ~2.2 gamma dark.
+
+    cmds.render never consults the Arnold driver, so no colour-management
+    setting could reach it. cmds.arnoldRender does - measured live, a linear-0.5
+    plane goes 127 -> 188 - which is why the arnold branch changes render call.
+    """
+
+    def test_arnold_frames_go_through_arnold_render(self, arnold_cmds):
+        _frame(arnold_cmds)
+        assert len(arnold_cmds.arnold_renders) == 1
+        assert arnold_cmds.legacy_renders == []
+
+    def test_the_frame_is_rendered_with_the_output_transform_applied(self, arnold_cmds):
+        _frame(arnold_cmds)
+        during = arnold_cmds.during[0]
+        assert during["colorManagement"] == 2  # Use Output Transform
+        assert during["outputTransformEnabled"] is True
+        assert during["outputTransformName"] == render.DISPLAY_TRANSFORM
+
+    def test_it_writes_png_rather_than_the_drivers_exr(self, arnold_cmds):
+        # arnoldRender obeys the DRIVER's translator, not imageFormat: left
+        # alone it writes .exr and the handler reads a file that is not a PNG.
+        _frame(arnold_cmds)
+        assert arnold_cmds.during[0]["aiTranslator"] == "png"
+
+    def test_it_returns_the_file_arnold_actually_wrote(self, arnold_cmds, tmp_path):
+        assert _frame(arnold_cmds) == str(tmp_path / "shot0.png")
+
+    def test_it_restores_the_driver_afterwards(self, arnold_cmds):
+        _frame(arnold_cmds)
+        assert arnold_cmds.attrs["defaultArnoldDriver.colorManagement"] == 0
+        assert arnold_cmds.attrs["defaultArnoldDriver.aiTranslator"] == "exr"
+
+    def test_it_restores_the_colour_management_prefs_afterwards(self, arnold_cmds):
+        _frame(arnold_cmds)
+        assert arnold_cmds.cm_prefs["outputTransformEnabled"] is False
+        assert arnold_cmds.cm_prefs["outputTransformName"] == "ACES 1.0 SDR-video (sRGB)"
+
+    def test_it_restores_them_even_when_the_render_fails(self, tmp_path):
+        fake = FakeArnoldCmds(tmp_path, arnold_render_raises=True)
+        _frame(fake)
+        assert fake.attrs["defaultArnoldDriver.colorManagement"] == 0
+        assert fake.cm_prefs["outputTransformEnabled"] is False
+
+    def test_a_failed_arnold_render_falls_back_to_cmds_render(self, tmp_path):
+        # A dark frame beats no frame: the caller asked to see something.
+        fake = FakeArnoldCmds(tmp_path, arnold_render_raises=True)
+        assert _frame(fake).endswith("_legacy.png")
+
+    def test_it_uses_the_view_transform_when_no_output_one_is_available(self, tmp_path):
+        # Another OCIO config need not carry that name. Mode 1 reads the
+        # scene's VIEW transform, which is still a display transform.
+        fake = FakeArnoldCmds(tmp_path, output_transforms=["Rec.709"])
+        _frame(fake)
+        assert fake.during[0]["colorManagement"] == 1
+
+    def test_hw2_still_goes_through_cmds_render(self, arnold_cmds):
+        _frame(arnold_cmds, renderer="mayaHardware2")
+        assert arnold_cmds.arnold_renders == []
+        assert len(arnold_cmds.legacy_renders) == 1

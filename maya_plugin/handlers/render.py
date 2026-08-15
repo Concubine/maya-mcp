@@ -43,6 +43,12 @@ DEFAULT_SAMPLES, MIN_SAMPLES, MAX_SAMPLES = 3, 1, 8
 # Maya's default camera vertical film aperture, in inches.
 MAYA_VERTICAL_APERTURE_IN = 0.981
 
+# The display transform the delivered frame is encoded with. Un-tone-mapped
+# matches URP with post-processing off, which is where the game side is today;
+# a tone-mapped view (ACES) would darken a linear-0.5 plane to 165 instead of
+# 188 and put a look on an image whose job is to report the asset (#615).
+DISPLAY_TRANSFORM = "Un-tone-mapped (sRGB)"
+
 
 def focal_length_for_fov(
     fov_deg: float, aperture_inches: float = MAYA_VERTICAL_APERTURE_IN
@@ -206,6 +212,127 @@ class _RenderGlobalsState:
                 pass
 
 
+class _ArnoldDisplayState:
+    """Make Arnold apply a display transform to the frame it writes.
+
+    Arnold hands back RAW LINEAR pixels: a surface of linear albedo 0.5 lit to
+    N.L = 1 arrived as 127 where a displayable image wants 188, so every frame
+    this tool ever returned was about 2.2 gamma too dark and the art judged
+    through it was judged wrong (redmine #615).
+
+    The transform is Arnold's to apply - in float, before the quantise to 8
+    bits, so there is no banding, and read from the scene's own colour
+    management, so it survives an OCIO change. Use Output Transform rather than
+    Use View Transform because the OUTPUT one can be pointed at
+    "Un-tone-mapped (sRGB)" for the delivered image while the user's viewport
+    keeps whatever view transform they set. Falls back to the view transform
+    when no output transform by that name exists in their config.
+
+    None of this reaches cmds.render, which never consults the Arnold driver at
+    all - see _render_frame.
+    """
+
+    _ATTRS = (
+        "defaultArnoldDriver.colorManagement",
+        # arnoldRender writes the DRIVER's format, not imageFormat: left alone
+        # it writes .exr and the handler reads a file that is not a PNG.
+        "defaultArnoldDriver.aiTranslator",
+    )
+
+    def __init__(self, cmds):
+        self.cmds = cmds
+        self.attrs = {}
+        self.prefs = {}
+
+    def apply(self) -> bool:
+        """Configure the driver; False means this Maya cannot, render as before."""
+        try:
+            import mtoa.core  # noqa: PLC0415 - only importable with mtoa loaded
+
+            mtoa.core.createOptions()  # defaultArnoldDriver must exist to be set
+        except Exception:
+            pass  # no mtoa module, or the node already exists: getAttr decides
+        try:
+            for attr in self._ATTRS:
+                self.attrs[attr] = self.cmds.getAttr(attr)
+            for pref in ("outputTransformEnabled", "outputTransformName"):
+                self.prefs[pref] = self.cmds.colorManagementPrefs(
+                    query=True, **{pref: True}
+                )
+            available = self.cmds.colorManagementPrefs(
+                query=True, outputTransformNames=True
+            ) or []
+            self.cmds.setAttr(
+                "defaultArnoldDriver.aiTranslator", "png", type="string"
+            )
+            if DISPLAY_TRANSFORM in available:
+                self.cmds.colorManagementPrefs(
+                    edit=True, outputTransformName=DISPLAY_TRANSFORM
+                )
+                self.cmds.colorManagementPrefs(edit=True, outputTransformEnabled=True)
+                self.cmds.setAttr("defaultArnoldDriver.colorManagement", 2)
+            else:
+                self.cmds.setAttr("defaultArnoldDriver.colorManagement", 1)
+            return True
+        except Exception:
+            self.restore()
+            return False
+
+    def restore(self):
+        # Order matters: the name has to go back before the enable flag, or a
+        # scene that had output transforms off is briefly left pointing
+        # somewhere it never pointed.
+        if "outputTransformName" in self.prefs:
+            self._try(
+                lambda: self.cmds.colorManagementPrefs(
+                    edit=True, outputTransformName=self.prefs["outputTransformName"]
+                )
+            )
+        if "outputTransformEnabled" in self.prefs:
+            self._try(
+                lambda: self.cmds.colorManagementPrefs(
+                    edit=True,
+                    outputTransformEnabled=self.prefs["outputTransformEnabled"],
+                )
+            )
+        for attr, value in self.attrs.items():
+            if isinstance(value, str):
+                self._try(lambda a=attr, v=value: self.cmds.setAttr(a, v, type="string"))
+            else:
+                self._try(lambda a=attr, v=value: self.cmds.setAttr(a, v))
+
+    @staticmethod
+    def _try(action):
+        try:
+            action()
+        except Exception:
+            pass  # a restore that raises hides whatever the render did
+
+
+def _arnold_render(cmds, camera, resolution) -> str:
+    """Render through mtoa's own command; return the file, or "" if it could not.
+
+    arnoldRender reports nothing about where it wrote, but renderSettings
+    predicts the name from the same globals the render uses - measured exact on
+    a live Maya, so this is a lookup rather than a guess.
+    """
+    try:
+        predicted = cmds.renderSettings(
+            firstImageName=True, fullPath=True, camera=camera
+        )
+    except Exception:
+        return ""
+    if isinstance(predicted, (list, tuple)):
+        predicted = predicted[0] if predicted else ""
+    try:
+        cmds.arnoldRender(
+            camera=camera, width=resolution, height=resolution, batch=True
+        )
+    except Exception:
+        return ""
+    return str(predicted) if predicted and os.path.exists(str(predicted)) else ""
+
+
 def _render_frame(cmds, camera, prefix, renderer, resolution, samples) -> str:
     """Render one frame and return the file it landed on.
 
@@ -226,6 +353,18 @@ def _render_frame(cmds, camera, prefix, renderer, resolution, samples) -> str:
             cmds.setAttr("defaultArnoldRenderOptions.AASamples", samples)
         except Exception:
             pass  # mtoa exposes this only once its globals node exists
+        # The display transform only reaches the file through mtoa's own render
+        # command; cmds.render ignores the driver entirely (#615).
+        display = _ArnoldDisplayState(cmds)
+        if display.apply():
+            try:
+                written = _arnold_render(cmds, camera, resolution)
+            finally:
+                display.restore()
+            if written:
+                return written
+        # arnoldRender could not run or wrote nothing: a dark frame beats no
+        # frame, so fall through to the interactive path as before.
     written = cmds.render(camera, x=resolution, y=resolution)
     # Some Maya versions hand back a list of written files rather than one path;
     # str() of a list is a path that cannot exist, which would surface as a
