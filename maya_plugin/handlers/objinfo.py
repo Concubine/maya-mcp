@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from ..dispatcher import HandlerError
-from . import naming
+from . import naming, units
 
 SECTIONS = ("transform", "mesh_stats", "uvs", "shading", "history")
 DEFAULT_SECTIONS = ["transform", "mesh_stats"]
@@ -97,7 +97,10 @@ def get_object_info(params: Dict[str, Any]) -> Dict[str, Any]:
             hint="valid sections: %s" % ", ".join(SECTIONS),
         )
 
-    out: Dict[str, Any] = {"name": name}
+    # Unconditional, not a section: `transform` below is a bare triple of
+    # numbers without it, and a caller must never have to opt in to knowing
+    # what a measurement means (maya-mcp #634).
+    out: Dict[str, Any] = {"name": name, "units": units.units_block(cmds)}
     shape = _shape_of(cmds, name)
     needs_shape = {"mesh_stats", "uvs", "shading", "history"}
     if shape is None and needs_shape.intersection(include):

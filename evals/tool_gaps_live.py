@@ -112,7 +112,11 @@ try:
         _live_code_exec.execute_python)
 except Exception:
     pass
-cmds.currentUnit(linear="m")
+# maya-mcp #634: "cm" is the authoring convention (1 unit = 1 m in the exported
+# file). Displayed measurements are unchanged; what changes is that this eval no
+# longer leaves the session in a unit that silently rescales the next build.
+# Was "m".
+cmds.currentUnit(linear="cm")
 '''
 
 
@@ -186,8 +190,9 @@ ASSEMBLE = PRELUDE + r'''
 cmds.file(new=True, force=True)
 # AFTER the new scene, not before: file(new=True) resets the linear unit, so a
 # unit set in the prelude is silently discarded and the whole gate would measure
-# centimetres while believing it measured metres.
-cmds.currentUnit(linear="m")
+# in the user's preference while believing it set its own. This same ordering
+# fact is why new_scene sets the unit after file(new=True) - maya-mcp #634.
+cmds.currentUnit(linear="cm")
 parts = []
 for i in range(4):
     parts.append({"pos": [i * 4.0, 1.5, 0.0], "dim": [3.0, 3.0, 3.0],

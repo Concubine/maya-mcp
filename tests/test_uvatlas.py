@@ -9,13 +9,19 @@ having vertices, which proved nothing about the feature.
 import pytest
 
 from maya_plugin.dispatcher import HandlerError
-from maya_plugin.handlers import uvatlas, uvmath
+from maya_plugin.handlers import units, uvatlas, uvmath
+
+_CM_PER_UNIT = units._CM_PER_UNIT
 
 
 class FakeCmds:
     """A mesh whose UVs start somewhere unhelpful, so normalisation matters."""
 
-    def __init__(self, objects=("|box",), shapes=None, uvs=None, world_m=3.0):
+    def __init__(self, objects=("|box",), shapes=None, uvs=None, world_m=3.0,
+                 linear="m"):
+        # Default "m" keeps every pre-existing test measuring what it always
+        # measured; the maya-mcp #635 tests below set it explicitly.
+        self.linear = linear
         self.world_m = world_m
         self.objects = list(objects)
         self.shapes = (
@@ -51,14 +57,22 @@ class FakeCmds:
                 return kind
         return "transform"
 
+    def currentUnit(self, query=False, linear=None):
+        assert query and linear is True, "uv_atlas must only QUERY the unit"
+        return self.linear
+
     # --- uv operations -----------------------------------------------------
     def polyAutoProjection(self, target, **kwargs):
         self.calls.append("polyAutoProjection:sm=%s" % kwargs.get("scaleMode"))
         if kwargs.get("scaleMode") == 0:
-            # World-proportional, as measured on Maya 2027: 100 UV units per
-            # metre. self.world_m is the object's size, so the fake reproduces
-            # the property the mode depends on rather than a fixed square.
-            extent = self.world_m * 100.0
+            # World-proportional. Measured on Maya 2027: polyAutoProjection
+            # sizes UVs from Maya's INTERNAL centimetres, so the constant
+            # tracks the scene's linear unit - 100 UV units per metre with the
+            # scene in "m", and 1.0 with it in "cm" (maya-mcp #635, measured by
+            # evals/combine_uv_live.py in both). The fake reproduces that
+            # dependency rather than a fixed factor, so a handler that ignores
+            # the scene unit cannot pass.
+            extent = self.world_m * _CM_PER_UNIT[self.linear]
             self.uvs = [(0.0, 0.0), (extent, extent)]
         else:
             self.uvs = [(0.0, 0.0), (1.0, 1.0)]
@@ -235,6 +249,30 @@ class TestWorldScale:
             (rect[2] - rect[0]) / 6.0, abs=2e-6
         )
         assert out["meshes"][0]["inside_patch"] is True
+
+    def test_a_full_cell_piece_fills_the_patch_in_a_CENTIMETRE_scene(self):
+        # maya-mcp #635: identical call, identical authored size, only the
+        # scene unit differs - and cm is what new_scene now forces (#634).
+        # With the default hard-coded to the metre-scene constant this lands at
+        # 1/100th of the patch and every texture reads 100x too fine.
+        fake = FakeCmds(world_m=3.0, linear="cm")
+        out = _run(fake, names=["|box"], cols=4, rows=4, patch=0,
+                   margin=0.0, world_scale=3.0)
+        rect = uvmath.patch_rect(4, 4, 0, 0, margin=0.0)
+        assert out["meshes"][0]["uv_bounds"] == pytest.approx(list(rect))
+
+    def test_the_default_uv_per_metre_follows_the_scene_unit(self):
+        for unit, expected in (("cm", 1.0), ("m", 100.0), ("mm", 0.1)):
+            out = _run(FakeCmds(linear=unit), names=["|box"], cols=4, rows=4,
+                       patch=0, margin=0.0, world_scale=3.0)
+            assert out["uv_per_metre"] == expected, unit
+
+    def test_an_explicit_uv_per_metre_still_overrides_the_scene(self):
+        # The generators pass 1.0 explicitly (evals/maya_export.py). Deriving
+        # the DEFAULT must not take that override away from them.
+        out = _run(FakeCmds(linear="m"), names=["|box"], cols=4, rows=4,
+                   patch=0, margin=0.0, world_scale=3.0, uv_per_metre=1.0)
+        assert out["uv_per_metre"] == 1.0
 
     def test_density_is_identical_across_sizes(self):
         # The property the whole mode exists for, stated as a ratio.

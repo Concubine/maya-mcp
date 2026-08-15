@@ -19,6 +19,17 @@ class FakeCmds:
         self.undo_calls = 0
         self.redo_calls = 0
         self.undo_fail_after = None  # raise RuntimeError after N successful undos
+        self.unit_preference = "m"  # what a new scene comes up in
+        self.linear = "m"  # a session left in metres, as an eval can leave it
+        self.unit_set_calls = []
+
+    def currentUnit(self, query=False, linear=None):
+        if query:
+            assert linear is True
+            return self.linear
+        self.unit_set_calls.append(linear)
+        self.linear = linear
+        return linear
 
     # session._cmds() surface
     def file(self, *args, **kw):
@@ -30,6 +41,11 @@ class FakeCmds:
             raise AssertionError("unexpected file query")
         if kw.get("new"):
             self.new_calls += 1
+            # Maya resets the linear unit to the user's preference on a new
+            # scene. Modelled so a set-BEFORE-file() refactor is silently
+            # undone here exactly as it would be in Maya, and the ordering
+            # test below can actually catch it.
+            self.linear = self.unit_preference
             return None
         if kw.get("exportAll") or kw.get("save"):
             target = args[0] if args else self.scene_name
@@ -145,6 +161,43 @@ def test_new_scene_with_confirm(fake):
     assert fake.saved_to == [
         os.path.join(fake._tmp, "checkpoints", "001_auto_pre_new_scene.ma")
     ]
+
+
+class TestNewSceneOwnsTheLinearUnit:
+    """maya-mcp #634 - reporting alone is not enough.
+
+    An eval that sets `m` leaves the session that way for whatever is built
+    next, and no in-Maya measurement can see the difference (#629). So
+    new_scene STATES the unit rather than inheriting it.
+    """
+
+    def test_it_forces_the_metre_true_unit_by_default(self, fake):
+        assert fake.linear == "m"  # the session arrives dirty
+        result = session.new_scene({"confirm": True})
+        assert fake.unit_set_calls == ["cm"]
+        assert result["units"] == {"linear_unit": "cm", "export_metres_per_unit": 1.0}
+
+    def test_an_explicit_unit_is_honoured(self, fake):
+        result = session.new_scene({"confirm": True, "linear_unit": "m"})
+        assert fake.unit_set_calls == ["m"]
+        assert result["units"]["export_metres_per_unit"] == 100.0
+
+    def test_an_unknown_unit_is_rejected_before_the_scene_is_destroyed(self, fake):
+        # Ordering matters exactly as it does for confirm: a bad param must
+        # never cost the user their scene.
+        with pytest.raises(HandlerError) as exc:
+            session.new_scene({"confirm": True, "linear_unit": "furlong"})
+        assert "furlong" in str(exc.value)
+        assert fake.new_calls == 0
+        assert fake.saved_to == []
+        assert fake.unit_set_calls == []
+
+    def test_the_unit_is_set_after_the_scene_is_replaced(self, fake):
+        # cmds.file(new=True) resets the linear unit to the user's preference,
+        # so setting it first would be silently undone.
+        session.new_scene({"confirm": True})
+        assert fake.new_calls == 1 and fake.unit_set_calls == ["cm"]
+        assert fake.linear == "cm"
 
 
 def test_new_scene_checkpoints_before_the_destructive_call(fake, monkeypatch):

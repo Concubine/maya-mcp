@@ -12,7 +12,8 @@ from maya_plugin.handlers import scene
 class FakeCmds:
     """A tiny Maya scene: a golem group with two meshes, a light, default cameras."""
 
-    def __init__(self):
+    def __init__(self, linear="cm"):
+        self.linear = linear
         self.heavy_calls = 0  # polyEvaluate + exactWorldBoundingBox invocations
         self.transforms = {
             "|persp": {}, "|top": {}, "|front": {}, "|side": {},  # default cams
@@ -84,6 +85,10 @@ class FakeCmds:
     def getAttr(self, attr):
         node = attr.rsplit(".", 1)[0]
         return self.transforms[node]["visible"]
+
+    def currentUnit(self, query=False, linear=None):
+        assert query and linear is True, "get_scene_graph must only QUERY the unit"
+        return self.linear
 
 
 @pytest.fixture
@@ -181,3 +186,29 @@ class TestPagination:
         assert len(result["objects"]) == 1
         # bbox+tris+verts for the single page item only
         assert fake_cmds.heavy_calls == 3
+
+
+class TestSceneGraphReportsItsUnit:
+    """maya-mcp #634 - the bboxes above are unitless without this."""
+
+    def test_every_response_carries_the_scenes_unit(self, fake_cmds):
+        result = scene.get_scene_graph({})
+        assert result["units"] == {"linear_unit": "cm", "export_metres_per_unit": 1.0}
+
+    def test_a_metre_scene_is_reported_as_a_hundred_metres_per_unit(self, monkeypatch):
+        # The same bbox numbers, a delivery 100x too large. Only this field
+        # tells them apart - no in-Maya measurement can (see #629).
+        fake = FakeCmds(linear="m")
+        monkeypatch.setattr(scene, "_cmds", lambda: fake)
+        result = scene.get_scene_graph({})
+        assert result["units"]["export_metres_per_unit"] == 100.0
+
+    def test_the_unit_is_reported_on_every_page_not_just_the_first(self, fake_cmds):
+        page1 = scene.get_scene_graph({"max_objects": 2})
+        page2 = scene.get_scene_graph({"max_objects": 2, "cursor": page1["cursor"]})
+        assert page2["units"] == page1["units"]
+
+    def test_an_empty_result_still_reports_the_unit(self, fake_cmds):
+        result = scene.get_scene_graph({"filter": "nothing_matches_this"})
+        assert result["objects"] == [] and result["total"] == 0
+        assert result["units"]["linear_unit"] == "cm"

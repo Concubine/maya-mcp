@@ -151,6 +151,13 @@ class FakeCmds:
     def polyAutoProjection(self, shape, **kw):
         self.uv_calls.append(("project", shape, kw.get("scaleMode")))
 
+    def currentUnit(self, query=False, linear=None):
+        # assemble packs through uv_atlas, whose world-proportional constant
+        # is derived from the scene unit since maya-mcp #635. "cm" is what
+        # new_scene forces, so that is what this models.
+        assert query and linear is True
+        return "cm"
+
     def polyProjection(self, comp, **kw):
         self.uv_calls.append(("planar", comp, None))
 

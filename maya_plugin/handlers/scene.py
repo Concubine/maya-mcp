@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from ..dispatcher import HandlerError
+from . import units
 
 MAX_OBJECTS_CAP = 500
 DEFAULT_MAX_OBJECTS = 200
@@ -118,4 +119,8 @@ def get_scene_graph(params: Dict[str, Any]) -> Dict[str, Any]:
         "objects": objects,
         "total": len(matches),
         "cursor": str(next_offset) if next_offset < len(matches) else None,
+        # Every bbox above is a bare number until this says what it means
+        # (maya-mcp #634). On EVERY page, and on an empty result too - a caller
+        # asserting the unit must not have to fetch objects to learn it.
+        "units": units.units_block(cmds),
     }

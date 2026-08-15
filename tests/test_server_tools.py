@@ -350,7 +350,53 @@ class TestSessionTools:
         mcp = server_mod.create_server(conn)
         run(mcp.call_tool("maya_new_scene", {}))
         assert conn.calls[0]["cmd"] == "new_scene"
-        assert conn.calls[0]["params"] == {"confirm": False}
+        assert conn.calls[0]["params"] == {"confirm": False, "linear_unit": "cm"}
+
+
+class TestLinearUnitReachesTheToolSurface:
+    """maya-mcp #634 - the numbers these tools quote had no unit attached."""
+
+    def test_new_scene_defaults_to_the_metre_true_unit(self):
+        conn = FakeConn(responses={"new_scene": {"new_scene": True}})
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_new_scene", {"confirm": True}))
+        assert conn.calls[0]["params"]["linear_unit"] == "cm"
+
+    def test_new_scene_forwards_an_explicit_unit(self):
+        conn = FakeConn(responses={"new_scene": {"new_scene": True}})
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_new_scene", {"confirm": True, "linear_unit": "m"}))
+        assert conn.calls[0]["params"]["linear_unit"] == "m"
+
+    def test_new_scene_result_surfaces_the_units_block(self):
+        conn = FakeConn(responses={"new_scene": {
+            "new_scene": True,
+            "units": {"linear_unit": "cm", "export_metres_per_unit": 1.0},
+        }})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_new_scene", {"confirm": True}))
+        assert result.structured_content["units"]["export_metres_per_unit"] == 1.0
+
+    def test_scene_graph_result_surfaces_the_units_block(self):
+        # Without this the bboxes in `objects` are bare numbers, which is how a
+        # 100x delivery shipped three times looking fine (#629).
+        conn = FakeConn(responses={"get_scene_graph": {
+            "objects": [], "total": 0, "cursor": None,
+            "units": {"linear_unit": "m", "export_metres_per_unit": 100.0},
+        }})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_get_scene_graph", {}))
+        assert result.structured_content["units"]["export_metres_per_unit"] == 100.0
+
+    def test_object_info_result_surfaces_the_units_block(self):
+        conn = FakeConn(responses={"get_object_info": {
+            "name": "|golem|torso",
+            "transform": {"translate": [1.0, 2.0, 3.0]},
+            "units": {"linear_unit": "cm", "export_metres_per_unit": 1.0},
+        }})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_get_object_info", {"name": "|golem|torso"}))
+        assert result.structured_content["units"]["linear_unit"] == "cm"
 
 
 class TestModelingTools:

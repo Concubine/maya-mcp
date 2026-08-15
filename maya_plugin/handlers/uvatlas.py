@@ -25,7 +25,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from ..dispatcher import HandlerError
-from . import naming, uvmath
+from . import naming, units, uvmath
 
 PROJECTIONS = ("box", "planar", "keep")
 
@@ -36,7 +36,23 @@ PROJECTIONS = ("box", "planar", "keep")
 # texel density possible at all, so the live gate asserts it; if a Maya version
 # or unit convention ever changes it, the gate fails loudly instead of every
 # piece silently drifting to a different density.
-AUTOPROJ_UV_PER_METRE = 100.0
+#
+# It is NOT a constant of Maya, though it was written as one. It sizes UVs from
+# Maya's INTERNAL centimetres, so it tracks the scene's linear unit exactly as
+# units.export_metres_per_unit does - 100.0 in an "m" scene, 1.0 in a "cm" one.
+# Both measured by evals/combine_uv_live.py (maya-mcp #635). Hard-coding the
+# "m" value was latent until #634 made new_scene force "cm", at which point
+# every default call started producing UVs 100x too small.
+AUTOPROJ_UV_PER_METRE = 100.0  # the "m"-scene value; kept for reference only
+
+
+def autoproj_uv_per_metre(cmds) -> float:
+    """The world-proportional UV constant for the scene as it stands now."""
+    per_metre = units.units_block(cmds)["export_metres_per_unit"]
+    # An unrecognised unit means we cannot know. Fall back to the historical
+    # value rather than silently scaling by None - and it is the value that was
+    # right for every scene before #634, so it is the safest guess available.
+    return AUTOPROJ_UV_PER_METRE if per_metre is None else per_metre
 
 
 def _cmds():
@@ -91,11 +107,13 @@ def pack_shape(
         # and a wall reads as a model of a wall.
         cmds.polyAutoProjection(shape, ch=False, scaleMode=0)
         # The constant is per METRE OF WORLD SIZE, and polyAutoProjection reads
-        # world size in the scene's own units - so it is a property of the
-        # authoring convention, not of Maya. 100.0 is right when 1 unit = 1 cm;
-        # a scene authored at 1 unit = 1 m must pass 1.0. Callers that do not
-        # say keep the historical value, so nothing existing moves.
-        per_metre = AUTOPROJ_UV_PER_METRE if uv_per_metre is None else uv_per_metre
+        # that size in Maya's internal centimetres - so it is a property of the
+        # scene's linear unit, not of Maya. Derived rather than assumed since
+        # #635; an explicit uv_per_metre still wins, which is what keeps the
+        # generators' explicit 1.0 authoritative.
+        per_metre = (
+            autoproj_uv_per_metre(cmds) if uv_per_metre is None else uv_per_metre
+        )
         scale = (rect[2] - rect[0]) / (per_metre * world_scale)
         raw = _uv_bounds(cmds, shape)
         pivot_u, pivot_v, delta_u, delta_v = uvmath.centre_in_rect(raw, rect)
@@ -206,6 +224,8 @@ def uv_atlas(params: Dict[str, Any]) -> Dict[str, Any]:
         "projection": "world" if world_scale is not None else project,
         "normalized": bool(normalize) and world_scale is None,
         "world_scale": world_scale,
-        "uv_per_metre": AUTOPROJ_UV_PER_METRE if uv_per_metre is None else uv_per_metre,
+        "uv_per_metre": (
+            autoproj_uv_per_metre(cmds) if uv_per_metre is None else uv_per_metre
+        ),
         "all_inside": all(m["inside_patch"] for m in out),
     }

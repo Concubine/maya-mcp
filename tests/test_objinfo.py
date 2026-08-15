@@ -7,7 +7,8 @@ from maya_plugin.handlers import objinfo
 
 
 class FakeCmds:
-    def __init__(self):
+    def __init__(self, linear="cm"):
+        self.linear = linear
         self.objects = {"|golem|torso"}
         self.shapes = {"|golem|torso": "|golem|torso|torsoShape"}
         # Named _shape_sgs (not `sets`) deliberately: an instance attribute
@@ -56,6 +57,10 @@ class FakeCmds:
     def listHistory(self, node):
         return [node, "polySoftEdge1"]
 
+    def currentUnit(self, query=False, linear=None):
+        assert query and linear is True, "get_object_info must only QUERY the unit"
+        return self.linear
+
 
 def test_shading_section_reports_the_assigned_material(monkeypatch):
     fake = FakeCmds()
@@ -71,8 +76,33 @@ def test_default_include_is_transform_and_mesh_stats(monkeypatch):
     monkeypatch.setattr(objinfo, "_cmds", lambda: fake)
     monkeypatch.setattr(objinfo, "_mesh_stats", lambda shape: {"tris": 12})
     result = objinfo.get_object_info({"name": "|golem|torso"})
-    assert set(result) == {"name", "transform", "mesh_stats"}
+    # `units` is not a section - it is unconditional, because `translate` below
+    # is a bare triple without it (maya-mcp #634).
+    assert set(result) == {"name", "transform", "mesh_stats", "units"}
     assert result["transform"]["translate"] == [1.0, 2.0, 3.0]
+
+
+def test_the_transform_it_reports_is_never_unitless(monkeypatch):
+    fake = FakeCmds()
+    monkeypatch.setattr(objinfo, "_cmds", lambda: fake)
+    result = objinfo.get_object_info({"name": "|golem|torso", "include": ["transform"]})
+    assert result["units"] == {"linear_unit": "cm", "export_metres_per_unit": 1.0}
+
+
+def test_a_metre_scene_says_so(monkeypatch):
+    fake = FakeCmds(linear="m")
+    monkeypatch.setattr(objinfo, "_cmds", lambda: fake)
+    result = objinfo.get_object_info({"name": "|golem|torso", "include": ["transform"]})
+    assert result["units"]["export_metres_per_unit"] == 100.0
+
+
+def test_units_reported_even_when_no_geometry_section_was_asked_for(monkeypatch):
+    # A caller asking only for shading still gets the unit: it costs one query
+    # and removes any path where a response's numbers could be read blind.
+    fake = FakeCmds()
+    monkeypatch.setattr(objinfo, "_cmds", lambda: fake)
+    result = objinfo.get_object_info({"name": "|golem|torso", "include": ["shading"]})
+    assert result["units"]["linear_unit"] == "cm"
 
 
 def test_unknown_section_is_rejected_with_the_valid_list(monkeypatch):

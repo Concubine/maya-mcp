@@ -60,7 +60,11 @@ from maya_plugin.handlers import meshcheck as _meshcheck
 importlib.reload(_uvmath)
 importlib.reload(_uvatlas)
 importlib.reload(_combine)
-cmds.currentUnit(linear="m")
+# maya-mcp #634: "cm" is the authoring convention - the numbers below still
+# mean metres, and displayed measurements are identical either way, but the
+# session is no longer left in a unit that makes the NEXT thing built in it
+# export 100x too large. Was "m".
+cmds.currentUnit(linear="cm")
 '''
 
 
@@ -142,7 +146,13 @@ result = {
     "repack_bounds": again["meshes"][0]["uv_bounds"],
     "margined": margined["meshes"][0]["uv_bounds"],
     "bare_rect": [round(q, 6) for q in bare],
-    "uv_per_metre_constant": _uvatlas.AUTOPROJ_UV_PER_METRE,
+    # The DERIVED constant, not the module's historical literal: since
+    # maya-mcp #635 it follows the scene's linear unit, because
+    # polyAutoProjection sizes UVs from Maya's internal centimetres. Reading
+    # the literal here is what let this eval pass for a metre scene and fail
+    # for a centimetre one while the projection itself was fine.
+    "uv_per_metre_constant": _uvatlas.autoproj_uv_per_metre(cmds),
+    "scene_linear_unit": cmds.currentUnit(q=True, linear=True),
     "metre_cube_uv_extent": round(max(pbb[0][1] - pbb[0][0],
                                       pbb[1][1] - pbb[1][0]), 4),
     "density_big": round((bb_big[2] - bb_big[0]) / 3.0, 6),
@@ -194,10 +204,12 @@ def main():
     print("\n-- fixed texel density ------------------------------------")
     # A 1 m cube's auto-projected UV extent spans 3 face-widths across, so the
     # per-metre constant is that extent / 3.
-    check("100 UV units per metre (the stated constant)",
+    check("the projected UV extent matches the constant the tool derives "
+          "for a %r scene" % u["scene_linear_unit"],
           round(u["metre_cube_uv_extent"] / 3.0, 3),
           u["uv_per_metre_constant"],
-          ok=lambda g: abs(g - u["uv_per_metre_constant"]) < 1.0)
+          ok=lambda g: abs(g - u["uv_per_metre_constant"])
+          < max(1.0, u["uv_per_metre_constant"] * 0.01))
     # A box auto-projection lays six faces side by side, so a cube's UV bbox is
     # about THREE face-widths across, not one. That factor is the difference
     # between "512 px per patch" and "512 px across a 3 m face", so it is

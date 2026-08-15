@@ -13,7 +13,7 @@ import re
 from typing import Any, Dict, Optional
 
 from ..dispatcher import HandlerError
-from . import ledger
+from . import ledger, units
 
 KEEP_CHECKPOINTS = 20
 MAX_UNDO_STEPS = 50
@@ -163,15 +163,29 @@ def new_scene(params: Dict[str, Any]) -> Dict[str, Any]:
             hint="pass confirm=true; call maya_checkpoint or maya_save_scene first "
             "if the current state matters",
         )
+    # Validate the unit BEFORE the checkpoint, for the same reason confirm is
+    # validated first: a bad param must never cost the user their scene.
+    requested = params.get("linear_unit", units.METRE_TRUE_UNIT)
+    units.require_known_unit(requested)
     # new_scene is genuinely unrecoverable (no undo chunk survives a scene
     # replace) - unlike every other destructive op here it took no
     # checkpoint of its own, so a confirm=true retry after a refusal was
     # permanent total loss. Checkpoint AFTER validation (so a refused call
     # burns nothing) and BEFORE the destructive file() call.
     pre = auto_checkpoint("pre_new_scene")
-    _cmds().file(new=True, force=True)
+    cmds = _cmds()
+    cmds.file(new=True, force=True)
+    # AFTER the replace, never before: a new scene comes up in the user's
+    # preference, which would silently undo a unit set beforehand. Setting it
+    # here is the point of maya-mcp #634 - an eval that leaves the session in
+    # metres must not decide the scale of whatever gets built next.
+    unit_block = units.set_linear_unit(cmds, requested)
     ledger.clear()
-    return {"new_scene": True, "pre_checkpoint": pre["checkpoint_id"]}
+    return {
+        "new_scene": True,
+        "pre_checkpoint": pre["checkpoint_id"],
+        "units": unit_block,
+    }
 
 
 new_scene.no_undo_chunk = True

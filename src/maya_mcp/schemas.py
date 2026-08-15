@@ -59,6 +59,32 @@ class SceneObject(BaseModel):
     visible: bool = True
 
 
+class SceneUnits(BaseModel):
+    """What the scene's numbers mean. Every measurement is bare without it.
+
+    maya-mcp #634. Maya's internal linear unit is centimetres whatever
+    `linear_unit` says, and the FBX exporter writes those internal numbers -
+    so `export_metres_per_unit` is what a delivery actually inherits.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    linear_unit: str = Field(
+        description="The scene's linear unit as Maya reports it (cm, m, mm, in, ...)."
+    )
+    export_metres_per_unit: Optional[float] = Field(
+        default=None,
+        description=(
+            "Metres one scene unit becomes in an exported FBX. 1.0 (linear_unit "
+            "'cm') is the ONLY value that produces a metre-true delivery - it is "
+            "the authoring convention every mesh out of this repo uses, where "
+            "the numbers you pass mean metres. 100.0 (linear_unit 'm') is the "
+            "100x defect of maya-mcp #629, which no in-Maya measurement can see. "
+            "Null means the unit was not recognised - never assume 1.0."
+        ),
+    )
+
+
 class SceneGraphResult(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -66,6 +92,10 @@ class SceneGraphResult(BaseModel):
     total: int = Field(description="Total matching objects before pagination.")
     cursor: Optional[str] = Field(
         default=None, description="Pass back to fetch the next page; None when complete."
+    )
+    units: Optional[SceneUnits] = Field(
+        default=None,
+        description="What every bbox above is measured in. Reported on every page.",
     )
 
 
@@ -92,6 +122,10 @@ class ObjectInfoResult(BaseModel):
     )
     history: Optional[dict] = Field(
         default=None, description="Construction-history node count and distinct node types."
+    )
+    units: Optional[SceneUnits] = Field(
+        default=None,
+        description="What the transform's numbers are measured in. Always present.",
     )
 
 
@@ -127,6 +161,10 @@ class NewSceneResult(BaseModel):
         default=None,
         description="Checkpoint id saved just before the discarded scene was replaced; "
         "pass to maya_restore_checkpoint to recover it.",
+    )
+    units: Optional[SceneUnits] = Field(
+        default=None,
+        description="The unit the new scene was set to - stated, not inherited.",
     )
 
 
