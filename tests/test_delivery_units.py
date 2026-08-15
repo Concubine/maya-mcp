@@ -62,9 +62,35 @@ def test_kit_is_metre_true():
     assert violations == [], "\n".join(violations)
 
 
-def test_check_names_the_node_carrying_a_bad_scale():
+def test_check_names_the_node_carrying_a_bad_scale(monkeypatch):
     # The message has to identify the offending node, because the two
     # deliveries put the scale in different places: the heroes on one group
     # Null, the kit on all 41 Mesh nodes.
-    violations = delivery_units.check_delivery(KIT, delivery_units.KIT_CEILING_M)
+    #
+    # Built here rather than read from a delivery. This assertion first ran
+    # against the shipped centimetre kit, which is what proved it could see the
+    # defect - but a test that needs a broken artifact to pass goes green the
+    # moment the artifact is fixed, and then guards nothing.
+    facts = fbx_probe.FbxFacts(
+        version=7700,
+        nodes=[fbx_probe.FbxNode(name="kit_steel_column_a", kind="Mesh",
+                                 scaling=(0.01, 0.01, 0.01))],
+        meshes=[(0.0, 0.0, 0.0)])
+    monkeypatch.setattr(fbx_probe, "read_fbx", lambda _path: facts)
+
+    violations = delivery_units.check_delivery("fake.fbx",
+                                               delivery_units.KIT_CEILING_M)
     assert any("kit_steel_column_a" in v for v in violations), violations
+    assert any("0.01" in v for v in violations), violations
+
+
+def test_check_passes_a_clean_delivery(monkeypatch):
+    facts = fbx_probe.FbxFacts(
+        version=7700,
+        nodes=[fbx_probe.FbxNode(name="kit_steel_column_a", kind="Mesh",
+                                 translation=(1.5, 0.0, 3.0))],
+        meshes=[(1.5, -1.5, 0.75)])
+    monkeypatch.setattr(fbx_probe, "read_fbx", lambda _path: facts)
+
+    assert delivery_units.check_delivery(
+        "fake.fbx", delivery_units.KIT_CEILING_M) == []

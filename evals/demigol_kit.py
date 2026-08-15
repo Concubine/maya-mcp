@@ -646,7 +646,9 @@ from maya_plugin.handlers import uvmath as _uvmath
 importlib.reload(_uvmath); importlib.reload(_uvatlas); importlib.reload(_combine)
 
 spec = json.loads(SPEC)
-cmds.currentUnit(linear="m")
+# METRE-NATIVE: 1 Maya unit = 1 metre, so the FBX carries metres in its
+# vertices. Every number below is unchanged; only the unit label moves.
+cmds.currentUnit(linear=AUTHORING_UNIT)
 
 # ONE shader for the entire kit. Everything below reads a region of one 512px
 # atlas; that is the whole reason the UV step exists.
@@ -726,7 +728,8 @@ for piece in spec["pieces"]:
         _uvatlas.uv_atlas({"names": [node], "cols": spec["cols"],
                            "rows": spec["rows"], "patch": b["patch"],
                            "margin": spec["margin"],
-                           "world_scale": spec["world_scale"]})
+                           "world_scale": spec["world_scale"],
+                           "uv_per_metre": UV_PER_METRE})
         parts.append(node)
     if len(parts) == 1:
         merged = parts[0]
@@ -806,7 +809,7 @@ result
 '''
 
 
-EXPORT_CODE = maya_export.BAKE_TO_METRES + maya_export.EXPORT_PREAMBLE + r'''
+EXPORT_CODE = maya_export.EXPORT_PREAMBLE + r'''
 cmds.select(NAMES, replace=True)
 cmds.file(FBX, force=True, type="FBX export", pr=True, es=True)
 result = FBX
@@ -909,7 +912,9 @@ def main():
 
     ok(call("new_scene", {"confirm": True}, 300.0), "new_scene")
     built = ast.literal_eval(
-        run("SPEC = %r\n%s" % (json.dumps(spec), BUILD_CODE), "build")["result_repr"])
+        run("SPEC = %r\nAUTHORING_UNIT = %r\nUV_PER_METRE = %r\n%s"
+            % (json.dumps(spec), maya_export.AUTHORING_UNIT,
+               maya_export.UV_PER_METRE, BUILD_CODE), "build")["result_repr"])
     print("built %d pieces" % built["pieces"])
 
     check = ast.literal_eval(
@@ -918,8 +923,8 @@ def main():
     fbx = os.path.join(OUT_DIR, "demigol_kit.fbx").replace("\\", "/")
     # Each kit piece is its own export root, which is why all 41 carried the
     # exporter's 0.01 while the heroes carried one on their group Null.
-    run("NAMES = %r\nFBX = %r\nROOTS = %r\n%s"
-        % (names, fbx, names, EXPORT_CODE), "export")
+    run("NAMES = %r\nFBX = %r\nEXPORT_SCALE_FACTOR = %r\n%s"
+        % (names, fbx, maya_export.EXPORT_SCALE_FACTOR, EXPORT_CODE), "export")
 
     violations = delivery_units.check_delivery(fbx, delivery_units.KIT_CEILING_M)
     if violations:

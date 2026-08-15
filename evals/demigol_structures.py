@@ -914,7 +914,9 @@ importlib.reload(_uvatlas); importlib.reload(_combine)
 
 spec = json.loads(SPEC)
 label = spec["label"]
-cmds.currentUnit(linear="m")
+# METRE-NATIVE: 1 Maya unit = 1 metre, so the FBX carries metres in its
+# vertices. Every number below is unchanged; only the unit label moves.
+cmds.currentUnit(linear=AUTHORING_UNIT)
 
 # ONE material for the building, on the SAME atlas the kit uses, so a hero and
 # its kit-dressed neighbours sit in the same light.
@@ -966,7 +968,8 @@ for c in spec["chunks"]:
         _uvatlas.uv_atlas({"names": [node], "cols": spec["cols"],
                            "rows": spec["rows"], "patch": b["patch"],
                            "margin": spec["margin"],
-                           "world_scale": spec["world_scale"]})
+                           "world_scale": spec["world_scale"],
+                           "uv_per_metre": UV_PER_METRE})
         parts.append(node)
     if len(parts) == 1:
         node = parts[0]
@@ -1054,7 +1057,7 @@ result = {"chunks": len(kids), "tris": tris, "fails": fails[:20],
 result
 '''
 
-EXPORT_CODE = maya_export.BAKE_TO_METRES + maya_export.EXPORT_PREAMBLE + r'''
+EXPORT_CODE = maya_export.EXPORT_PREAMBLE + r'''
 cmds.select("|" + LABEL, replace=True, hierarchy=True)
 cmds.file(FBX, force=True, type="FBX export", pr=True, es=True)
 result = FBX
@@ -1093,12 +1096,15 @@ def build_one(label, builder, zoom):
                           "margin": 0.03, "world_scale": kit.WORLD_SCALE,
                           "chunks": chunk_dicts})
     ok(call("new_scene", {"confirm": True}, 300.0), "new_scene")
-    run("SPEC = %r\n%s" % (payload, BUILD_CODE), "build %s" % label)
+    run("SPEC = %r\nAUTHORING_UNIT = %r\nUV_PER_METRE = %r\n%s"
+        % (payload, maya_export.AUTHORING_UNIT, maya_export.UV_PER_METRE,
+           BUILD_CODE), "build %s" % label)
     check = ast.literal_eval(
         run("LABEL = %r\n%s" % (label, CHECK_CODE), "check %s" % label)["result_repr"])
     fbx = os.path.join(OUT_DIR, "%s.fbx" % label).replace("\\", "/")
-    run("LABEL = %r\nFBX = %r\nROOTS = %r\n%s"
-        % (label, fbx, ["|" + label], EXPORT_CODE), "export %s" % label)
+    run("LABEL = %r\nFBX = %r\nEXPORT_SCALE_FACTOR = %r\n%s"
+        % (label, fbx, maya_export.EXPORT_SCALE_FACTOR, EXPORT_CODE),
+        "export %s" % label)
 
     # The artifact is the deliverable, so the artifact is what gets asserted.
     # An in-Maya check cannot see this class of defect at all: the scene reads
