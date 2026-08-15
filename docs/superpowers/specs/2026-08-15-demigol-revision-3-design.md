@@ -21,6 +21,70 @@ Generators being revised (here):
 
 ---
 
+## 0. Confirmed with the Demigol side, 2026-08-15 — revision 3 is unblocked
+
+Every point below was verified by them against their tree or the URP package source. This
+section is authoritative over anything later in this document that contradicts it.
+
+### 0.1 URP — author unchanged
+
+The editor (6000.0.47f1) ships URP 17.0.4 embedded. `Universal Render Pipeline/Lit` declares
+`_MetallicGlossMap` and reads **R = metallic, A = smoothness**, so the kit's packing is correct
+as authored and the G duplicate is inert. **No art change for the pipeline swap.**
+
+Two defects are theirs and are being fixed inside the conversion: `MaterialBaker` enables
+Built-in's `_METALLICGLOSSMAP` keyword where URP's is `_METALLICSPECGLOSSMAP`, and
+`MaterialBaker.cs:25` loads an existing `.mat` without ever reassigning its shader, so a re-bake
+would silently keep `Standard`. They delete and re-bake.
+
+**They are also switching to Linear colour space.** Our maps are unaffected — import settings
+already have albedo sRGB-on with normal and mask sRGB-off, correct under both — but the look of
+everything shifts. **Do not judge revision 3 against any screenshot taken before Linear lands.**
+This bears on item 7 (palette) in particular: colour variety authored and judged in Maya is
+valid, but its in-engine appearance will move.
+
+### 0.2 `MAX_RUN` stays exactly as written — they repair their side
+
+This is the significant one. Their sim does **not** consume authored boundaries; it partitions
+the same grid independently at runtime in `SimWorld.cs:281` via `Cluster.SplitByMaterial`, under
+`SimTuning.cs` budgets — frame `48 cells / span 6 / 4 storeys`, curtain `16 / 4 / 2`. So our
+`MAX_RUN` partition and their cluster partition are two independent partitions of one grid.
+
+- **Kit (one-cell): no conflict.** Every cluster is a whole number of cells, so any cluster is
+  exactly coverable by whole kit pieces. `MAX_RUN glass = 1` costs them nothing.
+- **Hero (multi-cell): a chunk can straddle a cluster boundary.** Our runs are ≤4 against their
+  48/16, so a chunk will usually sit inside one cluster — but "usually" is not a guarantee when
+  neither partition knows about the other.
+
+They considered asking us to granulate to one cell and **rejected it**, on the grounds that it
+would buy the guarantee by discarding what multi-cell chunks are *for*: `MAX_RUN steel = 4`
+exists so the frame falls in large sections, and one-cell steel falls as confetti. The repair is
+theirs — cluster over authored chunks as atomic units rather than over raw cells, which makes our
+rule true by construction. Scoped to #612.
+
+**Author revision 3 to the existing rule. Do not granulate, do not change `MAX_RUN`.**
+
+### 0.3 The rest
+
+- **`endcap` as a context, not a variant letter** — accepted outright. Chirality-by-hash stays
+  ours; they consume what the naming says.
+- **Gate-mass movement** — theirs, acknowledged.
+- **Hero `material` block** — add it. Wiring is theirs under #612: `CatalogBaker.cs:108` reads
+  `root.IsKit ? MaterialBaker.Bake(...) : null` and `ChunkCatalog.SharedMaterial` is documented
+  kit-only, so a cross-delivery material reference is something their contract validator has
+  never seen.
+- **The revision-1 "12 triangles" correction** — accepted and propagating; their `CLAUDE.md` is
+  being fixed.
+
+### 0.4 Heads-up received: a ground context may be coming
+
+Demigol #610 (destructible city floor, filed from this side) would make the ground a destructible
+surface rather than one flat plane — which is the first thing that would want a **pavement/road
+context** in the kit. **Do not author it now.** Recorded so a later contract adding a ground
+context is not a surprise.
+
+---
+
 ## 1. Why revision 3 exists, honestly
 
 Two of #600's seven items are **unmet existing requirements**, not new taste. This matters
