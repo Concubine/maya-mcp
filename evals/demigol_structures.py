@@ -89,6 +89,57 @@ TRIM_PATCH = {
     "infill": "infill_dark", "glass": "steel_dark",
 }
 
+# --------------------------------------------------------------- palette (r3)
+# #600 item 7: all four heroes were the same blue-glass/grey/rust, because all
+# four drew from the same five patches. The atlas has carried `amber`, `rust`,
+# `trim`, `grime`, `brick_dark`, `glass_bright` and `sky_glass` since revision 2
+# and no hero has ever touched one of them.
+#
+# So this is the table edit item 7 asked for, and it costs NOTHING downstream:
+# same atlas, same material, same draw call, no kit rebuild. A role absent from
+# a palette falls back to ROLE_PATCH/TRIM_PATCH, so a palette states only what
+# it changes.
+PALETTES = {
+    "default": {},
+    # tower - corporate, cold. Pale spandrels against sky-coloured glazing.
+    "cool": {
+        "glass":    ("sky_glass", "steel_dark"),
+        "infill":   ("trim", "concrete_dark"),
+        "concrete": ("concrete", "trim"),
+    },
+    # block - warm masonry. The amber is the industrial warning amber the art
+    # direction calls for, spent on string courses where it reads as a band.
+    "warm": {
+        "brick":    ("brick", "amber"),
+        "glass":    ("glass_bright", "steel_dark"),
+        "concrete": ("concrete", "trim"),
+    },
+    # slab - pale and rusting. Rust on every trim, so the decay reads at
+    # distance as a colour rather than as texture detail that mips away.
+    "industrial": {
+        "infill":   ("infill", "rust"),
+        "glass":    ("glass", "steel_dark"),
+        "concrete": ("concrete_dark", "rust"),
+        "steel":    ("steel_dark", "rust"),
+    },
+    # stump - grimy. Dark brick and soot; the one that should look derelict.
+    "grimy": {
+        "brick":    ("brick_dark", "grime"),
+        "glass":    ("glass", "grime"),
+        "concrete": ("concrete_dark", "grime"),
+        "steel":    ("steel_dark", "grime"),
+    },
+}
+
+
+def patches_for(role, palette=None):
+    """The (body, trim) atlas patches this role uses under this palette."""
+    table = PALETTES[palette or "default"]
+    if role in table:
+        return table[role]
+    return ROLE_PATCH[role], TRIM_PATCH[role]
+
+
 ROLE_COLOUR = {
     "steel":    [0.34, 0.37, 0.42],
     "concrete": [0.62, 0.61, 0.58],
@@ -500,37 +551,72 @@ def _face_boxes(ch, key, patch, trim, expo):
         dim[2 if axis == 0 else 0] = wide
         return {"pos": pos, "dim": dim, "patch": p}
 
+    def upright(offset_from_face, thickness, across_centre, width, p):
+        """A vertical rib the full height of the chunk. `place` lays slabs
+        horizontally; a mullion is the same slab stood on its end."""
+        centre = sign * (half + offset_from_face - thickness / 2.0)
+        pos = [0.0, 0.0, 0.0]
+        dim = [0.0, CELL * ch.sy - 2 * INSET, 0.0]
+        pos[axis] = centre
+        dim[axis] = thickness
+        other = 2 if axis == 0 else 0
+        pos[other] = across_centre
+        dim[other] = width
+        return {"pos": pos, "dim": dim, "patch": p}
+
+    # #600 item 6: revision 2.5 spent 73-78 triangles of a 200-per-cell budget
+    # and declined geometry on budget grounds while sitting on the headroom.
+    # What follows is the headroom, spent on verticals - a facade of horizontal
+    # bands alone reads as a stack of shelves, and it is the vertical rhythm
+    # that makes a curtain wall look like a curtain wall from 30 m.
+    cells_across = ch.sz if axis == 0 else ch.sx
     out = []
     if ch.role == "brick":
-        # string courses, and a sill under the head of each storey
+        # string courses, a sill under the head of each storey, and a pilaster
+        # at each end of the face
         for i in range(ch.sy):
             base = -hy + CELL * (i + 0.5)
             out.append(place(0.10, 0.28, base + 0.95, 0.26, across, trim))
             out.append(place(0.06, 0.20, base - 0.95, 0.16, across * 0.78, trim))
+        for i in range(cells_across):
+            edge = -across / 2.0 + CELL * (i + 0.5)
+            out.append(upright(0.07, 0.22, edge - CELL / 2.0 + 0.22, 0.44, patch))
+            out.append(upright(0.07, 0.22, edge + CELL / 2.0 - 0.22, 0.44, patch))
     elif ch.role == "infill":
         for i in range(ch.sy):
             base = -hy + CELL * (i + 0.5)
             out.append(place(0.05, 0.16, base + 1.2, 0.22, across, trim))
             out.append(place(0.05, 0.16, base - 1.2, 0.22, across, trim))
+        for i in range(cells_across):
+            out.append(upright(0.05, 0.14, -across / 2.0 + CELL * (i + 0.5),
+                               0.30, trim))       # panel joint, one per cell
     elif ch.role == "glass":
         for i in range(ch.sy):
             base = -hy + CELL * (i + 0.5)
             out.append(place(0.07, 0.18, base + 1.28, 0.30, across, trim))
             out.append(place(0.07, 0.18, base - 1.28, 0.30, across, trim))
+        for i in range(cells_across):
+            mid = -across / 2.0 + CELL * (i + 0.5)
+            for off in (-0.9, 0.0, 0.9):
+                out.append(upright(0.09, 0.20, mid + off, 0.20, trim))  # mullions
     else:  # steel / concrete frame, seen wherever cladding is gone
         out.append(place(0.07, 0.20, 0.0, CELL * ch.sy - 2 * INSET,
                          across * 0.55, trim))
+        # the flanges either side of that web: an I-section read, which is what
+        # says "steel frame" when the cladding has come off it
+        for edge in (-1, 1):
+            out.append(upright(0.16, 0.14, edge * across * 0.30, across * 0.18,
+                               trim))
     return out
 
 
-def chunk_boxes(ch, occupied, storeys):
+def chunk_boxes(ch, occupied, storeys, palette=None):
     """The chunk as a list of boxes. One box is the old behaviour; the rest is
     relief on faces that are actually visible."""
     hx = CELL * ch.sx / 2.0 - INSET
     hy = CELL * ch.sy / 2.0 - INSET
     hz = CELL * ch.sz / 2.0 - INSET
-    patch = ROLE_PATCH[ch.role]
-    trim = TRIM_PATCH[ch.role]
+    patch, trim = patches_for(ch.role, palette)
     boxes = [{"pos": [0.0, 0.0, 0.0], "dim": [2 * hx, 2 * hy, 2 * hz],
               "patch": patch}]
 
@@ -557,7 +643,7 @@ def chunk_boxes(ch, occupied, storeys):
             pos[axis] = sign * (half + 0.16)
             dim[axis] = 0.62
             if len(boxes) - 1 < budget_boxes:
-                boxes.append({"pos": pos, "dim": dim, "patch": TRIM_PATCH[ch.role]})
+                boxes.append({"pos": pos, "dim": dim, "patch": trim})
     if expo["ground"] and faces and ch.role in CLADDING:
         for key in faces:
             axis = 0 if key in ("nx", "px") else 2
@@ -568,7 +654,8 @@ def chunk_boxes(ch, occupied, storeys):
             pos[axis] = sign * (half + 0.09)
             dim[axis] = 0.40
             if len(boxes) - 1 < budget_boxes:
-                boxes.append({"pos": pos, "dim": dim, "patch": "concrete"})
+                boxes.append({"pos": pos, "dim": dim,
+                              "patch": patches_for("concrete", palette)[0]})
     return split_oversized(boxes)
 
 
@@ -991,7 +1078,7 @@ def build_one(label, builder, zoom):
     chunk_dicts = []
     outsets = {}
     for c in chunks:
-        boxes = chunk_boxes(c, occupied, b.storeys)
+        boxes = chunk_boxes(c, occupied, b.storeys, b.palette)
         # Declared from the SAME boxes Maya is about to build, so the manifest
         # cannot drift from the mesh. The manifest entry drops `boxes` - 2,034
         # chunks of box lists would dwarf everything a consumer reads.
@@ -1028,8 +1115,11 @@ def build_one(label, builder, zoom):
     for c in chunks:
         roles[c.role] = roles.get(c.role, 0) + 1
     size = [round(check["bbox_max"][i] - check["bbox_min"][i], 2) for i in range(3)]
+    used = sorted({bx["patch"] for d in chunk_dicts for bx in d["boxes"]})
     return dict(
         name=label, archetype_footprint_cells=[b.nx, b.nz], storeys=b.storeys,
+        palette=b.palette, patch_indices=used,
+        footprint_by_storey=[list(b.foot(y)) for y in range(b.storeys)],
         size_m=size, bbox_min=check["bbox_min"], bbox_max=check["bbox_max"],
         chunks=check["chunks"], triangles=check["tris"],
         tris_per_chunk=round(check["tris"] / max(1, check["chunks"]), 1),

@@ -752,3 +752,99 @@ class TestArchetypesDiffer:
         for name, fn, _ in st.BUILDINGS:
             heights = {y for (_, y, _) in fn().roofed}
             assert len(heights) >= 2, "%s has a single roof height" % name
+
+
+class TestPalettes:
+    """#600 item 7. Four colourways on one atlas, one material, one draw call -
+    the seven patches the kit has always shipped and no hero ever used."""
+
+    def test_every_patch_every_palette_names_exists_in_the_atlas(self):
+        for name, table in st.PALETTES.items():
+            for role, (body, trim) in table.items():
+                assert body in kit.PATCH, "%s/%s -> %s" % (name, role, body)
+                assert trim in kit.PATCH, "%s/%s -> %s" % (name, role, trim)
+
+    def test_a_role_a_palette_does_not_mention_falls_back(self):
+        assert st.patches_for("brick", "cool") == (st.ROLE_PATCH["brick"],
+                                                   st.TRIM_PATCH["brick"])
+
+    def test_the_default_palette_is_what_the_module_tables_say(self):
+        for role in st.ROLES:
+            assert st.patches_for(role) == (st.ROLE_PATCH[role], st.TRIM_PATCH[role])
+
+    def test_no_two_archetypes_use_the_same_set_of_patches(self):
+        seen = {}
+        for name, fn, _ in st.BUILDINGS:
+            b = fn()
+            used = set()
+            for role in {c.role for c in b.chunks()}:
+                used.update(st.patches_for(role, b.palette))
+            used = frozenset(used)
+            assert used not in seen, "%s and %s are the same colourway" % (name, seen[used])
+            seen[used] = name
+
+    def test_the_palette_reaches_the_geometry(self):
+        b = st.stump()
+        chunks = b.chunks()
+        occupied = set()
+        for c in chunks:
+            occupied.update(c.cells_occupied())
+        brick = next(c for c in chunks if c.role == "brick")
+        patches = {bx["patch"] for bx in st.chunk_boxes(brick, occupied,
+                                                        b.storeys, b.palette)}
+        assert "brick_dark" in patches and "brick" not in patches
+
+
+class TestTriangleHeadroom:
+    """#600 item 6: 45-54 triangles of 200 is 25%, and curves were declined on
+    budget grounds while sitting on that headroom.
+
+    The floor here is deliberately not the 200 cap. Detail on an exposed face
+    stops reading long before the budget runs out, and past that point it
+    aliases - which is item 3's complaint about brick, arriving by another
+    road. What the floor pins is that the spend roughly DOUBLED and cannot
+    silently fall back.
+    """
+
+    def measure(self, b):
+        chunks = b.chunks()
+        occupied = set()
+        for c in chunks:
+            occupied.update(c.cells_occupied())
+        tris = cells = 0
+        for c in chunks:
+            expo = st._exposure(c, occupied, b.storeys)
+            if not any(expo[k] for k in ("nx", "px", "nz", "pz")):
+                continue
+            tris += len(st.chunk_boxes(c, occupied, b.storeys, b.palette)) * st.TRIS_PER_BOX
+            cells += c.sx * c.sy * c.sz
+        return tris / float(cells)
+
+    def test_exposed_chunks_carry_real_detail(self):
+        for name, fn, _ in st.BUILDINGS:
+            density = self.measure(fn())
+            assert density >= 60.0, "%s is at %.1f tris/cell" % (name, density)
+
+    def test_no_chunk_exceeds_its_budget_after_splitting(self):
+        for name, fn, _ in st.BUILDINGS:
+            b = fn()
+            chunks = b.chunks()
+            occupied = set()
+            for c in chunks:
+                occupied.update(c.cells_occupied())
+            for c in chunks:
+                n = len(st.chunk_boxes(c, occupied, b.storeys, b.palette))
+                assert n * st.TRIS_PER_BOX <= c.sx * c.sy * c.sz * st.TRI_BUDGET_PER_CELL, (
+                    "%s/%s" % (name, c.name))
+
+    def test_the_new_relief_stays_inside_the_outset_allowance(self):
+        for name, fn, _ in st.BUILDINGS:
+            b = fn()
+            chunks = b.chunks()
+            occupied = set()
+            for c in chunks:
+                occupied.update(c.cells_occupied())
+            for c in chunks:
+                boxes = st.chunk_boxes(c, occupied, b.storeys, b.palette)
+                out = st.chunk_outset(boxes, c.sx, c.sy, c.sz)
+                assert out <= st.MAX_OUTSET + 1e-9, "%s/%s oversails %.4f" % (name, c.name, out)
