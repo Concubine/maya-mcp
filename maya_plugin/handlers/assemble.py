@@ -291,6 +291,32 @@ def assemble(params: Dict[str, Any]) -> Dict[str, Any]:
             "pivot must be one of %s, got %r"
             % (", ".join(combine.PIVOT_MODES), pivot_mode)
         )
+
+    explicit_pivots: Dict[str, List[float]] = {}
+    raw_pivots = params.get("pivots")
+    if raw_pivots is not None:
+        if not isinstance(raw_pivots, dict):
+            raise HandlerError(
+                "pivots must be a map of chunk name to [x, y, z]",
+                hint='e.g. pivots={"golem_L_upperarm": [1.25, 3.95, 0.15]}',
+            )
+        known = {part["chunk"] for part in resolved}
+        for chunk_name, value in raw_pivots.items():
+            if chunk_name not in known:
+                raise HandlerError(
+                    "pivots names chunk %r, which no part builds" % chunk_name,
+                    hint="chunks in this call: %s" % ", ".join(sorted(known)),
+                )
+            # _vec3 returns None for an absent value; an explicit map has no
+            # "absent" - naming a chunk and giving it nothing is a mistake.
+            if value is None:
+                raise HandlerError(
+                    "pivots[%r] is null; a pivot is a world-space point" % chunk_name,
+                    hint="e.g. [1.25, 3.95, 0.15], or drop the key to keep the "
+                    "global pivot mode",
+                )
+            explicit_pivots[chunk_name] = _vec3(value, "pivots[%r]" % chunk_name)
+
     freeze = params.get("freeze", True)
     if not isinstance(freeze, bool):
         raise HandlerError("freeze must be true or false, got %r" % (freeze,))
@@ -346,13 +372,18 @@ def assemble(params: Dict[str, Any]) -> Dict[str, Any]:
     objects: List[Dict[str, Any]] = []
     for chunk in chunks:
         nodes = members[chunk]
+        wanted = explicit_pivots.get(chunk)
         if merge and len(nodes) > 1:
             result = combine.unite(cmds, nodes, chunk, pivot_mode, freeze)
+            placed = result["pivot"]
+            if wanted is not None:
+                cmds.xform(result["name"], worldSpace=True, pivots=tuple(wanted))
+                placed = list(wanted)
             objects.append({
                 "name": result["name"], "parts": len(nodes),
                 "tris": result["tris"], "verts": result["verts"],
                 "faces": result["faces"], "shells": result["shells"],
-                "pivot": result["pivot"], "combined": True,
+                "pivot": placed, "combined": True,
             })
             warnings.extend(result["warnings"])
             ledger.record(cmds, result["name"])
@@ -366,6 +397,8 @@ def assemble(params: Dict[str, Any]) -> Dict[str, Any]:
                                               naming.unique_name(cmds, chunk)),
                                   long=True) or [nodes[0]])[0]]
             for node in nodes:
+                if wanted is not None:
+                    cmds.xform(node, worldSpace=True, pivots=tuple(wanted))
                 shape = cmds.listRelatives(node, shapes=True, fullPath=True,
                                            noIntermediate=True)[0]
                 objects.append({
@@ -374,7 +407,8 @@ def assemble(params: Dict[str, Any]) -> Dict[str, Any]:
                     "verts": cmds.polyEvaluate(shape, vertex=True),
                     "faces": cmds.polyEvaluate(shape, face=True),
                     "shells": cmds.polyEvaluate(shape, shell=True),
-                    "pivot": None, "combined": False,
+                    "pivot": list(wanted) if wanted is not None else None,
+                    "combined": False,
                 })
                 ledger.record(cmds, node)
 

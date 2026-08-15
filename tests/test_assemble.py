@@ -432,3 +432,78 @@ class TestValidateParts:
             [{"dim": [1, 1, 1], "patch": 5}], 4, 4, "w"
         )
         assert resolved[0]["cell"] == (1, 1)
+
+
+class TestPivots:
+    """The brief's bodies below are verbatim; only this fixture is added, to
+    keep session.auto_checkpoint from reaching the real `maya` module - the
+    same fix test_combine.py already applies for the identical reason."""
+
+    @pytest.fixture(autouse=True)
+    def _no_checkpoint(self, monkeypatch):
+        from maya_plugin.handlers import session
+
+        monkeypatch.setattr(session, "auto_checkpoint", lambda reason: {"path": "x.ma"})
+
+    def test_assemble_explicit_pivot_overrides_mode(self, monkeypatch):
+        fake = FakeCmds()
+        monkeypatch.setattr(assemble, "_cmds", lambda: fake)
+        result = assemble.assemble({
+            "name": "golem",
+            "parts": [
+                {"kind": "cube", "pos": [0, 1, 0], "dim": [1, 1, 1], "chunk": "arm"},
+                {"kind": "cube", "pos": [0, 2, 0], "dim": [1, 1, 1], "chunk": "arm"},
+            ],
+            "pivot": "center",
+            "pivots": {"arm": [0.0, 3.0, 0.0]},
+        })
+        arm = next(o for o in result["objects"] if o["name"].endswith("arm"))
+        assert arm["pivot"] == [0.0, 3.0, 0.0]
+
+    def test_assemble_pivots_reach_single_part_chunks(self, monkeypatch):
+        fake = FakeCmds()
+        monkeypatch.setattr(assemble, "_cmds", lambda: fake)
+        result = assemble.assemble({
+            "name": "golem",
+            "parts": [{"kind": "cube", "pos": [0, 1, 0], "dim": [1, 1, 1], "chunk": "fist"}],
+            "pivots": {"fist": [1.0, 2.0, 3.0]},
+        })
+        assert result["objects"][0]["pivot"] == [1.0, 2.0, 3.0]
+
+    def test_assemble_unlisted_chunks_keep_the_mode(self, monkeypatch):
+        fake = FakeCmds()
+        monkeypatch.setattr(assemble, "_cmds", lambda: fake)
+        result = assemble.assemble({
+            "name": "golem",
+            "parts": [
+                {"kind": "cube", "pos": [0, 1, 0], "dim": [1, 1, 1], "chunk": "a"},
+                {"kind": "cube", "pos": [0, 2, 0], "dim": [1, 1, 1], "chunk": "a"},
+                {"kind": "cube", "pos": [0, 3, 0], "dim": [1, 1, 1], "chunk": "b"},
+                {"kind": "cube", "pos": [0, 4, 0], "dim": [1, 1, 1], "chunk": "b"},
+            ],
+            "pivots": {"a": [9.0, 9.0, 9.0]},
+        })
+        by_chunk = {o["name"].split("|")[-1]: o for o in result["objects"]}
+        assert by_chunk["a"]["pivot"] == [9.0, 9.0, 9.0]
+        assert by_chunk["b"]["pivot"] != [9.0, 9.0, 9.0]
+
+    def test_assemble_pivots_rejects_an_unknown_chunk(self, monkeypatch):
+        fake = FakeCmds()
+        monkeypatch.setattr(assemble, "_cmds", lambda: fake)
+        with pytest.raises(HandlerError) as exc:
+            assemble.assemble({
+                "name": "golem",
+                "parts": [{"kind": "cube", "pos": [0, 1, 0], "dim": [1, 1, 1], "chunk": "arm"}],
+                "pivots": {"leg": [0.0, 0.0, 0.0]},
+            })
+        assert "leg" in str(exc.value)
+
+    def test_assemble_pivots_rejects_a_bad_vector(self, monkeypatch):
+        fake = FakeCmds()
+        monkeypatch.setattr(assemble, "_cmds", lambda: fake)
+        with pytest.raises(HandlerError):
+            assemble.assemble({
+                "name": "golem",
+                "parts": [{"kind": "cube", "pos": [0, 1, 0], "dim": [1, 1, 1], "chunk": "arm"}],
+                "pivots": {"arm": [0.0, 0.0]},
+            })
