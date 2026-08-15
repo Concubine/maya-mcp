@@ -87,6 +87,40 @@ def resolve_cell(patch: Any, cols: Any, rows: Any) -> Tuple[int, int]:
     return int(patch % cols), int(patch // cols)
 
 
+def centre_in_rect(
+    bounds: Sequence[float], rect: Sequence[float]
+) -> Tuple[float, float, float, float]:
+    """(pivot_u, pivot_v, delta_u, delta_v) to centre `bounds` inside `rect`.
+
+    Used by world-scale packing, where the scale factor is decided by real-world
+    size rather than by making the object fill the patch. Scale about the
+    object's own UV centre with the returned pivot, then move by the returned
+    delta, and the object sits centred in its patch at whatever density the
+    caller asked for.
+    """
+    u0, v0, u1, v1 = (float(q) for q in bounds)
+    centre_u, centre_v = (u0 + u1) / 2.0, (v0 + v1) / 2.0
+    rect_u = (float(rect[0]) + float(rect[2])) / 2.0
+    rect_v = (float(rect[1]) + float(rect[3])) / 2.0
+    return (centre_u, centre_v, rect_u - centre_u, rect_v - centre_v)
+
+
+def fits_in_rect(bounds: Sequence[float], rect: Sequence[float], scale: float) -> bool:
+    """Would `bounds`, scaled by `scale` about its centre, stay inside `rect`?
+
+    False means the piece is physically too big for the density asked of it, and
+    its UVs would spill into a neighbouring atlas patch - which reads as another
+    material's pixels appearing on the piece.
+    """
+    u0, v0, u1, v1 = (float(q) for q in bounds)
+    half_u = (u1 - u0) * float(scale) / 2.0
+    half_v = (v1 - v0) * float(scale) / 2.0
+    rect_half_u = (float(rect[2]) - float(rect[0])) / 2.0
+    rect_half_v = (float(rect[3]) - float(rect[1])) / 2.0
+    tol = 1e-6
+    return half_u <= rect_half_u + tol and half_v <= rect_half_v + tol
+
+
 def fit_transform(rect: Sequence[float]) -> Tuple[float, float, float, float]:
     """(scale_u, scale_v, offset_u, offset_v) mapping the unit square onto rect.
 

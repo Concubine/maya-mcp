@@ -114,6 +114,26 @@ margined = _uvatlas.uv_atlas({"names": [ico], "cols": 4, "rows": 4,
                               "patch": 6, "margin": 0.1})
 bare = _uvmath.patch_rect(4, 4, 2, 1, margin=0.0)
 
+# --- fixed texel density -------------------------------------------------
+# The constant AUTOPROJ_UV_PER_METRE is the whole basis of a STATED density,
+# so it is asserted here against real Maya rather than trusted.
+probe = cmds.polyCube(w=1, h=1, d=1, name="uv_metre", ch=False)[0]
+probe = (cmds.ls(probe, long=True) or [probe])[0]
+pshape = cmds.listRelatives(probe, shapes=True, fullPath=True)[0]
+cmds.polyAutoProjection(pshape, ch=False, scaleMode=0)
+pbb = cmds.polyEvaluate(pshape, boundingBox2d=True)
+
+big = cmds.polyCube(w=3, h=3, d=3, name="dens_big", ch=False)[0]
+big = (cmds.ls(big, long=True) or [big])[0]
+small = cmds.polyCube(w=0.5, h=0.5, d=0.5, name="dens_small", ch=False)[0]
+small = (cmds.ls(small, long=True) or [small])[0]
+d_big = _uvatlas.uv_atlas({"names": [big], "cols": 4, "rows": 4, "patch": 0,
+                           "margin": 0.0, "world_scale": 3.0})
+d_small = _uvatlas.uv_atlas({"names": [small], "cols": 4, "rows": 4, "patch": 0,
+                             "margin": 0.0, "world_scale": 3.0})
+bb_big = d_big["meshes"][0]["uv_bounds"]
+bb_small = d_small["meshes"][0]["uv_bounds"]
+
 result = {
     "rect": [round(q, 6) for q in rect],
     "cube_bounds": packed["meshes"][0]["uv_bounds"],
@@ -122,6 +142,13 @@ result = {
     "repack_bounds": again["meshes"][0]["uv_bounds"],
     "margined": margined["meshes"][0]["uv_bounds"],
     "bare_rect": [round(q, 6) for q in bare],
+    "uv_per_metre_constant": _uvatlas.AUTOPROJ_UV_PER_METRE,
+    "metre_cube_uv_extent": round(max(pbb[0][1] - pbb[0][0],
+                                      pbb[1][1] - pbb[1][0]), 4),
+    "density_big": round((bb_big[2] - bb_big[0]) / 3.0, 6),
+    "density_small": round((bb_small[2] - bb_small[0]) / 0.5, 6),
+    "big_fills_patch": round(bb_big[2] - bb_big[0], 6),
+    "patch_width": round(_uvmath.patch_rect(4, 4, 0, 0, margin=0.0)[2], 6),
 }
 result
 '''
@@ -163,6 +190,25 @@ def main():
                         and g[1] > u["bare_rect"][1] + tol
                         and g[2] < u["bare_rect"][2] - tol
                         and g[3] < u["bare_rect"][3] - tol))
+
+    print("\n-- fixed texel density ------------------------------------")
+    # A 1 m cube's auto-projected UV extent spans 3 face-widths across, so the
+    # per-metre constant is that extent / 3.
+    check("100 UV units per metre (the stated constant)",
+          round(u["metre_cube_uv_extent"] / 3.0, 3),
+          u["uv_per_metre_constant"],
+          ok=lambda g: abs(g - u["uv_per_metre_constant"]) < 1.0)
+    # A box auto-projection lays six faces side by side, so a cube's UV bbox is
+    # about THREE face-widths across, not one. That factor is the difference
+    # between "512 px per patch" and "512 px across a 3 m face", so it is
+    # measured and stated rather than assumed - assuming it is what made the
+    # first family's texel density unknowable.
+    factor = u["big_fills_patch"] / u["patch_width"]
+    check("a cube's UV layout spans ~3 face-widths", round(factor, 3), "2.5-3.5",
+          ok=lambda g: 2.5 <= g <= 3.5)
+    check("0.5 m piece carries the SAME px/m as a 3 m piece",
+          u["density_small"], u["density_big"],
+          ok=lambda g: abs(g - u["density_big"]) <= 1e-4)
 
     passed = sum(1 for p, *_ in CHECKS if p)
     print("\n%d/%d checks green" % (passed, len(CHECKS)))

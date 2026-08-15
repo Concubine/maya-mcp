@@ -410,6 +410,13 @@ class UvAtlasResult(BaseModel):
     margin: float
     projection: str
     normalized: bool
+    world_scale: Optional[float] = Field(
+        default=None,
+        description=(
+            "Metres mapped across one patch when fixed-density packing was "
+            "used; null when the object was normalised to fill the patch."
+        ),
+    )
     all_inside: bool = Field(
         description=(
             "False means at least one mesh's UVs escaped its patch, which will "
