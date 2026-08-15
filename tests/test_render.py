@@ -110,6 +110,10 @@ class FakeCmds:
         self.light_yaw_query = {}
         self.yaw_history = []
         self._lights = list(lights)
+        # Arnold's light shapes are their own node types and answer NEITHER
+        # ls(lights=True) nor ls(type="light") - they have to be asked for by
+        # name. A sky dome also answers ls(geometry=True), which is #618.
+        self.arnold_lights = []
         # Geometry is SHAPES, as cmds.ls(geometry=True) returns them - the
         # distinction that made isolate hide its own subject (redmine #584).
         self._geometry = list(geometry)
@@ -122,6 +126,8 @@ class FakeCmds:
             return list(self._lights)
         if kwargs.get("type") == "light":
             return list(self._lights)
+        if kwargs.get("type") == "aiSkyDomeLight":
+            return list(self.arnold_lights)
         if kwargs.get("geometry"):
             # Real cmds.ls returns SHORT names unless long=True is asked for.
             # Reproducing that is the whole point: the live gate found isolate
@@ -653,3 +659,38 @@ class TestDisplayTransform:
         _frame(arnold_cmds, renderer="mayaHardware2")
         assert arnold_cmds.arnold_renders == []
         assert len(arnold_cmds.legacy_renders) == 1
+
+
+class TestIsolateSparesLights:
+    """#618: cmds.ls(geometry=True) reports aiSkyDomeLight shapes as GEOMETRY.
+
+    So isolate hid the dome along with the scenery and the frame came back pure
+    black - measured live: (0,0,0) across a whole 256x256 frame under the
+    environment preset, against (122,110,107) for the same scene without
+    isolate. render_sheet isolates every subject by default, so a contact sheet
+    of a kit under a dome was 41 black cells.
+
+    It bites exactly where it hurts most: the dome preset exists because a full
+    metal has nothing to reflect in a directional rig, so the dome is the only
+    rig in which steel and glass can be judged - and isolate is how a single
+    piece gets judged.
+    """
+
+    def _fake(self):
+        fake = FakeCmds(geometry=("|ball|ballShape", "|floor|floorShape",
+                                  "|mcpLight_dome|mcpLight_domeShape"))
+        # what Maya really does: the dome answers ls(geometry=True) AND the
+        # Arnold light-type query
+        fake.arnold_lights = ["|mcpLight_dome|mcpLight_domeShape"]
+        return fake
+
+    def test_it_does_not_hide_a_sky_dome(self):
+        fake = self._fake()
+        hidden = render._hide_non_targets(fake, ["|ball"])
+        assert "|mcpLight_dome|mcpLight_domeShape" not in hidden
+        assert fake.visibility["|mcpLight_dome|mcpLight_domeShape"] is True
+
+    def test_it_still_hides_the_geometry_that_is_not_the_subject(self):
+        fake = self._fake()
+        hidden = render._hide_non_targets(fake, ["|ball"])
+        assert hidden == ["|floor|floorShape"]

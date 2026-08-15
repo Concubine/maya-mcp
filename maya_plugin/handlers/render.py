@@ -515,8 +515,18 @@ def _hide_non_targets(cmds, isolate: List[str]) -> List[str]:
     for name in isolate:
         for long_name in cmds.ls(name, long=True) or [name]:
             keep.add(long_name)
+    # An aiSkyDomeLight answers ls(geometry=True). Hiding it turned every
+    # isolated render under the environment/hdri presets into a pure black
+    # frame - and those are the only presets in which a metal can be judged at
+    # all, so the tool and the rig that need each other most could not be used
+    # together (redmine #618). lighting.light_shapes is the one place that
+    # knows what a light is; a second answer here would be a second thing to
+    # get wrong.
+    lights = set(lighting.light_shapes(cmds))
     hidden = []
     for name in cmds.ls(geometry=True, long=True) or []:
+        if name in lights:
+            continue
         if name in keep or any(name.startswith(target + "|") for target in keep):
             continue
         try:
