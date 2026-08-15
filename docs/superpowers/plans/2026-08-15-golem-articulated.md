@@ -32,6 +32,46 @@ double, FastMCP + pydantic on the server side, `uv` for running.
 
 ---
 
+## Revision, 2026-08-15 — after the final whole-branch review
+
+Three findings from the review change how this plan runs. They do not change the
+design; they change where pivots are placed and what counts as proof.
+
+**1. A pivot set in Task 4 will not survive to Task 8.** `boolean_op` produces a
+NEW node carrying Maya's pivot, not yours (Task 6 cuts four sockets), and
+`mesh_cleanup` defaults `freeze_transforms=True`, which resets pivots to the
+origin. Whatever `array` mode=mirror leaves on a mirrored child is unproven
+(`array.py:236-251` groups, sets a group pivot, negative-scales, freezes,
+unparents, deletes the group).
+
+So the rig is placed **twice**, deliberately:
+
+- Task 4 keeps its `pivots` map. That call is the point of #603 and of this
+  benchmark — can the toolset place a rig in one call? — and the answer is
+  ledger evidence either way.
+- **Task 8 gains a re-place pass** over all 29 chunks, after every boolean and
+  every mirror, using `transform.pivot` (the proven-live path). Task 8 must
+  first MEASURE which of the Task 4 pivots survived and record the count. A
+  rig that has to be placed twice is itself a finding for the report.
+
+**2. `assemble`'s reported pivot is not evidence.** It was computed from the
+input, so Task 4 Step 4's "every object's `pivot` equals the map" could not
+fail. Being fixed to query Maya back; until `evals/assemble_pivots_live.py`
+passes, verify pivots with an independent `execute_python` query, not with the
+response. Measurement, so not an escape.
+
+**3. Read names back from the response.** `pivots` is keyed by chunk label, but
+returned names come from `naming.unique_name` and become `golem_L_upperarm1` if
+the name is taken. The pivot still lands correctly; local `{name: pivot}`
+bookkeeping would not. Start from an empty scene and trust `objects[i]["name"]`.
+
+Also carried: single-part and multi-part chunks are structurally different —
+a multi-part chunk comes back frozen to identity, a single-part chunk keeps its
+`scale = dim` and rotate. Both appear in this build. Anything reading transforms
+alongside pivots must not assume the two are interchangeable.
+
+---
+
 ## File Structure
 
 | File | Responsibility |
