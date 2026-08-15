@@ -15,7 +15,8 @@ from maya_plugin.handlers import uvatlas, uvmath
 class FakeCmds:
     """A mesh whose UVs start somewhere unhelpful, so normalisation matters."""
 
-    def __init__(self, objects=("|box",), shapes=None, uvs=None):
+    def __init__(self, objects=("|box",), shapes=None, uvs=None, world_m=3.0):
+        self.world_m = world_m
         self.objects = list(objects)
         self.shapes = (
             dict(shapes)
@@ -52,8 +53,15 @@ class FakeCmds:
 
     # --- uv operations -----------------------------------------------------
     def polyAutoProjection(self, target, **kwargs):
-        self.calls.append("polyAutoProjection")
-        self.uvs = [(0.0, 0.0), (1.0, 1.0)]
+        self.calls.append("polyAutoProjection:sm=%s" % kwargs.get("scaleMode"))
+        if kwargs.get("scaleMode") == 0:
+            # World-proportional, as measured on Maya 2027: 100 UV units per
+            # metre. self.world_m is the object's size, so the fake reproduces
+            # the property the mode depends on rather than a fixed square.
+            extent = self.world_m * 100.0
+            self.uvs = [(0.0, 0.0), (extent, extent)]
+        else:
+            self.uvs = [(0.0, 0.0), (1.0, 1.0)]
 
     def polyProjection(self, target, **kwargs):
         self.calls.append("polyProjection:%s" % kwargs.get("type"))
@@ -155,7 +163,7 @@ class TestOrderAndModes:
     def test_box_projection_is_the_default(self):
         fake = FakeCmds()
         _run(fake, names=["|box"], cols=2, rows=2, patch=0)
-        assert "polyAutoProjection" in fake.calls
+        assert any(c.startswith("polyAutoProjection") for c in fake.calls)
 
     def test_keep_does_not_reproject(self):
         fake = FakeCmds(uvs=[(0.0, 0.0), (1.0, 1.0)])
@@ -198,3 +206,84 @@ class TestRejections:
     def test_rejects_a_patch_outside_the_grid(self):
         with pytest.raises(HandlerError):
             _run(FakeCmds(), names=["|box"], cols=2, rows=2, patch=99)
+
+
+class TestWorldScale:
+    """Texel density decided by real-world size, not by filling the patch.
+
+    This is the mode that makes a STATED density possible: a 3 m slab and a
+    0.5 m band must carry the same pixels per metre, or a wall reads as a model
+    of a wall.
+    """
+
+    def test_a_full_cell_piece_fills_the_patch(self):
+        fake = FakeCmds(world_m=3.0)
+        out = _run(fake, names=["|box"], cols=4, rows=4, patch=0,
+                   margin=0.0, world_scale=3.0)
+        rect = uvmath.patch_rect(4, 4, 0, 0, margin=0.0)
+        assert out["meshes"][0]["uv_bounds"] == pytest.approx(list(rect))
+
+    def test_a_sixth_size_piece_uses_a_sixth_of_the_patch(self):
+        fake = FakeCmds(world_m=0.5)
+        out = _run(fake, names=["|box"], cols=4, rows=4, patch=0,
+                   margin=0.0, world_scale=3.0)
+        bounds = out["meshes"][0]["uv_bounds"]
+        rect = uvmath.patch_rect(4, 4, 0, 0, margin=0.0)
+        # 0.5 m of a 3 m patch: one sixth of the width, and it must stay inside.
+        # abs tolerance because the handler reports uv_bounds rounded to 6 dp.
+        assert (bounds[2] - bounds[0]) == pytest.approx(
+            (rect[2] - rect[0]) / 6.0, abs=2e-6
+        )
+        assert out["meshes"][0]["inside_patch"] is True
+
+    def test_density_is_identical_across_sizes(self):
+        # The property the whole mode exists for, stated as a ratio.
+        big = _run(FakeCmds(world_m=3.0), names=["|box"], cols=4, rows=4,
+                   patch=0, margin=0.0, world_scale=3.0)["meshes"][0]["uv_bounds"]
+        small = _run(FakeCmds(world_m=0.5), names=["|box"], cols=4, rows=4,
+                     patch=0, margin=0.0, world_scale=3.0)["meshes"][0]["uv_bounds"]
+        big_per_m = (big[2] - big[0]) / 3.0
+        small_per_m = (small[2] - small[0]) / 0.5
+        assert big_per_m == pytest.approx(small_per_m, abs=1e-5)
+
+    def test_the_piece_is_centred_in_its_patch(self):
+        fake = FakeCmds(world_m=1.0)
+        out = _run(fake, names=["|box"], cols=4, rows=4, patch=5,
+                   margin=0.0, world_scale=3.0)
+        rect = uvmath.patch_rect(4, 4, 1, 1, margin=0.0)
+        bounds = out["meshes"][0]["uv_bounds"]
+        assert (bounds[0] + bounds[2]) / 2 == pytest.approx((rect[0] + rect[2]) / 2)
+        assert (bounds[1] + bounds[3]) / 2 == pytest.approx((rect[1] + rect[3]) / 2)
+
+    def test_uses_world_proportional_projection(self):
+        fake = FakeCmds(world_m=3.0)
+        _run(fake, names=["|box"], cols=4, rows=4, patch=0, world_scale=3.0)
+        assert "polyAutoProjection:sm=0" in fake.calls
+
+    def test_does_not_normalise(self):
+        # Normalising would destroy the world proportion this mode depends on.
+        fake = FakeCmds(world_m=3.0)
+        out = _run(fake, names=["|box"], cols=4, rows=4, patch=0, world_scale=3.0)
+        assert "polyNormalizeUV" not in fake.calls
+        assert out["normalized"] is False
+
+    def test_a_piece_too_big_for_the_density_is_reported_not_hidden(self):
+        # 6 m of geometry at 3 m per patch cannot fit; it must come back with
+        # inside_patch false rather than silently spilling into the neighbour.
+        fake = FakeCmds(world_m=6.0)
+        out = _run(fake, names=["|box"], cols=4, rows=4, patch=0,
+                   margin=0.0, world_scale=3.0)
+        assert out["meshes"][0]["inside_patch"] is False
+        assert out["all_inside"] is False
+
+    def test_world_scale_is_reported(self):
+        out = _run(FakeCmds(), names=["|box"], cols=4, rows=4, patch=0,
+                   world_scale=3.0)
+        assert out["world_scale"] == 3.0
+        assert out["projection"] == "world"
+
+    @pytest.mark.parametrize("bad", [0, -1.0, "3m", True])
+    def test_rejects_a_nonsense_world_scale(self, bad):
+        with pytest.raises(HandlerError):
+            _run(FakeCmds(), names=["|box"], cols=4, rows=4, patch=0,
+                 world_scale=bad)

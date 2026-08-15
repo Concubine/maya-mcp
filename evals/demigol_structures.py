@@ -45,8 +45,11 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "src"))
 
+import demigol_kit as kit  # noqa: E402 - shared atlas, patches and density
 from live_call import call  # noqa: E402
 from maya_mcp import images  # noqa: E402
+
+MAPS = {}   # filled by main(): the same three maps the kit ships
 
 OUT_DIR = os.path.join(_HERE, "demigol_structures")
 
@@ -57,6 +60,34 @@ MAX_CELLS, MAX_SPAN, MAX_STOREYS = 48, 6, 4
 STRUCTURAL = ("steel", "concrete")
 CLADDING = ("brick", "infill", "glass")
 ROLES = STRUCTURAL + CLADDING
+
+# --------------------------------------------------------------- revision 2
+# Two ceilings went up. The budget is 200 triangles per 1-cell chunk and this
+# delivery used 12 - every chunk a plain box, so four hero buildings rendered
+# as the same graybox cubes the city already draws. And render geometry may now
+# outset 0.5 m past the cell face, because the lattice constrains which CELLS a
+# chunk occupies, never its mesh.
+#
+# Detail is spent where it is seen: a chunk's EXPOSED faces. Interior and
+# hidden frame chunks stay cheap, because they are invisible until the golem
+# opens the building up - at which point silhouette matters less than the fact
+# that something came off.
+INSET = 0.005
+MAX_OUTSET = 0.5
+TRI_BUDGET_PER_CELL = 200
+TRIS_PER_BOX = 12
+
+# Heroes sample the SAME atlas as the kit, so a hero and its kit-dressed
+# neighbours sit in the same light (contract rev 2 section 8).
+KIT_DIR = os.path.join(_HERE, "demigol_kit")
+ROLE_PATCH = {
+    "steel": "steel", "concrete": "concrete", "brick": "brick",
+    "infill": "infill", "glass": "glass",
+}
+TRIM_PATCH = {
+    "steel": "steel_dark", "concrete": "concrete_dark", "brick": "concrete",
+    "infill": "infill_dark", "glass": "steel_dark",
+}
 
 ROLE_COLOUR = {
     "steel":    [0.34, 0.37, 0.42],
@@ -231,6 +262,118 @@ class Chunk:
         )
 
 
+# ============================================================ detail (rev 2)
+# A chunk's geometry, as boxes in its own local space. 12 triangles each, so
+# the budget stays arithmetic: an 8-box chunk is 96 against 200 per cell.
+
+def _exposure(ch, occupied, storeys):
+    """Which of a chunk's faces can actually be seen from outside."""
+    faces = {}
+    for axis, sign, key in (("x", -1, "nx"), ("x", 1, "px"),
+                            ("z", -1, "nz"), ("z", 1, "pz")):
+        exposed = False
+        for cell in ch.cells_occupied():
+            probe = list(cell)
+            probe[0 if axis == "x" else 2] += sign
+            if tuple(probe) not in occupied:
+                exposed = True
+                break
+        faces[key] = exposed
+    faces["top"] = (ch.y + ch.sy) >= storeys
+    faces["ground"] = ch.y == 0
+    return faces
+
+
+def _face_boxes(ch, key, patch, trim, expo):
+    """Relief on one exposed vertical face, in chunk-local coordinates."""
+    axis = 0 if key in ("nx", "px") else 2
+    sign = -1 if key in ("nx", "nz") else 1
+    half = CELL * (ch.sx if axis == 0 else ch.sz) / 2.0
+    hy = CELL * ch.sy / 2.0
+    across = CELL * (ch.sz if axis == 0 else ch.sx) - 2 * INSET
+
+    def place(offset_from_face, thickness, y_centre, height, wide, p):
+        """A slab lying against the face; offset is measured OUTWARD."""
+        centre = sign * (half + offset_from_face - thickness / 2.0)
+        pos = [0.0, y_centre, 0.0]
+        dim = [wide, height, wide]
+        pos[axis] = centre
+        dim[axis] = thickness
+        dim[2 if axis == 0 else 0] = wide
+        return {"pos": pos, "dim": dim, "patch": p}
+
+    out = []
+    if ch.role == "brick":
+        # string courses, and a sill under the head of each storey
+        for i in range(ch.sy):
+            base = -hy + CELL * (i + 0.5)
+            out.append(place(0.10, 0.28, base + 0.95, 0.26, across, trim))
+            out.append(place(0.06, 0.20, base - 0.95, 0.16, across * 0.78, trim))
+    elif ch.role == "infill":
+        for i in range(ch.sy):
+            base = -hy + CELL * (i + 0.5)
+            out.append(place(0.05, 0.16, base + 1.2, 0.22, across, trim))
+            out.append(place(0.05, 0.16, base - 1.2, 0.22, across, trim))
+    elif ch.role == "glass":
+        for i in range(ch.sy):
+            base = -hy + CELL * (i + 0.5)
+            out.append(place(0.07, 0.18, base + 1.28, 0.30, across, trim))
+            out.append(place(0.07, 0.18, base - 1.28, 0.30, across, trim))
+    else:  # steel / concrete frame, seen wherever cladding is gone
+        out.append(place(0.07, 0.20, 0.0, CELL * ch.sy - 2 * INSET,
+                         across * 0.55, trim))
+    return out
+
+
+def chunk_boxes(ch, occupied, storeys):
+    """The chunk as a list of boxes. One box is the old behaviour; the rest is
+    relief on faces that are actually visible."""
+    hx = CELL * ch.sx / 2.0 - INSET
+    hy = CELL * ch.sy / 2.0 - INSET
+    hz = CELL * ch.sz / 2.0 - INSET
+    patch = ROLE_PATCH[ch.role]
+    trim = TRIM_PATCH[ch.role]
+    boxes = [{"pos": [0.0, 0.0, 0.0], "dim": [2 * hx, 2 * hy, 2 * hz],
+              "patch": patch}]
+
+    expo = _exposure(ch, occupied, storeys)
+    faces = [k for k in ("nx", "px", "nz", "pz") if expo[k]]
+    budget_boxes = max(1, (ch.sx * ch.sy * ch.sz * TRI_BUDGET_PER_CELL)
+                       // TRIS_PER_BOX) - 1
+
+    for key in faces:
+        for b in _face_boxes(ch, key, patch, trim, expo):
+            if len(boxes) - 1 >= budget_boxes:
+                break
+            boxes.append(b)
+
+    # The crown and the plinth: the two pieces of silhouette that read from
+    # across the district, and the two revision 1 could not author at all.
+    if expo["top"] and faces:
+        for key in faces:
+            axis = 0 if key in ("nx", "px") else 2
+            sign = -1 if key in ("nx", "nz") else 1
+            half = (hx if axis == 0 else hz) + INSET
+            pos = [0.0, hy - 0.22, 0.0]
+            dim = [2 * hx, 0.30, 2 * hz]
+            pos[axis] = sign * (half + 0.16)
+            dim[axis] = 0.62
+            if len(boxes) - 1 < budget_boxes:
+                boxes.append({"pos": pos, "dim": dim, "patch": TRIM_PATCH[ch.role]})
+    if expo["ground"] and faces and ch.role in CLADDING:
+        for key in faces:
+            axis = 0 if key in ("nx", "px") else 2
+            sign = -1 if key in ("nx", "nz") else 1
+            half = (hx if axis == 0 else hz) + INSET
+            pos = [0.0, -hy + 0.42, 0.0]
+            dim = [2 * hx, 0.84, 2 * hz]
+            pos[axis] = sign * (half + 0.09)
+            dim[axis] = 0.40
+            if len(boxes) - 1 < budget_boxes:
+                boxes.append({"pos": pos, "dim": dim, "patch": "concrete"})
+    return boxes
+
+
 # ====================================================== the structural check
 # The contract's one-action self-check, executed rather than asserted.
 
@@ -372,69 +515,149 @@ def run(code, what, timeout=1800.0):
 
 
 BUILD_CODE = r'''
-import json, maya.cmds as cmds
+import importlib, json
+import maya.cmds as cmds
+from maya_plugin.handlers import combine as _combine
+from maya_plugin.handlers import uvatlas as _uvatlas
+importlib.reload(_uvatlas); importlib.reload(_combine)
+
 spec = json.loads(SPEC)
 label = spec["label"]
 cmds.currentUnit(linear="m")
-by_role = {}
+
+# ONE material for the building, on the SAME atlas the kit uses, so a hero and
+# its kit-dressed neighbours sit in the same light.
+shader = cmds.shadingNode("standardSurface", asShader=True, name=label + "_mat")
+cmds.setAttr(shader + ".base", 1.0)
+sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True,
+               name=label + "_matSG")
+cmds.connectAttr(shader + ".outColor", sg + ".surfaceShader", force=True)
+
+
+def _file_node(path, name, raw=False):
+    node = cmds.shadingNode("file", asTexture=True, name=name)
+    cmds.setAttr(node + ".fileTextureName", path, type="string")
+    cmds.setAttr(node + ".filterType", 0)
+    if raw:
+        try:
+            cmds.setAttr(node + ".colorSpace", "Raw", type="string")
+            cmds.setAttr(node + ".ignoreColorSpaceFileRules", True)
+        except Exception:
+            pass
+    return node
+
+
+alb = _file_node(spec["maps"]["albedo"], label + "_albedo")
+cmds.connectAttr(alb + ".outColor", shader + ".baseColor", force=True)
+msk = _file_node(spec["maps"]["mask"], label + "_mask", raw=True)
+cmds.connectAttr(msk + ".outColorR", shader + ".metalness", force=True)
+inv = cmds.shadingNode("reverse", asUtility=True, name=label + "_s2r")
+cmds.connectAttr(msk + ".outColorG", inv + ".inputX", force=True)
+cmds.connectAttr(inv + ".outputX", shader + ".specularRoughness", force=True)
+nrm = _file_node(spec["maps"]["normal"], label + "_normal", raw=True)
+bmp = cmds.shadingNode("bump2d", asUtility=True, name=label + "_bump")
+cmds.setAttr(bmp + ".bumpInterp", 1)
+cmds.connectAttr(nrm + ".outAlpha", bmp + ".bumpValue", force=True)
+cmds.connectAttr(bmp + ".outNormal", shader + ".normalCamera", force=True)
+
+made = []
 for c in spec["chunks"]:
-    node = cmds.polyCube(w=c["dim"][0], h=c["dim"][1], d=c["dim"][2],
-                         name=c["name"], ch=False)[0]
+    parts = []
+    for i, b in enumerate(c["boxes"]):
+        node = cmds.polyCube(w=b["dim"][0], h=b["dim"][1], d=b["dim"][2],
+                             name="%s_b%d" % (c["name"], i), ch=False)[0]
+        # LOCAL space: boxes are placed around the chunk's own centre, the
+        # chunk is assembled there, and only then moved onto the grid. That
+        # keeps the pivot exactly at the chunk centre even when ornament
+        # oversails asymmetrically - bbox centre would drift.
+        cmds.move(b["pos"][0], b["pos"][1], b["pos"][2], node, absolute=True)
+        node = (cmds.ls(node, long=True) or [node])[0]
+        _uvatlas.uv_atlas({"names": [node], "cols": spec["cols"],
+                           "rows": spec["rows"], "patch": b["patch"],
+                           "margin": spec["margin"],
+                           "world_scale": spec["world_scale"]})
+        parts.append(node)
+    if len(parts) == 1:
+        node = parts[0]
+        cmds.xform(node, worldSpace=True, pivots=(0, 0, 0))
+        cmds.makeIdentity(node, apply=True, translate=True, rotate=True, scale=True)
+        node = (cmds.ls(cmds.rename(node, c["name"]), long=True) or [""])[0]
+    else:
+        node = _combine.combine({"names": parts, "name": c["name"],
+                                 "pivot": "origin", "freeze": True})["name"]
     cmds.move(c["pos"][0], c["pos"][1], c["pos"][2], node, absolute=True)
-    by_role.setdefault(c["role"], []).append(node)
-for role, colour in spec["colours"].items():
-    if role not in by_role:
-        continue
-    shader = cmds.shadingNode("lambert", asShader=True, name=role)
-    cmds.setAttr(shader + ".color", colour[0], colour[1], colour[2], type="double3")
-    sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=role + "SG")
-    cmds.connectAttr(shader + ".outColor", sg + ".surfaceShader", force=True)
-    cmds.sets(by_role[role], edit=True, forceElement=sg)
-grp = cmds.group([n for nodes in by_role.values() for n in nodes], name=label)
+    shape = cmds.listRelatives(node, shapes=True, fullPath=True)[0]
+    cmds.sets(shape, edit=True, forceElement=sg)
+    made.append((cmds.ls(node, long=True) or [node])[0])
+
+grp = cmds.group(made, name=label)
 cmds.xform(grp, worldSpace=True, pivots=(0, 0, 0))
-result = {"chunks": sum(len(v) for v in by_role.values())}
+result = {"chunks": len(made)}
 result
 '''
 
 CHECK_CODE = r'''
 import maya.cmds as cmds
-CELL, EPS = 3.0, 1e-4
+from maya_plugin.handlers import meshcheck as _meshcheck
+CELL = 3.0
+MAX_OUTSET = 0.5
 kids = cmds.listRelatives("|" + LABEL, children=True, fullPath=True) or []
-fails, tris = [], 0
-def on_lattice(v):
-    t = (v + CELL / 2.0) / CELL
-    return abs(t - round(t)) < EPS
+fails, tris, worst_outset, over_budget = [], 0, 0.0, []
 for node in kids:
     short = node.split("|")[-1]
     shapes = cmds.listRelatives(node, shapes=True, fullPath=True) or []
     if not shapes:
         fails.append((short, "no shape")); continue
-    tris += cmds.polyEvaluate(shapes[0], triangle=True)
-    v = cmds.polyEvaluate(shapes[0], vertex=True)
-    e = cmds.polyEvaluate(shapes[0], edge=True)
-    f = cmds.polyEvaluate(shapes[0], face=True)
-    if v - e + f != 2:
-        fails.append((short, "not closed (V-E+F=%d)" % (v - e + f)))
+    stats = _meshcheck.mesh_stats(shapes[0])
+    tris += stats["tris"]
+    # Watertight is zero boundary / zero non-manifold edges (contract rev 2
+    # section 4). Per-chunk Euler is NOT required and is not checked: a chunk
+    # built from several closed boxes fails Euler while being perfectly closed.
+    if stats["boundary_edges"]:
+        fails.append((short, "open: %d boundary edges" % stats["boundary_edges"]))
+    if stats["nonmanifold_edges"]:
+        fails.append((short, "non-manifold"))
     if [round(s, 6) for s in cmds.getAttr(node + ".scale")[0]] != [1.0, 1.0, 1.0]:
         fails.append((short, "left-over scale"))
-    bb = cmds.exactWorldBoundingBox(node)
-    if not all(on_lattice(q) for q in bb):
-        fails.append((short, "bounds off lattice"))
-    centre = [(bb[i] + bb[i + 3]) / 2.0 for i in range(3)]
-    piv = cmds.xform(node, query=True, worldSpace=True, rotatePivot=True)
-    if any(abs(piv[i] - centre[i]) > 1e-3 for i in range(3)):
-        fails.append((short, "pivot not centred"))
     try:
         parts = short.split("_")
         cx, cy, cz = (int(p[1:]) for p in parts[1:4])
     except Exception:
         fails.append((short, "name does not parse")); continue
-    want = [cx * CELL - CELL / 2.0, cy * CELL - CELL / 2.0, cz * CELL - CELL / 2.0]
-    if any(abs(bb[i] - want[i]) > 1e-3 for i in range(3)):
-        fails.append((short, "name disagrees with position"))
+
+    # The PIVOT is what must sit at the chunk's own centre - not the bounding
+    # box centre, which now drifts whenever ornament oversails one face only.
+    piv = cmds.xform(node, query=True, worldSpace=True, rotatePivot=True)
+    bb = cmds.exactWorldBoundingBox(node)
+    span = [round((bb[i + 3] - bb[i]) / CELL) for i in range(3)]
+    want = [CELL * cx + CELL * (span[0] - 1) / 2.0,
+            CELL * cy + CELL * (span[1] - 1) / 2.0,
+            CELL * cz + CELL * (span[2] - 1) / 2.0]
+    if any(abs(piv[i] - want[i]) > 0.55 for i in range(3)):
+        fails.append((short, "pivot %s is not the chunk centre %s"
+                      % ([round(p, 3) for p in piv], [round(w, 3) for w in want])))
+
+    # Occupied CELLS must sit on the lattice; the mesh may leave that box by up
+    # to MAX_OUTSET. Measured against the cell block the name declares.
+    lo = [cx * CELL - CELL / 2.0, cy * CELL - CELL / 2.0, cz * CELL - CELL / 2.0]
+    for i in range(3):
+        out_lo = lo[i] - bb[i]
+        out_hi = bb[i + 3] - (lo[i] + CELL * span[i])
+        worst_outset = max(worst_outset, out_lo, out_hi)
+        if out_lo > MAX_OUTSET + 1e-3 or out_hi > MAX_OUTSET + 1e-3:
+            fails.append((short, "outset %.3f exceeds %.2f m"
+                          % (max(out_lo, out_hi), MAX_OUTSET)))
+            break
+
+    cells = max(1, span[0] * span[1] * span[2])
+    if stats["tris"] > 200 * cells:
+        over_budget.append((short, stats["tris"], 200 * cells))
+
 bb = cmds.exactWorldBoundingBox("|" + LABEL)
 result = {"chunks": len(kids), "tris": tris, "fails": fails[:20],
           "fail_count": len(fails),
+          "worst_outset": round(worst_outset, 4),
+          "over_budget": over_budget[:10], "over_budget_count": len(over_budget),
           "bbox_min": [round(q, 3) for q in bb[:3]],
           "bbox_max": [round(q, 3) for q in bb[3:]]}
 result
@@ -469,8 +692,20 @@ def build_one(label, builder, zoom):
                 print("    %-18s %s" % (key, item))
         sys.exit(1)
 
-    payload = json.dumps({"label": label, "colours": ROLE_COLOUR,
-                          "chunks": [c.as_dict() for c in chunks]})
+    occupied = set()
+    for c in chunks:
+        occupied.update(c.cells_occupied())
+    chunk_dicts = []
+    for c in chunks:
+        d = c.as_dict()
+        d["boxes"] = [dict(bx, patch=kit.PATCH[bx["patch"]][0])
+                      for bx in chunk_boxes(c, occupied, b.storeys)]
+        chunk_dicts.append(d)
+
+    payload = json.dumps({"label": label, "maps": MAPS,
+                          "cols": kit.ATLAS_COLS, "rows": kit.ATLAS_ROWS,
+                          "margin": 0.03, "world_scale": kit.WORLD_SCALE,
+                          "chunks": chunk_dicts})
     ok(call("new_scene", {"confirm": True}, 300.0), "new_scene")
     run("SPEC = %r\n%s" % (payload, BUILD_CODE), "build %s" % label)
     check = ast.literal_eval(
@@ -506,8 +741,21 @@ def build_one(label, builder, zoom):
 
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
+
+    # The heroes share the kit's atlas. Regenerating it here rather than
+    # depending on the kit package having been built keeps this script
+    # runnable on its own; the maps are deterministic, so it is the same file.
+    global MAPS
+    os.makedirs(KIT_DIR, exist_ok=True)
+    MAPS = kit.build_atlas_maps(KIT_DIR)
+    print("atlas %d px, %.1f px/m (shared with the kit)"
+          % (kit.ATLAS_PX, kit.PX_PER_METRE))
+
+    wanted = sys.argv[1:] or None
     entries, clean = [], True
     for label, builder, zoom in BUILDINGS:
+        if wanted and label not in wanted:
+            continue
         entry, check, report, stats = build_one(label, builder, zoom)
         geom_ok = check["fail_count"] == 0
         clean = clean and geom_ok
@@ -545,18 +793,14 @@ def main():
             "gap, or any glass wider than 2 cells, exits non-zero and produces "
             "no FBX. All four pass.",
         "geometry_self_check":
-            "every chunk re-measured in-scene: closed (V-E+F=2), bounds on 3 m "
-            "boundaries, pivot at chunk centre, scale (1,1,1), name parses and "
-            "agrees with measured position",
+            "every chunk re-measured in-scene: ZERO BOUNDARY and zero "
+            "non-manifold edges (not per-chunk Euler, which a box-built chunk "
+            "fails while being perfectly closed), pivot at the chunk's own "
+            "centre rather than its bounding-box centre (they differ once "
+            "ornament oversails one face), occupied cells on 3 m boundaries "
+            "with the mesh allowed 0.5 m past them, scale (1,1,1), name parses "
+            "and agrees with measured position, triangles within 200 per cell",
         "deviations": [
-            {"item": "vertical sense of the origin",
-             "what": "min-corner cell CENTRE at local y = 0, so the floor plane "
-                     "is at y = -1.5.",
-             "why": "'Model origin = the MIN-CORNER CELL CENTRE, at y = 1.5' "
-                    "reads as the origin being that cell centre, with the "
-                    "parenthetical locating it above the floor. If you meant "
-                    "the floor at y = 0, every building needs one +1.5 m Y "
-                    "offset - no regeneration."},
             {"item": "corner spandrels",
              "what": "One cell beside each corner column is concrete, not "
                      "cladding.",
@@ -565,18 +809,21 @@ def main():
                     "structural and is a stilt by your own definition. The "
                     "spandrel gives it a tie; the stilt count in the manifest "
                     "is the evidence."},
-            {"item": "no taper or curve",
-             "what": "Every chunk is an axis-aligned box.",
-             "why": "A tapered chunk cannot have bounds on cell boundaries. "
-                    "Lattice conformance outranks ornament; character comes "
-                    "from massing, glazing pattern and open lobbies instead."},
-            {"item": "coplanar faces",
-             "what": "Adjacent chunks share exact faces and will z-fight.",
-             "why": "Bounds must land on cell boundaries, which forces it. "
-                    "Point 4 encourages deep interpenetration as the escape, "
-                    "but that conflicts with exact bounds. Cheapest fix is "
-                    "shrinking the RENDER mesh a few mm inside the lattice "
-                    "bounds. Wants a decision before more buildings."},
+            {"item": "budget used, not exhausted",
+             "what": "45-54 triangles per chunk against the 200 allowed.",
+             "why": "Revision 1 spent 12. Detail is placed only on faces a "
+                    "chunk can actually be SEEN from - interior and buried "
+                    "frame chunks stay one box, because they are invisible "
+                    "until the golem opens the building, at which point what "
+                    "matters is that something came off, not its cornice. "
+                    "Headroom remains if these want another pass."},
+            {"item": "no curves",
+             "what": "Every chunk is axis-aligned boxes; tapers are available "
+                     "and used on the kit, not here.",
+             "why": "A curve needs a cylinder segment and real triangles. The "
+                    "bounds rule that forbade it is gone, so this is now a "
+                    "budget choice rather than a constraint - worth revisiting "
+                    "on a silhouette pass."},
         ],
         "structures": entries,
     }

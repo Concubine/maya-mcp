@@ -1064,8 +1064,18 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         normalize: Annotated[bool, Field(description=(
             "Normalise UVs to 0..1 collectively before fitting. Leave this on: "
             "Maya's primitives do not share a UV convention, so without it each "
-            "primitive kind lands in the patch at a different scale."
+            "primitive kind lands in the patch at a different scale. Ignored "
+            "when world_scale is given."
         ))] = True,
+        world_scale: Annotated[Optional[float], Field(gt=0.0, description=(
+            "Metres of real geometry that map across one patch. Setting it "
+            "switches from 'make this object fill the patch' to a FIXED TEXEL "
+            "DENSITY: a 3 m slab and a 0.5 m band then carry the same pixels "
+            "per metre. Without it, a small piece is magnified to patch size "
+            "and its material reads several times oversize - which is what "
+            "makes a wall look like a model of a wall. Pixels per metre is "
+            "(atlas_px / cols) / world_scale."
+        ))] = None,
     ) -> UvAtlasResult:
         """Pack meshes' UVs into one patch of a shared texture atlas.
 
@@ -1081,7 +1091,8 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             maya.request(
                 "uv_atlas",
                 {"names": names, "patch": patch, "cols": cols, "rows": rows,
-                 "margin": margin, "project": project, "normalize": normalize},
+                 "margin": margin, "project": project, "normalize": normalize,
+                 "world_scale": world_scale},
                 timeout_s=BOOL_TIMEOUT_S,
             )
         )

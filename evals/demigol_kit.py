@@ -50,8 +50,16 @@ OUT_DIR = os.path.join(_HERE, "demigol_kit")
 
 CELL = 3.0
 INSET = 0.005
-H = CELL / 2.0 - INSET          # 1.495: half-extent of the render envelope
+H = CELL / 2.0 - INSET          # 1.495: inset half-extent, for faces that meet
 FULL = 2.0 * H                  # 2.99
+
+# THE RULE THAT CHANGED IN REVISION 2. The lattice constrains which CELLS a
+# piece occupies - that is what the simulation reads - and never the render
+# mesh. Collision is generated from the grid, so ornament may leave the cell.
+# Faces that meet a neighbour still inset 5 mm (the z-fight fix); everything
+# else may reach 0.5 m past the cell face, which is where silhouette lives.
+MAX_OUTSET = 0.5
+OUT = CELL / 2.0 + MAX_OUTSET   # 2.0: the absolute limit on any coordinate
 
 TRI_BUDGET = {"interior": 20}
 TRI_BUDGET_DEFAULT = 120
@@ -62,78 +70,213 @@ TRIS_PER_BOX = 12
 # how the PNG reads in a viewer). Colours descend from Demigol's own role
 # palette; the amber is the industrial warning amber the art direction calls
 # for in place of the golem's ember glow.
-ATLAS_COLS, ATLAS_ROWS, ATLAS_PX = 4, 4, 512
+ATLAS_COLS, ATLAS_ROWS, ATLAS_PX = 4, 4, 4096
+
+# THE TEXEL DENSITY DECISION, stated here because the contract asks for it as a
+# measured number rather than an intention.
+#
+# `world_scale` is how many metres of UV LAYOUT map across one patch, and a box
+# auto-projection lays six faces side by side: measured live, a cube's UV bbox
+# spans 2.858 face-widths, not one. So a piece whose faces are 3 m needs ~8.6 m
+# of layout, and 9.0 gives it headroom.
+#
+# That factor is why this atlas is 4096 rather than the 2048 minimum. The
+# contract's ~170 px/m was computed as "patch pixels across one 3 m face";
+# under box projection a patch spans three of them, so the honest figure is
+# patch_px / WORLD_SCALE. At 4096/4 = 1024 px per patch that is 113.8 px/m.
+# Reaching a true 170 px/m this way would need a 6144 atlas.
+WORLD_SCALE = 9.0
+PATCH_PX = ATLAS_PX // ATLAS_COLS
+PX_PER_METRE = PATCH_PX / WORLD_SCALE
+
+# Real brick runs ~13 courses per metre, so a 3 m face should read ~39 and the
+# 9 m patch should carry ~117. Family 1 drew 8 per patch, which put roughly 7
+# courses on a 3 m face - about 5x oversize, and invisible from its manifest.
+COURSES_PER_METRE = 13.0
+COURSES_PER_PATCH = COURSES_PER_METRE * WORLD_SCALE
+
+# index, albedo rgb, style, metallic, smoothness
 PATCH = {
-    "brick":        (0,  (115, 61, 46),   "courses"),
-    "brick_dark":   (1,  (78, 41, 31),    "courses"),
-    "concrete":     (2,  (158, 156, 148), "grain"),
-    "concrete_dark": (3, (112, 110, 104), "grain"),
-    "steel":        (4,  (87, 94, 107),   "streak"),
-    "steel_dark":   (5,  (56, 61, 70),    "streak"),
-    "glass":        (6,  (92, 140, 158),  "gradient"),
-    "glass_bright": (7,  (140, 186, 199), "gradient"),
-    "infill":       (8,  (189, 184, 168), "grain"),
-    "infill_dark":  (9,  (140, 136, 124), "grain"),
-    "amber":        (10, (222, 143, 32),  "grain"),
-    "shadow":       (11, (28, 28, 30),    "flat"),
-    "rust":         (12, (128, 74, 44),   "grain"),
-    "trim":         (13, (206, 203, 194), "grain"),
-    "grime":        (14, (74, 72, 68),    "grain"),
-    "sky_glass":    (15, (110, 158, 175), "gradient"),
+    "brick":        (0,  (115, 61, 46),   "courses",  0.0, 0.14),
+    "brick_dark":   (1,  (78, 41, 31),    "courses",  0.0, 0.12),
+    "concrete":     (2,  (158, 156, 148), "grain",    0.0, 0.22),
+    "concrete_dark": (3, (112, 110, 104), "grain",    0.0, 0.18),
+    "steel":        (4,  (140, 148, 162), "streak",   1.0, 0.62),
+    "steel_dark":   (5,  (92, 99, 112),   "streak",   1.0, 0.48),
+    "glass":        (6,  (92, 140, 158),  "gradient", 0.0, 0.95),
+    "glass_bright": (7,  (140, 186, 199), "gradient", 0.0, 0.97),
+    "infill":       (8,  (189, 184, 168), "panel",    0.0, 0.36),
+    "infill_dark":  (9,  (140, 136, 124), "panel",    0.0, 0.30),
+    "amber":        (10, (222, 143, 32),  "grain",    0.0, 0.45),
+    "shadow":       (11, (28, 28, 30),    "flat",     0.0, 0.08),
+    "rust":         (12, (128, 74, 44),   "rust",     0.0, 0.10),
+    "trim":         (13, (206, 203, 194), "grain",    0.0, 0.32),
+    "grime":        (14, (74, 72, 68),    "grain",    0.0, 0.10),
+    "sky_glass":    (15, (110, 158, 175), "gradient", 0.0, 0.95),
 }
 
 
-def build_atlas(path):
-    """One PNG carrying every material the kit can wear."""
+def build_atlas_maps(out_dir):
+    """Albedo, normal and metallic/smoothness — one layout, one material.
+
+    Three maps on the same atlas cost zero extra draw calls and zero extra
+    triangles. The mask is what stops glass, steel and brick reflecting light
+    identically, which reads as a stronger 'this is a model' tell than
+    resolution does.
+    """
+    import numpy as np
     from PIL import Image
 
-    px = ATLAS_PX
-    cell_px = px // ATLAS_COLS
-    img = Image.new("RGB", (px, px), (0, 0, 0))
-    pixels = img.load()
+    px, cell = ATLAS_PX, PATCH_PX
+    albedo = np.zeros((px, px, 3), np.float32)
+    height = np.zeros((px, px), np.float32)
+    metal = np.zeros((px, px), np.float32)
+    smooth = np.zeros((px, px), np.float32)
 
-    # A tiny deterministic hash instead of random(), so re-running the build
-    # produces a byte-identical atlas and the FBX/PNG pair stays reproducible.
-    def noise(x, y, salt):
-        n = (x * 374761393 + y * 668265263 + salt * 1442695040888963407) & 0xFFFFFFFF
-        n = (n ^ (n >> 13)) * 1274126177 & 0xFFFFFFFF
-        return ((n ^ (n >> 16)) & 0xFF) / 255.0
+    yy, xx = np.mgrid[0:cell, 0:cell].astype(np.float32)
+    # metres per pixel within a patch, so features can be authored in real units
+    m_per_px = WORLD_SCALE / cell
 
-    for name, (index, rgb, style) in PATCH.items():
+    for _name, (index, rgb, style, mtl, smt) in PATCH.items():
         col, row = index % ATLAS_COLS, index // ATLAS_COLS
-        x0, y0 = col * cell_px, row * cell_px
-        for j in range(cell_px):
-            for i in range(cell_px):
-                r, g, b = rgb
-                n = noise(x0 + i, y0 + j, index) - 0.5
-                k = 1.0 + n * 0.10
-                if style == "courses":
-                    # horizontal coursing every 16 px, with a darker joint
-                    if j % 16 in (0, 1):
-                        k *= 0.70
-                    if (j // 16) % 2 == 0 and i % 32 == 0:
-                        k *= 0.78
-                elif style == "streak":
-                    k *= 1.0 + (noise(x0 + i, 0, index) - 0.5) * 0.22
-                elif style == "gradient":
-                    # glass gets a sky-to-dark falloff so a flat pane still
-                    # reads as reflective rather than as painted card
-                    t = j / float(cell_px - 1)
-                    k *= 1.25 - 0.55 * t
-                elif style == "grain":
-                    k *= 1.0 + (noise(x0 + i, y0 + j, index + 97) - 0.5) * 0.08
-                pixels[x0 + i, y0 + j] = (
-                    max(0, min(255, int(r * k))),
-                    max(0, min(255, int(g * k))),
-                    max(0, min(255, int(b * k))),
-                )
-    img.save(path)
-    return path
+        x0, y0 = col * cell, row * cell
+        rng = np.random.default_rng(1000 + index)   # deterministic per patch
+        # Grain generated at quarter resolution and block-upscaled. Per-pixel
+        # noise is a PNG compressor's worst case - it took the three maps to
+        # 46 MB - and at 114 px/m it also reads as dither rather than as
+        # material. Quarter-res grain is ~4 mm features, which is about right
+        # for aggregate and brick texture anyway.
+        coarse = rng.random((cell // 8, cell // 8), dtype=np.float32)
+        grain = np.repeat(np.repeat(coarse, 8, axis=0), 8, axis=1)
+        # Two box-blur passes. Block noise at this density reads as STATIC, not
+        # as material - the first pass of these maps made brick and concrete
+        # look like television snow, and the normal map derived from the same
+        # height amplified it. Blurring costs nothing and PNG likes it too.
+        for _ in range(2):
+            grain = (grain
+                     + np.roll(grain, 1, 0) + np.roll(grain, -1, 0)
+                     + np.roll(grain, 1, 1) + np.roll(grain, -1, 1)) / 5.0
+
+        k = 1.0 + (grain - 0.5) * 0.05
+        h = 0.5 + (grain - 0.5) * 0.02
+
+        if style == "courses":
+            course_px = cell / COURSES_PER_PATCH
+            course_i = np.floor(yy / course_px)
+            in_course = yy / course_px - course_i
+            joint = (in_course < 0.16)                  # mortar bed
+            # every other course offset by half a brick, and a perpend joint
+            brick_len_px = course_px * 4.0
+            stagger = (course_i % 2) * (brick_len_px / 2.0)
+            perpend = (((xx + stagger) % brick_len_px) / brick_len_px) < 0.06
+            face = ~(joint | perpend)
+            k = np.where(face, k * (1.0 + (grain - 0.5) * 0.10), k * 0.80)
+            h = np.where(face, 0.70 + (grain - 0.5) * 0.04, 0.42)
+        elif style == "streak":
+            streak = rng.random((1, cell), dtype=np.float32)
+            k = k * (1.0 + (streak - 0.5) * 0.16)
+            # a rolled-steel plate seam every 1.5 m
+            seam = (np.abs((yy * m_per_px) % 1.5) < 0.03)
+            k = np.where(seam, k * 0.78, k)
+            h = np.where(seam, 0.32, 0.68)
+        elif style == "gradient":
+            t = yy / float(cell - 1)
+            k = k * (1.25 - 0.55 * t)
+            h = np.full_like(h, 0.5)
+        elif style == "panel":
+            # a curtain panel: shallow recess with a raised border
+            u = (xx * m_per_px) % 3.0
+            v = (yy * m_per_px) % 3.0
+            border = (u < 0.12) | (u > 2.88) | (v < 0.12) | (v > 2.88)
+            k = np.where(border, k * 1.06, k * 0.97)
+            h = np.where(border, 0.80, 0.45)
+        elif style == "rust":
+            blot = rng.random((cell, cell), dtype=np.float32)
+            blot = (blot > 0.72).astype(np.float32)
+            k = k * (1.0 - blot * 0.28)
+            h = 0.5 - blot * 0.18
+        elif style == "flat":
+            k = np.full_like(k, 1.0)
+            h = np.full_like(h, 0.5)
+
+        patch_rgb = np.stack([np.clip(k * c, 0, 255) for c in rgb], axis=-1)
+        albedo[y0:y0 + cell, x0:x0 + cell] = patch_rgb
+        height[y0:y0 + cell, x0:x0 + cell] = np.clip(h, 0.0, 1.0)
+        metal[y0:y0 + cell, x0:x0 + cell] = mtl
+        # Flat per patch: variation here buys nothing visually and costs a lot
+        # of PNG, because a constant plane compresses to almost nothing.
+        smooth[y0:y0 + cell, x0:x0 + cell] = smt
+
+    # Normal from height. Sobel per patch would bleed across patch seams, so
+    # gradients are taken with edge-clamped differences and the patch borders
+    # are flattened - a normal that leaks across a seam shows up as a bright
+    # line on an unrelated material.
+    gx = np.zeros_like(height)
+    gy = np.zeros_like(height)
+    gx[:, 1:-1] = (height[:, 2:] - height[:, :-2]) * 0.5
+    gy[1:-1, :] = (height[2:, :] - height[:-2, :]) * 0.5
+    for edge in range(0, ATLAS_PX + 1, PATCH_PX):
+        for arr in (gx, gy):
+            arr[max(0, edge - 1):edge + 1, :] = 0.0
+            arr[:, max(0, edge - 1):edge + 1] = 0.0
+
+    strength = 2.5
+    nx, ny = -gx * strength, -gy * strength
+    nz = np.ones_like(nx)
+    length = np.sqrt(nx * nx + ny * ny + nz * nz)
+    normal = np.stack([nx / length, ny / length, nz / length], axis=-1)
+    normal = ((normal * 0.5) + 0.5) * 255.0
+
+    paths = {}
+    paths["albedo"] = os.path.join(out_dir, "kit_albedo.png").replace("\\", "/")
+    Image.fromarray(albedo.astype(np.uint8), "RGB").save(paths["albedo"])
+    paths["normal"] = os.path.join(out_dir, "kit_normal.png").replace("\\", "/")
+    Image.fromarray(normal.astype(np.uint8), "RGB").save(paths["normal"])
+    # R = metallic, G = smoothness, A = smoothness. Unity's Standard shader
+    # reads smoothness from ALPHA of the metallic map, so it is in both places:
+    # G keeps the map readable by eye, A makes it usable without repacking.
+    mask = np.stack([
+        metal * 255.0,
+        np.clip(smooth, 0, 1) * 255.0,
+        np.zeros_like(metal),
+        np.clip(smooth, 0, 1) * 255.0,
+    ], axis=-1)
+    paths["mask"] = os.path.join(out_dir, "kit_mask.png").replace("\\", "/")
+    Image.fromarray(mask.astype(np.uint8), "RGBA").save(paths["mask"])
+    return paths
 
 
 # ----------------------------------------------------------------- the pieces
-def box(cx, cy, cz, sx, sy, sz, patch):
-    return {"pos": [cx, cy, cz], "dim": [sx, sy, sz], "patch": patch}
+def box(cx, cy, cz, sx, sy, sz, patch, taper=None):
+    """One 12-triangle box. `taper` is (bottom_scale, top_scale) in X and Z:
+    a flare deformer on a 1-segment cube gives a clean linear frustum at the
+    SAME 12 triangles (measured live), so a battered plinth or a tapered
+    bracket costs nothing against the budget."""
+    b = {"pos": [cx, cy, cz], "dim": [sx, sy, sz], "patch": patch}
+    if taper:
+        b["taper"] = list(taper)
+    return b
+
+
+def cornice(patch, y, height, project, depth_in=0.35, taper=None):
+    """A band that oversails the cell face - the classic silhouette move, and
+    the one revision 1 could not author at all."""
+    zc, zs = span(H - depth_in, CELL / 2.0 + project)
+    yc, ys = span(y - height / 2.0, y + height / 2.0)
+    return box(0, yc, zc, FULL, ys, zs, patch, taper=taper)
+
+
+def sill(patch, y, project=0.12, height=0.16, width=None):
+    zc, zs = span(H - 0.10, CELL / 2.0 + project)
+    yc, ys = span(y - height / 2.0, y + height / 2.0)
+    return box(0, yc, zc, width or 2.2, ys, zs, patch)
+
+
+def bracket(patch, x, y, project=0.22, w=0.22, h=0.5):
+    """A corbel under a cornice. Tapered, so it reads as carrying something."""
+    zc, zs = span(H - 0.05, CELL / 2.0 + project)
+    yc, ys = span(y - h / 2.0, y + h / 2.0)
+    return box(x, yc, zc, w, ys, zs, patch, taper=(0.45, 1.0))
 
 
 def span(a, b):
@@ -253,6 +396,18 @@ def corner_bands(patch, ys, height=0.5):
     return out
 
 
+def mirror_x(boxes):
+    """Flip a piece in X. Turns an authored (+Z,+X) corner into the (+Z,-X)
+    chirality a wall that ENDS needs — which is a mirror, not a rotation, and
+    is therefore unreachable by the shell's 90 degree steps."""
+    out = []
+    for b in boxes:
+        m = dict(b)
+        m["pos"] = [-b["pos"][0], b["pos"][1], b["pos"][2]]
+        out.append(m)
+    return out
+
+
 def PIECES():
     p = {}
 
@@ -268,7 +423,7 @@ def PIECES():
     p["kit_steel_column_a"] = i_section("steel")
     p["kit_steel_column_b"] = i_section("steel") + [
         box(0, y, 0, 1.8, 0.22, 1.8, "steel_dark") for y in (-1.15, 1.15)
-    ]
+    ] + [bracket("steel_dark", 0.0, 1.05, project=0.24, w=0.5, h=0.55)]
     p["kit_steel_column_c"] = i_section("steel", web=0.5, depth=1.9) + [
         box(0, 0, 0, 2.1, 0.25, 2.1, "rust")
     ]
@@ -293,44 +448,53 @@ def PIECES():
         box(0, -0.75, 0, FULL, 0.4, 2.6, "concrete_dark"),
         box(0, 0.55, front_c, FULL, 0.3, front_s, "trim"),
     ]
+    # Battered plinths: a taper is free (12 tris either way) and it is what
+    # makes a base look like it carries load rather than sitting on the floor.
     p["kit_concrete_base_a"] = [
-        box(0, -1.12, 0, 2.6, 0.75, 2.6, "concrete"),
-        box(0, 0.3, 0, 1.7, 2.1, 1.7, "concrete"),
+        box(0, -1.05, 0, 3.3, 0.9, 3.3, "concrete", taper=(1.0, 0.79)),
+        box(0, 0.35, 0, 1.7, 2.0, 1.7, "concrete"),
         box(0, 1.36, 0, 2.05, 0.27, 2.05, "concrete_dark"),
     ]
     p["kit_concrete_base_b"] = [
-        box(0, -1.12, 0, 2.6, 0.75, 2.6, "concrete"),
-        box(0, 0.3, 0, 1.7, 2.1, 1.7, "concrete"),
+        box(0, -1.05, 0, 3.3, 0.9, 3.3, "concrete", taper=(1.0, 0.79)),
+        box(0, 0.35, 0, 1.7, 2.0, 1.7, "concrete"),
         box(0, 1.36, 0, 2.05, 0.27, 2.05, "concrete_dark"),
-        box(0, -0.55, 0, 1.85, 0.35, 1.85, "amber"),
+        box(0, -0.45, 0, 1.85, 0.35, 1.85, "amber"),
     ]
     p["kit_concrete_roof_a"] = [
         slab(top=0.6, patch="concrete_dark"),
         box(0, 0.75, 0, FULL, 0.3, FULL, "concrete"),
     ]
+    # The crown. Revision 1 pulled the coping INWARD because an outward
+    # oversail was forbidden; now it oversails properly and the building gets a
+    # skyline, which is what reads from across the district.
     p["kit_concrete_roof_b"] = [
         slab(top=0.6, patch="concrete_dark"),
         box(0, 0.75, 0, FULL, 0.3, FULL, "concrete"),
         box(0, 1.15, 1.2, FULL, 0.55, 0.59, "concrete"),
-        # coping oversails the parapet inward only: an outward oversail would
-        # leave the cell and z-fight whatever sits in the next one
-        box(0, 1.44, 1.1725, FULL, 0.11, 0.645, "trim"),
+        cornice("concrete", 1.42, 0.16, project=0.34, depth_in=0.5),
+        bracket("concrete_dark", -0.9, 0.98, project=0.26),
+        bracket("concrete_dark", 0.9, 0.98, project=0.26),
     ]
     p["kit_concrete_soffit_a"] = soffit_coffer("concrete", "concrete_dark")
 
     # --- brick: the heavy perimeter ----------------------------------------
-    p["kit_brick_facade_a"] = [slab(front=BACK, patch="brick")] + facade_bands(
-        "brick_dark", (-1.0, 0.0, 1.0)
+    p["kit_brick_facade_a"] = (
+        [slab(front=BACK, patch="brick")]
+        + facade_bands("brick_dark", (-1.0, 0.0))
+        # string course: the silhouette move revision 1 could not make
+        + [cornice("concrete", 1.05, 0.24, project=0.16)]
     )
     p["kit_brick_facade_b"] = (
         [slab(front=BACK, patch="brick")]
         + window_reveal("brick")
-        + [pane("glass", back=1.02)]
+        + [pane("glass", back=1.02), sill("concrete", -0.78, project=0.14)]
     )
     p["kit_brick_facade_c"] = (
         [slab(front=BACK, patch="brick")]
         + mullions("brick_dark", (-1.0, 1.0), width=0.6)
-        + facade_bands("brick_dark", (1.25,), height=0.4)
+        + [cornice("concrete", 1.18, 0.3, project=0.22, taper=(1.0, 0.72)),
+           bracket("concrete", -1.0, 0.72), bracket("concrete", 1.0, 0.72)]
     )
     p["kit_brick_corner_a"] = (
         [corner_body("brick"), corner_post("brick_dark")]
@@ -348,9 +512,8 @@ def PIECES():
         slab(top=0.6, patch="brick"),
         box(0, 0.75, 0, FULL, 0.3, FULL, "concrete_dark"),
         box(0, 1.15, 1.2, FULL, 0.55, 0.59, "brick"),
-        # coping oversails the parapet inward only: an outward oversail would
-        # leave the cell and z-fight whatever sits in the next one
-        box(0, 1.44, 1.1725, FULL, 0.11, 0.645, "trim"),
+        cornice("trim", 1.42, 0.16, project=0.30, depth_in=0.45),
+        cornice("brick_dark", 1.20, 0.14, project=0.20, depth_in=0.3),
     ]
     p["kit_brick_soffit_a"] = soffit_coffer("brick", "brick_dark")
     p["kit_brick_lobby_a"] = [
@@ -392,6 +555,7 @@ def PIECES():
     p["kit_glass_facade_a"] = (
         [slab(front=1.02, patch="shadow"), pane("glass", half_w=1.2, half_h=1.2)]
         + window_reveal("steel_dark", half_w=1.2, half_h=1.2)
+        + [sill("steel_dark", -1.34, project=0.16, height=0.14, width=FULL)]
     )
     p["kit_glass_facade_b"] = (
         [slab(front=1.02, patch="shadow"), pane("glass", half_w=1.2, half_h=1.2)]
@@ -412,6 +576,15 @@ def PIECES():
         box(0, 0.72, 0, FULL, 0.25, FULL, "glass_bright"),
         box(0, 0.9, 0, FULL, 0.14, 0.5, "steel_dark"),
     ]
+    # --- endcaps: the OTHER corner chirality -------------------------------
+    # Contract rev 2 §6. A tenth context rather than a variant letter, because
+    # the shell picks variants from a coordinate hash - chirality is not a
+    # thing you may pick at random, so it cannot ride in the variant slot.
+    p["kit_brick_endcap_a"] = mirror_x(p["kit_brick_corner_a"])
+    p["kit_brick_endcap_b"] = mirror_x(p["kit_brick_corner_b"])
+    p["kit_infill_endcap_a"] = mirror_x(p["kit_infill_corner_a"])
+    p["kit_glass_endcap_a"] = mirror_x(p["kit_glass_corner_a"])
+
     p["kit_glass_lobby_a"] = (
         [slab(front=1.02, patch="shadow"), pane("glass_bright", half_w=1.25, half_h=1.25)]
         + window_reveal("steel_dark", half_w=1.25, half_h=1.25)
@@ -461,22 +634,52 @@ cmds.currentUnit(linear="m")
 # atlas; that is the whole reason the UV step exists.
 shader = cmds.shadingNode("standardSurface", asShader=True, name="kit_material")
 cmds.setAttr(shader + ".base", 1.0)
-cmds.setAttr(shader + ".specularRoughness", 0.62)
-cmds.setAttr(shader + ".metalness", 0.0)
 sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name="kit_materialSG")
 cmds.connectAttr(shader + ".outColor", sg + ".surfaceShader", force=True)
-tex = cmds.shadingNode("file", asTexture=True, name="kit_atlas")
-cmds.setAttr(tex + ".fileTextureName", spec["atlas"], type="string")
-cmds.setAttr(tex + ".filterType", 0)          # no mip blur across patch seams
-place = cmds.shadingNode("place2dTexture", asUtility=True, name="kit_place")
-for a, b in (("coverage", "coverage"), ("repeatUV", "repeatUV"),
-             ("offset", "offset"), ("outUV", "uvCoord"),
-             ("outUvFilterSize", "uvFilterSize")):
-    try:
-        cmds.connectAttr(place + "." + a, tex + "." + b, force=True)
-    except Exception:
-        pass
-cmds.connectAttr(tex + ".outColor", shader + ".baseColor", force=True)
+
+
+def _file_node(path, name, raw=False):
+    node = cmds.shadingNode("file", asTexture=True, name=name)
+    cmds.setAttr(node + ".fileTextureName", path, type="string")
+    cmds.setAttr(node + ".filterType", 0)   # no mip blur across patch seams
+    if raw:
+        # normal and mask are DATA, not colour: letting Maya apply an sRGB
+        # curve to them bends the normals and shifts every roughness value.
+        try:
+            cmds.setAttr(node + ".colorSpace", "Raw", type="string")
+            cmds.setAttr(node + ".ignoreColorSpaceFileRules", True)
+        except Exception:
+            pass
+    place = cmds.shadingNode("place2dTexture", asUtility=True, name=name + "_p")
+    for a, b in (("coverage", "coverage"), ("repeatUV", "repeatUV"),
+                 ("offset", "offset"), ("outUV", "uvCoord"),
+                 ("outUvFilterSize", "uvFilterSize")):
+        try:
+            cmds.connectAttr(place + "." + a, node + "." + b, force=True)
+        except Exception:
+            pass
+    return node
+
+
+albedo = _file_node(spec["maps"]["albedo"], "kit_albedo")
+cmds.connectAttr(albedo + ".outColor", shader + ".baseColor", force=True)
+
+# Three maps, one material, one atlas layout: zero extra draw calls.
+mask = _file_node(spec["maps"]["mask"], "kit_mask", raw=True)
+cmds.connectAttr(mask + ".outColorR", shader + ".metalness", force=True)
+# smoothness -> roughness is an inversion, so it needs a reverse node
+inv = cmds.shadingNode("reverse", asUtility=True, name="kit_smooth_to_rough")
+cmds.connectAttr(mask + ".outColorG", inv + ".inputX", force=True)
+cmds.connectAttr(inv + ".outputX", shader + ".specularRoughness", force=True)
+
+nrm = _file_node(spec["maps"]["normal"], "kit_normal", raw=True)
+bump = cmds.shadingNode("bump2d", asUtility=True, name="kit_bump")
+cmds.setAttr(bump + ".bumpInterp", 1)          # 1 = tangent-space normal map
+# outALPHA, not outColor: bumpValue is a single float, so the RGB connection is
+# rejected outright. With bumpInterp = 1 Maya traces back through this
+# connection to the file node's colour and uses the RGB as a normal.
+cmds.connectAttr(nrm + ".outAlpha", bump + ".bumpValue", force=True)
+cmds.connectAttr(bump + ".outNormal", shader + ".normalCamera", force=True)
 
 built = []
 for piece in spec["pieces"]:
@@ -484,11 +687,28 @@ for piece in spec["pieces"]:
     for i, b in enumerate(piece["boxes"]):
         node = cmds.polyCube(w=b["dim"][0], h=b["dim"][1], d=b["dim"][2],
                              name="%s_b%d" % (piece["name"], i), ch=False)[0]
+        if b.get("taper"):
+            # Flare on a 1-segment cube: a clean linear frustum at the same 12
+            # triangles (measured live). Applied AT THE ORIGIN, before the box
+            # is moved, so the deformer's own axis is the box's own axis.
+            lo, hi = b["taper"]
+            handle = cmds.nonLinear(node, type="flare")
+            cmds.setAttr(handle[0] + ".startFlareX", lo)
+            cmds.setAttr(handle[0] + ".startFlareZ", lo)
+            cmds.setAttr(handle[0] + ".endFlareX", hi)
+            cmds.setAttr(handle[0] + ".endFlareZ", hi)
+            cmds.setAttr(handle[0] + ".curve", 0.0)
+            cmds.delete(node, constructionHistory=True)
+            if cmds.objExists(handle[1]):
+                cmds.delete(handle[1])
         cmds.move(b["pos"][0], b["pos"][1], b["pos"][2], node, absolute=True)
         node = (cmds.ls(node, long=True) or [node])[0]
+        # FIXED TEXEL DENSITY: world_scale metres of UV layout per patch, so a
+        # 0.5 m band and a 3 m slab carry identical pixels per metre.
         _uvatlas.uv_atlas({"names": [node], "cols": spec["cols"],
                            "rows": spec["rows"], "patch": b["patch"],
-                           "margin": spec["margin"], "project": "box"})
+                           "margin": spec["margin"],
+                           "world_scale": spec["world_scale"]})
         parts.append(node)
     if len(parts) == 1:
         merged = parts[0]
@@ -514,7 +734,7 @@ CHECK_CODE = r'''
 import maya.cmds as cmds
 from maya_plugin.handlers import meshcheck as _meshcheck
 
-H = 1.495 + 1e-4
+H = 2.0 + 1e-3          # cell half-face 1.5 + the 0.5 m outset allowance
 fails, rows = [], []
 sgs_seen = set()
 for name in NAMES:
@@ -533,7 +753,8 @@ for name in NAMES:
         sgs_seen.add(s)
 
     if any(abs(q) > H for q in bb):
-        fails.append((name, "escapes the 3 m cell: %s" % [round(q, 4) for q in bb]))
+        fails.append((name, "exceeds cell + 0.5 m outset: %s"
+                      % [round(q, 4) for q in bb]))
     if stats["boundary_edges"]:
         fails.append((name, "open: %d boundary edges" % stats["boundary_edges"]))
     if stats["nonmanifold_edges"]:
@@ -616,9 +837,13 @@ result
 
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
-    atlas_path = os.path.join(OUT_DIR, "kit_atlas.png").replace("\\", "/")
-    build_atlas(atlas_path)
-    print("atlas %s" % atlas_path)
+    maps = build_atlas_maps(OUT_DIR)
+    print("atlas %d px, %d px/patch, %.1f px/m at %.1f m per patch"
+          % (ATLAS_PX, PATCH_PX, PX_PER_METRE, WORLD_SCALE))
+    for kind, path in maps.items():
+        print("  %-7s %s (%.1f MB)"
+              % (kind, os.path.basename(path),
+                 os.path.getsize(path) / 1024.0 / 1024.0))
 
     pieces = PIECES()
     names = list(pieces)
@@ -642,18 +867,32 @@ def main():
                 sys.exit(1)
             for i in range(3):
                 half = b["dim"][i] / 2.0
-                if abs(b["pos"][i]) + half > H + 1e-6:
-                    print("BOX ESCAPES THE CELL on %s: axis %d, %.4f"
-                          % (name, i, abs(b["pos"][i]) + half))
+                reach = abs(b["pos"][i]) + half
+                # The limit is now the CELL face plus the outset allowance,
+                # not the inset envelope. Past 0.5 m an overhang would reach
+                # into the core of the next cell and clip badly when that
+                # neighbour is torn away, which is the reason for the cap.
+                if reach > OUT + 1e-6:
+                    print("BOX EXCEEDS THE OUTSET ALLOWANCE on %s: axis %d, "
+                          "%.4f m from centre (limit %.3f)"
+                          % (name, i, reach, OUT))
                     sys.exit(1)
     if over:
         for name, tris, budget in over:
             print("OVER BUDGET %-26s %d tris > %d" % (name, tris, budget))
         sys.exit(1)
 
+    # Declared outset per piece: how far the render mesh reaches past the true
+    # cell face (1.5 m), which is the number the contract asks to see.
+    outset = {}
+    for name, boxes in pieces.items():
+        reach = max(abs(b["pos"][i]) + b["dim"][i] / 2.0
+                    for b in boxes for i in range(3))
+        outset[name] = round(max(0.0, reach - CELL / 2.0), 4)
+
     spec = {
-        "atlas": atlas_path, "cols": ATLAS_COLS, "rows": ATLAS_ROWS,
-        "margin": 0.03,
+        "maps": maps, "cols": ATLAS_COLS, "rows": ATLAS_ROWS,
+        "margin": 0.03, "world_scale": WORLD_SCALE,
         "pieces": [
             {"name": n,
              "boxes": [dict(b, patch=PATCH[b["patch"]][0]) for b in pieces[n]]}
@@ -741,15 +980,21 @@ def main():
         fh.write(wall_sheet)
     wall_blank = [i for i, p in enumerate(wall_pngs) if images.pixel_stats(p)["blank"]]
 
-    # 6 cells wide x 5 tall on a 3 m lattice, measured against what the wall
-    # SHOULD span if every piece sat in its own cell and none escaped.
+    # 6 cells wide x 5 tall on a 3 m lattice. Revision 1's check asserted the
+    # wall matched the lattice inset by 5 mm on every face; under revision 2
+    # that is the WRONG rule, because ornament is meant to oversail. What must
+    # hold now is that every face sits inside the allowance band: no more than
+    # INSET short of the lattice, and no more than MAX_OUTSET past it.
     want = [-1.5, -1.5, -1.5, 6 * 3.0 - 1.5, 5 * 3.0 - 1.5, 1.5]
-    wall_ok = all(abs(tiling["bbox"][i] - want[i]) <= INSET + 1e-3
-                  for i in range(6))
+    excess = [want[i] - tiling["bbox"][i] if i < 3 else tiling["bbox"][i] - want[i]
+              for i in range(6)]
+    wall_ok = all(-INSET - 1e-3 <= e <= MAX_OUTSET + 1e-3 for e in excess)
     print("\ntiling proof: %d pieces, bbox %s"
           % (tiling["pieces"], tiling["bbox"]))
-    print("  expected    %s -> %s"
-          % ([round(q, 4) for q in want], "MATCHES" if wall_ok else "MISMATCH"))
+    print("  lattice     %s" % [round(q, 4) for q in want])
+    print("  oversail    %s m per face (allowance -%.3f .. %.2f) -> %s"
+          % ([round(e, 4) for e in excess], INSET, MAX_OUTSET,
+             "WITHIN" if wall_ok else "OUT OF BAND"))
 
     measured = check["tris"]
     entries = []
@@ -762,6 +1007,7 @@ def main():
             "name": name, "role": role, "context": context, "variant": variant,
             "triangles": tris, "boxes": len(pieces[name]),
             "budget": TRI_BUDGET.get(context, TRI_BUDGET_DEFAULT),
+            "outset_m": outset[name],
         })
 
     print("\n%-26s %-9s %-8s %6s %6s" % ("piece", "role", "context", "tris", "cap"))
@@ -788,19 +1034,68 @@ def main():
         "contract": "Demigol KIT OF PARTS",
         "scope": "one-cell pieces, not buildings",
         "units": "metres, Y-up, 1 unit = 1 m, cell = 3 m",
-        "envelope": "3 x 3 x 3 m, render geometry inset %.3f m" % INSET,
+        "envelope": {
+            "cell_m": CELL,
+            "inset_m": INSET,
+            "inset_note": "faces that meet a neighbouring cell inset %.3f m - "
+                          "the z-fight fix" % INSET,
+            "max_outset_m": MAX_OUTSET,
+            "outset_note": "ornament may oversail the cell face by up to "
+                           "%.1f m; declared per piece as outset_m. The lattice "
+                           "constrains which CELLS a piece occupies, never the "
+                           "render mesh, because collision is generated from "
+                           "the grid." % MAX_OUTSET,
+            "pieces_with_outset": sum(1 for v in outset.values() if v > 0),
+            "max_declared_outset_m": max(outset.values()),
+        },
         "pivot": "cell centre (0,0,0) on every piece",
         "authored_facing": "+Z; the shell rotates in 90 degree steps. Corner "
                            "pieces read from +Z AND +X.",
         "material": {
             "shared": True,
             "shader": "kit_material (standardSurface)",
-            "atlas": "kit_atlas.png",
+            "maps": {
+                "albedo": "kit_albedo.png",
+                "normal": "kit_normal.png (tangent space)",
+                "mask": "kit_mask.png (R = metallic, G = smoothness, "
+                        "A = smoothness; A is where Unity's Standard shader "
+                        "reads smoothness from, G keeps it readable by eye)",
+            },
+            "atlas_px": ATLAS_PX,
             "atlas_grid": [ATLAS_COLS, ATLAS_ROWS],
-            "patches": {k: {"index": v[0], "rgb": list(v[1])}
+            "patch_px": PATCH_PX,
+            "patches": {k: {"index": v[0], "rgb": list(v[1]),
+                            "metallic": v[3], "smoothness": v[4]}
                         for k, v in PATCH.items()},
-            "note": "every piece samples one 128 px patch of the single atlas, "
-                    "so the whole kit draws in one batch",
+            "note": "three maps on ONE atlas layout under ONE material: zero "
+                    "extra draw calls, zero extra triangles. The mask is what "
+                    "stops glass, steel and brick reflecting light identically.",
+        },
+        "texel_density": {
+            "px_per_metre": round(PX_PER_METRE, 1),
+            "world_scale_m_per_patch": WORLD_SCALE,
+            "how_it_is_achieved":
+                "uv_atlas world_scale mode: UV scale is derived from real-world "
+                "size, so a 0.5 m band and a 3 m slab carry identical pixels "
+                "per metre. Family 1 normalised each box to fill its patch, so "
+                "density varied ~6x between pieces and was not knowable from "
+                "the manifest - that unknowability was the defect.",
+            "why_not_170":
+                "A box auto-projection lays a piece's six faces side by side: "
+                "measured live, a cube's UV bbox spans 2.858 face-widths, not "
+                "one. So a patch covers ~%.0f m of layout, not one 3 m face, "
+                "and px/m is patch_px / world_scale. The contract's ~170 px/m "
+                "assumed one patch per face; reaching it under box projection "
+                "would need a 6144 atlas. 4096 gives %.1f px/m."
+                % (WORLD_SCALE, PX_PER_METRE),
+            "brick_courses_per_metre": COURSES_PER_METRE,
+            "brick_courses_per_3m_face": round(COURSES_PER_METRE * 3.0),
+            "brick_note":
+                "drawn at real-world scale: %.0f courses across the %.0f m "
+                "patch, so a 3 m face reads ~%d. Family 1 drew 8 per patch, "
+                "putting ~7 courses on a 3 m face - about 5x oversize."
+                % (COURSES_PER_PATCH, WORLD_SCALE,
+                   round(COURSES_PER_METRE * 3.0)),
         },
         "budgets": {"interior": TRI_BUDGET["interior"],
                     "default": TRI_BUDGET_DEFAULT,
@@ -824,15 +1119,18 @@ def main():
                     "mixing brick, infill, glass, steel and a corner run",
             "pieces": tiling["pieces"],
             "measured_bbox": tiling["bbox"],
-            "expected_bbox": [round(q, 4) for q in want],
-            "lattice_conformant": bool(wall_ok),
+            "lattice_bbox": [round(q, 4) for q in want],
+            "oversail_per_face_m": [round(e, 4) for e in excess],
+            "allowance_m": [-INSET, MAX_OUTSET],
+            "within_allowance": bool(wall_ok),
             "corner_rule": "rotating the authored (+Z,+X) corner by 90 degree "
                            "steps gives (+X,-Z), (-Z,-X), (-X,+Z) - exactly the "
                            "four corners of a rectangular plan. A wall that "
                            "simply ENDS needs (+Z,-X), which is a mirror, not a "
                            "rotation, and is not in this kit.",
         },
-        "files": ["demigol_kit.fbx", "kit_atlas.png", "contact_sheet.png",
+        "files": ["demigol_kit.fbx", "kit_albedo.png", "kit_normal.png",
+                  "kit_mask.png", "contact_sheet.png",
                   "tiling_proof.png"],
     }
     with open(os.path.join(OUT_DIR, "manifest.json"), "w") as fh:
