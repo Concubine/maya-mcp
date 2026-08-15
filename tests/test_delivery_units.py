@@ -19,6 +19,7 @@ _EVALS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))
 if _EVALS not in sys.path:
     sys.path.insert(0, _EVALS)
 
+import delivery_units     # noqa: E402
 import fbx_probe          # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
@@ -47,3 +48,23 @@ def test_reader_defaults_absent_records_to_identity():
     # carries one. Absent must read as identity, never as missing.
     assert all(n.scaling == (1.0, 1.0, 1.0)
                for n in facts.nodes if n.name != "tower")
+
+
+@pytest.mark.parametrize("hero", HEROES)
+def test_hero_is_metre_true(hero):
+    violations = delivery_units.check_delivery(
+        STRUCTURES / ("%s.fbx" % hero), delivery_units.HERO_CEILING_M)
+    assert violations == [], "\n".join(violations)
+
+
+def test_kit_is_metre_true():
+    violations = delivery_units.check_delivery(KIT, delivery_units.KIT_CEILING_M)
+    assert violations == [], "\n".join(violations)
+
+
+def test_check_names_the_node_carrying_a_bad_scale():
+    # The message has to identify the offending node, because the two
+    # deliveries put the scale in different places: the heroes on one group
+    # Null, the kit on all 41 Mesh nodes.
+    violations = delivery_units.check_delivery(KIT, delivery_units.KIT_CEILING_M)
+    assert any("kit_steel_column_a" in v for v in violations), violations
