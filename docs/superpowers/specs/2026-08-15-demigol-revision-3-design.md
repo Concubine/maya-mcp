@@ -26,20 +26,32 @@ Generators being revised (here):
 Two of #600's seven items are **unmet existing requirements**, not new taste. This matters
 because it changes what revision 3 has to do to be the last one of its kind.
 
-**Item 1 (no roofs).** The kit contract already defines the `roof` context as *"top face
-exposed — parapet / cap / plant."* Revision 2 built all six `roof` pieces as **vertical facade
-pieces with a cornice on top** — `kit_concrete_roof_a/b`, `kit_brick_roof_a/b`,
-`kit_infill_roof_a`, `kit_glass_roof_a`. Not one presents a horizontal surface. The context was
-reported as covered while nothing in it satisfied the definition.
+**Item 1 (no roofs) is entirely hero-side. The kit is not at fault.**
+
+An earlier draft of this spec claimed the kit's six `roof` pieces were vertical facade pieces that
+never presented a horizontal surface. That was wrong, and the arithmetic says so:
+`slab(top=0.6)` spans `y` from −1.495 to 0.6, and the following
+`box(0, 0.75, 0, FULL, 0.3, FULL)` lays a **full-cell deck plate from 0.6 to 0.9**. The `_b`
+variants add a parapet box on the +Z edge and a cornice. These are real roofs.
+
+The actual cause is that **the heroes never place anything on top of themselves.**
+`evals/demigol_structures.py` computes `faces["ground"] = ch.y == 0` but has no top or roof
+equivalent anywhere, and `clad()` only hangs perimeter cladding storey by storey. Nothing is ever
+assigned to the upward surface of the topmost storey. All four buildings are therefore open
+egg-crates, exactly as #600 describes.
+
+Note also that the heroes do not consume kit pieces at all — they are separately generated and
+merely share the atlas. So a kit fix could never have produced hero roofs.
 
 **Item 2 (one silhouette family).** The structure contract already asks for *"parapets, a crown
 that reads from across the district."* Revision 2 delivered four flat-topped rectangular prisms.
 
-The cause is the same in both cases: revision 2's verification tables check only **mechanical**
-properties — zero boundary edges, pivot at chunk centre, cells on the lattice, triangles within
-budget, names parse and agree with measured position. Every one of those is a property a wrong
-building satisfies just as easily as a right one. **No check in the delivery could fail on "this
-roof is not a roof" or "these four buildings are one shape."**
+What both have in common is not the fault but the reason it shipped: revision 2's verification
+tables check only **mechanical** properties — zero boundary edges, pivot at chunk centre, cells on
+the lattice, triangles within budget, names parse and agree with measured position. Every one of
+those is a property a wrong building satisfies just as easily as a right one. **No check in the
+delivery could fail on "this building has no top" or "these four buildings are one shape."** A
+roofless hero passes every single revision-2 check.
 
 So revision 3 adds intent checks alongside the art. Without them, revision 4 can re-report a
 covered context that is not covered, and the loop does not converge.
@@ -89,35 +101,58 @@ changes, not tool work, and the two have different review audiences.
 
 Self-contained in `evals/demigol_kit.py`. No dependency on the heroes.
 
-### 3.1 The `roof` context gains what it always meant
+### 3.0 The division of labour: the hero frames the roof, the kit sheathes it
 
-A `roof` cell is one whose **top face is exposed**. Its top face *is* the roof surface, so a
-`roof` piece must present a horizontal deck plate at the cell top (`y = +1.5`), plus exactly one
-of three treatments:
+Directed by the user, 2026-08-15. **A roof is modelled the way a roof is actually built**, and the
+two halves land on opposite sides of the delivery boundary:
 
-| treatment | what | where it is used |
-|---|---|---|
-| `parapet` | a wall rising above the deck into the 0.5 m outset allowance | perimeter roof cells |
-| `cap` | flush deck, no upstand | setback shoulders, where another mass rises behind |
-| `plant` | deck plus mechanical clutter — vents, AC blocks, a stair head | interior roof cells |
+| half | who builds it | roles | what it is | when destroyed |
+|---|---|---|---|---|
+| **roof structure** | **hero** (`demigol_structures.py`) | frame — `steel`, `concrete` | beams spanning the bay lines at the top storey, plus the deck substrate they carry | the roof **collapses** |
+| **roof sheathing** | **kit** (`demigol_kit.py`) | cladding — `brick`, `infill`, `glass`, plus plant | the visible deck finish, the parapet upstand, rooftop clutter | it **peels off**, the building stands |
 
-The outset allowance is what a parapet spends. This is the allowance being used for its original
-purpose rather than only for cornices.
+This is not a new concept — it is the existing frame/cladding split extended upward. The heroes
+already build `steel` columns and `concrete` beams and hang cladding in the perimeter cells the
+frame does not need; a roof is the same idea rotated into the horizontal.
+
+Three things follow, and they resolve questions this spec previously left open:
+
+1. **§4.4's deferred question is largely answered.** Roof and floor *structure* is structural and
+   participates in the flood-fill. *Sheathing* is not. What remains to settle in sub-project 2 is
+   only the narrower question of whether a floor's structure ties columns strongly enough to relax
+   the stilt rules.
+2. **The damage model falls out of it.** Strip the sheathing and the frame is exposed but standing;
+   take the beams and the roof comes down. That is the distinction the user wants to feel.
+3. **It sets the build order.** The kit sheathes what the hero frames, so the sheathing vocabulary
+   must exist before the heroes can dress a roof — sub-project 1 still lands first.
+
+### 3.1 The `roof` context keeps its pieces and gains the missing treatment
+
+The contract names three roof treatments — *parapet / cap / plant*. Revision 2 delivered the
+first two and **not the third**: `roof_a` variants are a flush deck (`cap`), `roof_b` variants add
+a parapet and cornice, and nothing anywhere is `plant`.
+
+So the kit's roof work in revision 3 is small and additive: **rooftop plant pieces** — vents, AC
+blocks, a stair head. Existing roof pieces are unchanged and nothing is reclassified.
 
 **`plant` is a gameplay piece, not set dressing.** The golem roof-slams, and a bare deck gives it
 nothing to destroy on landing. Rooftop clutter is high feel-per-triangle: small, cheap, breaks
-satisfyingly, and it makes a roof read as a place rather than a lid.
+satisfyingly, and it makes a roof read as a place rather than a lid. Given the delivery goal is
+judging how damage *feels*, this is the highest-value item in sub-project 1.
 
-**The revision-2 cornice pieces are not deleted.** They are reclassified as top-storey `facade`,
-which is what they actually are. Deleting them would throw away good work; leaving them labelled
-`roof` is what caused the problem.
+### 3.2 Open question — deck height against the collision surface
 
-### 3.2 Deck pieces must be collidable
+Flag to the Demigol dev agent rather than fix blind, because the answer depends on how collision
+is generated and this side would be guessing.
 
-Collision is generated from the grid and never from the art. So a roof deck reads as a walkable
-surface **only if its cells are genuinely occupied cells in the lattice** — a deck modelled as
-ornament oversailing an empty cell would be visually right and physically absent, and the golem
-would fall through it. This is a hard requirement, checked in §6.
+A `roof_a` deck tops out at **`y = 0.9`**, while the cell's own top face is at **`y = 1.495`**.
+Collision is generated from the grid, never from the art, so if an occupied roof cell yields a
+full-cell collider the golem stands on an invisible ledge **0.6 m above the visible deck**.
+
+Either the deck should rise to the cell top, or the collider for a roof cell should be shortened
+to match the art. Both are one-line changes on their respective sides; picking the wrong one
+silently is what makes it worth asking. **Do not change the kit for this until the dev agent
+answers.**
 
 ### 3.3 Brick pitch and palette
 
@@ -164,9 +199,20 @@ The `block` courtyard is the highest-value single change for the map: it is the 
 produces a silhouette which differs *from above*, which now matters because revision 3 has roofs
 and the golem plays on them.
 
-### 4.3 Floors and roofs as bay-sized plates — a damage-feel decision
+### 4.3 Framing the roof, and floors as bay-sized plates
 
-Floor plates and roof decks are **multi-cell chunks, one per structural bay**, which the
+Per §3.0 the hero builds the roof **structure**, not its finish. Concretely, the topmost storey
+gains what every other storey already has and one thing more:
+
+- **roof beams** on the bay lines, in `concrete`, exactly as `frame()` already lays a beam grid at
+  each storey — this is what ties the column tops
+- **a deck substrate** carried by those beams, spanning the bays
+
+The heroes therefore do not place kit pieces (they never have — they are separately generated and
+merely share the atlas). They build the frame and the substrate; the kit's sheathing vocabulary
+dresses the same surface through the shared material.
+
+Floor plates and roof substrate are **multi-cell chunks, one per structural bay**, which the
 generator already supports (*"Multi-cell chunks are named for their min-corner cell"*).
 
 Not per-cell, for two reasons:
@@ -183,12 +229,13 @@ neighbours in the occupied-cell set. Adding floors and roofs changes which faces
 essentially every chunk in every building. Revision 3 is therefore **not additive** — the entire
 delivery re-derives and must be re-validated, not just extended.
 
-**One decision is deliberately deferred to sub-project 2, and must not survive it:** whether a
-floor plate counts as structural for the load-path flood-fill. If it does, floors tie columns and
-the stilt rules relax; if it does not, floors are cladding that happens to be horizontal. Both are
-defensible and the answer depends on how the plates actually behave once built. The choice must be
-made once, recorded in the manifest as a stated property, and checked — sub-project 2 is not
-complete while it is still open.
+**The deferred decision, now narrowed by §3.0.** Structure is structural and sheathing is not —
+that much is settled, so a floor's *substrate* participates in the flood-fill and its finish does
+not. What remains open to sub-project 2 is only the narrower question: **does a floor's structure
+tie columns strongly enough to relax the stilt rules?** Today a column with no floor ties is a
+stilt; once every storey carries real substrate spanning its bays, that definition may be doing
+less work than it was. The answer must be made once, recorded in the manifest as a stated
+property, and checked — sub-project 2 is not complete while it is still open.
 
 **One input to that decision, recorded now.** The user's longer-term intent is a **destructible
 city floor**, with buildings sitting on top of it. That is a Demigol concern and not part of any
@@ -257,8 +304,8 @@ generator and fail the build**, in the same manner as revision 2's existing load
 
 | # | check | fails when |
 |---|---|---|
-| V1 | every `roof` piece presents a horizontal surface at the cell top | a `roof` piece has no upward-facing geometry at `y = +1.5` — the exact defect revision 2 shipped |
-| V2 | every roof deck cell is an **occupied lattice cell** | a deck exists as art over an empty cell, so the golem falls through a visible floor |
+| V1 | every building's topmost storey carries **roof structure** — beams on the bay lines and substrate spanning every bay | a building has no top; this is precisely the egg-crate revision 2 shipped, and it passed every mechanical check |
+| V2 | every roof substrate chunk occupies **real lattice cells** | a deck exists as art over an empty cell, so collision is absent where the art says to stand and the golem falls through a visible floor |
 | V3 | each building shows **≥2 distinct occupied-cell footprints** across its storeys | a building is a flat-topped prism — no setback, no crown |
 | V4 | for every pair of the four buildings, the normalised extent ratio `(w : d : h)` differs by **>20% on at least one axis** | four archetypes collapse to one silhouette family |
 | V5 | every occupied cell with **no occupied cell directly above it** is a `roof` cell | the egg-crate condition, stated positively — this is the check that would have failed revision 2 |
