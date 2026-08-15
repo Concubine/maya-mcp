@@ -170,7 +170,8 @@ class TransformedObject(BaseModel):
     pivot: Optional[List[float]] = Field(
         default=None,
         description="World-space rotate pivot after the call - the point this "
-                    "object turns about, which is what a ragdoll reads.",
+                    "object turns about, which is what a ragdoll reads. Same "
+                    "meaning as AssembledObject.pivot.",
     )
 
 
@@ -388,7 +389,14 @@ class AssembledObject(BaseModel):
             "assemble unites, it does not weld."
         )
     )
-    pivot: Optional[List[float]] = None
+    pivot: Optional[List[float]] = Field(
+        default=None,
+        description="World-space rotate pivot after the call - the point this "
+                    "object turns about. Null means no pivot treatment was "
+                    "applied at all (an omitted single-part chunk); otherwise "
+                    "this is measured from Maya after the write, the same as "
+                    "TransformedObject.pivot.",
+    )
     combined: bool
 
 

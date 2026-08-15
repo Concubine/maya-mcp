@@ -1090,6 +1090,23 @@ class TestDocsExplainWhichShadingModeRevealsWhat:
         # as None and the plugin would fall back to the global `pivot` mode.
         assert conn.calls[0]["params"]["pivots"] == {"rig_arm": [1.0, 2.0, 3.0]}
 
+    def test_assemble_rejects_a_pivots_entry_with_the_wrong_length_in_schema(self):
+        # pivots values reuse Vec3 (min_length=3, max_length=3) so a malformed
+        # entry is refused by the MCP schema itself - never forwarded to the
+        # plugin, which would otherwise cost a Maya round-trip just to reject
+        # what pydantic could catch for free.
+        from mcp.server.mcpserver.exceptions import ToolError
+
+        conn = FakeConn()
+        mcp = server_mod.create_server(conn)
+        with pytest.raises(ToolError):
+            run(mcp.call_tool("maya_assemble", {
+                "name": "rig",
+                "parts": [{"pos": [0, 0, 0], "dim": [1, 1, 1], "chunk": "rig_arm"}],
+                "pivots": {"rig_arm": [1.0, 2.0]},
+            }))
+        assert conn.calls == []
+
     def test_assign_pbr_forwards_the_whole_map_set_in_one_request(self):
         conn = FakeConn({"assign_pbr": {
             "meshes": ["|kit_a", "|kit_b"], "material": "kit",

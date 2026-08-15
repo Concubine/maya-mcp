@@ -938,10 +938,14 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "world-space translate and rotate; object-space scale."
         ))] = True,
         pivot: Annotated[Vec3, Field(description=(
-            "World-space point to place the object's pivot at. Does NOT move the "
-            "geometry - it moves what the geometry turns about. Applied before "
-            "translate/rotate/scale, so a relative rotate in the same call turns "
-            "about the new pivot."
+            "World-space point to place the object's pivot at. By itself, does "
+            "NOT move the geometry - it moves what the geometry turns about. "
+            "But it sets BOTH the rotate and the scale pivot (that is what "
+            "`xform -piv` does), so a `scale` in the SAME call now scales about "
+            "this point too and DOES move the geometry - differently than a "
+            "`scale` would have before a pivot was placed here. Applied before "
+            "translate/rotate/scale, so a relative rotate or scale in the same "
+            "call acts about the new pivot."
         ))] = None,
     ) -> TransformResult:
         """Move/rotate/scale objects by name. Returns the resulting transforms —
@@ -1157,10 +1161,14 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         pivot: Annotated[Literal["center", "origin", "keep"], Field(description=(
             "Pivot for each combined object, as in maya_combine."
         ))] = "center",
-        pivots: Annotated[Optional[Dict[str, List[float]]], Field(description=(
-            "Chunk name -> world-space pivot. Chunks left out keep the global "
-            "`pivot` mode. For an articulated figure this is the rig: each chunk "
-            "pivots at its own joint, which `center` never gets right."
+        pivots: Annotated[Optional[Dict[str, Vec3]], Field(description=(
+            "Chunk name -> world-space pivot. What an omitted chunk keeps "
+            "depends on its shape: a MULTI-part chunk still gets the global "
+            "`pivot` mode (it always goes through combine.unite, which always "
+            "places one); a SINGLE-part chunk gets NO pivot treatment at all - "
+            "`combine` never runs for it, so Maya's own default pivot stands. "
+            "For an articulated figure this is the rig: each chunk pivots at "
+            "its own joint, which `center` never gets right."
         ))] = None,
         freeze: Annotated[bool, Field(description=(
             "Freeze transforms on each combined object."
