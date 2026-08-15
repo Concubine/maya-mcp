@@ -19,6 +19,7 @@ not escapes and are not listed.
 | 12 | re-place 3 pivots after the booleans | transform (pivot) | 3 | no | **required** — see finding below |
 | 13 | rename 2 boolean results | rename | 2 | no | **should not have been required** — see finding below |
 | 14 | chamfer the chest girdle | sculpt_ops (bevel_edges) | 1 | no | the chunk Task 5's `soft_move` silently missed; caught by capturing, not by a number |
+| 15 | drop the aleph, keep the visor | delete_objects + create_primitive + bevel_edges + transform | 4 | no | art direction; the rune is carved INTO the brow, so removing one meant rebuilding the other |
 
 ## Notes
 
