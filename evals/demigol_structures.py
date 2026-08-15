@@ -710,22 +710,39 @@ def structural_report(chunks):
 # ================================================================= buildings
 
 def tower():
-    """13x13x14 - the Tower archetype. Full frame, glazed shaft, open lobby."""
-    b = Building("tower", 13, 13, 14,
+    """30 m base, 84 m tall, stepping 10x10 -> 7x7 -> 4x4. The Tower.
+
+    Revision 2's tower was 13x13 cells by 14 storeys - 39.9 x 42.0 x 39.9 m, a
+    cube, which is #600 item 2's headline complaint. Two things fix it and only
+    together: the base SHRINKS to 10x10, so it still fits any plot the old one
+    fitted and needs no coordination with the city layout, and the height is
+    not capped by anything in the contract.
+
+    The 7x7 tier is offset rather than centred (x 0-6, z 3-9). A centred
+    setback reads as a wedding cake; an offset one gives the shaft a shoulder,
+    and the two terraces it produces are at different corners.
+    """
+    b = Building("tower", 10, 10, 28,
+                 tiers=[(0, (0, 9, 0, 9)), (12, (0, 6, 3, 9)), (22, (3, 6, 3, 6))],
                  note="Ground storey is an open lobby: cladding omitted, columns "
-                      "present. Top two storeys glazed as a crown.")
+                      "present. Two setbacks with terraces at 36 m and 66 m; the "
+                      "top tier is glazed as a crown.",
+                 palette="cool")
     b.frame()
-    b.clad(lambda y: "glass" if (y >= b.storeys - 2 or y % 3 == 2) else "infill",
+    b.clad(lambda y: "glass" if (y >= 22 or y % 3 == 2) else "infill",
            skip_storeys=(0,))
     b.roof()
     return b
 
 
 def block():
-    """19x19x6 - the Block archetype. Heavy brick perimeter, wide and squat."""
+    """19x19x6 with a 13x13 attic - the Block. Wide, squat, stepped crown."""
     b = Building("block", 19, 19, 6,
-                 note="Brick perimeter with a glazed top storey; open colonnade "
-                      "at ground level on all four sides.")
+                 tiers=[(0, (0, 18, 0, 18)), (5, (3, 15, 3, 15))],
+                 note="Brick perimeter with a glazed attic set back 9 m on all "
+                      "four sides, leaving a perimeter terrace; open colonnade "
+                      "at ground level.",
+                 palette="warm")
     b.frame()
     b.clad(lambda y: "glass" if y == b.storeys - 1 else "brick", skip_storeys=(0,))
     b.roof()
@@ -733,10 +750,18 @@ def block():
 
 
 def slab():
-    """10x19x8 - the Slab archetype. Long glazed flanks, solid ends."""
+    """10x19x8, the upper third stepping back on ONE end - the Slab.
+
+    The asymmetry is the point. A slab that steps back on both ends is a
+    smaller slab; stepping one end gives it a front and a back, which is what
+    stops a row of them reading as a wall.
+    """
     b = Building("slab", 10, 19, 8,
-                 note="Alternating glazed and infill storeys the full height; "
-                      "no open lobby, so the ground storey is fully clad.")
+                 tiers=[(0, (0, 9, 0, 18)), (5, (0, 9, 0, 12))],
+                 note="Alternating glazed and infill storeys the full height; no "
+                      "open lobby. The last three storeys step back 18 m on the "
+                      "+z end, leaving a long terrace over the low block.",
+                 palette="industrial")
     b.frame()
     b.clad(lambda y: "glass" if y % 2 == 1 else "infill")
     b.roof()
@@ -744,11 +769,19 @@ def slab():
 
 
 def stump():
-    """10x10x4 - the Stump archetype. Industrial brick, minimal glazing."""
-    b = Building("stump", 10, 10, 4,
-                 note="All brick except a glazed band at the top storey.")
+    """10x10x4 under a 4x4 bulkhead - the Stump. Deliberately plain.
+
+    A skyline needs plain boxes or the stepped ones stop reading as stepped.
+    What separates this from a graybox is the stair headhouse: one storey, a
+    quarter of the footprint, and a step the golem can take onto the main deck.
+    """
+    b = Building("stump", 10, 10, 5,
+                 tiers=[(0, (0, 9, 0, 9)), (4, (3, 6, 3, 6))],
+                 note="All brick except a glazed band under the roof. The fifth "
+                      "storey is a 12 m stair bulkhead on the main deck.",
+                 palette="grimy")
     b.frame()
-    b.clad(lambda y: "glass" if y == b.storeys - 1 else "brick")
+    b.clad(lambda y: "glass" if y == 3 else "brick")
     b.roof()
     return b
 

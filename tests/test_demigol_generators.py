@@ -692,3 +692,63 @@ class TestTerraces:
         b.roof()
         with pytest.raises(ValueError, match="claimed twice"):
             b.roof()
+
+
+class TestArchetypesDiffer:
+    """#600 item 2, end to end: four archetypes, four silhouettes.
+
+    Revision 2's four were 13x13x14, 19x19x6, 10x19x8 and 10x10x4 - all
+    flat-topped rectangular prisms, so a 50-building skyline read flat. The
+    profile below is the sequence of footprint widths up the height, which is
+    what a silhouette IS at district distance.
+    """
+
+    def profile(self, b):
+        return [b.foot(y) for y in range(b.storeys)]
+
+    def test_no_two_archetypes_share_a_profile(self):
+        seen = {}
+        for name, fn, _ in st.BUILDINGS:
+            key = tuple(self.profile(fn()))
+            assert key not in seen, "%s and %s have the same silhouette" % (name, seen[key])
+            seen[key] = name
+
+    def test_three_of_the_four_actually_step(self):
+        stepping = [name for name, fn, _ in st.BUILDINGS
+                    if len(set(self.profile(fn()))) > 1]
+        assert len(stepping) >= 3, stepping
+
+    def test_the_tower_is_at_least_twice_as_tall_as_it_is_wide(self):
+        b = st.tower()
+        x0, x1, z0, z1 = b.foot(0)
+        width = st.CELL * max(x1 - x0 + 1, z1 - z0 + 1)
+        height = st.CELL * (b.storeys + 1)
+        assert height >= 2 * width, "%.1f m tall on a %.1f m base" % (height, width)
+
+    def test_the_tower_plot_did_not_grow(self):
+        # It shrank from 13x13 to 10x10 on purpose: a smaller plot fits
+        # anywhere the old one did, so the city layout needs no revisiting.
+        x0, x1, z0, z1 = st.tower().foot(0)
+        assert x1 - x0 + 1 <= 13 and z1 - z0 + 1 <= 13
+
+    def test_every_archetype_stands(self):
+        for name, fn, _ in st.BUILDINGS:
+            report = st.structural_report(fn().chunks())
+            assert report["standing"], "%s: %s" % (name, report)
+
+    def test_every_archetype_tops_out_in_roof(self):
+        for name, fn, _ in st.BUILDINGS:
+            b = fn()
+            tops = {}
+            for (x, y, z) in b.cells:
+                if (x, z) not in tops or y > tops[(x, z)]:
+                    tops[(x, z)] = y
+            for (x, z), y in tops.items():
+                assert (x, y, z) in b.roofed, "%s: %s tops out unroofed" % (name, (x, z))
+
+    def test_every_archetype_has_more_than_one_roof_deck_or_says_why(self):
+        # The stump is the deliberate exception: one main deck plus its
+        # bulkhead cap, which is still two heights.
+        for name, fn, _ in st.BUILDINGS:
+            heights = {y for (_, y, _) in fn().roofed}
+            assert len(heights) >= 2, "%s has a single roof height" % name
