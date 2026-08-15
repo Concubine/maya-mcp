@@ -86,6 +86,7 @@ class TestRegistration:
             "maya_compare_to_reference",
             "maya_setup_lighting",
             "maya_assign_material",
+            "maya_assign_pbr",
             "maya_apply_texture_recipe",
         }
 
@@ -971,6 +972,37 @@ class TestDocsExplainWhichShadingModeRevealsWhat:
         tools = {t.name: t for t in run(mcp.list_tools())}
         desc = tools["maya_assign_material"].description
         assert "reuse" in desc.lower() or "reuses" in desc.lower()
+
+    def test_assign_pbr_forwards_the_whole_map_set_in_one_request(self):
+        conn = FakeConn({"assign_pbr": {
+            "meshes": ["|kit_a", "|kit_b"], "material": "kit",
+            "shading_group": "kitSG", "shader": "standardSurface",
+            "maps": {"roughness": {"file": "kit_mask_tex",
+                                   "attr": "specularRoughness", "channel": "g",
+                                   "inverted": True, "raw": True}},
+            "nodes": ["kit_mask_tex"], "warnings": [],
+        }})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_assign_pbr", {
+            "mesh": ["|kit_a", "|kit_b"],
+            "maps": {"roughness": {"path": "D:/kit_mask.png", "channel": "g",
+                                   "invert": True}},
+        }))
+        assert conn.calls[0]["cmd"] == "assign_pbr"
+        assert conn.calls[0]["params"]["mesh"] == ["|kit_a", "|kit_b"]
+        assert conn.calls[0]["params"]["maps"]["roughness"]["invert"] is True
+        assert result.structured_content["maps"]["roughness"]["raw"] is True
+
+    def test_assign_pbr_description_carries_the_traps_that_cost_a_session(self):
+        """The tool description is where a caller learns things no viewport can
+        show: that a smoothness map needs inverting, that data maps are read
+        raw, and that an atlas wants mip filtering off."""
+        mcp = server_mod.create_server(FakeConn())
+        tools = {t.name: t for t in run(mcp.list_tools())}
+        schema = str(tools["maya_assign_pbr"].input_schema)
+        assert "SMOOTHNESS" in schema
+        assert "sRGB" in schema
+        assert "ATLAS" in schema
 
 
 def test_array_result_accepts_a_mirror_response():

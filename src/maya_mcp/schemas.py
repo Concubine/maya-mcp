@@ -356,6 +356,38 @@ class MaterialResult(BaseModel):
     warnings: List[str] = Field(default_factory=list)
 
 
+class PbrMapResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    file: str = Field(description="The file node reading this map.")
+    attr: str = Field(description="Shader attribute the map ends up driving.")
+    channel: Optional[str] = Field(
+        default=None, description="Channel read for scalar slots; None for colour."
+    )
+    inverted: bool = Field(description="True when a reverse node sits in the path.")
+    raw: bool = Field(
+        description=(
+            "True when the file is read linearly (colorSpace Raw). Normal and "
+            "mask maps are data, not colour: sRGB on them bends the normals and "
+            "shifts every roughness value."
+        )
+    )
+
+
+class PbrResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    meshes: List[str] = Field(description="Meshes now wearing this material.")
+    material: str
+    shading_group: str
+    shader: str
+    maps: Dict[str, PbrMapResult] = Field(
+        description="What each requested slot ended up connected to."
+    )
+    nodes: List[str] = Field(description="Every node the call created.")
+    warnings: List[str] = Field(default_factory=list)
+
+
 class TextureRecipeResult(BaseModel):
     model_config = ConfigDict(extra="ignore")
 

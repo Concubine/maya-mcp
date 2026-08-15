@@ -32,6 +32,7 @@ from .handlers import (
     material,
     modeling,
     objinfo,
+    pbr,
     render,
     scene,
     sculpt,
@@ -113,6 +114,7 @@ def _build_handlers() -> Dict[str, Any]:
         "set_camera": viewport.set_camera,
         "setup_lighting": lighting.setup_lighting,
         "assign_material": material.assign_material,
+        "assign_pbr": pbr.assign_pbr,
         "apply_texture_recipe": texture_recipes.apply_texture_recipe,
     }
 

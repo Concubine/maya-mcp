@@ -24,9 +24,9 @@ SHADERS = ("standardSurface", "lambert", "blinn")
 # Whitelisted authoring params per shader, by their REAL attribute names.
 PARAM_WHITELIST = {
     "standardSurface": {
-        "baseColor", "roughness", "metalness", "emission", "emissionColor",
-        "specular", "transmission", "transmissionColor", "transmissionDepth",
-        "ior", "coat", "coatRoughness",
+        "base", "baseColor", "roughness", "metalness", "emission",
+        "emissionColor", "specular", "transmission", "transmissionColor",
+        "transmissionDepth", "ior", "coat", "coatRoughness",
     },
     "lambert": {"color", "transparency", "incandescence"},
     "blinn": {"color", "transparency", "incandescence", "eccentricity",
@@ -36,6 +36,7 @@ PARAM_WHITELIST = {
 # Real attribute name for each whitelisted param, per shader.
 _ATTR = {
     "standardSurface": {
+        "base": "base",
         "baseColor": "baseColor", "roughness": "specularRoughness",
         "metalness": "metalness", "emission": "emission",
         "emissionColor": "emissionColor", "specular": "specular",
@@ -76,6 +77,9 @@ _COLOR_ATTRS = {"baseColor", "color", "emissionColor", "specularColor",
 # 1.5, diamond 2.42) and catches "ior=150" before it silently builds a
 # black-mirror gem.
 _RANGES = {
+    # The diffuse weight. Whitelisted because both revision-2 art runs set it
+    # explicitly rather than inherit a version-dependent default.
+    "base": (0.0, 1.0),
     "transmission": (0.0, 1.0),
     "ior": (1.0, 3.0),
     # Absorption distance in scene units: how far light travels through the
@@ -87,6 +91,7 @@ _RANGES = {
     "coatRoughness": (0.0, 1.0),
 }
 _RANGE_HINTS = {
+    "base": "diffuse weight; 1 = full, 0 = no diffuse response at all",
     "transmission": "0 = opaque, 1 = fully transmissive",
     "ior": "water 1.33, glass 1.5, diamond 2.42",
     "transmissionDepth": "scene units light travels before transmissionColor "

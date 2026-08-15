@@ -40,6 +40,7 @@ from .schemas import (
     NewSceneResult,
     ObjectInfoResult,
     OpenSceneResult,
+    PbrResult,
     ReferenceResult,
     RemeshResult,
     RenderedFrame,
@@ -1461,6 +1462,67 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             maya.request(
                 "assign_material",
                 {"mesh": mesh, "shader": shader, "params": params, "name": name},
+                timeout_s=SCENE_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Assign PBR material",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=False
+        ),
+    )
+    def maya_assign_pbr(
+        mesh: Annotated[Union[str, List[str]], Field(description=(
+            "One canonical long name, or a list of them. A list shares ONE "
+            "material across every mesh - which is the point when they all read "
+            "from a common atlas."
+        ))],
+        maps: Annotated[dict, Field(description=(
+            "Slot -> image. A bare string is the path; an object takes "
+            "{path, channel, invert, raw, mip_filter}.\n"
+            "Slots: color, emission_color (colour, whole image), metalness, "
+            "roughness (scalar, one channel), normal (tangent-space normal map "
+            "via bump2d).\n"
+            "channel (r/g/b/a, scalar slots only, default r) is how a packed "
+            "mask drives several slots from ONE image - two slots naming the "
+            "same file share a single file node.\n"
+            "invert inserts a reverse node: that is how a SMOOTHNESS map "
+            "becomes roughness.\n"
+            "raw defaults to true for metalness/roughness/normal, false for "
+            "colour - normal and mask maps are data, not colour, and an sRGB "
+            "curve on them bends the normals and shifts every roughness value.\n"
+            "mip_filter defaults true; pass false for an ATLAS, where mip blur "
+            "bleeds neighbouring patches across every seam.\n"
+            'e.g. {"color": "D:/kit_albedo.png", "normal": "D:/kit_nrm.png", '
+            '"metalness": {"path": "D:/kit_mask.png", "channel": "r"}, '
+            '"roughness": {"path": "D:/kit_mask.png", "channel": "g", '
+            '"invert": true}}'
+        ))],
+        params: Annotated[dict, Field(description=(
+            "Constant standardSurface values for anything NOT driven by a map "
+            "(base, specular, ior, coat...). Same whitelist as "
+            "maya_assign_material. Naming a param that a map also drives is an "
+            "error, not a silent override."
+        ))] = {},
+        name: Annotated[Optional[str], Field(description=(
+            "Material name; an existing standardSurface of this name is REUSED, "
+            "which is how a whole kit ends up on one shader."
+        ))] = None,
+    ) -> PbrResult:
+        """Wire a full multi-map standardSurface in one call.
+
+        Builds file nodes + place2dTexture + reverse (for inverted scalars) +
+        bump2d, then assigns the material to every mesh given. Texture paths are
+        resolved on the machine running MAYA, and a missing file is refused
+        rather than rendered flat - Maya reports nothing for a missing map, the
+        material simply looks wrong.
+
+        Use maya_assign_material instead when there are no textures at all."""
+        return PbrResult.model_validate(
+            maya.request(
+                "assign_pbr",
+                {"mesh": mesh, "maps": maps, "params": params, "name": name},
                 timeout_s=SCENE_TIMEOUT_S,
             )
         )
