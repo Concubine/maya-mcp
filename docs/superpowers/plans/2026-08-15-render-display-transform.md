@@ -1,6 +1,6 @@
 # render_scene display transform — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Make `render_scene` return a *displayable* image instead of raw linear pixels, so an asset's colour and value can be judged from a render.
 
@@ -58,7 +58,7 @@ No production code. The question: can Arnold be made to apply the display transf
 **Files:**
 - Scratch only. Nothing committed except the decision, recorded on #615.
 
-- [ ] **Step 1: Establish the calibration harness by hand, live**
+- [x] **Step 1: Establish the calibration harness by hand, live**
 
 Run against port 9877. Build the probe in the live scene:
 
@@ -85,7 +85,7 @@ cmds.sets(pl, edit=True, forceElement=sg)
 Render it with `isolate=["calibPlane"]`, `angles=["top"]`, `relight=False`, `fallback_light=False`.
 Expected NOW: **~128**. Target after the fix: **~188**.
 
-- [ ] **Step 2: Probe Path A — make Arnold apply the transform**
+- [x] **Step 2: Probe Path A — make Arnold apply the transform**
 
 Try each, re-rendering the probe after each and recording the value:
 
@@ -107,7 +107,7 @@ cmds.arnoldRender(camera=cam, width=res, height=res, batch=True)
 
 **Known already:** `colorManagement=1` alone did NOT work via `cmds.render`. The open question is whether `arnoldRender` honours it. That is the single most valuable thing this spike answers.
 
-- [ ] **Step 3: Decide and record**
+- [x] **Step 3: Decide and record**
 
 **Path A is the committed target. Hours are not the tie-breaker — durability and image quality are (user's call, 2026-08-15).**
 
@@ -119,7 +119,7 @@ cmds.arnoldRender(camera=cam, width=res, height=res, batch=True)
 
 Post the outcome and the measured numbers to #615. Then delete the probe and restore the lights.
 
-- [ ] **Step 4: Commit the decision**
+- [x] **Step 4: Commit the decision**
 
 ```bash
 git commit --allow-empty -m "spike(render): decide display-transform path for #615"
@@ -129,7 +129,8 @@ git commit --allow-empty -m "spike(render): decide display-transform path for #6
 
 ### Task 2 (Path B only): The LUT, headless
 
-Skip entirely if Task 1 selected Path A.
+**SKIPPED — Task 1 selected Path A.** Left here as the record of the road not taken;
+none of it was built.
 
 **Files:**
 - Create: `maya_plugin/handlers/display_transform.py`
@@ -229,7 +230,7 @@ git commit -m "feat(render): the sRGB transfer function, as a byte LUT"
 - Consumes: Path A — the driver attribute names confirmed by Task 1. Path B — `display_transform.srgb_lut`.
 - Produces: no signature change. `render_scene`'s response shape is untouched, so no caller changes.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Path A — assert the handler sets and restores the attributes, using the existing fake-`cmds` pattern already in the render tests:
 
@@ -254,12 +255,12 @@ def test_it_encodes_the_frame_for_display(tmp_path, fake_cmds):
     assert _dominant_value(result) == pytest.approx(188, abs=2)
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 Run: `uv run python -m pytest tests/test_render_handler.py -v -k display`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement the selected path**
+- [x] **Step 3: Implement the selected path**
 
 **Path A** — inside `_render_frame`, guarded to `renderer == "arnold"`, wrapped so a Maya without mtoa degrades rather than raises:
 
@@ -291,17 +292,17 @@ with `_apply_display_transform` decoding the PNG's IDAT, applying `srgb_lut()` v
 (`MImage.readFromFile` / `.writeToFile(path, "png")`) so no Pillow is needed — operate on
 the file in place before reading it, which avoids hand-rolling a PNG codec entirely.
 
-- [ ] **Step 4: Run the tests and watch them pass**
+- [x] **Step 4: Run the tests and watch them pass**
 
 Run: `uv run python -m pytest tests/test_render_handler.py -v`
 Expected: PASS.
 
-- [ ] **Step 5: Run the whole suite**
+- [x] **Step 5: Run the whole suite**
 
 Run: `uv run python -m pytest`
 Expected: **704+ passed, 1 skipped**. Any pre-existing failure is a regression — stop and fix.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add maya_plugin/handlers/render.py tests/test_render_handler.py
@@ -317,13 +318,13 @@ Headless tests cannot prove this. The whole defect existed *because* every headl
 **Files:**
 - Create: `evals/render_calibration_live.py`
 
-- [ ] **Step 1: Write the gate**
+- [x] **Step 1: Write the gate**
 
 It must: sync-check the deployed plugin, build the calibration probe from Task 1 Step 1, render it, print the measured 8-bit value against the expected, and exit non-zero on failure. Restore the lights and delete the probe in a `finally`. Follow the structure of the existing `evals/isolate_regression.py`.
 
 Assertion: `abs(measured - 188) <= 3`.
 
-- [ ] **Step 2: Deploy the plugin and run it**
+- [x] **Step 2: Deploy the plugin and run it**
 
 ```bash
 MAYA_MCP_PORT=9877 uv run python evals/render_calibration_live.py
@@ -332,7 +333,7 @@ Expected: `calibration OK  measured 188  expected 188 +/- 3`
 
 Remember to copy the changed plugin to `Documents/maya/scripts/maya_plugin` first, or the gate tests the old code and passes for the wrong reason.
 
-- [ ] **Step 3: Re-render the hero and confirm by eye**
+- [x] **Step 3: Re-render the hero and confirm by eye**
 
 ```bash
 MAYA_MCP_PORT=9877 uv run python evals/demigol_structures.py stump
@@ -341,14 +342,14 @@ Expected: `stump OK 166 chunks (110 frame) 12960 tris`, and `stump.png` now read
 grey concrete rather than near-black. Compare against `evals/demigol_structures/stump_srgb.png`,
 the manually corrected reference produced while diagnosing this — they should broadly match.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add evals/render_calibration_live.py
 git commit -m "test(render): a live gate that measures the display transform"
 ```
 
-- [ ] **Step 5: Close the ticket**
+- [x] **Step 5: Close the ticket**
 
 Update #615 to Resolved with the measured before/after numbers and the path taken. Add a
 note to #600 that revision 2's renders were gamma-dark, so its colour findings — item 7
