@@ -32,6 +32,11 @@ from live_call import DEFAULT_PORT, call, structured_result  # noqa: E402
 EXPECTED = 188
 TOLERANCE = 3
 
+# The dome check is a floor, not a target: it asks whether the sky survived
+# isolate at all. Measured ~122 for this plane under the default sky, against 0
+# when the dome was being hidden - anything above this cannot be a black frame.
+DOME_FLOOR = 40
+
 SETUP = """
 import maya.cmds as cmds, math
 saved = {}
@@ -75,11 +80,49 @@ for shape, value in %r.items():
 """
 
 
+PRESET_SETUP = """
+import maya.cmds as cmds
+# The hand-built control light, off. Derived rather than spelled
+# "calibLightShape": cmds.directionalLight names the TRANSFORM, and the shape
+# suffix is Maya's to choose.
+for shape in (cmds.listRelatives("calibLight", shapes=True, fullPath=True) or []):
+    cmds.setAttr(shape + ".intensity", 0.0)
+"""
+
+PRESET_AIM = """
+import maya.cmds as cmds
+# Aim the preset's sun straight down at the plane so N.L = 1. Its ROTATION is
+# not what #617 changed - its intensity is - so pointing it is fair, and it is
+# the only way to compare against a known analytic value.
+cmds.xform(%r, rotation=(-90, 0, 0), worldSpace=True)
+"""
+
+DELETE_NODES = """
+import maya.cmds as cmds
+for node in %r:
+    if cmds.objExists(node):
+        cmds.delete(node)
+"""
+
+
 def send(command, params, timeout_s=300.0):
     response = call(command, params, timeout_s=timeout_s)
     if response.get("status") != "ok":
         raise RuntimeError("%s failed: %s" % (command, response.get("error")))
     return response["result"]
+
+
+def render_the_plane() -> bytes:
+    """One isolated top-down frame of the calibration plane."""
+    result = send("render_scene", {
+        "isolate": ["calibPlane"],
+        "angles": ["top"],
+        "relight": False,        # the probe light IS the calibration
+        "fallback_light": False,
+        "resolution": 256,
+        "samples": 3,
+    })
+    return base64.b64decode(result["images"][0]["png_b64"])
 
 
 def lit_value(png_bytes) -> int:
@@ -104,28 +147,59 @@ def main() -> int:
         return 2
 
     saved = structured_result(send("execute_python", {"code": SETUP}))["saved"]
+    created: list = []
     try:
-        result = send("render_scene", {
-            "isolate": ["calibPlane"],
-            "angles": ["top"],
-            "relight": False,        # our probe light IS the calibration
-            "fallback_light": False,
-            "resolution": 256,
-            "samples": 3,
-        })
-        png = base64.b64decode(result["images"][0]["png_b64"])
-        measured = lit_value(png)
+        # 1. the hand-built light at pi: does the frame carry a display
+        #    transform at all (#615)? It does not go through setup_lighting, so
+        #    it is unaffected by #617 and makes a useful control.
+        measured = lit_value(render_the_plane())
+
+        # 2. the same surface, lit by the PRESET at intensity 1.0 (#617)
+        send("execute_python", {"code": PRESET_SETUP})
+        sun = send("setup_lighting", {"preset": "single_sun", "intensity": 1.0,
+                                      "replace_existing": False})["lights"]
+        created.extend(sun)
+        send("execute_python", {"code": PRESET_AIM % sun[0]})
+        preset_measured = lit_value(render_the_plane())
+
+        # 3. the same object, isolated, under a DOME (#618). A sky dome answers
+        #    ls(geometry=True), so isolate used to hide it and hand back a
+        #    perfectly black frame.
+        send("execute_python", {"code": DELETE_NODES % (sun,)})
+        created = [c for c in created if c not in sun]
+        dome = send("setup_lighting", {"preset": "environment", "intensity": 1.0,
+                                       "replace_existing": False})["lights"]
+        created.extend(dome)
+        dome_measured = lit_value(render_the_plane())
     finally:
+        if created:
+            send("execute_python", {"code": DELETE_NODES % (created,)})
         send("execute_python", {"code": TEARDOWN % saved})
 
-    print("calibration: measured %d  expected %d +/- %d  (%d lights parked and "
-          "restored)" % (measured, EXPECTED, TOLERANCE, len(saved)))
+    print("calibration: hand-built light at pi -> %d, setup_lighting(single_sun,"
+          " 1.0) -> %d, expected %d +/- %d. Isolated under a dome -> %d, must "
+          "not be black. (%d lights parked and restored)"
+          % (measured, preset_measured, EXPECTED, TOLERANCE, dome_measured,
+             len(saved)))
     if abs(measured - EXPECTED) > TOLERANCE:
         print("FAIL: a linear-0.5 surface at N.L = 1 must leave as %d. %d is "
               "the RAW LINEAR value - render_scene is returning undisplayable "
               "pixels again (redmine #615)." % (EXPECTED, measured))
         return 1
-    print("PASS: render_scene returns a displayable image")
+    if abs(preset_measured - EXPECTED) > TOLERANCE:
+        print("FAIL: setup_lighting(intensity=1.0) must light a surface to its "
+              "OWN albedo, which is %d here. %d means the pi is missing, in the "
+              "wrong place, or applied twice (redmine #617)."
+              % (EXPECTED, preset_measured))
+        return 1
+    if dome_measured < DOME_FLOOR:
+        print("FAIL: an isolated render under the environment preset came back "
+              "at %d. isolate is hiding the dome again, and a dome is the only "
+              "rig in which a metal can be judged (redmine #618)."
+              % dome_measured)
+        return 1
+    print("PASS: displayable pixels, intensity 1.0 is a fully-lit surface, and "
+          "isolate leaves the sky alone")
     return 0
 
 
