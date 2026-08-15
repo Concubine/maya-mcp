@@ -1532,15 +1532,23 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
     )
     def maya_setup_lighting(
         preset: Annotated[
-            Literal["three_point", "single_sun", "hdri"],
-            Field(description="Light rig to build."),
+            Literal["three_point", "single_sun", "hdri", "environment"],
+            Field(description=(
+                "'three_point' and 'single_sun' are directional rigs - right for "
+                "reading form and silhouette.\n"
+                "'environment' is an Arnold sky dome with a horizon, needing no "
+                "file. REQUIRED for anything metallic: a full metal has no "
+                "diffuse response, so in a directional rig it has nothing to "
+                "reflect and renders BLACK at every intensity.\n"
+                "'hdri' is the same dome driven by your own .hdr/.exr."
+            )),
         ],
         intensity: Annotated[float, Field(gt=0, le=20, description=(
             "Overall rig intensity; 1.0 is neutral."
         ))] = 1.0,
         hdri_path: Annotated[Optional[str], Field(description=(
             "Absolute path to an .hdr/.exr. Required for preset='hdri' - no HDRI "
-            "is bundled."
+            "is bundled. Use preset='environment' for a dome without a file."
         ))] = None,
         replace_existing: Annotated[bool, Field(description=(
             "Delete existing lights first. Auto-checkpoints before doing so. "
@@ -1549,7 +1557,13 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
     ) -> LightingResult:
         """Build a lighting rig so the model can actually be judged.
 
-        Pair with maya_capture_viewport(lighting='scene') to see it."""
+        Pair with maya_capture_viewport(lighting='scene') to see it - or, for a
+        dome, with maya_render_scene: image-based lighting is a render feature,
+        and the viewport will not show it.
+
+        The dome presets need Arnold. Without it they fall back to a directional
+        light and SAY SO in warnings, because that fallback cannot show a metal
+        correctly and a silent substitution would look like a material bug."""
         return LightingResult.model_validate(
             maya.request(
                 "setup_lighting",

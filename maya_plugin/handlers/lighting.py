@@ -14,7 +14,30 @@ from typing import Any, Dict, List, Optional, Tuple
 from ..dispatcher import HandlerError
 from . import naming
 
-PRESETS = ("three_point", "single_sun", "hdri")
+PRESETS = ("three_point", "single_sun", "hdri", "environment")
+
+# Arnold's lights are their own node types and do NOT reliably answer
+# cmds.ls(lights=True) or ls(type="light"). Every place that asks "what is
+# lighting this scene" has to ask for these too, or a scene lit entirely by a
+# dome reads as unlit - which would have render_scene add a fallback key on top
+# of it and setup_lighting's replace_existing leave the old dome behind.
+ARNOLD_LIGHT_TYPES = ("aiSkyDomeLight", "aiAreaLight", "aiPhotometricLight",
+                      "aiMeshLight", "aiLightPortal")
+
+# A dome is the environment, not a lamp: swinging it to follow the camera would
+# rotate the world's reflections shot to shot, which is the opposite of what an
+# environment is for.
+OMNIDIRECTIONAL_LIGHT_TYPES = ("aiSkyDomeLight",)
+
+# A neutral studio dome: sky above, ground below, and a horizon between them.
+# A FLAT grey dome lights a metal evenly and it still reads as grey paint - the
+# horizon line is what makes a mirror surface legible as a mirror.
+DEFAULT_SKY = (0.55, 0.62, 0.72)
+DEFAULT_GROUND = (0.18, 0.16, 0.15)
+
+# aiSkyDomeLight.format: 0 = mirrored ball, 1 = angular, 2 = latlong. Every HDRI
+# a caller is likely to own is latlong, and the default is not.
+_LATLONG = 2
 
 # (suffix, intensity multiplier, rotate) - a conventional key/fill/rim rig.
 _THREE_POINT = (
@@ -37,14 +60,33 @@ def _auto_checkpoint(reason: str):
     return session.auto_checkpoint(reason)
 
 
+def light_shapes(cmds) -> List[str]:
+    """Every shape that lights the scene, Maya's and Arnold's alike.
+
+    Shared with render.py, because "is this scene lit?" and "which lights are
+    mine to swing?" must answer the same way this does - an Arnold dome that
+    only one of them can see is worse than one neither can.
+    """
+    found: List[str] = []
+    for query in (("light",),) + tuple((t,) for t in ARNOLD_LIGHT_TYPES):
+        try:
+            shapes = cmds.ls(type=query[0], long=True) or []
+        except Exception:
+            continue  # node type unknown in this Maya (mtoa absent)
+        for shape in shapes:
+            if shape not in found:
+                found.append(shape)
+    return found
+
+
 def _existing_light_transforms(cmds) -> List[str]:
     """Transforms that own a light shape - and nothing else.
 
-    Deliberately derived from ls(type="light"), not from a selection or a
-    naming convention: this list is about to be deleted.
+    Deliberately derived from the node types, not from a selection or a naming
+    convention: this list is about to be deleted.
     """
     out: List[str] = []
-    for shape in cmds.ls(type="light", long=True) or []:
+    for shape in light_shapes(cmds):
         parents = cmds.listRelatives(shape, parent=True, fullPath=True) or []
         for parent in parents:
             if parent not in out:
@@ -106,7 +148,8 @@ def setup_lighting(params: Dict[str, Any]) -> Dict[str, Any]:
         raise HandlerError(
             "the hdri preset requires hdri_path",
             hint="maya-mcp bundles no HDRI (they are large and separately "
-            "licensed) - pass an absolute path to your own .hdr/.exr",
+            "licensed) - pass an absolute path to your own .hdr/.exr, or use "
+            "preset='environment' for a neutral studio dome that needs no file",
         )
     replace_existing = params.get("replace_existing", True) is not False
 
@@ -127,7 +170,11 @@ def setup_lighting(params: Dict[str, Any]) -> Dict[str, Any]:
     elif preset == "single_sun":
         lights = _build(cmds, "mcpLight", _SINGLE_SUN, float(intensity))
     else:
-        lights = _build_hdri(cmds, str(hdri_path), float(intensity))
+        lights, dome_warnings = _build_dome(
+            cmds, float(intensity),
+            hdri_path=str(hdri_path) if hdri_path else None,
+        )
+        warnings.extend(dome_warnings)
 
     return {
         "preset": preset,
@@ -155,10 +202,12 @@ def _replace_existing_lights(cmds, transforms: List[str]) -> Tuple[List[str], Li
         if not cmds.objExists(transform):
             continue
         short = transform.split("|")[-1]
-        light_shapes = cmds.listRelatives(
-            transform, shapes=True, fullPath=True, type="light"
-        ) or []
-        for shape in light_shapes:
+        # Filtered against the set we already found rather than by type="light",
+        # which does not match Arnold's own light nodes - a dome would survive
+        # replace_existing and quietly double the lighting of the next rig.
+        lit = set(light_shapes(cmds))
+        under = cmds.listRelatives(transform, shapes=True, fullPath=True) or []
+        for shape in [s for s in under if s in lit]:
             if cmds.objExists(shape):
                 cmds.delete(shape)
         remaining = cmds.listRelatives(transform, children=True, fullPath=True) or []
@@ -174,25 +223,117 @@ def _replace_existing_lights(cmds, transforms: List[str]) -> Tuple[List[str], Li
     return removed, warnings
 
 
-def _build_hdri(cmds, hdri_path: str, intensity: float) -> List[str]:
-    """Dome light driven by a file texture.
+def _arnold_available(cmds) -> bool:
+    """Is aiSkyDomeLight buildable? Loads mtoa if it is merely not loaded yet.
 
-    aiSkyDomeLight is Arnold-only, so this uses Maya's own light + file node
-    to stay renderer-agnostic (compatibility rule, design doc 6).
+    Same shape as render._ensure_renderer, and for the same reason: a cold Maya
+    has mtoa installed and unloaded, and making the caller load a plugin to use
+    the tool's own preset is a defect, not their mistake.
+    """
+    try:
+        if cmds.pluginInfo("mtoa", query=True, loaded=True):
+            return True
+    except Exception:
+        pass
+    try:
+        cmds.loadPlugin("mtoa", quiet=True)
+    except Exception:
+        return False
+    try:
+        return bool(cmds.pluginInfo("mtoa", query=True, loaded=True))
+    except Exception:
+        return False
+
+
+def _build_dome(
+    cmds, intensity: float, hdri_path: Optional[str] = None,
+    sky=DEFAULT_SKY, ground=DEFAULT_GROUND,
+) -> Tuple[List[str], List[str]]:
+    """A real environment: a dome the whole scene sits inside.
+
+    This is the tool's answer to a measured failure. metalness = 1.0 renders
+    BLACK in a three-point rig, because a full metal has no diffuse response and
+    three directional lights give it nothing to reflect - so the kit's steel was
+    being judged in a rig that physically cannot show it. Directional lights
+    cannot fix that at any intensity; only an environment can.
+
+    The previous hdri preset was a directional light with a file texture on its
+    colour. That is a coloured lamp, not image-based lighting: it lights one
+    side and reflects nothing. It survives here only as the fallback for a Maya
+    without Arnold, and it says so out loud.
     """
     created: List[str] = []
+    warnings: List[str] = []
     try:
-        name = naming.unique_name(cmds, "mcpLight_dome")
-        shape = cmds.directionalLight(name=name, intensity=intensity)
+        if not _arnold_available(cmds):
+            name = naming.unique_name(cmds, "mcpLight_domeFallback")
+            shape = cmds.directionalLight(name=name, intensity=intensity)
+            parents = cmds.listRelatives(shape, parent=True, fullPath=True) or []
+            transform = parents[0] if parents else shape
+            created.append(transform)
+            if hdri_path:
+                tex = cmds.shadingNode(
+                    "file", asTexture=True,
+                    name=naming.unique_name(cmds, "mcpLight_domeTex"))
+                created.append(tex)
+                cmds.setAttr(tex + ".fileTextureName", hdri_path, type="string")
+                cmds.connectAttr(tex + ".outColor", shape + ".color", force=True)
+            warnings.append(
+                "Arnold is unavailable, so this is a DIRECTIONAL light standing "
+                "in for a dome. It lights one side and reflects nothing: a "
+                "metallic material will still render black or flat. Install/load "
+                "mtoa, and render with renderer='arnold'."
+            )
+            return created[:1], warnings
+
+        shape = cmds.createNode(
+            "aiSkyDomeLight", name=naming.unique_name(cmds, "mcpLight_domeShape"))
         parents = cmds.listRelatives(shape, parent=True, fullPath=True) or []
         transform = parents[0] if parents else shape
         created.append(transform)
-        tex = cmds.shadingNode("file", asTexture=True,
-                               name=naming.unique_name(cmds, "mcpLight_domeTex"))
-        created.append(tex)
-        cmds.setAttr(tex + ".fileTextureName", hdri_path, type="string")
-        cmds.connectAttr(tex + ".outColor", shape + ".color", force=True)
+        transform = cmds.rename(transform, naming.unique_name(cmds, "mcpLight_dome"))
+        created[0] = transform
+        shape = (cmds.listRelatives(transform, shapes=True, fullPath=True)
+                 or [shape])[0]
+        cmds.setAttr(shape + ".intensity", intensity)
+
+        if hdri_path:
+            tex = cmds.shadingNode(
+                "file", asTexture=True,
+                name=naming.unique_name(cmds, "mcpLight_domeTex"))
+            created.append(tex)
+            cmds.setAttr(tex + ".fileTextureName", hdri_path, type="string")
+            # An HDRI is lighting data, not a picture: an sRGB curve on it
+            # changes every reflection and every bounce.
+            for attr, value, kwargs in (
+                (".colorSpace", "Raw", {"type": "string"}),
+                (".ignoreColorSpaceFileRules", True, {}),
+            ):
+                try:
+                    cmds.setAttr(tex + attr, value, **kwargs)
+                except Exception:
+                    pass
+            cmds.setAttr(shape + ".format", _LATLONG)
+            cmds.connectAttr(tex + ".outColor", shape + ".color", force=True)
+        else:
+            # A V ramp: ground at the bottom, sky at the top, horizon between.
+            ramp = cmds.shadingNode(
+                "ramp", asTexture=True,
+                name=naming.unique_name(cmds, "mcpLight_domeRamp"))
+            created.append(ramp)
+            cmds.setAttr(ramp + ".type", 0)  # 0 = V ramp
+            cmds.setAttr(ramp + ".interpolation", 1)  # linear
+            cmds.setAttr(ramp + ".colorEntryList[0].position", 0.0)
+            cmds.setAttr(ramp + ".colorEntryList[0].color", *ground, type="double3")
+            cmds.setAttr(ramp + ".colorEntryList[1].position", 0.5)
+            cmds.setAttr(ramp + ".colorEntryList[1].color", *ground, type="double3")
+            cmds.setAttr(ramp + ".colorEntryList[2].position", 0.52)
+            cmds.setAttr(ramp + ".colorEntryList[2].color", *sky, type="double3")
+            cmds.setAttr(ramp + ".colorEntryList[3].position", 1.0)
+            cmds.setAttr(ramp + ".colorEntryList[3].color", *sky, type="double3")
+            cmds.setAttr(shape + ".format", _LATLONG)
+            cmds.connectAttr(ramp + ".outColor", shape + ".color", force=True)
     except Exception:
         _sweep(cmds, created)
         raise
-    return [transform]
+    return created[:1], warnings

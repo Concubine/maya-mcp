@@ -57,7 +57,37 @@ class FakeCmds:
     def ls(self, *args, long=False, type=None, **kw):
         if type == "light":
             return [n for n, t in self.node_type.items() if t in self._LIGHT_TYPES]
+        if type is not None:
+            # Arnold's light nodes answer only to their OWN type - the reason
+            # light_shapes has to ask for each of them by name.
+            if type in lighting.ARNOLD_LIGHT_TYPES and not self.mtoa_loaded:
+                raise RuntimeError("Unknown object type: %s" % type)
+            return [n for n, t in self.node_type.items() if t == type]
         return []
+
+    # -- mtoa, which is installed-but-unloaded on a cold Maya --
+    mtoa_installed = True
+    mtoa_loaded = False
+
+    def pluginInfo(self, name, query=False, loaded=False, **kw):
+        if loaded:
+            return self.mtoa_loaded
+        return None
+
+    def loadPlugin(self, name, **kw):
+        if not self.mtoa_installed:
+            raise RuntimeError("plugin not found: %s" % name)
+        self.mtoa_loaded = True
+        return [name]
+
+    def createNode(self, node_type, name=None, **kw):
+        """Maya parents a new light shape under an auto-created transform and
+        hands back the SHAPE - the shape/transform confusion that has bitten
+        this codebase before."""
+        shape_name = name or (node_type + "Shape1")
+        transform = self.add_transform(shape_name.replace("Shape", "") + "_xf")
+        self.created.append((node_type, name))
+        return self.add_shape(transform, shape_name, node_type)
 
     def listRelatives(self, node, parent=False, shapes=False, children=False,
                        fullPath=False, type=None, **kw):
@@ -120,7 +150,38 @@ class FakeCmds:
         self.attrs[attr] = value
 
     def rename(self, old, new):
-        return new
+        """Really move the node, subtree and all.
+
+        A stub that returned the new name without renaming anything let a
+        cleanup path look correct while sweeping a node that no longer answered
+        to the name it was tracking - the fake agreeing with the handler instead
+        of behaving like Maya.
+        """
+        if old not in self.objects:
+            return new
+        parent = self.parent.get(old)
+        new_path = (parent + "|" if parent else "|") + new
+
+        def move(path, target):
+            self.objects.discard(path)
+            self.objects.add(target)
+            self.node_type[target] = self.node_type.pop(path)
+            self.parent.pop(path, None)
+            kids = self.children.pop(path, [])
+            self.children[target] = []
+            for kid in kids:
+                kid_target = target + "|" + kid.rsplit("|", 1)[-1]
+                self.children[target].append(kid_target)
+                move(kid, kid_target)
+                self.parent[kid_target] = target
+
+        move(old, new_path)
+        self.parent[new_path] = parent
+        if parent and parent in self.children:
+            self.children[parent] = [
+                new_path if c == old else c for c in self.children[parent]
+            ]
+        return new_path
 
 
 def test_three_point_builds_three_lights(monkeypatch):
@@ -284,3 +345,93 @@ def test_build_hdri_sweeps_orphans_on_forced_connect_failure(monkeypatch, tmp_pa
 
     assert fake.objects == before, \
         "the orphaned light + file texture must be swept on failure"
+
+
+class TestEnvironmentDome:
+    """metalness = 1.0 renders BLACK in a three-point rig.
+
+    A full metal has no diffuse response and three directional lights give it
+    nothing to reflect, so the kit's steel was being judged in a rig that
+    physically cannot show it. No intensity fixes that; only an environment can.
+    """
+
+    @staticmethod
+    def _fake(monkeypatch, **kwargs):
+        fake = FakeCmds()
+        for key, value in kwargs.items():
+            setattr(fake, key, value)
+        monkeypatch.setattr(lighting, "_cmds", lambda: fake)
+        monkeypatch.setattr(lighting, "_auto_checkpoint", lambda reason: None)
+        return fake
+
+    def test_environment_builds_a_real_arnold_dome(self, monkeypatch):
+        fake = self._fake(monkeypatch)
+        result = lighting.setup_lighting({"preset": "environment"})
+        assert result["warnings"] == []
+        assert [c for c in fake.created if c[0] == "aiSkyDomeLight"]
+        assert len(result["lights"]) == 1
+
+    def test_it_loads_mtoa_rather_than_making_the_caller_do_it(self, monkeypatch):
+        """A cold Maya has mtoa installed and unloaded. Making the caller load a
+        plugin to use the tool's own preset is a defect, not their mistake."""
+        fake = self._fake(monkeypatch)
+        assert fake.mtoa_loaded is False
+        lighting.setup_lighting({"preset": "environment"})
+        assert fake.mtoa_loaded is True
+
+    def test_a_bare_dome_gets_a_horizon_not_flat_grey(self, monkeypatch):
+        """A FLAT grey dome lights a metal evenly and it still reads as grey
+        paint. The horizon line is what makes a mirror legible as a mirror."""
+        fake = self._fake(monkeypatch)
+        lighting.setup_lighting({"preset": "environment"})
+        assert [c for c in fake.created if c[0] == "ramp"]
+        ramp = "|mcpLight_domeRamp"
+        assert fake.attrs[ramp + ".type"] == (0,)  # V ramp
+        assert fake.attrs[ramp + ".colorEntryList[0].color"] == lighting.DEFAULT_GROUND
+        assert fake.attrs[ramp + ".colorEntryList[3].color"] == lighting.DEFAULT_SKY
+
+    def test_an_hdri_is_read_raw_and_mapped_latlong(self, monkeypatch):
+        """An HDRI is lighting DATA: an sRGB curve on it changes every
+        reflection and every bounce. And the dome's default projection is not
+        the one every HDRI a caller owns is authored in."""
+        fake = self._fake(monkeypatch)
+        lighting.setup_lighting({"preset": "hdri", "hdri_path": "D:/studio.hdr"})
+        tex = "|mcpLight_domeTex"
+        assert fake.attrs[tex + ".colorSpace"] == ("Raw",)
+        assert fake.attrs[tex + ".ignoreColorSpaceFileRules"] == (True,)
+        dome = [n for n, t in fake.node_type.items() if t == "aiSkyDomeLight"][0]
+        assert fake.attrs[dome + ".format"] == (2,)  # latlong
+
+    def test_without_arnold_it_says_the_metal_will_still_be_wrong(self, monkeypatch):
+        """The old hdri preset was a directional light with a texture on its
+        colour - a coloured lamp, not image-based lighting. It survives only as
+        a fallback, and it no longer pretends."""
+        fake = self._fake(monkeypatch, mtoa_installed=False)
+        result = lighting.setup_lighting({"preset": "environment"})
+        assert len(result["lights"]) == 1
+        assert not [c for c in fake.created if c[0] == "aiSkyDomeLight"]
+        assert any("metallic material will still render black" in w
+                   for w in result["warnings"])
+
+    def test_hdri_without_a_path_points_at_the_no_file_preset(self, monkeypatch):
+        self._fake(monkeypatch)
+        with pytest.raises(HandlerError) as exc:
+            lighting.setup_lighting({"preset": "hdri"})
+        assert "environment" in exc.value.hint
+
+    def test_replace_existing_removes_a_previous_dome(self, monkeypatch):
+        """A dome that survives replace_existing quietly doubles the lighting of
+        every rig built after it - and ls(type='light') cannot see one."""
+        fake = self._fake(monkeypatch)
+        lighting.setup_lighting({"preset": "environment"})
+        domes_before = [n for n, t in fake.node_type.items()
+                        if t == "aiSkyDomeLight"]
+        assert len(domes_before) == 1
+        result = lighting.setup_lighting({"preset": "three_point"})
+        assert result["removed"], "the old dome was left behind"
+        assert not [n for n, t in fake.node_type.items() if t == "aiSkyDomeLight"]
+
+    def test_light_shapes_survives_a_maya_without_mtoa(self, monkeypatch):
+        fake = self._fake(monkeypatch, mtoa_installed=False)
+        fake.add_light("keyShape")
+        assert lighting.light_shapes(fake) == ["|key|keyShape"]

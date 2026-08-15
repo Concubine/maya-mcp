@@ -22,7 +22,7 @@ import uuid
 from typing import Any, Dict, List, Optional, Sequence
 
 from ..dispatcher import HandlerError
-from . import capture, naming
+from . import capture, lighting, naming
 
 VALID_RENDERERS = ("arnold", "hw2")
 RENDERER_TO_MAYA = {"arnold": "arnold", "hw2": "mayaHardware2"}
@@ -274,13 +274,27 @@ def _ensure_renderer(cmds, maya_renderer: str) -> List[str]:
     return available
 
 
+def _visible(cmds, shape: str) -> bool:
+    try:
+        return bool(cmds.getAttr(shape + ".visibility"))
+    except Exception:
+        return True
+
+
 def _scene_has_light(cmds) -> bool:
     """Is anything actually lighting this scene?
 
     Visible, not merely present: a hidden light does not illuminate, so a scene
     whose only light is hidden renders as black - the case fallback_light exists
     to catch.
+
+    Arnold's lights are asked for BY TYPE (lighting.light_shapes), because they
+    do not reliably answer cmds.ls(lights=True) - and a scene lit entirely by a
+    dome that reads as unlit would get a fallback key thrown on top of it,
+    doubling the exposure of every judged frame.
     """
+    if any(_visible(cmds, s) for s in lighting.light_shapes(cmds)):
+        return True
     return bool(cmds.ls(lights=True, visible=True) or [])
 
 
@@ -291,9 +305,19 @@ _RIG_PREFIX = "mcpLight"
 
 
 def _rig_lights(cmds) -> Dict[str, float]:
-    """Transforms of the tool's own light rig, mapped to their original yaw."""
+    """Transforms of the tool's own light rig, mapped to their original yaw.
+
+    A DOME is deliberately excluded even though setup_lighting built it: an
+    environment is the world, not a lamp, and swinging it per angle would
+    rotate every reflection shot to shot - the opposite of what it is for.
+    """
     rig = {}
     for light in cmds.ls(lights=True, long=True) or []:
+        try:
+            if cmds.nodeType(light) in lighting.OMNIDIRECTIONAL_LIGHT_TYPES:
+                continue
+        except Exception:
+            pass
         parents = cmds.listRelatives(light, parent=True, fullPath=True) or []
         transform = parents[0] if parents else light
         leaf = transform.rsplit("|", 1)[-1]

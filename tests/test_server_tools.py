@@ -1129,3 +1129,24 @@ def test_array_result_signed_volume_is_optional():
     assert result.signed_volume is None
     assert result.group == "|gear"
     assert result.warnings == []
+
+
+class TestLightingPresets:
+    def test_environment_preset_is_reachable_and_needs_no_file(self):
+        conn = FakeConn(responses={"setup_lighting": {
+            "preset": "environment", "lights": ["|mcpLight_dome"],
+            "removed": [], "checkpoint_id": None, "warnings": [],
+        }})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_setup_lighting",
+                                   {"preset": "environment"}))
+        assert conn.calls[0]["params"]["hdri_path"] is None
+        assert result.structured_content["lights"] == ["|mcpLight_dome"]
+
+    def test_the_preset_docs_say_why_a_metal_needs_the_dome(self):
+        """metalness = 1.0 renders black in a three-point rig. A caller reaching
+        for lighting has to learn that HERE, not from a black render."""
+        mcp = server_mod.create_server(FakeConn())
+        tools = {t.name: t for t in run(mcp.list_tools())}
+        schema = str(tools["maya_setup_lighting"].input_schema)
+        assert "metal" in schema and "BLACK" in schema
