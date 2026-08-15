@@ -20,6 +20,10 @@ class FakeCmds:
     def __init__(self, existing_lights=()):
         self.deleted = []
         self.created = []
+        # Every node built through shadingNode(asLight=True). Tracked separately
+        # from `created` because WHICH command built a light is the whole
+        # difference between one that lights and one that only draws.
+        self.as_light = []
         self.attrs = {}
         self.objects = set()      # every node's long path
         self.node_type = {}       # long path -> type string
@@ -129,7 +133,17 @@ class FakeCmds:
         transform = self.add_transform(tname)
         return self.add_shape(transform, tname + "Shape", "directionalLight")
 
-    def shadingNode(self, node_type, asTexture=False, name=None, **kw):
+    def shadingNode(self, node_type, asTexture=False, asLight=False, name=None, **kw):
+        if asLight:
+            # A light is a DAG node: Maya parents the shape under an
+            # auto-created transform and hands back the shape, exactly as
+            # createNode does. The difference is invisible here and decisive in
+            # a render - see test_the_dome_is_created_as_a_light.
+            shape_name = name or (node_type + "Shape1")
+            transform = self.add_transform(shape_name.replace("Shape", "") + "_xf")
+            self.created.append((node_type, name))
+            self.as_light.append((node_type, name))
+            return self.add_shape(transform, shape_name, node_type)
         tname = name or node_type
         path = "|" + tname
         self.objects.add(path)
@@ -138,6 +152,9 @@ class FakeCmds:
         self.children.setdefault(path, [])
         self.created.append((node_type, name))
         return path
+
+    def nodeType(self, node):
+        return self.node_type.get(node, "unknown")
 
     def connectAttr(self, src, dst, force=False, **kw):
         self.attrs.setdefault("__connections__", []).append((src, dst))
@@ -371,6 +388,36 @@ class TestEnvironmentDome:
         assert result["warnings"] == []
         assert [c for c in fake.created if c[0] == "aiSkyDomeLight"]
         assert len(result["lights"]) == 1
+
+    def test_the_dome_is_created_as_a_light_not_a_bare_node(self, monkeypatch):
+        """createNode builds the node but never wires it into Maya's lighting
+        network, so the dome draws as BACKGROUND and illuminates nothing.
+
+        Measured in a live Maya during the #601 run, and it took a probe to
+        believe it: a plain 50%-grey sphere under a createNode dome renders
+        PURE BLACK while the dome's own sky blows out behind it, at intensity
+        1.0 and at 4.0 alike. The same sphere under a stock
+        shadingNode(asLight=True) dome renders correctly. Setting colour,
+        intensity, defaultLightSet membership and even the lightList connection
+        on the createNode dome afterwards fixes none of it - the node has to be
+        BUILT as a light.
+
+        This is the preset the tool's own docs call REQUIRED for metal, so
+        every metallic material ever judged through it was judged unlit.
+        """
+        fake = self._fake(monkeypatch)
+        lighting.setup_lighting({"preset": "environment"})
+        assert [c for c in fake.as_light if c[0] == "aiSkyDomeLight"], (
+            "the dome must be built with shadingNode(asLight=True); createNode "
+            "produces a dome that renders as background and lights nothing"
+        )
+
+    def test_an_hdri_dome_is_a_light_too(self, monkeypatch):
+        """Same defect, same fix: hdri and environment share _build_dome, so an
+        HDRI dome was equally inert."""
+        fake = self._fake(monkeypatch)
+        lighting.setup_lighting({"preset": "hdri", "hdri_path": "D:/studio.hdr"})
+        assert [c for c in fake.as_light if c[0] == "aiSkyDomeLight"]
 
     def test_it_loads_mtoa_rather_than_making_the_caller_do_it(self, monkeypatch):
         """A cold Maya has mtoa installed and unloaded. Making the caller load a

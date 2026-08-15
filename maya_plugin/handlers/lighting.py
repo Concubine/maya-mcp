@@ -306,10 +306,28 @@ def _build_dome(
             )
             return created[:1], warnings
 
-        shape = cmds.createNode(
-            "aiSkyDomeLight", name=naming.unique_name(cmds, "mcpLight_domeShape"))
-        parents = cmds.listRelatives(shape, parent=True, fullPath=True) or []
-        transform = parents[0] if parents else shape
+        # shadingNode(asLight=True), NOT createNode. createNode builds the node
+        # and stops there: the dome then draws as background and illuminates
+        # NOTHING. Measured in a live Maya (#601 run) - a plain 50%-grey sphere
+        # under a createNode dome renders pure black while the dome's own sky
+        # blows out behind it, at intensity 1.0 and 4.0 alike, and setting
+        # colour, defaultLightSet membership and the lightList connection
+        # afterwards fixes none of it. A light has to be BUILT as a light.
+        # This preset is the tool's own answer to metalness rendering black, so
+        # the bug silently voided the fix it exists to provide.
+        node = cmds.shadingNode(
+            "aiSkyDomeLight", asLight=True,
+            name=naming.unique_name(cmds, "mcpLight_domeShape"))
+        # Maya hands back the shape here and the auto-created transform there,
+        # depending on version. Normalise rather than trust either.
+        if cmds.nodeType(node) == "aiSkyDomeLight":
+            shape = node
+            parents = cmds.listRelatives(node, parent=True, fullPath=True) or []
+            transform = parents[0] if parents else node
+        else:
+            transform = node
+            shape = (cmds.listRelatives(node, shapes=True, fullPath=True)
+                     or [node])[0]
         created.append(transform)
         transform = cmds.rename(transform, naming.unique_name(cmds, "mcpLight_dome"))
         created[0] = transform
