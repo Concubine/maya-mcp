@@ -1,99 +1,95 @@
-# Demigol — four destructible hero buildings
+# Demigol — four destructible hero buildings (**revision 2**)
 
-Built to the **STRUCTURE MODEL CONTRACT**. The model *is* the building,
-structurally as well as visually: nothing is generated underneath to hold the art
-up, so the frame was designed first and the cladding hung on what was left.
+**2,034 chunks, 94,344 triangles, one shared material.** Built to
+`2026-08-14-structure-model-contract.md` **rev 2**. Regenerate with
+`evals/demigol_structures.py` (optionally naming one building, e.g. `… stump`).
 
-Footprints match the four archetypes, so each is a **drop-in replacement** in the
-generated district rather than something to place by hand.
+| building | archetype | cells | size (m) | chunks | frame | tris | tris/chunk |
+|---|---|---|---|---|---|---|---|
+| `tower` | Tower | 13 × 13 × 14 | 39.9 × 42.0 × 39.9 | 772 | 492 | 35,040 | 45 |
+| `block` | Block | 19 × 19 × 6 | 57.9 × 18.0 × 57.9 | 622 | 482 | 27,576 | 44 |
+| `slab` | Slab | 10 × 19 × 8 | 30.9 × 24.0 × 57.9 | 504 | 304 | 24,336 | 48 |
+| `stump` | Stump | 10 × 10 × 4 | 30.9 × 12.0 × 30.9 | 136 | 80 | 7,392 | 54 |
 
-| building | archetype | cells | size (m) | chunks | frame chunks | tris |
-|---|---|---|---|---|---|---|
-| `tower` | Tower | 13 × 13 × 14 | 39 × 42 × 39 | 772 | 492 | 9 264 |
-| `block` | Block | 19 × 19 × 6 | 57 × 18 × 57 | 622 | 482 | 7 464 |
-| `slab` | Slab | 10 × 19 × 8 | 30 × 24 × 57 | 504 | 304 | 6 048 |
-| `stump` | Stump | 10 × 10 × 4 | 30 × 12 × 30 | 136 | 80 | 1 632 |
+## What revision 2 changed
 
-2 034 chunks, 24 408 triangles. 12 tris per chunk against a 200 budget.
+### The budget is now spent — 12 tris/chunk → 44–54
 
-## It stands — and that is checked, not claimed
+Revision 1 made every chunk a plain box, so all four buildings rendered as the same
+graybox cubes the city already draws. They were excellent structurally and
+placeholders visually; the contract said so, and it was right.
 
-**The one-action self-check is implemented in the generator.** Every
-`brick`/`infill`/`glass` chunk is discarded and the remaining `steel`+`concrete`
-is flood-filled from storey 0 through face-adjacency — the same question your
-solver asks on load, asked here first. A build fails and produces **no FBX** if:
+Detail is placed **only on faces a chunk can actually be seen from**, computed by
+probing each chunk's neighbours in the occupied-cell set. Interior and buried frame
+chunks stay a single box — they are invisible until the golem opens the building, at
+which point what matters is that something came off, not whether it had a cornice.
 
-- any frame chunk is unreachable from the ground,
-- any column fails to reach storey 0, or has a gap in it,
-- any glass chunk is wider than 2 cells.
+Per role, on an exposed face: brick gets string courses and sills, `infill` gets
+mullion rails, glass gets head and cill trims, and steel/concrete get a flange band
+that reads wherever cladding has been torn away. Every exposed chunk on the top
+storey gets a **cornice**, and every exposed cladding chunk at ground level gets a
+**plinth**.
 
-All four pass, with **zero stilt columns** (a column touching no concrete at its
-own storey is reported by name).
+**This is honest headroom, not a full spend**: 44–54 against 200. A further pass has
+room, and the sizes above show why the buildings now measure `39.94` rather than
+`39.0` — the ornament oversails by up to 0.47 m against the 0.5 allowance.
 
-### The structural model
+### Ornament may leave the cell
 
-- **Columns** — steel on every bay-line intersection, continuous from storey 0,
-  merged into segments of up to 4 storeys so the frame falls as large bent
-  sections rather than a shower of cubes.
-- **Ties** — every storey carries a concrete beam grid on the bay lines. That is
-  what joins the columns; it is not decoration.
-- **Corner spandrels** — one cell beside each corner column is concrete rather
-  than cladding. A corner's only two face-adjacent cells are both on the
-  perimeter ring, so with cladding there it would touch nothing structural and be
-  a stilt by your own definition.
-- **Cladding** — hung only in perimeter cells the frame does not need. **No cell
-  is ever claimed twice**, so the manifest is an unambiguous statement of what
-  each cell is made of.
-- **Glass** — emitted one cell at a time, so the 2-cell limit is unreachable
-  rather than merely checked.
+The lattice constrains which **cells** a chunk occupies; the render mesh may inset
+5 mm where it meets a neighbour and outset up to 0.5 m for ornament. Collision is
+generated from the grid and never from this art.
 
-### Geometry check
+This also retires revision 1's **coplanar-faces** warning: chunks no longer share
+exact faces, because every chunk body is inset 5 mm.
 
-Every chunk is also re-measured *in the scene* after building: closed (V−E+F = 2),
-bounds on 3 m boundaries, pivot at chunk centre, scale `(1,1,1)`, name parses
-**and agrees with measured position**. All four clean.
+### Materials: the same atlas the kit uses
 
-## One reading I had to choose — please confirm
+One `standardSurface` per building, sampling the kit's shared 4096 atlas — albedo,
+normal, and metallic/smoothness — at the same **113.8 px/m**. That is deliberate: a
+hero stands surrounded by kit-dressed neighbours, and if it carried its own materials
+the four hand-made buildings would visibly not belong to the same city.
 
-**Vertical sense of the origin.** I placed the min-corner cell **centre** at local
-`y = 0`, so the floor plane sits at `y = −1.5`. The other reading puts the floor
-at `y = 0` and the origin 1.5 m above it. If that is what you meant, every
-building needs a single **+1.5 m Y offset** — no regeneration.
+### Watertightness, and the pivot
 
-## Known issue: coplanar faces will z-fight
+Both definitions moved and both are now checked correctly:
 
-Adjacent chunks share exact faces, because bounds must land on cell boundaries.
-Contract point 4 encourages deep interpenetration as the escape, but that
-conflicts with exact bounds. Cheapest fix is shrinking the **render** mesh a few
-mm inside the lattice bounds. Worth deciding before more buildings are authored.
+- **Closed = zero boundary edges and zero non-manifold edges.** Per-chunk
+  `V − E + F = 2` is *not* required — a chunk built from several closed boxes fails
+  Euler while being perfectly closed.
+- **The pivot is the chunk's own centre, not its bounding-box centre.** Those differ
+  the moment ornament oversails one face only, so chunks are assembled at the origin
+  and moved onto the grid afterwards; the check compares the pivot against the
+  position its name declares.
 
-## The four, and how each fails
+## Verification
 
-- **`tower`** — full frame, glazed bands every third storey, glazed crown, and an
-  **open lobby**: ground-floor cladding omitted, columns present. Cut a column
-  line and everything the frame carried above it drops.
-- **`block`** — heavy brick perimeter, wide and squat, open colonnade at ground
-  on all four sides. Lots of mass, short fall.
-- **`slab`** — alternating glazed and infill storeys the full height, fully clad
-  at ground. Long axis means it can shear rather than topple.
-- **`stump`** — all brick with a glazed top band. Small enough (136 chunks) to be
-  the cheap one to scatter.
+Everything the contract's §10 asks, executed rather than asserted:
 
-## Deliberate character is available, and cheap
+| check | result |
+|---|---|
+| load path (§4a) — delete all cladding, flood-fill the frame from storey 0 | **all four stand, 0 stilt columns** |
+| zero boundary / non-manifold edges | **0 failures across 2,034 chunks** |
+| pivot at chunk centre | **0 failures** |
+| occupied cells on the lattice, mesh within +0.5 m | **0 failures**, worst outset 0.47 m |
+| triangle budget ≤ 200 × cells | **0 over budget** |
+| names parse and agree with measured position | **0 failures** |
+| render vacuity (clipped fraction) | 0.0000 on all four |
 
-The generator refuses buildings that would collapse on load, but that is a floor,
-not a straitjacket — and it is what makes deliberate weirdness *safe* to author.
-A half-ruined tower with a missing column line, a slab with a collapsed corner, a
-block already leaning: all are a few lines, and the solver will tell us
-immediately whether the result still stands or needs declaring as
-collapse-on-load by design. Say the word and it is quick.
+A build that fails the load-path check **exits non-zero and produces no FBX**.
 
-## What is deliberately not here
+## Deviations
 
-- **No taper or curve.** A tapered chunk cannot have bounds on cell boundaries.
-  Lattice conformance outranked ornament; character comes from massing, glazing
-  pattern and open lobbies instead. If you want curves, the rule to relax is
-  "bounds on cell boundaries".
-- **No LOD**, per the contract.
-- **No interiors** — no stairs, cores or partitions. The beam grid leaves the bays
-  open, so there is room for them if the golem is ever meant to go inside.
+1. **Corner spandrels** — one cell beside each corner column is concrete rather than
+   cladding, or the column would be a stilt by the contract's own definition. The
+   zero stilt count is the evidence.
+2. **Budget used, not exhausted** — 44–54 of 200, for the reason above.
+3. **No curves.** Tapers are available now (a flare on a 1-segment cube is a clean
+   frustum at the same 12 triangles, and the kit uses them) but curves need a
+   cylinder segment and real triangles. This is now a budget choice, not a
+   constraint.
+
+## Settled, no longer open
+
+The origin question from revision 1 is **closed**: min-corner cell centre at local
+`y = 0`, floor plane at `y = −1.5`, no offset needed.

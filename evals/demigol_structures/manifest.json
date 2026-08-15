@@ -40,27 +40,22 @@
   },
   "structural_model": "Columns are steel on every bay-line intersection, merged into segments of up to 4 storeys so the frame falls as large sections. Every storey carries a concrete beam grid on the bay lines, which is what ties the columns. Cladding is hung only in perimeter cells the frame does not need, so no cell is ever claimed twice and the manifest is an unambiguous statement of what each cell is made of.",
   "one_action_self_check": "IMPLEMENTED IN THE GENERATOR, not asserted. All brick/infill/glass is discarded and the remaining steel+concrete is flood-filled from storey 0 through face-adjacency. A build with any unreachable frame chunk, any column that does not reach the ground or has a gap, or any glass wider than 2 cells, exits non-zero and produces no FBX. All four pass.",
-  "geometry_self_check": "every chunk re-measured in-scene: closed (V-E+F=2), bounds on 3 m boundaries, pivot at chunk centre, scale (1,1,1), name parses and agrees with measured position",
+  "geometry_self_check": "every chunk re-measured in-scene: ZERO BOUNDARY and zero non-manifold edges (not per-chunk Euler, which a box-built chunk fails while being perfectly closed), pivot at the chunk's own centre rather than its bounding-box centre (they differ once ornament oversails one face), occupied cells on 3 m boundaries with the mesh allowed 0.5 m past them, scale (1,1,1), name parses and agrees with measured position, triangles within 200 per cell",
   "deviations": [
-    {
-      "item": "vertical sense of the origin",
-      "what": "min-corner cell CENTRE at local y = 0, so the floor plane is at y = -1.5.",
-      "why": "'Model origin = the MIN-CORNER CELL CENTRE, at y = 1.5' reads as the origin being that cell centre, with the parenthetical locating it above the floor. If you meant the floor at y = 0, every building needs one +1.5 m Y offset - no regeneration."
-    },
     {
       "item": "corner spandrels",
       "what": "One cell beside each corner column is concrete, not cladding.",
       "why": "A corner column's only two face-adjacent cells are both on the perimeter ring. With cladding there it touches nothing structural and is a stilt by your own definition. The spandrel gives it a tie; the stilt count in the manifest is the evidence."
     },
     {
-      "item": "no taper or curve",
-      "what": "Every chunk is an axis-aligned box.",
-      "why": "A tapered chunk cannot have bounds on cell boundaries. Lattice conformance outranks ornament; character comes from massing, glazing pattern and open lobbies instead."
+      "item": "budget used, not exhausted",
+      "what": "45-54 triangles per chunk against the 200 allowed.",
+      "why": "Revision 1 spent 12. Detail is placed only on faces a chunk can actually be SEEN from - interior and buried frame chunks stay one box, because they are invisible until the golem opens the building, at which point what matters is that something came off, not its cornice. Headroom remains if these want another pass."
     },
     {
-      "item": "coplanar faces",
-      "what": "Adjacent chunks share exact faces and will z-fight.",
-      "why": "Bounds must land on cell boundaries, which forces it. Point 4 encourages deep interpenetration as the escape, but that conflicts with exact bounds. Cheapest fix is shrinking the RENDER mesh a few mm inside the lattice bounds. Wants a decision before more buildings."
+      "item": "no curves",
+      "what": "Every chunk is axis-aligned boxes; tapers are available and used on the kit, not here.",
+      "why": "A curve needs a cylinder segment and real triangles. The bounds rule that forbade it is gone, so this is now a budget choice rather than a constraint - worth revisiting on a silhouette pass."
     }
   ],
   "structures": [
@@ -72,23 +67,23 @@
       ],
       "storeys": 14,
       "size_m": [
-        39.0,
-        42.0,
-        39.0
+        39.94,
+        41.99,
+        39.94
       ],
       "bbox_min": [
-        -1.5,
-        -1.5,
-        -1.5
+        -1.97,
+        -1.495,
+        -1.97
       ],
       "bbox_max": [
-        37.5,
-        40.5,
-        37.5
+        37.97,
+        40.495,
+        37.97
       ],
       "chunks": 772,
-      "triangles": 9264,
-      "tris_per_chunk": 12.0,
+      "triangles": 35040,
+      "tris_per_chunk": 45.4,
       "roles": {
         "steel": 100,
         "concrete": 392,
@@ -18641,23 +18636,23 @@
       ],
       "storeys": 6,
       "size_m": [
-        57.0,
-        18.0,
-        57.0
+        57.94,
+        17.99,
+        57.94
       ],
       "bbox_min": [
-        -1.5,
-        -1.5,
-        -1.5
+        -1.97,
+        -1.495,
+        -1.97
       ],
       "bbox_max": [
-        55.5,
-        16.5,
-        55.5
+        55.97,
+        16.495,
+        55.97
       ],
       "chunks": 622,
-      "triangles": 7464,
-      "tris_per_chunk": 12.0,
+      "triangles": 27576,
+      "tris_per_chunk": 44.3,
       "roles": {
         "steel": 98,
         "concrete": 384,
@@ -33610,23 +33605,23 @@
       ],
       "storeys": 8,
       "size_m": [
-        30.0,
-        24.0,
-        57.0
+        30.94,
+        23.99,
+        57.94
       ],
       "bbox_min": [
-        -1.5,
-        -1.5,
-        -1.5
+        -1.97,
+        -1.495,
+        -1.97
       ],
       "bbox_max": [
-        28.5,
-        22.5,
-        55.5
+        28.97,
+        22.495,
+        55.97
       ],
       "chunks": 504,
-      "triangles": 6048,
-      "tris_per_chunk": 12.0,
+      "triangles": 24336,
+      "tris_per_chunk": 48.3,
       "roles": {
         "steel": 56,
         "infill": 72,
@@ -45747,23 +45742,23 @@
       ],
       "storeys": 4,
       "size_m": [
-        30.0,
-        12.0,
-        30.0
+        30.94,
+        11.99,
+        30.94
       ],
       "bbox_min": [
-        -1.5,
-        -1.5,
-        -1.5
+        -1.97,
+        -1.495,
+        -1.97
       ],
       "bbox_max": [
-        28.5,
-        10.5,
-        28.5
+        28.97,
+        10.495,
+        28.97
       ],
       "chunks": 136,
-      "triangles": 1632,
-      "tris_per_chunk": 12.0,
+      "triangles": 7392,
+      "tris_per_chunk": 54.4,
       "roles": {
         "steel": 16,
         "brick": 36,
