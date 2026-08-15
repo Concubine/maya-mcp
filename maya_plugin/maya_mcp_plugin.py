@@ -24,6 +24,7 @@ from . import protocol, version
 from .dispatcher import Dispatcher
 from .handlers import (
     array,
+    assemble,
     capture,
     code_exec,
     combine,
@@ -104,6 +105,7 @@ def _build_handlers() -> Dict[str, Any]:
         "delete_objects": modeling.delete_objects,
         "boolean_op": modeling.boolean_op,
         "combine": combine.combine,
+        "assemble": assemble.assemble,
         "uv_atlas": uvatlas.uv_atlas,
         "remesh_retopo": modeling.remesh_retopo,
         "mesh_cleanup": modeling.mesh_cleanup,

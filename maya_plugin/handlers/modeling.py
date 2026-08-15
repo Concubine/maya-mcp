@@ -159,7 +159,23 @@ def create_primitive(params: Dict[str, Any]) -> Dict[str, Any]:
         )
     cmds = _cmds()
     name = naming.unique_name(cmds, requested)
+    long_name = _long(cmds, build_unit_primitive(cmds, kind, name, divisions))
+    _apply_xform(
+        cmds, long_name,
+        _vec3(params, "translate"), _vec3(params, "rotate"), _vec3(params, "scale"),
+        relative=False,
+    )
+    ledger.record(cmds, long_name)
+    return {"name": long_name, "warnings": []}
 
+
+def build_unit_primitive(cmds, kind: str, name: str, divisions: int = 1) -> str:
+    """Create `kind` filling a 1-unit box, at the origin, and return its name.
+
+    Split out of create_primitive so bulk builders (assemble) share ONE unit-box
+    normalisation rather than re-deriving Maya's per-kind default sizes. Assumes
+    `kind`, `divisions` and `name` are already validated.
+    """
     # Every kind is built to fill a 1-unit box - largest dimension exactly 1 -
     # so `scale` means the same thing whichever kind you pick. Maya's own
     # defaults do not agree: measured in mayapy, cube 1.0 across,
@@ -227,15 +243,7 @@ def create_primitive(params: Dict[str, Any]) -> Dict[str, Any]:
             subdivisionsCaps=0,
         ),
     }
-    created = creators[kind]()[0]
-    long_name = _long(cmds, created)
-    _apply_xform(
-        cmds, long_name,
-        _vec3(params, "translate"), _vec3(params, "rotate"), _vec3(params, "scale"),
-        relative=False,
-    )
-    ledger.record(cmds, long_name)
-    return {"name": long_name, "warnings": []}
+    return creators[kind]()[0]
 
 
 def duplicate(params: Dict[str, Any]) -> Dict[str, Any]:

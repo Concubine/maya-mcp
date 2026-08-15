@@ -25,6 +25,7 @@ from . import images, refstore
 from .connection import MayaConnection
 from .schemas import (
     ArrayResult,
+    AssembleResult,
     CombineResult,
     UvAtlasResult,
     BooleanResult,
@@ -1036,6 +1037,72 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 "combine",
                 {"names": names, "name": name, "pivot": pivot, "freeze": freeze},
                 timeout_s=BOOL_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Assemble parts into objects",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_assemble(
+        name: Annotated[str, Field(min_length=1, description=(
+            "Name of the assembled object, and the prefix for its parts. Parts "
+            "that set their own 'chunk' are named after that instead."
+        ))],
+        parts: Annotated[List[dict], Field(min_length=1, description=(
+            "One entry per primitive:\n"
+            "  dim     [w, h, d] in scene units - REQUIRED. Every kind is built "
+            "to fill a 1-unit box, so dim is literally the size.\n"
+            "  pos     [x, y, z] centre, default origin\n"
+            "  kind    cube (default), sphere, cylinder, plane, torus, cone, "
+            "octahedron, icosahedron, prism, pyramid\n"
+            "  rotate  [x, y, z] degrees\n"
+            "  patch   atlas patch index, or [col, row]\n"
+            "  taper   a MULTIPLIER on the far end (0.6 = 60% as wide at the "
+            "top), or the full flare params. Baked - no deformer survives.\n"
+            "  chunk   which object this part belongs to. Parts sharing a chunk "
+            "are united into one object named after it.\n"
+            "  divisions, name  as in maya_create_primitive"
+        ))],
+        atlas: Annotated[Optional[dict], Field(description=(
+            "UV packing applied to each part before merging: {cols, rows, "
+            "margin, world_scale, project, normalize}. world_scale is the metres "
+            "one patch represents, which is what makes texel density equal "
+            "across parts of different sizes. Pass null to leave UVs untouched."
+        ))] = None,
+        combine: Annotated[bool, Field(description=(
+            "Unite each chunk's parts into one object. False leaves every part "
+            "as its own object."
+        ))] = True,
+        pivot: Annotated[Literal["center", "origin", "keep"], Field(description=(
+            "Pivot for each combined object, as in maya_combine."
+        ))] = "center",
+        freeze: Annotated[bool, Field(description=(
+            "Freeze transforms on each combined object."
+        ))] = True,
+    ) -> AssembleResult:
+        """Build many primitives, pack their UVs, and merge them - in ONE call.
+
+        This is the build loop a kit or a building generator actually runs:
+        primitive -> taper -> place -> atlas patch -> unite. Doing it a tool call
+        at a time costs thousands of round-trips, and doing it inside
+        maya_execute_python means nothing about the build is measured.
+
+        The parts list is FLAT and each part names its chunk, because that is
+        what a generator emits: 2,000 chunks of four boxes is 8,000 rows.
+
+        The whole call is validated before anything is built - a run that died
+        halfway would leave thousands of orphans - and it takes ONE checkpoint,
+        not one per object. Reports per-object tris/verts/faces/shells plus how
+        many parts ended up with UVs outside their patch."""
+        return AssembleResult.model_validate(
+            maya.request(
+                "assemble",
+                {"name": name, "parts": parts, "atlas": atlas,
+                 "combine": combine, "pivot": pivot, "freeze": freeze},
+                timeout_s=RENDER_TIMEOUT_S,
             )
         )
 

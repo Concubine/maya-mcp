@@ -77,6 +77,7 @@ class TestRegistration:
             "maya_sculpt_ops",
             "maya_deform",
             "maya_combine",
+            "maya_assemble",
             "maya_uv_atlas",
             "maya_remesh_retopo",
             "maya_mesh_cleanup",
@@ -972,6 +973,27 @@ class TestDocsExplainWhichShadingModeRevealsWhat:
         tools = {t.name: t for t in run(mcp.list_tools())}
         desc = tools["maya_assign_material"].description
         assert "reuse" in desc.lower() or "reuses" in desc.lower()
+
+    def test_assemble_forwards_a_whole_parts_list_in_one_request(self):
+        conn = FakeConn({"assemble": {
+            "objects": [{"name": "|tower_c0000", "parts": 4, "tris": 48,
+                         "verts": 32, "faces": 24, "shells": 4,
+                         "pivot": [0, 0, 0], "combined": True}],
+            "parts": 4, "tris": 48, "outside_patch": 0, "atlas": [4, 4],
+            "warnings": [],
+        }})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_assemble", {
+            "name": "tower",
+            "parts": [{"pos": [0, 0, 0], "dim": [3, 3, 3], "chunk": "tower_c0000"}],
+            "atlas": {"cols": 4, "rows": 4, "world_scale": 3.0},
+        }))
+        assert conn.calls[0]["cmd"] == "assemble"
+        assert conn.calls[0]["params"]["atlas"]["world_scale"] == 3.0
+        # A real delivery is thousands of boxes: the timeout must be the render
+        # budget, not the 30 s scene one.
+        assert conn.calls[0]["timeout_s"] == server_mod.RENDER_TIMEOUT_S
+        assert result.structured_content["objects"][0]["shells"] == 4
 
     def test_assign_pbr_forwards_the_whole_map_set_in_one_request(self):
         conn = FakeConn({"assign_pbr": {

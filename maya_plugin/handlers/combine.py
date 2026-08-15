@@ -110,6 +110,21 @@ def combine(params: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(requested, str) or not requested:
         raise HandlerError("name must be a non-empty string")
 
+    session.auto_checkpoint("combine")
+    return unite(cmds, longs, requested, pivot_mode, freeze)
+
+
+def unite(
+    cmds, longs: List[str], requested: str, pivot_mode: str = "center",
+    freeze: bool = True,
+) -> Dict[str, Any]:
+    """polyUnite + pivot + freeze + shading collapse, and MEASURE the result.
+
+    Split out of combine() with no checkpoint of its own, so a bulk builder
+    (assemble) can take one checkpoint for a whole run instead of one per
+    object - two thousand checkpoints would evict the ring twenty times over
+    and turn the safety net into a delay. Inputs are assumed resolved.
+    """
     # Record which shaders went in, so a caller can tell whether the collapse
     # below threw away a distinction they meant to keep.
     shaders_in = []
@@ -117,8 +132,6 @@ def combine(params: Dict[str, Any]) -> Dict[str, Any]:
         for sg in cmds.listSets(object=_require_mesh(cmds, transform), type=1) or []:
             if sg not in shaders_in:
                 shaders_in.append(sg)
-
-    session.auto_checkpoint("combine")
 
     target_name = naming.unique_name(cmds, requested)
     result = cmds.polyUnite(longs, ch=False, name=target_name)

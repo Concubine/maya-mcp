@@ -73,6 +73,66 @@ def _uv_bounds(cmds, shape: str) -> List[float]:
     return [float(u0), float(v0), float(u1), float(v1)]
 
 
+def pack_shape(
+    cmds, shape: str, rect, project: str = "box", normalize: bool = True,
+    world_scale=None,
+) -> Dict[str, Any]:
+    """Project and fit ONE shape's UVs into `rect`; report where they landed.
+
+    Split out of uv_atlas so bulk builders (assemble) pack through exactly this
+    code rather than a second copy of it - the world-scale arithmetic and the
+    boundingBox2d trap below are the kind of thing that must have one home.
+    """
+    if world_scale is not None:
+        # WORLD-SCALE MODE: texel density is decided by real-world size, so
+        # a 3 m slab and a 0.5 m band carry the SAME pixels per metre. The
+        # normalising mode below cannot do this - it makes every object fill
+        # the patch, so a small band ends up magnified several times over
+        # and a wall reads as a model of a wall.
+        cmds.polyAutoProjection(shape, ch=False, scaleMode=0)
+        scale = (rect[2] - rect[0]) / (AUTOPROJ_UV_PER_METRE * world_scale)
+        raw = _uv_bounds(cmds, shape)
+        pivot_u, pivot_v, delta_u, delta_v = uvmath.centre_in_rect(raw, rect)
+        cmds.polyEditUV(
+            shape + ".map[*]",
+            scaleU=scale, scaleV=scale, pivotU=pivot_u, pivotV=pivot_v,
+        )
+        cmds.polyEditUV(shape + ".map[*]", uValue=delta_u, vValue=delta_v)
+    else:
+        if project == "box":
+            cmds.polyAutoProjection(shape, ch=False)
+        elif project == "planar":
+            cmds.polyProjection(shape + ".f[*]", type="Planar", ch=False, md="z")
+
+        if normalize:
+            # normalizeType=0 is COLLECTIVE: the whole mesh becomes one 0..1
+            # block, which is what a single atlas patch wants. Normalising per
+            # shell would give every shell the full patch and destroy the
+            # relative scale between a piece's parts.
+            cmds.polyNormalizeUV(
+                shape + ".map[*]", normalizeType=0, preserveAspectRatio=False,
+                ch=False,
+            )
+
+        scale_u, scale_v, offset_u, offset_v = uvmath.fit_transform(rect)
+        cmds.polyEditUV(
+            shape + ".map[*]",
+            scaleU=scale_u, scaleV=scale_v, pivotU=0.0, pivotV=0.0,
+        )
+        cmds.polyEditUV(shape + ".map[*]", uValue=offset_u, vValue=offset_v)
+
+    bounds = _uv_bounds(cmds, shape)
+    tol = 1e-4
+    inside = (
+        bounds[0] >= rect[0] - tol and bounds[1] >= rect[1] - tol
+        and bounds[2] <= rect[2] + tol and bounds[3] <= rect[3] + tol
+    )
+    # A piece that does not fit is REPORTED, never silently clamped: its UVs
+    # spill into the neighbouring patch, which reads as another material's
+    # pixels on this piece.
+    return {"uv_bounds": [round(q, 6) for q in bounds], "inside_patch": bool(inside)}
+
+
 def uv_atlas(params: Dict[str, Any]) -> Dict[str, Any]:
     cmds = _cmds()
 
@@ -87,7 +147,6 @@ def uv_atlas(params: Dict[str, Any]) -> Dict[str, Any]:
     margin = params.get("margin", 0.02)
     col, row = uvmath.resolve_cell(params.get("patch", 0), cols, rows)
     rect = uvmath.patch_rect(cols, rows, col, row, margin=margin)
-    scale_u, scale_v, offset_u, offset_v = uvmath.fit_transform(rect)
 
     project = params.get("project") or "box"
     if project not in PROJECTIONS:
@@ -115,60 +174,11 @@ def uv_atlas(params: Dict[str, Any]) -> Dict[str, Any]:
 
     out: List[Dict[str, Any]] = []
     for transform, shape in zip(targets, shapes):
-        if world_scale is not None:
-            # WORLD-SCALE MODE: texel density is decided by real-world size, so
-            # a 3 m slab and a 0.5 m band carry the SAME pixels per metre. The
-            # normalising mode below cannot do this - it makes every object fill
-            # the patch, so a small band ends up magnified several times over
-            # and a wall reads as a model of a wall.
-            cmds.polyAutoProjection(shape, ch=False, scaleMode=0)
-            scale = (rect[2] - rect[0]) / (AUTOPROJ_UV_PER_METRE * world_scale)
-            raw = _uv_bounds(cmds, shape)
-            fits = uvmath.fits_in_rect(raw, rect, scale)
-            pivot_u, pivot_v, delta_u, delta_v = uvmath.centre_in_rect(raw, rect)
-            cmds.polyEditUV(
-                shape + ".map[*]",
-                scaleU=scale, scaleV=scale, pivotU=pivot_u, pivotV=pivot_v,
-            )
-            cmds.polyEditUV(shape + ".map[*]", uValue=delta_u, vValue=delta_v)
-            if not fits:
-                # Reported, not silently clamped: the piece is bigger than the
-                # density asked of it and its UVs now spill into the neighbouring
-                # patch, which reads as another material's pixels on this piece.
-                pass
-        else:
-            if project == "box":
-                cmds.polyAutoProjection(shape, ch=False)
-            elif project == "planar":
-                cmds.polyProjection(shape + ".f[*]", type="Planar", ch=False, md="z")
-
-            if normalize:
-                # normalizeType=0 is COLLECTIVE: the whole mesh becomes one 0..1
-                # block, which is what a single atlas patch wants. Normalising per
-                # shell would give every shell the full patch and destroy the
-                # relative scale between a piece's parts.
-                cmds.polyNormalizeUV(
-                    shape + ".map[*]", normalizeType=0, preserveAspectRatio=False,
-                    ch=False,
-                )
-
-            cmds.polyEditUV(
-                shape + ".map[*]",
-                scaleU=scale_u, scaleV=scale_v, pivotU=0.0, pivotV=0.0,
-            )
-            cmds.polyEditUV(shape + ".map[*]", uValue=offset_u, vValue=offset_v)
-
-        bounds = _uv_bounds(cmds, shape)
-        tol = 1e-4
-        inside = (
-            bounds[0] >= rect[0] - tol and bounds[1] >= rect[1] - tol
-            and bounds[2] <= rect[2] + tol and bounds[3] <= rect[3] + tol
+        packed = pack_shape(
+            cmds, shape, rect, project=project, normalize=normalize,
+            world_scale=world_scale,
         )
-        out.append({
-            "name": transform,
-            "uv_bounds": [round(q, 6) for q in bounds],
-            "inside_patch": bool(inside),
-        })
+        out.append({"name": transform, **packed})
 
     return {
         "meshes": out,

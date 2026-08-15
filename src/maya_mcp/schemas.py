@@ -369,6 +369,42 @@ class MaterialResult(BaseModel):
     warnings: List[str] = Field(default_factory=list)
 
 
+class AssembledObject(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str = Field(description="Canonical long name of the finished object.")
+    parts: int = Field(description="How many primitives went into it.")
+    tris: int
+    verts: int
+    faces: int
+    shells: int = Field(
+        description=(
+            "Separate closed pieces. Equals `parts` for a combined object: "
+            "assemble unites, it does not weld."
+        )
+    )
+    pivot: Optional[List[float]] = None
+    combined: bool
+
+
+class AssembleResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    objects: List[AssembledObject]
+    parts: int = Field(description="Primitives built across the whole call.")
+    tris: int
+    outside_patch: int = Field(
+        description=(
+            "Parts whose UVs spilled out of their atlas patch - those pieces "
+            "read the neighbouring patch, which is another material's pixels."
+        )
+    )
+    atlas: Optional[List[int]] = Field(
+        default=None, description="[cols, rows] used, or null when UVs were left alone."
+    )
+    warnings: List[str] = Field(default_factory=list)
+
+
 class PbrMapResult(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
