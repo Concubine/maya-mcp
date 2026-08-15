@@ -67,8 +67,9 @@ def main():
     subject = created["name"]  # canonical long name - collision-safe on a dirty scene
     print("  subject:", subject)
 
+    # 1.2/pi: the pre-#617 number, in the new unit - same pixels as before
     print("2. lighting it")
-    lit = call("setup_lighting", {"preset": "three_point", "intensity": 1.2})
+    lit = call("setup_lighting", {"preset": "three_point", "intensity": 0.3820})
     print("  lights:", lit["lights"], "removed:", lit["removed"])
 
     # Isolate the subject and drop the wireframe overlay for every judged

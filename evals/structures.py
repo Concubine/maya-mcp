@@ -361,8 +361,9 @@ def main():
         del _built[:]
         ok(call("new_scene", {"confirm": True}, 180.0), "new_scene")
         build_studio()
+        # 2.1/pi: the pre-#617 number, in the new unit - same pixels as before
         builder()
-        ok(call("setup_lighting", {"preset": "three_point", "intensity": 2.1,
+        ok(call("setup_lighting", {"preset": "three_point", "intensity": 0.6685,
                                    "replace_existing": True}, 180.0), "lighting")
         stats = render(label, zoom)
         info = organise_and_export(label)

@@ -255,8 +255,10 @@ def gate_gear():
         "X=%.3f Z=%.3f, bearing offset from ideal 90deg %.2fdeg)"
         % (src_span[0], src_span[2], rot_span[0], rot_span[2], ninety_offset)
     )
+# 3.0/pi: the pre-#617 number, in the new unit - same pixels as before
 
-    ok(call("setup_lighting", {"preset": "three_point", "intensity": 3.0,
+    # 3.0/pi: the pre-#617 number, in the new unit - same pixels as before
+    ok(call("setup_lighting", {"preset": "three_point", "intensity": 0.9549,
                                "replace_existing": True}, 180.0), "lighting")
     render("gear", ["|hub", "|tooth"] + result["names"])
 
@@ -310,7 +312,8 @@ def gate_spine():
           "the last rib is less than half the first (%.3f vs %.3f)"
           % (widths[-1], widths[0]))
 
-    ok(call("setup_lighting", {"preset": "three_point", "intensity": 3.0,
+    # 3.0/pi: the pre-#617 number, in the new unit - same pixels as before
+    ok(call("setup_lighting", {"preset": "three_point", "intensity": 0.9549,
                                "replace_existing": True}, 180.0), "lighting")
     render("spine", ["|core", "|rib"] + result["names"])
 
@@ -406,7 +409,7 @@ def gate_mirror():
           % result["signed_volume"])
     check(not result["warnings"], "mirror reported no warnings: %s" % result["warnings"])
 
-    ok(call("setup_lighting", {"preset": "three_point", "intensity": 3.0,
+    ok(call("setup_lighting", {"preset": "three_point", "intensity": 0.9549,
                                "replace_existing": True}, 180.0), "lighting")
     render("mirror", ["|arm", copy])
     # distinct_colors on a frame with BOTH objects is not a real cross-check:

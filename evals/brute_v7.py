@@ -301,8 +301,9 @@ def build():
             _built.append(copy.split("|")[-1])
         stats["arrayed"] += len(result["names"])
 
+    # 3.0/pi: the pre-#617 number, in the new unit - same pixels as before
     ok(call("setup_lighting", {
-        "preset": "three_point", "intensity": 3.0, "replace_existing": True},
+        "preset": "three_point", "intensity": 0.9549, "replace_existing": True},
         180.0), "setup_lighting")
     return stats
 

@@ -74,8 +74,10 @@ def build():
                                      "scale": scale}, 60.0), "create " + name)
         ok(call("assign_material", {"mesh": "|" + name, "shader": "standardSurface",
                                     "name": gem + "_mat", "params": gems[gem]},
+                # 4.0/pi: the pre-#617 number, in the new unit - same pixels as before
                 60.0), "material " + gem)
-    ok(call("setup_lighting", {"preset": "three_point", "intensity": 4.0,
+    ok(call("setup_lighting", {"preset": "three_point", "intensity": 1.2732,
+                               # 16.0/pi: the pre-#617 number, in the new unit - same pixels as before
                                "replace_existing": True}, 120.0), "setup_lighting")
 
 
@@ -136,7 +138,7 @@ def main():
     check("F4 every frame reports clipped_fraction and mean_luma",
           all(k in hot for k in ("clipped_fraction", "mean_luma")),
           "clipped %.3f, luma %.1f" % (hot["clipped_fraction"], hot["mean_luma"]))
-    ok(call("setup_lighting", {"preset": "three_point", "intensity": 16.0,
+    ok(call("setup_lighting", {"preset": "three_point", "intensity": 5.0930,
                                "replace_existing": True}, 120.0), "blow it out")
     blown, _ = render("f4_blown", base)
     check("F4 clipped_fraction rises when the exposure is blown",

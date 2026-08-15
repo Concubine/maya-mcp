@@ -153,8 +153,9 @@ def build():
     # Pass 1 at 14 blew every surface to flat saturated primaries - the exact
     # "painted plastic" read the original run was criticised for, this time
     # caused by exposure rather than by the material model.
+    # 7.0/pi: the pre-#617 number, in the new unit - same pixels as before
     ok(call("setup_lighting", {
-        "preset": "three_point", "intensity": 7.0, "replace_existing": True},
+        "preset": "three_point", "intensity": 2.2282, "replace_existing": True},
         120.0), "setup_lighting")
 
 
@@ -228,8 +229,9 @@ def build_study():
             "mesh": "|" + name, "shader": "standardSurface", "name": gem + "_mat",
             "params": gems[gem]}, 60.0), "material %s on %s" % (gem, name))
 
+    # 4.0/pi: the pre-#617 number, in the new unit - same pixels as before
     ok(call("setup_lighting", {
-        "preset": "three_point", "intensity": 4.0, "replace_existing": True},
+        "preset": "three_point", "intensity": 1.2732, "replace_existing": True},
         120.0), "setup_lighting")
 
 
