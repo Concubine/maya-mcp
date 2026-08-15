@@ -89,10 +89,26 @@ WORLD_SCALE = 9.0
 PATCH_PX = ATLAS_PX // ATLAS_COLS
 PX_PER_METRE = PATCH_PX / WORLD_SCALE
 
-# Real brick runs ~13 courses per metre, so a 3 m face should read ~39 and the
-# 9 m patch should carry ~117. Family 1 drew 8 per patch, which put roughly 7
-# courses on a 3 m face - about 5x oversize, and invisible from its manifest.
-COURSES_PER_METRE = 13.0
+# DELIBERATELY COARSER THAN REAL BRICK, and revision 3 walked this back on
+# purpose. Real brick runs ~13 courses/m, which revision 2 authored faithfully -
+# and it was the wrong target. At 113.8 px/m a course is 8.75 px and the mortar
+# bed, 0.16 of a course, is 1.4 px. Sub-2px detail does not read as mortar; it
+# reads as fine corduroy in the contact sheet, and the import path disables
+# mipmaps to protect the atlas patch margin, so at city distance it aliases.
+#
+# 6 courses/m puts a course at 18.9 px and the bed at 3.0 px, which survives
+# both. A 3 m face reads 18 courses instead of 39. Coarser than a real wall,
+# correct for one seen from 30 m by a camera that cannot mip.
+#
+# The other route - fix the margin so mips can be on - was rejected: a patch
+# atlas and mipmapping are structurally incompatible, since by mip 5 a 1024
+# patch is 32 px and the 3% margin is 1 px. That needs a Texture2DArray and a
+# shader change on the Demigol side. Recorded in the revision 3 spec as the
+# option not taken.
+#
+# tests/test_demigol_generators.py pins the 2 px floor so this cannot silently
+# regress to a value that aliases again.
+COURSES_PER_METRE = 6.0
 COURSES_PER_PATCH = COURSES_PER_METRE * WORLD_SCALE
 
 # index, albedo rgb, style, metallic, smoothness
@@ -1090,12 +1106,19 @@ def main():
                 % (WORLD_SCALE, PX_PER_METRE),
             "brick_courses_per_metre": COURSES_PER_METRE,
             "brick_courses_per_3m_face": round(COURSES_PER_METRE * 3.0),
+            "brick_course_px": round(PATCH_PX / COURSES_PER_PATCH, 2),
+            "brick_mortar_bed_px": round(PATCH_PX / COURSES_PER_PATCH * 0.16, 2),
             "brick_note":
-                "drawn at real-world scale: %.0f courses across the %.0f m "
-                "patch, so a 3 m face reads ~%d. Family 1 drew 8 per patch, "
-                "putting ~7 courses on a 3 m face - about 5x oversize."
+                "DELIBERATELY COARSER THAN REAL BRICK. %.0f courses across the "
+                "%.0f m patch, so a 3 m face reads ~%d rather than the ~39 a "
+                "real wall would. Revision 2 authored the real 13 courses/m and "
+                "that was the wrong target: it put a course at 8.75 px and the "
+                "mortar bed at 1.4 px, which reads as corduroy up close and "
+                "aliases at distance because the import path disables mipmaps "
+                "to protect the patch margin. At %.1f px the bed survives both."
                 % (COURSES_PER_PATCH, WORLD_SCALE,
-                   round(COURSES_PER_METRE * 3.0)),
+                   round(COURSES_PER_METRE * 3.0),
+                   PATCH_PX / COURSES_PER_PATCH * 0.16),
         },
         "budgets": {"interior": TRI_BUDGET["interior"],
                     "default": TRI_BUDGET_DEFAULT,

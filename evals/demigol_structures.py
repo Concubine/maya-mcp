@@ -251,7 +251,7 @@ class Chunk:
                 for k in range(self.sz):
                     yield (self.x + i, self.y + j, self.z + k)
 
-    def as_dict(self):
+    def as_dict(self, outset_m=0.0):
         return dict(
             name=self.name, role=self.role,
             cell=[self.x, self.y, self.z], size_cells=[self.sx, self.sy, self.sz],
@@ -259,7 +259,75 @@ class Chunk:
                  CELL * self.y + CELL * (self.sy - 1) / 2.0,
                  CELL * self.z + CELL * (self.sz - 1) / 2.0],
             dim=[CELL * self.sx, CELL * self.sy, CELL * self.sz],
+            outset_m=float(outset_m),
         )
+
+
+def chunk_outset(boxes, sx, sy, sz):
+    """Metres this chunk's render mesh oversails its own cell block.
+
+    The kit has declared this per piece since revision 2 and the heroes never
+    have, while using up to 0.47 m of the 0.5 allowance - #600 item 4, and
+    2,034 importer warnings.
+
+    The kit's version compares against CELL/2 because a piece is always one
+    cell centred on the origin. A chunk is sx x sy x sz cells, so the half
+    extent scales; comparing a 4-storey chunk against CELL/2 would report 4.5 m
+    of oversail on a mesh that fits perfectly.
+
+    Boxes are in the chunk's own local space, centred on the chunk centre.
+    Taper is ignored, exactly as the kit ignores it: a tapered box never
+    reaches past its untapered footprint, so the declared value stays
+    conservative.
+    """
+    if not boxes:
+        return 0.0
+    half = (CELL * sx / 2.0, CELL * sy / 2.0, CELL * sz / 2.0)
+    reach = max(abs(b["pos"][i]) + b["dim"][i] / 2.0 - half[i]
+                for b in boxes for i in range(3))
+    return round(max(0.0, reach), 4)
+
+
+def hero_material_block():
+    """What atlas the heroes sample, said in the manifest rather than a README.
+
+    #600 item 5: the delivery names no material at all, so an importer cannot
+    wire one without hardcoding the knowledge that heroes borrow the kit's.
+
+    Shape is constrained by the consumer: `DeliveryManifest` is a
+    [Serializable] DTO parsed with plain JsonUtility and no Newtonsoft, which
+    cannot deserialize dictionaries. Objects and numeric arrays only.
+
+    Wiring this is Demigol's side (#612) - `CatalogBaker` reads
+    `root.IsKit ? MaterialBaker.Bake(...) : null` and `SharedMaterial` is
+    documented kit-only, so a cross-delivery reference is new to their
+    validator.
+    """
+    return {
+        "shared_with": "demigol_kit",
+        "shared": True,
+        "shader": "kit_material (standardSurface)",
+        "maps": {
+            "albedo": "kit_albedo.png",
+            "normal": "kit_normal.png",
+            "mask": "kit_mask.png",
+        },
+        "mask_channels": {
+            "metallic": "R",
+            # URP Lit's _MetallicGlossMap reads R = metallic, A = smoothness.
+            # G carries a duplicate so the map stays readable by eye; it is
+            # inert under URP and would be read as ambient occlusion under
+            # HDRP, which is one reason Demigol did not go there.
+            "smoothness": "A (duplicated in G, inert)",
+        },
+        "atlas_px": kit.ATLAS_PX,
+        "atlas_grid": [kit.ATLAS_COLS, kit.ATLAS_ROWS],
+        "world_scale": kit.WORLD_SCALE,
+        "px_per_metre": round(kit.PX_PER_METRE, 2),
+        "note": "One standardSurface per building, sampling the kit's shared "
+                "atlas at the same density, so a hero standing among "
+                "kit-dressed neighbours belongs to the same city.",
+    }
 
 
 # ============================================================ detail (rev 2)
@@ -696,10 +764,15 @@ def build_one(label, builder, zoom):
     for c in chunks:
         occupied.update(c.cells_occupied())
     chunk_dicts = []
+    outsets = {}
     for c in chunks:
-        d = c.as_dict()
-        d["boxes"] = [dict(bx, patch=kit.PATCH[bx["patch"]][0])
-                      for bx in chunk_boxes(c, occupied, b.storeys)]
+        boxes = chunk_boxes(c, occupied, b.storeys)
+        # Declared from the SAME boxes Maya is about to build, so the manifest
+        # cannot drift from the mesh. The manifest entry drops `boxes` - 2,034
+        # chunks of box lists would dwarf everything a consumer reads.
+        outsets[c.name] = chunk_outset(boxes, c.sx, c.sy, c.sz)
+        d = c.as_dict(outset_m=outsets[c.name])
+        d["boxes"] = [dict(bx, patch=kit.PATCH[bx["patch"]][0]) for bx in boxes]
         chunk_dicts.append(d)
 
     payload = json.dumps({"label": label, "maps": MAPS,
@@ -734,8 +807,9 @@ def build_one(label, builder, zoom):
         tris_per_chunk=round(check["tris"] / max(1, check["chunks"]), 1),
         roles=roles, frame_chunks=report["frame_chunks"],
         stilt_columns=report["stilts"], note=b.note,
+        max_outset_m=round(max(outsets.values() or [0.0]), 4),
         files=["%s.fbx" % label, "%s.png" % label],
-        chunk_list=[c.as_dict() for c in chunks],
+        chunk_list=[c.as_dict(outset_m=outsets[c.name]) for c in chunks],
     ), check, report, images.pixel_stats(png)
 
 
@@ -778,6 +852,24 @@ def main():
                   "their min-corner cell.",
         "roles": list(ROLES),
         "role_colours": ROLE_COLOUR,
+        "material": hero_material_block(),
+        "envelope": {
+            "cell_m": CELL,
+            "inset_m": INSET,
+            "max_outset_m": MAX_OUTSET,
+            "outset_note":
+                "Ornament may oversail a chunk's cell block by up to 0.5 m, "
+                "declared per chunk as outset_m. The lattice constrains which "
+                "CELLS a chunk occupies, never its render mesh, because "
+                "collision is generated from the grid.",
+        },
+        "destruction_unit":
+            "A CHUNK is the unit of destruction - detach it whole, never "
+            "subdivide it per cell. MAX_RUN is what tunes this: glass 1 so a "
+            "pane cannot come off in pairs, steel 4 so the frame falls in "
+            "large sections, brick/infill 2, concrete 4. Steel merges "
+            "vertically; everything else along X, trying Z only when the X run "
+            "was length 1.",
         "structural_model":
             "Columns are steel on every bay-line intersection, merged into "
             "segments of up to 4 storeys so the frame falls as large sections. "
