@@ -88,6 +88,7 @@ def _build_handlers() -> Dict[str, Any]:
         "capture_viewport": capture.capture_viewport,
         "capture_turntable": capture.capture_turntable,
         "render_scene": render.render_scene,
+        "render_sheet": render.render_sheet,
         "checkpoint": session.checkpoint,
         "restore_checkpoint": session.restore_checkpoint,
         "undo": session.undo,

@@ -435,3 +435,72 @@ class TestRenderScene:
         out = render.render_scene({"angles": ["front"], "renderer": "hw2"})
         assert out["renderer"] == "hw2"
         assert fake_maya.written[0]["renderer"] == "mayaHardware2"
+
+
+class TestRenderSheet:
+    """One frame per subject in ONE call - the kit contact sheet was 41 of them.
+
+    Everything outside the frame loop is setup: resolving the renderer,
+    snapshotting the user's render globals, building a camera, hiding the scene.
+    These assert that the setup happens once and the loop is just frames.
+    """
+
+    def test_one_frame_per_subject_labelled_by_subject(self, fake_maya):
+        out = render.render_sheet({"subjects": ["|ball", "|floor"]})
+        assert [i["label"] for i in out["images"]] == ["|ball", "|floor"]
+        assert all(i["png_b64"] for i in out["images"])
+
+    def test_the_camera_is_built_once_for_the_whole_sheet(self, fake_maya):
+        render.render_sheet({"subjects": ["|ball", "|floor"]})
+        cameras = [n for n in fake_maya.created if "RenderCam" in n]
+        assert len(cameras) == 1, "a camera per cell is setup, not picture"
+
+    def test_each_cell_is_isolated_to_its_own_subject(self, fake_maya):
+        render.render_sheet({"subjects": ["|ball", "|floor"]})
+        # Each subject's cell hid the OTHER one; both are visible again at the end.
+        assert "|floor|floorShape" in fake_maya.hidden
+        assert "|ball|ballShape" in fake_maya.hidden
+        assert all(fake_maya.visibility.values()), "visibility must be restored"
+
+    def test_isolation_can_be_declined_for_subjects_that_need_the_room(self, fake_maya):
+        """Hiding the surroundings also removes what a transmissive material
+        refracts - the #585 lesson, kept reachable here."""
+        render.render_sheet({"subjects": ["|ball"], "isolate": False})
+        assert fake_maya.hidden == []
+
+    def test_every_cell_gets_its_own_render_prefix(self, fake_maya):
+        render.render_sheet({"subjects": ["|ball", "|floor"]})
+        prefixes = [w["prefix"] for w in fake_maya.written]
+        assert len(set(prefixes)) == 2, "cmds.render overwrites a fixed path"
+
+    def test_render_globals_are_restored_after_a_whole_sheet(self, fake_maya):
+        before = dict(fake_maya.attrs)
+        render.render_sheet({"subjects": ["|ball", "|floor"], "resolution": 256})
+        assert {k: fake_maya.attrs[k] for k in before} == before
+
+    def test_a_bad_name_is_caught_before_any_frame_is_rendered(self, fake_maya):
+        """A sheet that dies on cell 30 has spent thirty frames' worth of
+        seconds to report a typo."""
+        with pytest.raises(HandlerError) as exc:
+            render.render_sheet({"subjects": ["|ball", "|nonexistent"]})
+        assert "nonexistent" in str(exc.value)
+        assert fake_maya.written == []
+
+    def test_empty_subjects_points_at_render_scene(self, fake_maya):
+        with pytest.raises(HandlerError) as exc:
+            render.render_sheet({"subjects": []})
+        assert "render_scene" in exc.value.hint
+
+    def test_too_many_subjects_is_refused(self, fake_maya):
+        with pytest.raises(HandlerError) as exc:
+            render.render_sheet(
+                {"subjects": ["|ball"] * (render.MAX_SHEET_SUBJECTS + 1)}
+            )
+        assert "cap" in str(exc.value)
+
+    def test_an_unknown_angle_is_refused(self, fake_maya):
+        with pytest.raises(HandlerError):
+            render.render_sheet({"subjects": ["|ball"], "angle": "diagonal"})
+
+    def test_a_sheet_does_not_pollute_the_undo_queue(self):
+        assert render.render_sheet.no_undo_chunk is True

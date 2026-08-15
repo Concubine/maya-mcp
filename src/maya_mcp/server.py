@@ -475,6 +475,78 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         return content
 
     @mcp.tool(
+        title="Render contact sheet",
+        annotations=ToolAnnotations(
+            read_only_hint=True, destructive_hint=False, idempotent_hint=True
+        ),
+    )
+    def maya_render_sheet(
+        subjects: Annotated[List[str], Field(min_length=1, max_length=48, description=(
+            "One rendered cell per object, each isolated and framed on itself. "
+            "For several ANGLES of one object use maya_render_scene."
+        ))],
+        angle: Annotated[Angle, Field(description=(
+            "The single angle every cell is rendered from."
+        ))] = "three_quarter",
+        renderer: Annotated[
+            Literal["arnold", "hw2"],
+            Field(description=(
+                "'hw2' is worth considering here: a sheet is N rendered frames, "
+                "and unless the pieces are transmissive it shows the same thing "
+                "far faster."
+            )),
+        ] = "arnold",
+        resolution: Annotated[int, Field(ge=64, le=1024, description=(
+            "Per-cell resolution, before the sheet is downscaled."
+        ))] = 384,
+        isolate: Annotated[bool, Field(description=(
+            "Hide everything but each cell's own subject. True is the point of "
+            "a sheet; pass false for transmissive pieces, which need the "
+            "surroundings they refract."
+        ))] = True,
+        samples: Annotated[int, Field(ge=1, le=8, description=(
+            "Arnold AA samples per cell. Cells are small - 1 or 2 is usually "
+            "enough, and this multiplies by the number of subjects."
+        ))] = 2,
+        cols: Annotated[Optional[int], Field(ge=1, le=12, description=(
+            "Grid columns; defaults to a roughly square layout."
+        ))] = None,
+    ) -> list:
+        """Render a whole kit as ONE contact-sheet image, in one call.
+
+        A 41-piece kit sheet used to be 41 round-trips, each re-resolving the
+        renderer, snapshotting and restoring the user's render globals, building
+        a camera and re-hiding the scene. That is setup, not picture: here it
+        happens once and the loop is just frames.
+
+        Cells are row-major, top-left first, in the order given."""
+        result = maya.request(
+            "render_sheet",
+            {"subjects": subjects, "angle": angle, "renderer": renderer,
+             "resolution": resolution, "isolate": isolate, "samples": samples},
+            timeout_s=RENDER_TIMEOUT_S,
+        )
+        shots = result.get("images", [])
+        cells = [
+            images.decode_and_downscale(shot["png_b64"], max_px=resolution)
+            for shot in shots
+        ]
+        blank = [
+            shot["label"] for shot, cell in zip(shots, cells)
+            if images.pixel_stats(cell)["blank"]
+        ]
+        sheet = images.contact_sheet(cells, cols=cols)
+        return [
+            Image(data=images.decode_and_downscale(
+                base64.b64encode(sheet).decode("ascii")), format="png"),
+            "cells (row-major): " + json.dumps([s["label"] for s in shots]),
+            # A cell of nothing is a valid image. Naming the empty ones is the
+            # difference between "that piece looks wrong" and "that piece did
+            # not render".
+            "blank cells: " + (json.dumps(blank) if blank else "none"),
+        ]
+
+    @mcp.tool(
         title="Load reference image",
         annotations=ToolAnnotations(
             read_only_hint=False, destructive_hint=False, idempotent_hint=True

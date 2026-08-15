@@ -32,6 +32,10 @@ DEFAULT_RENDERER = "arnold"
 # The 4-image ceiling is capture's, and holds for capture's reason - the token
 # budget of the images coming back, not the time spent making them.
 DEFAULT_ANGLES = ["three_quarter"]
+# A sheet returns ONE composited image, so the 4-image ceiling does not apply -
+# but a rendered frame costs seconds, and a 64-cell sheet is unreadable at any
+# resolution that fits in a message. The kit that motivated this is 41 pieces.
+MAX_SHEET_SUBJECTS = 48
 DEFAULT_RESOLUTION = 512
 MIN_RESOLUTION, MAX_RESOLUTION = 64, 2048
 DEFAULT_SAMPLES, MIN_SAMPLES, MAX_SAMPLES = 3, 1, 8
@@ -380,12 +384,6 @@ def _name_list(params: Dict[str, Any], key: str, example: str):
 def render_scene(params: Dict[str, Any]) -> Dict[str, Any]:
     """Render named angles through the render pipeline; no viewport involved."""
     angles = resolve_angles(params.get("angles"))
-    renderer = resolve_renderer(params.get("renderer"))
-    resolution = clamp_resolution(params.get("resolution"))
-    samples = resolve_samples(params.get("samples"))
-    zoom = resolve_zoom(params.get("zoom"))
-    fallback_light = bool(params.get("fallback_light", True))
-    relight = bool(params.get("relight", True))
     isolate = _name_list(params, "isolate", "|golem")
     # Framing and visibility are separate questions. Welding them meant a
     # close-up of a gem also hid the backdrop it needed to refract, so the
@@ -394,9 +392,74 @@ def render_scene(params: Dict[str, Any]) -> Dict[str, Any]:
     # alone. With no target, framing falls back to the isolate set, which is
     # what a caller passing only isolate means.
     target = _name_list(params, "target", "|golem|chest")
-    frame_on = target or isolate
+    shots = [
+        {"label": angle, "angle": angle, "isolate": isolate,
+         "frame_on": target or isolate}
+        for angle in angles
+    ]
+    return _run_shots(_cmds(), shots, params)
 
-    cmds = _cmds()
+
+def render_sheet(params: Dict[str, Any]) -> Dict[str, Any]:
+    """One frame per subject, each isolated and framed on itself, in ONE call.
+
+    A kit contact sheet was 41 separate render_scene round-trips. Every one of
+    them re-resolved the renderer, snapshotted and restored the render globals,
+    built and deleted a camera, and re-hid the scene - all of which is setup,
+    not picture. Here it happens once and the loop is just frames.
+
+    The images come back as a list; the MCP server composites them, exactly as
+    it already does for capture_turntable.
+    """
+    subjects = _name_list(params, "subjects", "|kit_wall_a")
+    if not subjects:
+        raise HandlerError(
+            "subjects must be a non-empty list of objects to render",
+            hint='one frame per subject, e.g. subjects=["|kit_a", "|kit_b"]; '
+            "for several angles of ONE subject use maya_render_scene",
+        )
+    if len(subjects) > MAX_SHEET_SUBJECTS:
+        raise HandlerError(
+            "%d subjects requested; the cap is %d per call"
+            % (len(subjects), MAX_SHEET_SUBJECTS),
+            hint="a sheet past that is unreadable at any sane resolution, and "
+            "a rendered frame costs seconds - split it",
+        )
+    angle = params.get("angle") or "three_quarter"
+    if angle not in capture.VALID_ANGLES:
+        raise HandlerError(
+            "unknown angle %r" % angle,
+            hint="valid angles: %s" % ", ".join(capture.VALID_ANGLES),
+        )
+    # Isolating is the POINT of a sheet: each cell must show one piece, not one
+    # piece in front of forty others. Opting out is allowed for a subject that
+    # needs its surroundings (a transmissive material refracts them).
+    isolate_each = bool(params.get("isolate", True))
+    shots = [
+        {"label": subject, "angle": angle,
+         "isolate": [subject] if isolate_each else None,
+         "frame_on": [subject]}
+        for subject in subjects
+    ]
+    return _run_shots(_cmds(), shots, params)
+
+
+def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dict[str, Any]:
+    """Render a list of shots sharing one renderer, camera, rig and globals.
+
+    Everything outside the frame loop is SETUP - loading mtoa, snapshotting the
+    user's render globals, building a camera, hiding the scene - and it is what
+    makes a per-frame round-trip expensive. Both render_scene (many angles of
+    one subject) and render_sheet (one angle of many subjects) are the same
+    loop with a different list, so they share it.
+    """
+    renderer = resolve_renderer(params.get("renderer"))
+    resolution = clamp_resolution(params.get("resolution"))
+    samples = resolve_samples(params.get("samples"))
+    zoom = resolve_zoom(params.get("zoom"))
+    fallback_light = bool(params.get("fallback_light", True))
+    relight = bool(params.get("relight", True))
+
     maya_renderer = RENDERER_TO_MAYA[renderer]
     available = _ensure_renderer(cmds, maya_renderer)
     if available and maya_renderer not in available:
@@ -416,15 +479,17 @@ def render_scene(params: Dict[str, Any]) -> Dict[str, Any]:
     prev_undo = cmds.undoInfo(query=True, state=True)
     cmds.undoInfo(stateWithoutFlush=False)
     try:
-        for key, names in (("isolate", isolate), ("target", target)):
-            missing = [n for n in (names or []) if not cmds.objExists(n)]
-            if missing:
-                raise HandlerError(
-                    "%s objects not found: %s" % (key, ", ".join(missing)),
-                    hint="call maya_get_scene_graph to list objects",
-                )
-        if isolate:
-            hidden = _hide_non_targets(cmds, isolate)
+        # Every name in every shot, checked before a single frame is rendered:
+        # a sheet that dies on cell 30 has spent thirty frames' worth of seconds
+        # to report a typo.
+        for shot in shots:
+            for key in ("isolate", "frame_on"):
+                missing = [n for n in (shot[key] or []) if not cmds.objExists(n)]
+                if missing:
+                    raise HandlerError(
+                        "%s objects not found: %s" % (key, ", ".join(missing)),
+                        hint="call maya_get_scene_graph to list objects",
+                    )
 
         if fallback_light and not _scene_has_light(cmds):
             # Arnold renders an unlit scene as pure black, indistinguishable
@@ -440,10 +505,27 @@ def render_scene(params: Dict[str, Any]) -> Dict[str, Any]:
         # exact failure it was added to prevent.
         rig = _rig_lights(cmds) if relight else {}
 
-        bbox_min, bbox_max = capture._scene_bbox(cmds, frame_on)
         images_out = []
         positions = []
-        for index, angle in enumerate(angles):
+        current_isolate: Optional[List[str]] = None
+        for index, shot in enumerate(shots):
+            angle = shot["angle"]
+            # Re-hide only when the visible set actually changes: render_scene
+            # holds one isolate set across all its angles, and re-walking every
+            # shape in a 45,000-renderer city per frame would cost more than the
+            # renders.
+            if shot["isolate"] != current_isolate:
+                for name in hidden:
+                    try:
+                        cmds.showHidden(name)
+                    except Exception:
+                        pass
+                hidden = (
+                    _hide_non_targets(cmds, shot["isolate"]) if shot["isolate"] else []
+                )
+                current_isolate = shot["isolate"]
+
+            bbox_min, bbox_max = capture._scene_bbox(cmds, shot["frame_on"])
             # "current" has no meaning without a panel to read a camera from;
             # it degrades to the default judging angle rather than failing a
             # render the caller could not have known was panel-dependent.
@@ -486,14 +568,15 @@ def render_scene(params: Dict[str, Any]) -> Dict[str, Any]:
                     os.unlink(path)  # the render lands in the project images dir
                 except OSError:
                     pass
-            images_out.append(
-                {"angle": angle, "png_b64": base64.b64encode(png).decode("ascii")}
-            )
+            images_out.append({
+                "angle": angle, "label": shot["label"],
+                "png_b64": base64.b64encode(png).decode("ascii"),
+            })
             pos = cmds.getAttr(temp_camera + ".translate")[0]
             rot = cmds.getAttr(temp_camera + ".rotate")[0]
             positions.append(
-                {"angle": angle, "position": list(pos), "rotation": list(rot),
-                 "camera": temp_camera}
+                {"angle": angle, "label": shot["label"], "position": list(pos),
+                 "rotation": list(rot), "camera": temp_camera}
             )
 
         return {
@@ -527,3 +610,4 @@ def render_scene(params: Dict[str, Any]) -> Dict[str, Any]:
 
 # Perception must not pollute the user's undo queue.
 render_scene.no_undo_chunk = True
+render_sheet.no_undo_chunk = True

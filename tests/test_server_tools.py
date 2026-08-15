@@ -56,6 +56,7 @@ class TestRegistration:
             "maya_capture_viewport",
             "maya_capture_turntable",
             "maya_render_scene",
+            "maya_render_sheet",
             "maya_checkpoint",
             "maya_restore_checkpoint",
             "maya_undo",
@@ -769,6 +770,82 @@ class TestCaptureTurntable:
         mcp = server_mod.create_server(conn)
         run(mcp.call_tool("maya_capture_turntable", {}))
         assert conn.calls[0]["params"]["shading"] == "smoothShaded"
+
+
+class TestRenderSheet:
+    """41 render_scene round-trips became one call and one image."""
+
+    @staticmethod
+    def _subject_png():
+        """Two-tone: a FLAT frame is blank by definition (an unlit render, or a
+        camera inside an object), so a cell with a subject in it needs two."""
+        img = PILImage.new("RGB", (64, 64), (20, 20, 24))
+        img.paste(PILImage.new("RGB", (30, 30), (200, 140, 90)), (10, 10))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+
+    @classmethod
+    def _conn(cls, labels, color=None):
+        return FakeConn(responses={"render_sheet": {
+            "images": [{"angle": "three_quarter", "label": label,
+                        "png_b64": (png_b64(64, 64, color) if color
+                                    else cls._subject_png())}
+                       for label in labels],
+            "camera_positions": [], "renderer": "arnold", "samples": 2,
+            "fallback_light": False, "zoom": 1.0, "relit_lights": 0,
+        }})
+
+    def test_a_whole_kit_goes_over_the_wire_once(self):
+        conn = self._conn(["|kit_a", "|kit_b", "|kit_c"])
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_render_sheet", {
+            "subjects": ["|kit_a", "|kit_b", "|kit_c"], "renderer": "hw2",
+        }))
+        assert len(conn.calls) == 1
+        assert conn.calls[0]["cmd"] == "render_sheet"
+        assert conn.calls[0]["params"]["subjects"] == ["|kit_a", "|kit_b", "|kit_c"]
+        assert result.is_error is False
+
+    def test_returns_one_composited_image_not_n(self):
+        mcp = server_mod.create_server(self._conn(["a", "b", "c", "d"]))
+        result = run(mcp.call_tool("maya_render_sheet", {
+            "subjects": ["a", "b", "c", "d"],
+        }))
+        pictures = [c for c in result.content if getattr(c, "type", None) == "image"]
+        assert len(pictures) == 1, "a sheet is ONE image - that is the token win"
+
+    def test_the_cell_order_is_reported_so_the_grid_can_be_read(self):
+        mcp = server_mod.create_server(self._conn(["|kit_a", "|kit_b"]))
+        result = run(mcp.call_tool("maya_render_sheet",
+                                   {"subjects": ["|kit_a", "|kit_b"]}))
+        text = " ".join(c.text for c in result.content
+                        if getattr(c, "type", None) == "text")
+        assert "row-major" in text
+        assert "|kit_a" in text and "|kit_b" in text
+
+    def test_blank_cells_are_named_not_left_to_the_eye(self):
+        """A cell of nothing is a valid image. Naming the empty ones is the
+        difference between 'that piece looks wrong' and 'it did not render'."""
+        mcp = server_mod.create_server(self._conn(["|kit_a"], color=(0, 0, 0)))
+        result = run(mcp.call_tool("maya_render_sheet", {"subjects": ["|kit_a"]}))
+        text = " ".join(c.text for c in result.content
+                        if getattr(c, "type", None) == "text")
+        assert "blank cells: [\"|kit_a\"]" in text
+
+    def test_no_blank_cells_says_so_explicitly(self):
+        mcp = server_mod.create_server(self._conn(["|kit_a"]))
+        result = run(mcp.call_tool("maya_render_sheet", {"subjects": ["|kit_a"]}))
+        text = " ".join(c.text for c in result.content
+                        if getattr(c, "type", None) == "text")
+        assert "blank cells: none" in text
+
+    def test_the_subject_cap_is_enforced_by_the_schema(self):
+        conn = self._conn(["a"])
+        mcp = server_mod.create_server(conn)
+        with pytest.raises(Exception):
+            run(mcp.call_tool("maya_render_sheet", {"subjects": ["a"] * 49}))
+        assert conn.calls == []  # rejected before reaching Maya
 
 
 class TestReferenceImages:
