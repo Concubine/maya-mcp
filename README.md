@@ -42,6 +42,14 @@ uv run python maya_plugin/install.py
 This copies `maya_plugin/` into your Maya scripts directory and prints the `userSetup.py`
 autoload snippet. It prints exactly what it will do and asks before touching anything.
 
+**The live Maya imports that COPY, not this repo.** A deployed copy that has fallen
+behind the working tree produces green results that describe other code — it has cost
+this project hours twice. So the install stamps the copy with the commit and a content
+digest of what it wrote, `ping` hands that back, and the eval harness
+(`evals/live_call.py`) prints a loud warning before its first call when the two differ.
+Re-run the installer after changing plugin code, and **restart Maya** — a reinstall does
+not reload modules Python has already imported.
+
 Manual alternative — run inside Maya's Script Editor (Python tab):
 
 ```python
@@ -88,8 +96,8 @@ Environment variables, all optional:
 ## Tools
 
 `src/maya_mcp/server.py` is the authoritative source — the table below enumerates its
-`@mcp.tool` wrappers (33 total: 3 from M0, 23 added in M1, 7 added in M2). Schemas
-(`src/maya_mcp/schemas.py`) are the reference for exact fields; each row here is one sentence.
+`@mcp.tool` wrappers (**40 total**). Schemas (`src/maya_mcp/schemas.py`) are the
+reference for exact fields; each row here is one sentence.
 
 ### Perception (M0)
 
@@ -136,6 +144,14 @@ Environment variables, all optional:
 | `maya_remesh_retopo` | Retopologize a mesh toward a target polycount (polyRetopo, falling back to polyRemesh, then polyReduce); auto-checkpoints. |
 | `maya_mesh_cleanup` | Merge near-duplicate vertices, conform normals, freeze transforms, and delete construction history. |
 
+### Kit building
+
+| Tool | Description |
+|---|---|
+| `maya_combine` | Merge meshes into ONE object while keeping each as its own shell — not a boolean union; nothing is welded. |
+| `maya_uv_atlas` | Pack a mesh's UVs into one patch of a shared texture atlas, with an optional fixed pixels-per-metre density, and report where they actually landed. |
+| `maya_assemble` | Build many primitives, taper them, place them, pack each into its atlas patch, and unite them per chunk — the whole build loop in one call, validated up front and measured on the way out. |
+
 ### Viewport and camera
 
 | Tool | Description |
@@ -157,6 +173,7 @@ Environment variables, all optional:
 | Tool | Description |
 |---|---|
 | `maya_render_scene` | Render frames through the render pipeline instead of the viewport: shows transmission and refraction as they really are, and works on a Maya with no visible window. Reports each frame's opaque pixel count, because a render of nothing is still a valid image. |
+| `maya_render_sheet` | One rendered cell per subject, each isolated and framed on itself, composited into a single contact sheet. All the setup — renderer, globals, camera, hiding — happens once instead of once per frame, and blank cells are named. |
 
 **Which eye to use.** `maya_capture_viewport` is fast (milliseconds), needs a
 mapped window, and draws transmissive materials as plain transparency — a
@@ -168,8 +185,9 @@ and composition with the viewport; judge materials with the renderer.
 
 | Tool | Description |
 |---|---|
-| `maya_setup_lighting` | Build a preset lighting rig (three-point/single-sun/HDRI) so the model can actually be judged; the only tool that deletes existing scene lights. |
+| `maya_setup_lighting` | Build a preset lighting rig so the model can actually be judged; the only tool that deletes existing scene lights. Directional rigs (three-point/single-sun) read form; the `environment` and `hdri` sky domes are **required for anything metallic** — a full metal has no diffuse response, so in a directional rig it has nothing to reflect and renders black. |
 | `maya_assign_material` | Assign one shader (standardSurface/lambert/blinn) to a whole mesh, object-level only. |
+| `maya_assign_pbr` | Wire a full multi-map standardSurface in one call — file nodes, placement, channel packing, smoothness→roughness inversion, and a tangent-space normal map — across one mesh or a whole kit sharing one material. |
 | `maya_apply_texture_recipe` | Build a named texture network (noise bump, ramp gradient, layered mask, file texture) and wire it into a mesh's shader. |
 
 ### Checkpoint directory and undo contract
