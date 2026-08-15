@@ -375,10 +375,14 @@ def assemble(params: Dict[str, Any]) -> Dict[str, Any]:
         wanted = explicit_pivots.get(chunk)
         if merge and len(nodes) > 1:
             result = combine.unite(cmds, nodes, chunk, pivot_mode, freeze)
-            placed = result["pivot"]
             if wanted is not None:
                 cmds.xform(result["name"], worldSpace=True, pivots=tuple(wanted))
-                placed = list(wanted)
+            # Query Maya back rather than trust either combine.unite's
+            # pre-freeze snapshot or the caller's own input: a chunk always
+            # gets SOME pivot treatment here (the global mode, at minimum),
+            # so this is never None for a combined object.
+            placed = list(cmds.xform(result["name"], query=True,
+                                     worldSpace=True, rotatePivot=True))
             objects.append({
                 "name": result["name"], "parts": len(nodes),
                 "tris": result["tris"], "verts": result["verts"],
@@ -397,8 +401,14 @@ def assemble(params: Dict[str, Any]) -> Dict[str, Any]:
                                               naming.unique_name(cmds, chunk)),
                                   long=True) or [nodes[0]])[0]]
             for node in nodes:
+                placed = None
                 if wanted is not None:
                     cmds.xform(node, worldSpace=True, pivots=tuple(wanted))
+                    # Query back, not the input echoed: a chunk that got NO
+                    # pivot treatment (wanted is None) still reports None, so
+                    # the "was a pivot placed" signal survives.
+                    placed = list(cmds.xform(node, query=True, worldSpace=True,
+                                             rotatePivot=True))
                 shape = cmds.listRelatives(node, shapes=True, fullPath=True,
                                            noIntermediate=True)[0]
                 objects.append({
@@ -407,7 +417,7 @@ def assemble(params: Dict[str, Any]) -> Dict[str, Any]:
                     "verts": cmds.polyEvaluate(shape, vertex=True),
                     "faces": cmds.polyEvaluate(shape, face=True),
                     "shells": cmds.polyEvaluate(shape, shell=True),
-                    "pivot": list(wanted) if wanted is not None else None,
+                    "pivot": placed,
                     "combined": False,
                 })
                 ledger.record(cmds, node)
