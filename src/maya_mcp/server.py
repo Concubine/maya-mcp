@@ -149,8 +149,13 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         """Run arbitrary Python in the Maya session (persistent namespace).
 
         Returns stdout, stderr, result_repr, a complete verbatim traceback when
-        the code raised (None otherwise), and the namespace keys. stdout is
-        capped at 8 KB with an explicit truncation notice.
+        the code raised (None otherwise), and the namespace keys.
+
+        Output is capped - stdout/stderr at 8 KB, result_repr at 256 KB - and
+        every cap reports itself: check result_truncated before parsing
+        result_repr, because a truncated repr is not valid Python and will fail
+        inside your parser rather than here. If a measurement is genuinely that
+        large, have the code write it to a file and return the path.
         """
         return ExecuteResult.model_validate(
             maya.request(

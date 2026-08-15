@@ -80,11 +80,83 @@ class TestOutputCaps:
         result = code_exec.execute_python({"code": "print('A' * 20000)"})
         assert len(result["stdout"]) < 10000
         assert "truncated" in result["stdout"]
+        assert result["stdout_truncated"] is True
 
     def test_result_repr_capped_with_marker(self):
-        result = code_exec.execute_python({"code": "'B' * 50000"})
-        assert len(result["result_repr"]) < 5000
+        result = code_exec.execute_python(
+            {"code": "'B' * %d" % (code_exec.RESULT_REPR_CAP + 5000)}
+        )
+        assert len(result["result_repr"]) < code_exec.RESULT_REPR_CAP + 1000
         assert "truncated" in result["result_repr"]
+
+    def test_truncation_of_a_structured_result_is_flagged_not_silent(self):
+        """The bug: a 37-row check came back as a truncated, unparseable string,
+        and the caller learned about it as a SyntaxError from its own
+        literal_eval. The cap is fine; discovering it downstream is not."""
+        result = code_exec.execute_python(
+            {"code": "[{'chunk': 'c%d' % i, 'tris': i} for i in range(200000)]"}
+        )
+        assert result["result_truncated"] is True
+        assert result["result_bytes"] > code_exec.RESULT_REPR_CAP
+
+    def test_an_uncapped_result_says_so_and_reports_its_real_size(self):
+        result = code_exec.execute_python({"code": "[{'chunk': 'c', 'tris': 12}]"})
+        assert result["result_truncated"] is False
+        assert result["result_bytes"] == len(result["result_repr"])
+        assert result["stdout_truncated"] is False
+
+    def test_a_real_measurement_now_fits(self):
+        """37 rows was the size that broke. The cap has to clear a genuine
+        per-chunk report of a whole delivery, not just a toy one."""
+        result = code_exec.execute_python({
+            "code": "[{'name': 'tower_c%04d' % i, 'tris': 48, 'watertight': True,"
+                    " 'outset_m': 0.47} for i in range(2034)]"
+        })
+        assert result["result_truncated"] is False
+        import ast
+
+        assert len(ast.literal_eval(result["result_repr"])) == 2034
+
+    def test_a_result_with_no_value_reports_no_size(self):
+        result = code_exec.execute_python({"code": "x = 1"})
+        assert result["result_repr"] is None
+        assert result["result_bytes"] is None
+        assert result["result_truncated"] is False
+
+
+class TestEvalHarnessParsing:
+    """evals/live_call.structured_result - the caller side of the same bug."""
+
+    @staticmethod
+    def _live_call():
+        import importlib.util
+        import os
+
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "evals", "live_call.py",
+        )
+        spec = importlib.util.spec_from_file_location("evals_live_call", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_parses_a_whole_result(self):
+        out = code_exec.execute_python({"code": "[{'tris': 12}]"})
+        assert self._live_call().structured_result(out) == [{"tris": 12}]
+
+    def test_a_truncated_result_fails_here_not_inside_the_parser(self):
+        out = code_exec.execute_python({"code": "'B' * %d" % (256 * 1024 + 10)})
+        with pytest.raises(ValueError) as exc:
+            self._live_call().structured_result(out, "chunk report")
+        assert "truncated" in str(exc.value)
+        assert "chunk report" in str(exc.value)
+
+    def test_code_that_returned_nothing_says_why(self):
+        out = code_exec.execute_python({"code": "x = 1"})
+        with pytest.raises(ValueError) as exc:
+            self._live_call().structured_result(out)
+        assert "bare expression" in str(exc.value)
 
 
 class TestRisky:

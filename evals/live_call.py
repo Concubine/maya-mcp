@@ -60,6 +60,32 @@ def staleness_warning(port: int | None = None) -> str | None:
         return None
 
 
+def structured_result(execute_result: dict, what: str = "result"):
+    """ast.literal_eval an execute_python result_repr, checking the cap first.
+
+    Eval scripts parse result_repr constantly. When the repr is truncated it is
+    not valid Python, and a raw literal_eval reports that as a SyntaxError from
+    inside the parser - a confusing place to learn that a MEASUREMENT lost its
+    tail. Fail here instead, saying what actually happened.
+    """
+    import ast
+
+    if execute_result.get("result_truncated"):
+        raise ValueError(
+            "%s was truncated at the result cap (%s bytes of repr): it cannot be "
+            "parsed. Have the code return a summary, or write the full data to a "
+            "file and return the path."
+            % (what, execute_result.get("result_bytes"))
+        )
+    repr_text = execute_result.get("result_repr")
+    if not repr_text:
+        raise ValueError(
+            "%s returned no value - the code must END in a bare expression for "
+            "execute_python to send one back" % what
+        )
+    return ast.literal_eval(repr_text)
+
+
 def call(command: str, params: dict, timeout_s: float = 60.0, port: int | None = None) -> dict:
     """Send one command to a live plugin; return the decoded response frame."""
     target = port or DEFAULT_PORT

@@ -30,6 +30,19 @@ class ExecuteResult(BaseModel):
     checkpoint: Optional[str] = Field(
         default=None, description="Path of the auto-checkpoint taken when risky=true."
     )
+    result_truncated: bool = Field(
+        default=False,
+        description=(
+            "True when result_repr was cut at the cap. A truncated repr will NOT "
+            "parse - check this before eval'ing it, and have the code write to a "
+            "file or return a summary instead."
+        ),
+    )
+    result_bytes: Optional[int] = Field(
+        default=None, description="Full length of the repr before any capping."
+    )
+    stdout_truncated: bool = Field(default=False)
+    stderr_truncated: bool = Field(default=False)
 
 
 class SceneObject(BaseModel):

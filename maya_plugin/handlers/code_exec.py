@@ -7,6 +7,13 @@ scene) the namespace simply lacks them.
 A Python exception inside user code is NOT a protocol error: the call succeeds
 and the complete verbatim traceback comes back in the result, because the LLM
 debugs itself with it and silent failure causes hallucinated success.
+
+Truncation follows the same rule. A capped result is a MEASUREMENT WITH ITS TAIL
+CUT OFF, and callers routinely ast.literal_eval result_repr - so a 37-row check
+came back as a broken string and surfaced as a SyntaxError inside the caller's
+parser, which is a confusing place to learn about a size cap. Every cap now
+reports itself as a flag, and the structured-result cap is large enough that a
+real measurement fits inside it.
 """
 
 from __future__ import annotations
@@ -20,7 +27,11 @@ from typing import Any, Dict, Optional
 from ..dispatcher import HandlerError
 
 STDOUT_CAP = 8 * 1024
-RESULT_REPR_CAP = 4 * 1024
+# A structured result is the whole point of the call, not chatter: 4 KB used to
+# cut a 37-row check in half. The wire allows 64 MB, so this is still bounded by
+# three orders of magnitude - and anything hitting it is a dump, not a
+# measurement, and should be written to a file.
+RESULT_REPR_CAP = 256 * 1024
 TRUNCATION_NOTICE = "\n... [truncated by maya-mcp: output exceeded %d bytes]"
 
 _namespace: Optional[Dict[str, Any]] = None
@@ -63,10 +74,12 @@ def reset_namespace(params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     return {"reset": True}
 
 
-def _cap(text: str, limit: int) -> str:
+def _cap(text: str, limit: int) -> tuple:
+    """(text, was_truncated). The notice stays inline for a human reading the
+    output; the flag is for a caller that is about to parse it."""
     if len(text) <= limit:
-        return text
-    return text[:limit] + TRUNCATION_NOTICE % limit
+        return text, False
+    return text[:limit] + TRUNCATION_NOTICE % limit, True
 
 
 def execute_python(params: Dict[str, Any]) -> Dict[str, Any]:
@@ -87,6 +100,8 @@ def execute_python(params: Dict[str, Any]) -> Dict[str, Any]:
     stdout_buf = io.StringIO()
     stderr_buf = io.StringIO()
     result_repr: Optional[str] = None
+    result_bytes: Optional[int] = None
+    result_truncated = False
     tb_text: Optional[str] = None
 
     try:
@@ -108,16 +123,26 @@ def execute_python(params: Dict[str, Any]) -> Dict[str, Any]:
                 if trailing_expr is not None:
                     value = eval(compile(trailing_expr, "<maya-mcp>", "eval"), ns)  # noqa: S307
                     if value is not None:
-                        result_repr = _cap(repr(value), RESULT_REPR_CAP)
+                        full = repr(value)
+                        result_bytes = len(full)
+                        result_repr, result_truncated = _cap(full, RESULT_REPR_CAP)
         except Exception:
             tb_text = traceback.format_exc()
 
+    stdout_text, stdout_truncated = _cap(stdout_buf.getvalue(), STDOUT_CAP)
+    stderr_text, stderr_truncated = _cap(stderr_buf.getvalue(), STDOUT_CAP)
     result: Dict[str, Any] = {
-        "stdout": _cap(stdout_buf.getvalue(), STDOUT_CAP),
-        "stderr": _cap(stderr_buf.getvalue(), STDOUT_CAP),
+        "stdout": stdout_text,
+        "stderr": stderr_text,
         "result_repr": result_repr,
         "traceback": tb_text,
         "namespace_keys": sorted(k for k in ns if not k.startswith("__")),
+        # A truncated repr will not parse. Callers literal_eval this routinely,
+        # so they must be able to ask rather than discover it as a SyntaxError.
+        "result_truncated": result_truncated,
+        "result_bytes": result_bytes,
+        "stdout_truncated": stdout_truncated,
+        "stderr_truncated": stderr_truncated,
     }
     if checkpoint_path is not None:
         result["checkpoint"] = checkpoint_path
