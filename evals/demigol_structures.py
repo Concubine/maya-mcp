@@ -116,7 +116,8 @@ class Building:
     made of - which is what the solver reads it as.
     """
 
-    def __init__(self, label, nx, nz, storeys, note=""):
+    def __init__(self, label, nx, nz, storeys, note="", tiers=None,
+                 palette=None):
         for axis, n in (("x", nx), ("z", nz)):
             if n < 4 or (n - 1) % BAY != 0:
                 raise ValueError("%s: %s axis of %d cells is not (bays*3+1)"
@@ -125,6 +126,77 @@ class Building:
         self.note = note
         self.bx, self.bz = bay_lines(nx), bay_lines(nz)
         self.cells = {}                     # (x, y, z) -> role
+        self.roofed = set()                 # cells roof() claimed
+        self.palette = palette or "default"
+        self.tiers = self._check_tiers(tiers)
+
+    # ------------------------------------------------------------- footprint
+    def _check_tiers(self, tiers):
+        """Validate the per-storey footprint, or invent the trivial one.
+
+        #600 item 2. Every rule here is a load path: a tier that breaks one
+        would produce a building that renders correctly and collapses the
+        moment the game's solver looks at it, which is the worst kind of
+        delivery. They are checked at construction so a bad tier cannot reach
+        an FBX.
+        """
+        full = (0, self.nx - 1, 0, self.nz - 1)
+        if not tiers:
+            return [(0, full)]
+        if tiers[0][0] != 0:
+            raise ValueError("%s: the first tier must start at the ground"
+                             % self.label)
+        out, prev, last = [], full, -1
+        for frm, rect in tiers:
+            if frm <= last:
+                raise ValueError("%s: tiers must ascend, %d follows %d"
+                                 % (self.label, frm, last))
+            last = frm
+            x0, x1, z0, z1 = rect
+            for axis, lo, hi, lines, plo, phi in (
+                    ("x", x0, x1, self.bx, prev[0], prev[1]),
+                    ("z", z0, z1, self.bz, prev[2], prev[3])):
+                n = hi - lo + 1
+                if n < 4 or (n - 1) % BAY != 0:
+                    raise ValueError(
+                        "%s: tier at storey %d is %d cells on %s - not (bays*3+1)"
+                        % (self.label, frm, n, axis))
+                if lo < plo or hi > phi:
+                    raise ValueError(
+                        "%s: tier at storey %d does not nest on %s (%d-%d "
+                        "outside %d-%d) - that is a cantilever"
+                        % (self.label, frm, axis, lo, hi, plo, phi))
+                own = [lo + i for i in bay_lines(n)]
+                missing = [v for v in own if v not in lines]
+                if missing:
+                    raise ValueError(
+                        "%s: tier at storey %d puts a column line at %s on %s, "
+                        "where there is none below"
+                        % (self.label, frm, missing, axis))
+            out.append((frm, tuple(rect)))
+            prev = tuple(rect)
+        return out
+
+    def foot(self, y):
+        """The (x0, x1, z0, z1) cell rect this storey occupies."""
+        rect = self.tiers[0][1]
+        for frm, r in self.tiers:
+            if y >= frm:
+                rect = r
+        return rect
+
+    def foot_cells(self, y):
+        """The footprint as a set of (x, z), empty above the top storey."""
+        if y < 0 or y >= self.storeys:
+            return set()
+        x0, x1, z0, z1 = self.foot(y)
+        return {(x, z) for x in range(x0, x1 + 1) for z in range(z0, z1 + 1)}
+
+    def foot_lines(self, y):
+        """This storey's column lines, in the building's own coordinates."""
+        x0, x1, z0, z1 = self.foot(y)
+        return ([x0 + i for i in bay_lines(x1 - x0 + 1)],
+                [z0 + i for i in bay_lines(z1 - z0 + 1)])
 
     def put(self, role, x, y, z):
         if role not in ROLES:
@@ -151,24 +223,29 @@ class Building:
         """
         storeys = self.storeys if storeys is None else storeys
         for y in range(storeys):
-            for x in self.bx:
-                for z in self.bz:
+            rect = self.foot(y)
+            x0, x1, z0, z1 = rect
+            bx, bz = self.foot_lines(y)
+            for x in bx:
+                for z in bz:
                     self.put("steel", x, y, z)
-            for x in range(self.nx):
-                for z in range(self.nz):
-                    on_x, on_z = x in self.bx, z in self.bz
+            for x in range(x0, x1 + 1):
+                for z in range(z0, z1 + 1):
+                    on_x, on_z = x in bx, z in bz
                     if on_x and on_z:
                         continue                      # column, already placed
-                    if on_x != on_z and self._interior(x, z):
+                    if on_x != on_z and self._interior(x, z, rect):
                         self.put("concrete", x, y, z)  # beam grid
-            for x, z in self._corner_spandrels():
+            for x, z in self._corner_spandrels(rect):
                 self.put("concrete", x, y, z)
 
-    def _interior(self, x, z):
-        return 0 < x < self.nx - 1 and 0 < z < self.nz - 1
+    def _interior(self, x, z, rect):
+        x0, x1, z0, z1 = rect
+        return x0 < x < x1 and z0 < z < z1
 
-    def _corner_spandrels(self):
-        return [(1, 0), (self.nx - 2, 0), (1, self.nz - 1), (self.nx - 2, self.nz - 1)]
+    def _corner_spandrels(self, rect):
+        x0, x1, z0, z1 = rect
+        return [(x0 + 1, z0), (x1 - 1, z0), (x0 + 1, z1), (x1 - 1, z1)]
 
     # -------------------------------------------------------------- cladding
     def clad(self, role_for, storeys=None, skip_storeys=()):
@@ -183,9 +260,10 @@ class Building:
             if y in skip_storeys:
                 continue
             role = role_for(y)
-            for x in range(self.nx):
-                for z in range(self.nz):
-                    if not (x in (0, self.nx - 1) or z in (0, self.nz - 1)):
+            x0, x1, z0, z1 = self.foot(y)
+            for x in range(x0, x1 + 1):
+                for z in range(z0, z1 + 1):
+                    if not (x in (x0, x1) or z in (z0, z1)):
                         continue
                     if (x, y, z) in self.cells:
                         continue

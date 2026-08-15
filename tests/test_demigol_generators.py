@@ -524,3 +524,107 @@ class TestKitAtlasArithmetic:
         assert course_px * 0.16 >= 2.0, (
             "mortar bed is %.2f px at %.1f courses/m"
             % (course_px * 0.16, kit.COURSES_PER_METRE))
+
+
+# ====================================================== revision 3: silhouette
+
+class TestTiers:
+    """#600 item 2: four archetypes, one silhouette family.
+
+    The cause is structural, not artistic - `frame`, `clad` and `roof` all
+    iterated the whole grid at every storey, so a rectangular prism was the
+    only thing this class could express. A tier gives a storey its own
+    footprint, and every validation here is a load path that would otherwise
+    fail silently in the game instead of loudly in the script.
+    """
+
+    def test_no_tiers_means_the_whole_grid_at_every_storey(self):
+        b = st.Building("t", 10, 13, 3)
+        for y in range(3):
+            assert b.foot(y) == (0, 9, 0, 12)
+
+    def test_a_tier_applies_from_its_storey_upward(self):
+        b = st.Building("t", 10, 10, 6, tiers=[(0, (0, 9, 0, 9)),
+                                               (3, (0, 6, 0, 6))])
+        assert b.foot(2) == (0, 9, 0, 9)
+        assert b.foot(3) == (0, 6, 0, 6)
+        assert b.foot(5) == (0, 6, 0, 6)
+
+    def test_a_tier_whose_columns_miss_the_ones_below_is_rejected(self):
+        # x0 = 1 puts this tier's bay lines at 1, 4, 7 - there is no column
+        # under any of them, so every one of them would stand on cladding.
+        with pytest.raises(ValueError, match="column line"):
+            st.Building("t", 10, 10, 4, tiers=[(0, (0, 9, 0, 9)),
+                                               (2, (1, 7, 0, 9))])
+
+    def test_a_tier_that_grows_is_rejected(self):
+        with pytest.raises(ValueError, match="cantilever|nest"):
+            st.Building("t", 10, 10, 4, tiers=[(0, (3, 6, 3, 6)),
+                                               (2, (0, 9, 0, 9))])
+
+    def test_a_tier_off_the_bay_grid_is_rejected(self):
+        with pytest.raises(ValueError, match="not"):
+            st.Building("t", 10, 10, 4, tiers=[(0, (0, 9, 0, 9)),
+                                               (2, (0, 4, 0, 9))])
+
+    def test_a_tier_narrower_than_four_cells_is_rejected(self):
+        with pytest.raises(ValueError, match="not"):
+            st.Building("t", 10, 10, 4, tiers=[(0, (0, 9, 0, 9)),
+                                               (2, (3, 4, 3, 6))])
+
+    def test_the_first_tier_must_start_at_the_ground(self):
+        with pytest.raises(ValueError, match="ground"):
+            st.Building("t", 10, 10, 4, tiers=[(1, (0, 9, 0, 9))])
+
+    def test_tiers_must_ascend(self):
+        with pytest.raises(ValueError, match="ascend"):
+            st.Building("t", 10, 10, 6, tiers=[(0, (0, 9, 0, 9)),
+                                               (4, (0, 6, 0, 6)),
+                                               (2, (3, 6, 3, 6))])
+
+
+class TestTieredFrameAndCladding:
+    def test_nothing_is_claimed_outside_the_footprint(self):
+        b = st.Building("t", 10, 10, 6, tiers=[(0, (0, 9, 0, 9)),
+                                               (3, (0, 6, 0, 6))])
+        b.frame()
+        b.clad(lambda y: "brick")
+        for (x, y, z) in b.cells:
+            x0, x1, z0, z1 = b.foot(y)
+            assert x0 <= x <= x1 and z0 <= z <= z1, "%s at storey %d" % ((x, z), y)
+
+    def test_a_setback_column_stands_on_a_column(self):
+        b = st.Building("t", 10, 10, 6, tiers=[(0, (0, 9, 0, 9)),
+                                               (3, (0, 6, 0, 6))])
+        b.frame()
+        for (x, y, z), role in list(b.cells.items()):
+            if role == "steel" and y > 0:
+                assert b.cells.get((x, y - 1, z)) == "steel", (
+                    "column %s at storey %d stands on %r"
+                    % ((x, z), y, b.cells.get((x, y - 1, z))))
+
+    def test_cladding_follows_the_setback_perimeter(self):
+        b = st.Building("t", 10, 10, 6, tiers=[(0, (0, 9, 0, 9)),
+                                               (3, (0, 6, 0, 6))])
+        b.frame()
+        b.clad(lambda y: "brick")
+        upper = {(x, z) for (x, y, z), role in b.cells.items()
+                 if role == "brick" and y >= 3}
+        assert upper
+        for (x, z) in upper:
+            assert x in (0, 6) or z in (0, 6)
+
+    def test_an_untiered_building_claims_exactly_what_it_always_did(self):
+        # Characterisation. The tier refactor must not move a single cell of
+        # a building that declares no tiers.
+        b = st.Building("t", 13, 13, 3)
+        b.frame()
+        b.clad(lambda y: "glass" if y == 2 else "infill", skip_storeys=(0,))
+        assert len(b.cells) == 287
+        assert b.cells[(0, 0, 0)] == "steel"
+        assert b.cells[(1, 0, 0)] == "concrete"
+        assert b.cells[(2, 1, 0)] == "infill"
+        assert b.cells[(2, 2, 0)] == "glass"
+        assert (2, 0, 0) not in b.cells          # the open lobby
+        assert (6, 1, 6) in b.cells              # a bay-line column
+        assert (7, 1, 7) not in b.cells          # interior, claimed by nothing
