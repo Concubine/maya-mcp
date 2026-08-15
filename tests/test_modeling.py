@@ -686,3 +686,46 @@ def test_mesh_cleanup_delete_history_false_skips_delete(monkeypatch):
     monkeypatch.setattr(meshcheck, "mesh_stats", _fake_mesh_stats([]))
     modeling.mesh_cleanup({"mesh": "|dirty", "delete_history": False})
     assert not any(c[0] == "delete" for c in fake.calls)
+
+
+def test_every_primitive_size_is_passed_explicitly_never_defaulted(monkeypatch):
+    """A size FLAG is read in the scene's current linear unit; an OMITTED one
+    falls back to Maya's internal unit. Measured live with the scene in metres:
+    polyCube() builds a 0.01 m cube and polyCube(w=1,h=1,d=1) a 1 m one - so a
+    cube came out ONE HUNDRED TIMES smaller than a sphere at the same scale,
+    silently breaking the unit-box promise create_primitive is built on.
+
+    Asserted as kwargs because that is the shape of the bug: not a wrong number,
+    an ABSENT one.
+    """
+    recorded = {}
+
+    class SizeSpy:
+        def objExists(self, name):
+            return False
+
+        def ls(self, name, **kw):
+            return ["|" + name]
+
+        def xform(self, *a, **kw):
+            return [0.0, 0.0, 0.0]
+
+        def __getattr__(self, creator):
+            def call(name=None, **kw):
+                recorded[creator] = kw
+                return [name, name + "Shape"]
+            return call
+
+    spy = SizeSpy()
+    monkeypatch.setattr(modeling, "_cmds", lambda: spy)
+    monkeypatch.setattr(modeling.ledger, "record", lambda cmds, name: None)
+
+    size_flags = {"width", "height", "depth", "radius", "sectionRadius",
+                  "sideLength", "length"}
+    for kind in modeling.PRIMITIVE_KINDS:
+        recorded.clear()
+        modeling.create_primitive({"kind": kind, "name": "probe_" + kind})
+        kwargs = list(recorded.values())[0]
+        assert size_flags & set(kwargs), (
+            "%s relies on Maya's default size, which is in the INTERNAL unit" % kind
+        )

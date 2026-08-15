@@ -187,14 +187,24 @@ def build_unit_primitive(cmds, kind: str, name: str, divisions: int = 1) -> str:
     # The box, not the width: a triangular prism and a square pyramid have
     # non-square footprints, so "same width" and "same size" are different
     # promises and only the box is keepable for every kind.
+    #
+    # EVERY size is passed EXPLICITLY, including the ones that look like Maya's
+    # defaults. A size FLAG is interpreted in the scene's current linear unit; an
+    # OMITTED one falls back to Maya's internal unit. Measured live with the
+    # scene in metres: polyCube() builds a 0.01 m cube while polyCube(w=1,h=1,
+    # d=1) builds a 1 m one - so cube and plane, the only two kinds that relied
+    # on defaults, came out ONE HUNDRED TIMES smaller than every other kind at
+    # the same scale, breaking the unit-box promise this comment makes. Caught
+    # by evals/tool_gaps_live.py; no headless fake could see it.
     creators = {
         "cube": lambda: cmds.polyCube(
             name=name, constructionHistory=False,
+            width=1.0, height=1.0, depth=1.0,
             subdivisionsWidth=divisions, subdivisionsHeight=divisions,
             subdivisionsDepth=divisions,
         ),
         "plane": lambda: cmds.polyPlane(
-            name=name, constructionHistory=False,
+            name=name, constructionHistory=False, width=1.0, height=1.0,
             subdivisionsWidth=divisions, subdivisionsHeight=divisions,
         ),
         "sphere": lambda: cmds.polySphere(

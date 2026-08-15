@@ -8,6 +8,9 @@ dist/
 logs/
 .superpowers/
 
+# throwaway texture maps the tool-gaps live gate writes for assign_pbr
+evals/_tool_gaps_maps/
+
 # golem look-dev work copies and their auto-checkpoints (generated)
 evals/golem_run/golem_m1_pass.mb
 evals/golem_run/checkpoints/
