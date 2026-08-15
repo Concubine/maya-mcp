@@ -15,5 +15,11 @@ evals/_tool_gaps_maps/
 evals/golem_run/golem_m1_pass.mb
 evals/golem_run/checkpoints/
 
+# #601 run: per-task recovery scenes and auto-checkpoints. These exist so a
+# wedged Maya costs one task, not the run; the deliverable scene is committed
+# once at the end.
+evals/golem_run_2/golem_task*.mb
+evals/golem_run_2/checkpoints/
+
 # Arnold's auto-generated tiled textures, written next to any map it renders
 *.tx

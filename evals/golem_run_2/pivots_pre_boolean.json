@@ -1,0 +1,92 @@
+{
+ "golem_C_belly": [
+  0.0,
+  2.9,
+  0.02
+ ],
+ "golem_C_brow": [
+  0.0,
+  4.5,
+  0.3
+ ],
+ "golem_C_chest_girdle": [
+  0.0,
+  3.45,
+  0.05
+ ],
+ "golem_C_head": [
+  0.0,
+  4.05,
+  0.25
+ ],
+ "golem_C_neck_gasket": [
+  0.0,
+  4.05,
+  0.25
+ ],
+ "golem_C_pelvis": [
+  0.0,
+  2.45,
+  0.0
+ ],
+ "golem_C_waist_gasket": [
+  0.0,
+  2.9,
+  0.02
+ ],
+ "golem_L_ankle_gasket": [
+  0.55,
+  0.35,
+  0.145
+ ],
+ "golem_L_elbow_gasket": [
+  1.25,
+  2.75,
+  0.15
+ ],
+ "golem_L_fist": [
+  1.25,
+  1.4,
+  0.15
+ ],
+ "golem_L_foot": [
+  0.55,
+  0.35,
+  0.145
+ ],
+ "golem_L_forearm": [
+  1.25,
+  2.75,
+  0.15
+ ],
+ "golem_L_knee_gasket": [
+  0.55,
+  1.116,
+  0.376
+ ],
+ "golem_L_shin": [
+  0.55,
+  1.116,
+  0.376
+ ],
+ "golem_L_shoulder": [
+  0.9,
+  3.85,
+  0.1
+ ],
+ "golem_L_thigh": [
+  0.55,
+  2.15,
+  0.0
+ ],
+ "golem_L_upperarm": [
+  1.25,
+  3.95,
+  0.15
+ ],
+ "golem_L_wrist_gasket": [
+  1.25,
+  1.4,
+  0.15
+ ]
+}

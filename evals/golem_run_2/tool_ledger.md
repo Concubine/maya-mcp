@@ -13,6 +13,11 @@ not escapes and are not listed.
 | 6 | rubble the 6 gaskets | sculpt_ops (displace_noise) | 6 | no | |
 | 7 | harden brow / fists / feet | sculpt_ops (bevel_edges) | 3 | no | |
 | 8 | pressed clay on body chunks | sculpt_ops (displace_noise) | 3 | no | |
+| 9 | shoulder socket, L | create_primitive + boolean_op | 2 | no | cutter must BREAK the surface or the result is a sealed void |
+| 10 | hip sockets, L and R | create_primitive + boolean_op | 4 | no | the pelvis is a centre chunk, so both hips are cut here — the right one cannot come from Task 7's mirror |
+| 11 | carve the aleph | etch_text | 1 | no | one call, glyph to recess |
+| 12 | re-place 3 pivots after the booleans | transform (pivot) | 3 | no | **required** — see finding below |
+| 13 | rename 2 boolean results | rename | 2 | no | **should not have been required** — see finding below |
 
 ## Notes
 
@@ -53,6 +58,48 @@ warning, nothing moved. On an 8-vertex cube there is no radius that catches the
 top four and not the bottom four — 1.23 vs 1.60 — so the op is the wrong
 instrument for a hard plate regardless. Rotating the chunk about its own pivot
 gave the forward pitch and kept the plate hard, which is what the design wants.
+
+**Task 6, row 12 — `boolean_op` does not preserve the pivot.** Measured, not
+assumed: `golem_L_shoulder` went in with its pivot at the shoulder ball
+[0.9, 3.85, 0.1] and came out with [1.1517, 3.964, 0.1452] — the new mesh's own
+bbox centre. Same for the pelvis: [0, 2.45, 0] became [0.0069, 2.4526, 0.0076].
+The boolean also freezes `scale` to identity, which is harmless.
+
+This is a genuine gap and it costs exactly what #603 was built to buy. A caller
+who rigs first and cuts sockets second loses the rig silently — the tool reports
+`watertight: true` and says nothing about the pivot. Either `boolean_op` should
+carry `a`'s pivot onto the result, or it should warn. Baseline for all 18 chunks
+was captured to `pivots_pre_boolean.json` before the first cut, which is what made
+the comparison possible; **Task 8's re-place pass is now confirmed necessary
+rather than precautionary.**
+
+**Task 6, row 13 — `new_name` collides with an input that the call itself
+consumes.** `boolean_op(a=golem_L_shoulder, b=cutter, new_name="golem_L_shoulder")`
+returned `golem_L_shoulder_001`. The name is reserved before the inputs are
+deleted, so the most natural request there is — cut a socket into X and have it
+still be called X — cannot be expressed. Proven by contrast, not inferred: the
+pelvis call named its result `golem_C_pelvis` while the live object was still
+called `pelvis_socket_L`, and got the clean name. Two `rename` calls were spent
+undoing this.
+
+**Task 6, step 2 — a fully interior cutter yields a sealed void, not a socket.**
+The plan's cutter centre (the arm's proximal end, [1.25, 3.95, 0.15]) sits inside
+the shoulder ball, and subtracting it would have produced a second shell — a
+hollow, not a dish. Measured the shoulder's lowest surface vertex on the arm axis
+(Y = 3.3833) and dropped the cutter to Y = 3.55 so its radius-0.35 sphere
+protrudes 0.18 through that surface. Result: 1 shell, watertight, 760 → 1158 tris.
+
+**Task 6, step 4 — `etch_text` `depth` is exact, and I twice measured it wrong.**
+Recorded because the error is the instructive part. First reading said the brow
+recess was 0.2 deep for a requested 0.08 — that was the brow's *rear wall*, since
+I minimised over every vertex instead of the recess floor. Second reading, on
+scrap cubes, said the tool delivered exactly half (0.03 → 0.015, 0.5 → 0.25) —
+that was the glyph's *intermediate ring*, picked by taking the second distinct Z.
+The full Z list settles it: `etchres1` carries 1.0, 0.75 **and 0.5**, so a
+requested 0.5 cuts 0.5. The brow's floor is 0.08 below its own plate plane, with
+0.12 of wall left behind. **No defect.** The lesson is that a min/max over a whole
+mesh is not a depth measurement, and two independent wrong numbers agreed with
+each other well enough to look like a finding.
 
 **Step 5 — one proportion was wrong and was caught by looking.** The head sat
 0.6 of its 1.0 height inside the chest girdle and the figure measured 4.5 against
