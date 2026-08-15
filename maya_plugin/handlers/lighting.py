@@ -9,6 +9,7 @@ call never burns one (the correction M1 made to sculpt_ops/remesh).
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..dispatcher import HandlerError
@@ -46,6 +47,22 @@ _THREE_POINT = (
     ("rim", 0.7, [-10.0, 165.0, 0.0]),
 )
 _SINGLE_SUN = (("sun", 1.0, [-45.0, 25.0, 0.0]),)
+
+# Arnold's distant light spreads its energy over the hemisphere the surface can
+# see, so a lambert facing it at intensity 1.0 returns albedo/pi, not albedo.
+# VP2 does the same - both measured on a linear-0.5 plane at N.L = 1, which
+# reads its own albedo only at intensity pi (redmine #617).
+#
+# Carrying the factor here makes `intensity` a UNIT: 1.0 is a fully-lit
+# surface, 0.5 is visibly dim, 2.0 is deliberately hot. Before this, "1.0"
+# delivered 32% of a lit surface and named nothing, so every caller dialled in
+# its own number by eye - 1.2, 1.5, 2.1, 3.0, 3.2, 4.0, 16.0 across the evals,
+# no two agreeing, each also compensating for the #615 gamma bug.
+#
+# A sky dome does NOT get this: a hemisphere of uniform luminance already
+# integrates to albedo * L. Measured, environment at 1.0 lights the plane to
+# ~122 where a pi-divided dome would be ~88.
+FULLY_LIT = math.pi
 
 
 def _cmds():
@@ -115,7 +132,8 @@ def _build(cmds, prefix: str, specs, intensity: float) -> List[str]:
     try:
         for suffix, factor, rotate in specs:
             name = naming.unique_name(cmds, "%s_%s" % (prefix, suffix))
-            shape = cmds.directionalLight(name=name, intensity=intensity * factor)
+            shape = cmds.directionalLight(
+                name=name, intensity=intensity * factor * FULLY_LIT)
             parents = cmds.listRelatives(shape, parent=True, fullPath=True) or []
             transform = parents[0] if parents else shape
             created.append(transform)
@@ -267,7 +285,9 @@ def _build_dome(
     try:
         if not _arnold_available(cmds):
             name = naming.unique_name(cmds, "mcpLight_domeFallback")
-            shape = cmds.directionalLight(name=name, intensity=intensity)
+            # The factor, so a Maya without mtoa does not render three times
+            # darker than one with it for the same call (#617).
+            shape = cmds.directionalLight(name=name, intensity=intensity * FULLY_LIT)
             parents = cmds.listRelatives(shape, parent=True, fullPath=True) or []
             transform = parents[0] if parents else shape
             created.append(transform)

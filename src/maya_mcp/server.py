@@ -1564,7 +1564,10 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             )),
         ],
         intensity: Annotated[float, Field(gt=0, le=20, description=(
-            "Overall rig intensity; 1.0 is neutral."
+            "Rig intensity, in fully-lit surfaces. 1.0 means a surface facing "
+            "the key reads its OWN albedo - a light grey wall renders light "
+            "grey. 0.5 is visibly dim, 2.0 deliberately hot. The key/fill/rim "
+            "ratio is fixed; this scales the whole rig."
         ))] = 1.0,
         hdri_path: Annotated[Optional[str], Field(description=(
             "Absolute path to an .hdr/.exr. Required for preset='hdri' - no HDRI "

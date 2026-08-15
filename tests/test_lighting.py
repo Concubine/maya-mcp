@@ -1,5 +1,6 @@
 """setup_lighting against a fake cmds - no Maya required."""
 
+import math
 from typing import Optional
 
 import pytest
@@ -435,3 +436,66 @@ class TestEnvironmentDome:
         fake = self._fake(monkeypatch, mtoa_installed=False)
         fake.add_light("keyShape")
         assert lighting.light_shapes(fake) == ["|key|keyShape"]
+
+
+class TestFullyLitUnit:
+    """#617: intensity 1.0 must mean a surface facing the key reads its own
+    albedo. Arnold's distant light returns albedo/pi at 1.0, and VP2 does the
+    same (both measured live), so the tool carries the pi and the caller states
+    a picture instead of guessing a number.
+    """
+
+    @staticmethod
+    def _fake(monkeypatch, **kwargs):
+        fake = FakeCmds()
+        for key, value in kwargs.items():
+            setattr(fake, key, value)
+        monkeypatch.setattr(lighting, "_cmds", lambda: fake)
+        monkeypatch.setattr(lighting, "_auto_checkpoint", lambda reason: None)
+        return fake
+
+    @staticmethod
+    def _built(fake):
+        """(name, intensity) per directional light created.
+
+        FakeCmds.directionalLight records ("directionalLight", name, intensity);
+        createNode records a 2-tuple, hence the star-unpack.
+        """
+        return [(name, rest[0]) for kind, name, *rest in fake.created
+                if kind == "directionalLight"]
+
+    def test_a_single_sun_at_one_is_a_fully_lit_surface(self, monkeypatch):
+        fake = self._fake(monkeypatch)
+        lighting.setup_lighting({"preset": "single_sun", "intensity": 1.0,
+                                 "replace_existing": False})
+        assert self._built(fake)[0][1] == pytest.approx(math.pi)
+
+    def test_the_key_carries_the_factor_and_the_ratios_are_unchanged(self, monkeypatch):
+        fake = self._fake(monkeypatch)
+        lighting.setup_lighting({"preset": "three_point", "intensity": 2.0,
+                                 "replace_existing": False})
+        built = [i for _, i in self._built(fake)]
+        assert built[0] == pytest.approx(2.0 * math.pi)
+        # only the UNIT moves: key/fill/rim keep the rig's shape
+        assert built[1] / built[0] == pytest.approx(0.35)
+        assert built[2] / built[0] == pytest.approx(0.7)
+
+    def test_the_dome_does_not_get_the_factor(self, monkeypatch):
+        # A hemisphere of uniform luminance already integrates to albedo * L.
+        # Measured: environment at 1.0 lights the plane to ~122, where a
+        # pi-divided dome would be ~88.
+        fake = self._fake(monkeypatch)
+        result = lighting.setup_lighting({"preset": "environment", "intensity": 1.0,
+                                          "replace_existing": False})
+        dome = result["lights"][0]
+        intensity = [v for a, v in fake.attrs.items()
+                     if a.startswith(dome) and a.endswith(".intensity")]
+        assert intensity and intensity[0] == (1.0,)
+
+    def test_the_no_arnold_fallback_matches_the_dome_it_stands_in_for(self, monkeypatch):
+        # Without the factor a Maya lacking mtoa renders three times darker than
+        # one that has it, for the same call - a silent difference.
+        fake = self._fake(monkeypatch, mtoa_installed=False)
+        lighting.setup_lighting({"preset": "environment", "intensity": 1.0,
+                                 "replace_existing": False})
+        assert self._built(fake)[0][1] == pytest.approx(math.pi)
