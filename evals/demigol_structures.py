@@ -24,9 +24,16 @@ unsupported chunk and fails the build. This is the same question the game's
 solver asks on load, asked here first.
 
 Footprints match the four archetypes, so each is a drop-in replacement in the
-generated district rather than something that has to be placed by hand:
+generated district rather than something that has to be placed by hand. Since
+revision 3 a storey has a footprint of its own, so a hero is a PROFILE rather
+than a box, and each one steps back to a different rhythm:
 
-  tower  13x13x14   block  19x19x6   slab  10x19x8   stump  10x10x4
+  tower  10x10 -> 7x7 -> 4x4 over 28 storeys   30 x 87 x 30 m
+  block  19x19 with a 13x13 attic, 6 storeys   57 x 21 x 57 m
+  slab   10x19 stepping to 10x13, 8 storeys    30 x 27 x 57 m
+  stump  10x10 under a 4x4 bulkhead, 5 storeys 30 x 18 x 30 m
+
+The base footprint never grew, so nothing in the city layout has to move.
 
 Run:  set MAYA_MCP_PORT=9878 && .venv/Scripts/python.exe evals/demigol_structures.py
 Package: evals/demigol_structures/
@@ -873,8 +880,10 @@ def stump():
     return b
 
 
-BUILDINGS = [("tower", tower, 1.3), ("block", block, 1.3),
-             ("slab", slab, 1.3), ("stump", stump, 1.25)]
+# The third value is render zoom. The tower is 87 m on a 30 m base now, so it
+# needs the whole frame; a 1.3 that suited a cube crops a tower.
+BUILDINGS = [("tower", tower, 1.0), ("block", block, 1.25),
+             ("slab", slab, 1.2), ("stump", stump, 1.25)]
 
 
 # =============================================================== Maya bridge

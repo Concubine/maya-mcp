@@ -38,15 +38,15 @@ yields terraces. Palette and detail are table edits on top.
   bounds. `Building.foot(y) -> (x0, x1, z0, z1)`. `tiers=None` means one
   implicit tier covering the whole grid.
 
-- [ ] **Step 1: Write the failing tests** - a tier whose bay lines are not a
+- [x] **Step 1: Write the failing tests** - a tier whose bay lines are not a
   subset of the parent's raises; a tier that grows raises; a tier off the
   `bays*3+1` grid raises; `foot(y)` returns the whole grid when `tiers=None`;
   `foot(y)` returns the right rect either side of a boundary.
-- [ ] **Step 2:** `pytest tests/test_demigol_generators.py -k Tier -v` - FAIL.
-- [ ] **Step 3: Implement.** Validation runs in `__init__` so a bad tier can
+- [x] **Step 2:** `pytest tests/test_demigol_generators.py -k Tier -v` - FAIL.
+- [x] **Step 3: Implement.** Validation runs in `__init__` so a bad tier can
   never reach the game. Error messages name the tier and the offending axis.
-- [ ] **Step 4:** tests PASS.
-- [ ] **Step 5: Commit.**
+- [x] **Step 4:** tests PASS.
+- [x] **Step 5: Commit.**
 
 ---
 
@@ -61,17 +61,17 @@ yields terraces. Palette and detail are table edits on top.
 - Consumes: `foot(y)` from Task 1.
 - Produces: same signatures; behaviour identical when no tiers are given.
 
-- [ ] **Step 1: Write the failing tests** - characterisation first: a building
+- [x] **Step 1: Write the failing tests** - characterisation first: a building
   with no tiers claims *exactly* the same cell dict as before the change (pin
   the count and a sample of roles). Then: with a tier, no cell is claimed
   outside `foot(y)` at that storey; the setback storey's columns sit directly
   above columns of the storey below.
-- [ ] **Step 2:** run - FAIL.
-- [ ] **Step 3: Implement.** `_interior` and `_corner_spandrels` take a rect.
+- [x] **Step 2:** run - FAIL.
+- [x] **Step 3: Implement.** `_interior` and `_corner_spandrels` take a rect.
   Bay lines per storey come from `_tier_bay_lines`.
-- [ ] **Step 4:** tests PASS, and the whole file passes - the existing frame
+- [x] **Step 4:** tests PASS, and the whole file passes - the existing frame
   and cladding tests are the characterisation.
-- [ ] **Step 5: Commit.**
+- [x] **Step 5: Commit.**
 
 ---
 
@@ -85,19 +85,19 @@ yields terraces. Palette and detail are table edits on top.
 **Interfaces:**
 - Produces: `Building.roofed` - the set of `(x, y, z)` cells `roof()` claimed.
 
-- [ ] **Step 1: Write the failing tests** - a setback building gets a terrace
+- [x] **Step 1: Write the failing tests** - a setback building gets a terrace
   at the tier boundary of exactly `foot(y) - foot(y+1)`; the top deck still
   covers the whole top footprint; every `(x, z)` column tops out in a cell in
   `self.roofed`; roofing twice still raises; a terraced building still passes
   `structural_report(...)["standing"]`.
-- [ ] **Step 2:** run - FAIL.
-- [ ] **Step 3: Implement** the single rule: for `y` in `0..storeys`, claim
+- [x] **Step 2:** run - FAIL.
+- [x] **Step 3: Implement** the single rule: for `y` in `0..storeys`, claim
   concrete at `(x, y+1, z)` for every cell in `foot(y)` not in `foot(y+1)`,
   where `foot(storeys)` is empty.
-- [ ] **Step 4:** tests PASS. Update
+- [x] **Step 4:** tests PASS. Update
   `test_no_occupied_cell_is_left_with_nothing_above_it_but_sky` to assert
   against `roofed` rather than `y == storeys`, which tiers make false.
-- [ ] **Step 5: Commit.**
+- [x] **Step 5: Commit.**
 
 ---
 
@@ -107,17 +107,17 @@ yields terraces. Palette and detail are table edits on top.
 - Modify: `evals/demigol_structures.py` (`tower`, `block`, `slab`, `stump`)
 - Test: `tests/test_demigol_generators.py`
 
-- [ ] **Step 1: Write the failing test** - each archetype has a distinct
+- [x] **Step 1: Write the failing test** - each archetype has a distinct
   footprint *profile* (the sequence of `foot(y)` widths); no two archetypes
   share one; every archetype still stands; the tower is at least twice as tall
   as it is wide.
-- [ ] **Step 2:** run - FAIL.
-- [ ] **Step 3: Implement** the table from the spec: tower 10x10/7x7/4x4 over
+- [x] **Step 2:** run - FAIL.
+- [x] **Step 3: Implement** the table from the spec: tower 10x10/7x7/4x4 over
   28 storeys, block 19x19 with a 13x13 attic, slab 10x19 stepping to 10x13 on
   one end, stump 10x10 with a 4x4 bulkhead.
-- [ ] **Step 4:** tests PASS; the budget and outset tests still pass on the new
+- [x] **Step 4:** tests PASS; the budget and outset tests still pass on the new
   shapes.
-- [ ] **Step 5: Commit.**
+- [x] **Step 5: Commit.**
 
 ---
 
@@ -133,14 +133,14 @@ yields terraces. Palette and detail are table edits on top.
   role -> `(patch, trim_patch)`. `Building.palette_name`, and
   `chunk_boxes(ch, occupied, storeys, palette=None)`.
 
-- [ ] **Step 1: Write the failing tests** - every patch every palette names
+- [x] **Step 1: Write the failing tests** - every patch every palette names
   exists in `kit.PATCH`; no two archetypes produce the same set of patches; a
   palette omitting a role falls back to `ROLE_PATCH`/`TRIM_PATCH`; the manifest
   states the palette name.
-- [ ] **Step 2:** run - FAIL.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4:** tests PASS.
-- [ ] **Step 5: Commit.**
+- [x] **Step 2:** run - FAIL.
+- [x] **Step 3: Implement.**
+- [x] **Step 4:** tests PASS.
+- [x] **Step 5: Commit.**
 
 ---
 
@@ -150,15 +150,15 @@ yields terraces. Palette and detail are table edits on top.
 - Modify: `evals/demigol_structures.py` (`_face_boxes`)
 - Test: `tests/test_demigol_generators.py`
 
-- [ ] **Step 1: Write the failing test** - the mean triangles per cell across
+- [x] **Step 1: Write the failing test** - the mean triangles per cell across
   every archetype's exposed chunks is at least 110 (it is 73-78 today), while
   every chunk stays inside its 200-per-cell budget after `split_oversized`.
-- [ ] **Step 2:** run - FAIL on the floor, PASS on the cap.
-- [ ] **Step 3: Implement** mullions on glass, a centre rib on infill, end
+- [x] **Step 2:** run - FAIL on the floor, PASS on the cap.
+- [x] **Step 3: Implement** mullions on glass, a centre rib on infill, end
   pilasters on brick, a flange rib on exposed frame.
-- [ ] **Step 4:** tests PASS. Re-check the outset tests - new relief must stay
+- [x] **Step 4:** tests PASS. Re-check the outset tests - new relief must stay
   inside `MAX_OUTSET`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 5: Commit.**
 
 ---
 
@@ -169,17 +169,17 @@ yields terraces. Palette and detail are table edits on top.
   one - a silhouette claim cannot be judged from above)
 - Produces: `evals/demigol_structures/*.fbx`, `*.png`, `manifest.json`
 
-- [ ] **Step 1:** Full headless suite green first.
+- [x] **Step 1:** Full headless suite green first.
   Run: `uv run pytest -q`
-- [ ] **Step 2:** Sync the deployed plugin if it is stale.
+- [x] **Step 2:** Sync the deployed plugin if it is stale.
   Run: `uv run python maya_plugin/install.py --yes`
-- [ ] **Step 3:** Build all four, in one invocation - a partial run writes a
+- [x] **Step 3:** Build all four, in one invocation - a partial run writes a
   partial manifest (the trap found on 2026-08-15).
   Run: `MAYA_MCP_PORT=9877 uv run python evals/demigol_structures.py`
   Expected: four FBXs, `geometry check: all four clean`, manifest listing all
   four with a `material` block and a palette name.
-- [ ] **Step 4:** Look at the renders. The four must be distinguishable in
+- [x] **Step 4:** Look at the renders. The four must be distinguishable in
   silhouette *and* in colour at a glance. If they are not, this plan failed
   regardless of what the tests say.
-- [ ] **Step 5:** Report measured numbers on #600: triangles per cell, chunk
+- [x] **Step 5:** Report measured numbers on #600: triangles per cell, chunk
   counts, heights, and what each hero now reads as. Commit.
