@@ -60,7 +60,7 @@ Established live on 9877, 2026-08-15, with the #615 calibration plane (`standard
 - Produces: `lighting.FULLY_LIT` — the float multiplier applied to every directional light's intensity. Task 3's live gate refers to the behaviour, not the constant.
 - No signature change. `setup_lighting`'s params and response shape are untouched.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/test_lighting.py`. The existing `FakeCmds.directionalLight` records `("directionalLight", name, intensity)` in `fake.created`, and `setAttr` stores its value as a tuple in `fake.attrs` — both are used below.
 
@@ -130,12 +130,12 @@ class TestFullyLitUnit:
 
 Add `import math` to the top of `tests/test_lighting.py` if it is not already there.
 
-- [ ] **Step 2: Run them and watch them fail**
+- [x] **Step 2: Run them and watch them fail**
 
 Run: `uv run python -m pytest tests/test_lighting.py -v -k FullyLit`
 Expected: FAIL — three of the four assert π and get 1.0. `test_the_dome_does_not_get_the_factor` passes already; that is correct, it is the guard that the factor stays out of the dome.
 
-- [ ] **Step 3: Add the constant**
+- [x] **Step 3: Add the constant**
 
 In `maya_plugin/handlers/lighting.py`, after the `_SINGLE_SUN` definition (line 48), add:
 
@@ -159,7 +159,7 @@ FULLY_LIT = math.pi
 
 Add `import math` to the imports at the top of the file (after `from __future__ import annotations`, with the other stdlib imports).
 
-- [ ] **Step 4: Apply it in `_build`**
+- [x] **Step 4: Apply it in `_build`**
 
 `maya_plugin/handlers/lighting.py` line 118, inside `_build`:
 
@@ -168,7 +168,7 @@ Add `import math` to the imports at the top of the file (after `from __future__ 
                 name=name, intensity=intensity * factor * FULLY_LIT)
 ```
 
-- [ ] **Step 5: Apply it to the no-Arnold dome fallback**
+- [x] **Step 5: Apply it to the no-Arnold dome fallback**
 
 `maya_plugin/handlers/lighting.py` line 270, inside `_build_dome`:
 
@@ -179,12 +179,12 @@ Add `import math` to the imports at the top of the file (after `from __future__ 
 
 Leave line 298 — `cmds.setAttr(shape + ".intensity", intensity)` on the real `aiSkyDomeLight` — exactly as it is.
 
-- [ ] **Step 6: Run the tests and watch them pass**
+- [x] **Step 6: Run the tests and watch them pass**
 
 Run: `uv run python -m pytest tests/test_lighting.py -v`
 Expected: PASS, including the four new ones.
 
-- [ ] **Step 7: State the unit on the tool surface**
+- [x] **Step 7: State the unit on the tool surface**
 
 `src/maya_mcp/server.py` lines 1566-1568. Replace:
 
@@ -205,12 +205,12 @@ with:
         ))] = 1.0,
 ```
 
-- [ ] **Step 8: Run the whole suite**
+- [x] **Step 8: Run the whole suite**
 
 Run: `uv run python -m pytest`
 Expected: **717 passed, 1 skipped**. Any other failure is a regression — stop and fix.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add maya_plugin/handlers/lighting.py src/maya_mcp/server.py tests/test_lighting.py
@@ -239,13 +239,13 @@ Mechanical `/π` for every script whose intensity was tuned for a look that must
 - Consumes: Task 1's `FULLY_LIT`, indirectly — these numbers are only correct once the handler carries the factor.
 - Produces: nothing. No other task depends on these files.
 
-- [ ] **Step 1: Change every number**
+- [x] **Step 1: Change every number**
 
 Each is a literal in a `setup_lighting` params dict of the form `"intensity": 3.0,`. Change only the number. Do not touch `preset` or `replace_existing`.
 
 The divisions, for checking: `1.2/π = 0.3820`, `2.1/π = 0.6685`, `3.0/π = 0.9549`, `4.0/π = 1.2732`, `7.0/π = 2.2282`, `16.0/π = 5.0930`.
 
-- [ ] **Step 2: Add the one-line reason where the number now looks odd**
+- [x] **Step 2: Add the one-line reason where the number now looks odd**
 
 A bare `0.9549` invites someone to "tidy" it back to 1.0. Above each changed call, add:
 
@@ -255,17 +255,17 @@ A bare `0.9549` invites someone to "tidy" it back to 1.0. Above each changed cal
 
 with that script's own old value.
 
-- [ ] **Step 3: Verify nothing else moved**
+- [x] **Step 3: Verify nothing else moved**
 
 Run: `git diff --stat evals/`
 Expected: ten files, and every changed line is either an intensity literal or the comment above it. No logic, no assertions.
 
-- [ ] **Step 4: Run the headless suite**
+- [x] **Step 4: Run the headless suite**
 
 Run: `uv run python -m pytest`
 Expected: **717 passed, 1 skipped**. These are eval scripts, not tests, so the count should not move — this step is confirming you did not edit a file that pytest imports.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add evals/
@@ -285,7 +285,7 @@ Headless tests prove the multiplication happened. They cannot prove it happened 
 - Consumes: Task 1's behaviour, through `setup_lighting`.
 - Produces: a second exit-code check in the same script.
 
-- [ ] **Step 1: Add the second measurement**
+- [x] **Step 1: Add the second measurement**
 
 The existing check builds its own light at intensity π and asserts 188. Keep it exactly as it is — it does not go through `setup_lighting`, so it is unaffected by this change and makes a useful control.
 
@@ -337,7 +337,7 @@ and in `main()`, after the first `measured = lit_value(png)`:
 
 Initialise `created = []` before the `try` so the `finally` cannot raise on a failure that happened earlier.
 
-- [ ] **Step 2: Report and gate on it**
+- [x] **Step 2: Report and gate on it**
 
 Replace the single print/return block at the end of `main()` with both numbers:
 
@@ -360,7 +360,7 @@ Replace the single print/return block at the end of `main()` with both numbers:
     return 0
 ```
 
-- [ ] **Step 3: Deploy and hot-patch the live plugin**
+- [x] **Step 3: Deploy and hot-patch the live plugin**
 
 ```bash
 uv run python maya_plugin/install.py --yes
@@ -385,7 +385,7 @@ getattr(L, "FULLY_LIT", None)
 
 Expected: `3.141592653589793`.
 
-- [ ] **Step 4: Run the gate**
+- [x] **Step 4: Run the gate**
 
 ```bash
 MAYA_MCP_PORT=9877 uv run python evals/render_calibration_live.py
@@ -395,7 +395,7 @@ Expected: `calibration: hand-built light at pi -> 187, setup_lighting(single_sun
 
 If the second number comes back near **60**, the factor was applied to the dome path or divided rather than multiplied. If it comes back near **255**, it was applied twice.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add evals/render_calibration_live.py
@@ -416,7 +416,7 @@ git commit -m "test(render): the live gate measures the unit, not just the gamma
 - Consumes: Task 1's unit, Task 3's confirmation that the unit is real.
 - Produces: the renders the revision-3 regeneration pass will judge.
 
-- [ ] **Step 1: Set both to the new unit**
+- [x] **Step 1: Set both to the new unit**
 
 `evals/demigol_structures.py:893` and `evals/demigol_kit.py:936`: `"intensity": 1.0`.
 
@@ -430,7 +430,7 @@ Above each, replace any existing tuning comment with:
 
 using that script's own old value.
 
-- [ ] **Step 2: Re-render the hero and read the number**
+- [x] **Step 2: Re-render the hero and read the number**
 
 ```bash
 MAYA_MCP_PORT=9877 uv run python evals/demigol_structures.py stump
@@ -445,18 +445,18 @@ sorted((c for c in im.getcolors(maxcolors=im.width*im.height) if sum(c[1]) > 30)
        reverse=True)[:3]
 ```
 
-- [ ] **Step 3: Judge it by eye**
+- [x] **Step 3: Judge it by eye**
 
 Open `evals/demigol_structures/stump.png`. The deck should read as light grey concrete. If it is now blown out — large flat areas at 250+ — the key is too hot for a scene with three lights adding up; drop to 0.7 and re-render. Record whichever number you land on and why, in the comment from Step 1.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add evals/demigol_kit.py evals/demigol_structures.py evals/demigol_structures/
 git commit -m "feat(assets): light the delivery in the new unit, and mean it"
 ```
 
-- [ ] **Step 5: Close the ticket**
+- [x] **Step 5: Close the ticket**
 
 Update #617 to Resolved with the before/after numbers from Task 3 Step 4 and Task 4 Step 2, and the intensity each art script landed on.
 
