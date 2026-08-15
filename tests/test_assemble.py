@@ -92,13 +92,24 @@ class FakeCmds:
     # --- transforms
     def xform(self, node, **kw):
         if kw.get("query"):
-            if kw.get("rotatePivot") or kw.get("pivots"):
+            if kw.get("rotatePivot"):
+                # Logged separately from the (untouched) generic query
+                # no-op below: this is the specific query assemble.py must
+                # make AFTER writing a pivot, to report what Maya actually
+                # has rather than trusting its own input. A handler that
+                # goes back to echoing the input never makes this call.
+                self.calls.append(("query_pivot", node))
+                return list(self.pivots.get(node, (0.0, 0.0, 0.0)))
+            if kw.get("pivots"):
                 return list(self.pivots.get(node, (0.0, 0.0, 0.0)))
             return [0.0, 0.0, 0.0]
         if "pivots" in kw:
-            value = tuple(kw["pivots"])
-            self.pivots[node] = value
-            self.calls.append(("pivot", node, value))
+            self.pivots[node] = tuple(kw["pivots"])
+            # Same shape test_modeling.py's FakeCmds already uses for this
+            # call ((tag, node, full_kwargs) rather than a bespoke
+            # ("pivot", node, value) tuple) - the two doubles model the same
+            # cmds.xform(pivots=...) call and should agree on how.
+            self.calls.append(("xform", node, kw))
             return None
         for key in ("scale", "rotation", "translation"):
             if key in kw:
@@ -110,6 +121,12 @@ class FakeCmds:
 
     def makeIdentity(self, node, **kw):
         self.calls.append(("freeze", node))
+        # Models the real Maya gotcha this module's own docstring names:
+        # freeze resets pivots to the world origin. Without this, a refactor
+        # that hoists an explicit pivot write to BEFORE combine.unite would
+        # stay green here even though it silently loses the pivot in a real
+        # Maya session.
+        self.pivots.pop(node, None)
 
     # --- deformer
     def nonLinear(self, node, type=None, **kw):
@@ -467,7 +484,67 @@ class TestPivots:
         # The reported dict field alone doesn't prove the Maya-side mutation
         # ran - assert the real cmds.xform(pivots=...) call happened too, on
         # the merged node, with the caller's vector (not the "center" mode's).
-        assert ("pivot", arm["name"], (0.0, 3.0, 0.0)) in fake.calls
+        assert ("xform", arm["name"],
+                {"worldSpace": True, "pivots": (0.0, 3.0, 0.0)}) in fake.calls
+        # The explicit pivot MUST be written after combine.unite's freeze
+        # (combine.py's makeIdentity), because freeze resets pivots to the
+        # world origin - a refactor hoisting the write earlier would look
+        # tidier and still pass every OTHER assertion here.
+        assert (fake.calls.index(("freeze", arm["name"]))
+                < fake.calls.index(("xform", arm["name"],
+                                    {"worldSpace": True, "pivots": (0.0, 3.0, 0.0)})))
+
+    def test_assemble_reports_what_maya_has_not_what_was_requested(self, monkeypatch):
+        """The finding this whole wave exists for: the response must be able
+        to DISAGREE with the input. A handler that reports `wanted` straight
+        back (list(wanted)) cannot fail this test even when Maya's actual
+        pivot ends up somewhere else - only a real query-back can."""
+
+        class DisagreeingFakeCmds(FakeCmds):
+            def xform(self, node, **kw):
+                if not kw.get("query") and "pivots" in kw:
+                    # Model Maya landing the pivot somewhere OTHER than the
+                    # exact value requested - e.g. a live session's own
+                    # rounding or a stale value from before the write. Any
+                    # handler that reports the request unchanged will miss
+                    # this; only a genuine query-back can catch it.
+                    kw = dict(kw, pivots=tuple(v + 100.0 for v in kw["pivots"]))
+                return super().xform(node, **kw)
+
+        fake = DisagreeingFakeCmds()
+        monkeypatch.setattr(assemble, "_cmds", lambda: fake)
+        result = assemble.assemble({
+            "name": "golem",
+            "parts": [
+                {"kind": "cube", "pos": [0, 1, 0], "dim": [1, 1, 1], "chunk": "arm"},
+                {"kind": "cube", "pos": [0, 2, 0], "dim": [1, 1, 1], "chunk": "arm"},
+            ],
+            "pivots": {"arm": [0.0, 3.0, 0.0]},
+        })
+        arm = next(o for o in result["objects"] if o["name"].endswith("arm"))
+        # Maya actually landed at (100, 103, 100), not the requested (0, 3, 0).
+        assert arm["pivot"] == [100.0, 103.0, 100.0]
+
+    def test_assemble_single_part_reports_what_maya_has_not_what_was_requested(
+        self, monkeypatch
+    ):
+        """Same proof as the merge-branch test above, for the single-part
+        branch: it has its OWN `placed = list(wanted)` echo to fix."""
+
+        class DisagreeingFakeCmds(FakeCmds):
+            def xform(self, node, **kw):
+                if not kw.get("query") and "pivots" in kw:
+                    kw = dict(kw, pivots=tuple(v + 100.0 for v in kw["pivots"]))
+                return super().xform(node, **kw)
+
+        fake = DisagreeingFakeCmds()
+        monkeypatch.setattr(assemble, "_cmds", lambda: fake)
+        result = assemble.assemble({
+            "name": "golem",
+            "parts": [{"kind": "cube", "pos": [0, 1, 0], "dim": [1, 1, 1], "chunk": "fist"}],
+            "pivots": {"fist": [1.0, 2.0, 3.0]},
+        })
+        assert result["objects"][0]["pivot"] == [101.0, 102.0, 103.0]
 
     def test_assemble_pivots_reach_single_part_chunks(self, monkeypatch):
         fake = FakeCmds()
@@ -481,7 +558,8 @@ class TestPivots:
         # Same proof for the single-part branch: the dict field is computed
         # from `wanted` independently of whether cmds.xform ever ran, so
         # assert the real call too.
-        assert ("pivot", result["objects"][0]["name"], (1.0, 2.0, 3.0)) in fake.calls
+        assert ("xform", result["objects"][0]["name"],
+                {"worldSpace": True, "pivots": (1.0, 2.0, 3.0)}) in fake.calls
 
     def test_assemble_unlisted_chunks_keep_the_mode(self, monkeypatch):
         fake = FakeCmds()
