@@ -1072,6 +1072,24 @@ class TestDocsExplainWhichShadingModeRevealsWhat:
         assert conn.calls[0]["timeout_s"] == server_mod.RENDER_TIMEOUT_S
         assert result.structured_content["objects"][0]["shells"] == 4
 
+    def test_assemble_forwards_the_per_chunk_pivot_map(self):
+        conn = FakeConn({"assemble": {
+            "objects": [{"name": "|rig_arm", "parts": 1, "tris": 12,
+                         "verts": 8, "faces": 6, "shells": 1,
+                         "pivot": [1.0, 2.0, 3.0], "combined": True}],
+            "parts": 1, "tris": 12, "outside_patch": 0, "atlas": None,
+            "warnings": [],
+        }})
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_assemble", {
+            "name": "rig",
+            "parts": [{"pos": [0, 0, 0], "dim": [1, 1, 1], "chunk": "rig_arm"}],
+            "pivots": {"rig_arm": [1.0, 2.0, 3.0]},
+        }))
+        # If pivots stopped being forwarded, this would silently pass through
+        # as None and the plugin would fall back to the global `pivot` mode.
+        assert conn.calls[0]["params"]["pivots"] == {"rig_arm": [1.0, 2.0, 3.0]}
+
     def test_assign_pbr_forwards_the_whole_map_set_in_one_request(self):
         conn = FakeConn({"assign_pbr": {
             "meshes": ["|kit_a", "|kit_b"], "material": "kit",
@@ -1102,6 +1120,23 @@ class TestDocsExplainWhichShadingModeRevealsWhat:
         assert "SMOOTHNESS" in schema
         assert "sRGB" in schema
         assert "ATLAS" in schema
+
+
+def test_transform_forwards_pivot_and_reports_it_back():
+    conn = FakeConn({"transform": {
+        "objects": [{"name": "|pivotGate", "translate": [2.0, 3.0, 4.0],
+                     "rotate": [0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0],
+                     "pivot": [0.0, 10.0, 0.0]}],
+        "warnings": [],
+    }})
+    mcp = server_mod.create_server(conn)
+    result = run(mcp.call_tool("maya_transform", {
+        "names": ["|pivotGate"], "pivot": [0.0, 10.0, 0.0],
+    }))
+    # If pivot stopped being forwarded, this would silently pass through as
+    # None and the plugin would never move the pivot at all.
+    assert conn.calls[0]["params"]["pivot"] == [0.0, 10.0, 0.0]
+    assert result.structured_content["objects"][0]["pivot"] == [0.0, 10.0, 0.0]
 
 
 def test_array_result_accepts_a_mirror_response():

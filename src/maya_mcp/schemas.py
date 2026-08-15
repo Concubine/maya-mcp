@@ -167,6 +167,11 @@ class TransformedObject(BaseModel):
     translate: List[float]
     rotate: List[float]
     scale: List[float]
+    pivot: Optional[List[float]] = Field(
+        default=None,
+        description="World-space rotate pivot after the call - the point this "
+                    "object turns about, which is what a ragdoll reads.",
+    )
 
 
 class TransformResult(BaseModel):

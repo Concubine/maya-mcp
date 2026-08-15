@@ -14,7 +14,7 @@ import json
 import logging
 import logging.handlers
 import os
-from typing import Annotated, List, Literal, Optional, Union
+from typing import Annotated, Dict, List, Literal, Optional, Union
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Image
@@ -937,6 +937,12 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "True (default): offsets relative to current values. False: absolute "
             "world-space translate and rotate; object-space scale."
         ))] = True,
+        pivot: Annotated[Vec3, Field(description=(
+            "World-space point to place the object's pivot at. Does NOT move the "
+            "geometry - it moves what the geometry turns about. Applied before "
+            "translate/rotate/scale, so a relative rotate in the same call turns "
+            "about the new pivot."
+        ))] = None,
     ) -> TransformResult:
         """Move/rotate/scale objects by name. Returns the resulting transforms —
         trust these over your own bookkeeping: the live user may also be moving
@@ -945,7 +951,7 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             maya.request(
                 "transform",
                 {"names": names, "translate": translate, "rotate": rotate,
-                 "scale": scale, "relative": relative},
+                 "scale": scale, "relative": relative, "pivot": pivot},
                 timeout_s=SCENE_TIMEOUT_S,
             )
         )
@@ -1151,6 +1157,11 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         pivot: Annotated[Literal["center", "origin", "keep"], Field(description=(
             "Pivot for each combined object, as in maya_combine."
         ))] = "center",
+        pivots: Annotated[Optional[Dict[str, List[float]]], Field(description=(
+            "Chunk name -> world-space pivot. Chunks left out keep the global "
+            "`pivot` mode. For an articulated figure this is the rig: each chunk "
+            "pivots at its own joint, which `center` never gets right."
+        ))] = None,
         freeze: Annotated[bool, Field(description=(
             "Freeze transforms on each combined object."
         ))] = True,
@@ -1173,7 +1184,8 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             maya.request(
                 "assemble",
                 {"name": name, "parts": parts, "atlas": atlas,
-                 "combine": combine, "pivot": pivot, "freeze": freeze},
+                 "combine": combine, "pivot": pivot, "pivots": pivots,
+                 "freeze": freeze},
                 timeout_s=RENDER_TIMEOUT_S,
             )
         )
