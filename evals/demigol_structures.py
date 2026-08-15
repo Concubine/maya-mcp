@@ -890,7 +890,10 @@ def build_one(label, builder, zoom):
     fbx = os.path.join(OUT_DIR, "%s.fbx" % label).replace("\\", "/")
     run("LABEL = %r\nFBX = %r\n%s" % (label, fbx, EXPORT_CODE), "export %s" % label)
 
-    ok(call("setup_lighting", {"preset": "three_point", "intensity": 1.5,
+    # 1.0 = a surface facing the key reads its own albedo (#617). The old
+    # 1.5 was dialled in against images that were also 2.2 gamma too dark
+    # (#615), so it is not a number worth converting - only re-judging.
+    ok(call("setup_lighting", {"preset": "three_point", "intensity": 1.0,
                                "replace_existing": True}, 180.0), "lighting")
     shot = ok(call("render_scene", {
         "angles": ["three_quarter"], "renderer": "arnold", "resolution": 768,

@@ -933,7 +933,10 @@ def main():
     # this relief faces. Each piece gets its own framed render instead, and
     # every tile is checked for a subject - a "valid PNG of nothing" is the
     # failure mode a render gate exists to catch.
-    ok(call("setup_lighting", {"preset": "three_point", "intensity": 3.2,
+    # 1.0 = a surface facing the key reads its own albedo (#617). The old
+    # 3.2 was dialled in against images that were also 2.2 gamma too dark
+    # (#615), so it is not a number worth converting - only re-judging.
+    ok(call("setup_lighting", {"preset": "three_point", "intensity": 1.0,
                                "replace_existing": True}, 180.0), "lighting")
     tiles, blanks = [], []
     for name in names:
