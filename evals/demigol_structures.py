@@ -52,7 +52,9 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "src"))
 
+import delivery_units  # noqa: E402 - the artifact-level unit gate
 import demigol_kit as kit  # noqa: E402 - shared atlas, patches and density
+import maya_export  # noqa: E402 - one place the delivery unit is decided
 from live_call import call  # noqa: E402
 from maya_mcp import images  # noqa: E402
 
@@ -1052,17 +1054,7 @@ result = {"chunks": len(kids), "tris": tris, "fails": fails[:20],
 result
 '''
 
-EXPORT_CODE = r'''
-import maya.cmds as cmds
-cmds.loadPlugin("fbxmaya", quiet=True)
-try:
-    import maya.mel as mel
-    mel.eval('FBXExportFileVersion -v FBX202000')
-    mel.eval('FBXExportUpAxis y')
-    mel.eval('FBXExportConvertUnitString m')
-    mel.eval('FBXExportInputConnections -v false')
-except Exception:
-    pass
+EXPORT_CODE = maya_export.BAKE_TO_METRES + maya_export.EXPORT_PREAMBLE + r'''
 cmds.select("|" + LABEL, replace=True, hierarchy=True)
 cmds.file(FBX, force=True, type="FBX export", pr=True, es=True)
 result = FBX
@@ -1105,7 +1097,18 @@ def build_one(label, builder, zoom):
     check = ast.literal_eval(
         run("LABEL = %r\n%s" % (label, CHECK_CODE), "check %s" % label)["result_repr"])
     fbx = os.path.join(OUT_DIR, "%s.fbx" % label).replace("\\", "/")
-    run("LABEL = %r\nFBX = %r\n%s" % (label, fbx, EXPORT_CODE), "export %s" % label)
+    run("LABEL = %r\nFBX = %r\nROOTS = %r\n%s"
+        % (label, fbx, ["|" + label], EXPORT_CODE), "export %s" % label)
+
+    # The artifact is the deliverable, so the artifact is what gets asserted.
+    # An in-Maya check cannot see this class of defect at all: the scene reads
+    # 3.0 m at scale [1,1,1] frozen and exports as 300.0 (maya-mcp #629).
+    violations = delivery_units.check_delivery(fbx, delivery_units.HERO_CEILING_M)
+    if violations:
+        print("DELIVERY IS NOT METRE-TRUE - refusing to ship %s:" % fbx)
+        for v in violations:
+            print("    " + v)
+        sys.exit(1)
 
     # 1.0 = a surface facing the key reads its own albedo (#617). The old
     # 1.5 was dialled in against images that were also 2.2 gamma too dark

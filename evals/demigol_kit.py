@@ -43,6 +43,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "src"))
 
+import delivery_units  # noqa: E402 - the artifact-level unit gate
+import maya_export  # noqa: E402 - one place the delivery unit is decided
 from live_call import call  # noqa: E402
 from maya_mcp import images  # noqa: E402
 
@@ -804,18 +806,7 @@ result
 '''
 
 
-EXPORT_CODE = r'''
-import maya.cmds as cmds
-cmds.loadPlugin("fbxmaya", quiet=True)
-try:
-    import maya.mel as mel
-    mel.eval('FBXExportFileVersion -v FBX202000')
-    mel.eval('FBXExportUpAxis y')
-    mel.eval('FBXExportConvertUnitString m')
-    mel.eval('FBXExportInputConnections -v false')
-    mel.eval('FBXExportEmbeddedTextures -v false')
-except Exception:
-    pass
+EXPORT_CODE = maya_export.BAKE_TO_METRES + maya_export.EXPORT_PREAMBLE + r'''
 cmds.select(NAMES, replace=True)
 cmds.file(FBX, force=True, type="FBX export", pr=True, es=True)
 result = FBX
@@ -925,7 +916,17 @@ def main():
         run("NAMES = %r\n%s" % (names, CHECK_CODE), "check")["result_repr"])
 
     fbx = os.path.join(OUT_DIR, "demigol_kit.fbx").replace("\\", "/")
-    run("NAMES = %r\nFBX = %r\n%s" % (names, fbx, EXPORT_CODE), "export")
+    # Each kit piece is its own export root, which is why all 41 carried the
+    # exporter's 0.01 while the heroes carried one on their group Null.
+    run("NAMES = %r\nFBX = %r\nROOTS = %r\n%s"
+        % (names, fbx, names, EXPORT_CODE), "export")
+
+    violations = delivery_units.check_delivery(fbx, delivery_units.KIT_CEILING_M)
+    if violations:
+        print("DELIVERY IS NOT METRE-TRUE - refusing to ship %s:" % fbx)
+        for v in violations:
+            print("    " + v)
+        sys.exit(1)
 
     # Contact sheet, one piece per tile. A single wide shot of the kit laid
     # out was tried first and is the wrong instrument: from one camera the
