@@ -75,7 +75,7 @@ def _uv_bounds(cmds, shape: str) -> List[float]:
 
 def pack_shape(
     cmds, shape: str, rect, project: str = "box", normalize: bool = True,
-    world_scale=None,
+    world_scale=None, uv_per_metre=None,
 ) -> Dict[str, Any]:
     """Project and fit ONE shape's UVs into `rect`; report where they landed.
 
@@ -90,7 +90,13 @@ def pack_shape(
         # the patch, so a small band ends up magnified several times over
         # and a wall reads as a model of a wall.
         cmds.polyAutoProjection(shape, ch=False, scaleMode=0)
-        scale = (rect[2] - rect[0]) / (AUTOPROJ_UV_PER_METRE * world_scale)
+        # The constant is per METRE OF WORLD SIZE, and polyAutoProjection reads
+        # world size in the scene's own units - so it is a property of the
+        # authoring convention, not of Maya. 100.0 is right when 1 unit = 1 cm;
+        # a scene authored at 1 unit = 1 m must pass 1.0. Callers that do not
+        # say keep the historical value, so nothing existing moves.
+        per_metre = AUTOPROJ_UV_PER_METRE if uv_per_metre is None else uv_per_metre
+        scale = (rect[2] - rect[0]) / (per_metre * world_scale)
         raw = _uv_bounds(cmds, shape)
         pivot_u, pivot_v, delta_u, delta_v = uvmath.centre_in_rect(raw, rect)
         cmds.polyEditUV(
@@ -169,6 +175,17 @@ def uv_atlas(params: Dict[str, Any]) -> Dict[str, Any]:
             raise HandlerError("world_scale must be positive, got %r" % (world_scale,))
         world_scale = float(world_scale)
 
+    uv_per_metre = params.get("uv_per_metre")
+    if uv_per_metre is not None:
+        if isinstance(uv_per_metre, bool) or not isinstance(uv_per_metre, (int, float)):
+            raise HandlerError(
+                "uv_per_metre must be a number, got %r" % (uv_per_metre,)
+            )
+        if float(uv_per_metre) <= 0.0:
+            raise HandlerError(
+                "uv_per_metre must be positive, got %r" % (uv_per_metre,))
+        uv_per_metre = float(uv_per_metre)
+
     targets = [naming.require_object(cmds, n) for n in names]
     shapes = [_require_mesh(cmds, t) for t in targets]
 
@@ -176,7 +193,7 @@ def uv_atlas(params: Dict[str, Any]) -> Dict[str, Any]:
     for transform, shape in zip(targets, shapes):
         packed = pack_shape(
             cmds, shape, rect, project=project, normalize=normalize,
-            world_scale=world_scale,
+            world_scale=world_scale, uv_per_metre=uv_per_metre,
         )
         out.append({"name": transform, **packed})
 
@@ -189,5 +206,6 @@ def uv_atlas(params: Dict[str, Any]) -> Dict[str, Any]:
         "projection": "world" if world_scale is not None else project,
         "normalized": bool(normalize) and world_scale is None,
         "world_scale": world_scale,
+        "uv_per_metre": AUTOPROJ_UV_PER_METRE if uv_per_metre is None else uv_per_metre,
         "all_inside": all(m["inside_patch"] for m in out),
     }

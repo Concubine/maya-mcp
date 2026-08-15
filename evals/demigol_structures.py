@@ -52,7 +52,10 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "src"))
 
+import delivery_units  # noqa: E402 - the artifact-level unit gate
+import fbx_probe  # noqa: E402 - reads and corrects the delivered FBX
 import demigol_kit as kit  # noqa: E402 - shared atlas, patches and density
+import maya_export  # noqa: E402 - one place the delivery unit is decided
 from live_call import call  # noqa: E402
 from maya_mcp import images  # noqa: E402
 
@@ -912,7 +915,9 @@ importlib.reload(_uvatlas); importlib.reload(_combine)
 
 spec = json.loads(SPEC)
 label = spec["label"]
-cmds.currentUnit(linear="m")
+# METRE-NATIVE: 1 Maya unit = 1 metre, so the FBX carries metres in its
+# vertices. Every number below is unchanged; only the unit label moves.
+cmds.currentUnit(linear=AUTHORING_UNIT)
 
 # ONE material for the building, on the SAME atlas the kit uses, so a hero and
 # its kit-dressed neighbours sit in the same light.
@@ -964,7 +969,8 @@ for c in spec["chunks"]:
         _uvatlas.uv_atlas({"names": [node], "cols": spec["cols"],
                            "rows": spec["rows"], "patch": b["patch"],
                            "margin": spec["margin"],
-                           "world_scale": spec["world_scale"]})
+                           "world_scale": spec["world_scale"],
+                           "uv_per_metre": UV_PER_METRE})
         parts.append(node)
     if len(parts) == 1:
         node = parts[0]
@@ -1052,17 +1058,7 @@ result = {"chunks": len(kids), "tris": tris, "fails": fails[:20],
 result
 '''
 
-EXPORT_CODE = r'''
-import maya.cmds as cmds
-cmds.loadPlugin("fbxmaya", quiet=True)
-try:
-    import maya.mel as mel
-    mel.eval('FBXExportFileVersion -v FBX202000')
-    mel.eval('FBXExportUpAxis y')
-    mel.eval('FBXExportConvertUnitString m')
-    mel.eval('FBXExportInputConnections -v false')
-except Exception:
-    pass
+EXPORT_CODE = maya_export.EXPORT_PREAMBLE + r'''
 cmds.select("|" + LABEL, replace=True, hierarchy=True)
 cmds.file(FBX, force=True, type="FBX export", pr=True, es=True)
 result = FBX
@@ -1101,11 +1097,29 @@ def build_one(label, builder, zoom):
                           "margin": 0.03, "world_scale": kit.WORLD_SCALE,
                           "chunks": chunk_dicts})
     ok(call("new_scene", {"confirm": True}, 300.0), "new_scene")
-    run("SPEC = %r\n%s" % (payload, BUILD_CODE), "build %s" % label)
+    run("SPEC = %r\nAUTHORING_UNIT = %r\nUV_PER_METRE = %r\n%s"
+        % (payload, maya_export.AUTHORING_UNIT, maya_export.UV_PER_METRE,
+           BUILD_CODE), "build %s" % label)
     check = ast.literal_eval(
         run("LABEL = %r\n%s" % (label, CHECK_CODE), "check %s" % label)["result_repr"])
     fbx = os.path.join(OUT_DIR, "%s.fbx" % label).replace("\\", "/")
-    run("LABEL = %r\nFBX = %r\n%s" % (label, fbx, EXPORT_CODE), "export %s" % label)
+    run("LABEL = %r\nFBX = %r\nEXPORT_SCALE_FACTOR = %r\n%s"
+        % (label, fbx, maya_export.EXPORT_SCALE_FACTOR, EXPORT_CODE),
+        "export %s" % label)
+
+    # Maya writes a centimetre declaration for a metre-native scene and gives
+    # no way to change it, so the declaration is corrected on the artifact.
+    fbx_probe.set_unit_scale_factor(fbx)
+
+    # The artifact is the deliverable, so the artifact is what gets asserted.
+    # An in-Maya check cannot see this class of defect at all: the scene reads
+    # 3.0 m at scale [1,1,1] frozen and exports as 300.0 (maya-mcp #629).
+    violations = delivery_units.check_delivery(fbx, delivery_units.HERO_CEILING_M)
+    if violations:
+        print("DELIVERY IS NOT METRE-TRUE - refusing to ship %s:" % fbx)
+        for v in violations:
+            print("    " + v)
+        sys.exit(1)
 
     # 1.0 = a surface facing the key reads its own albedo (#617). The old
     # 1.5 was dialled in against images that were also 2.2 gamma too dark
@@ -1173,6 +1187,7 @@ def main():
         "contract": "Demigol STRUCTURE MODEL CONTRACT",
         "scope": "four whole destructible hero buildings; not a parts library",
         "units": "metres, Y-up, 1 unit = 1 m, cell = 3 m",
+        "units_gate": maya_export.UNITS_GATE,
         "origin": "min-corner cell CENTRE at local (0,0,0); floor plane at y = -1.5",
         "naming": "<role>_x##_y##_z##; x/z cell indices from the min corner, "
                   "y = storey (0 = ground). Multi-cell chunks are named for "
