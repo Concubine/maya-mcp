@@ -641,9 +641,18 @@ Parts — `chunk`, `kind`, `pos`, `dim`, `rotate` where non-zero:
 | `golem_C_waist_gasket` | sphere | [0, 2.9, 0.02] | [1.35, 0.35, 1.1] | |
 | `golem_C_belly` | sphere | [0, 3.0, 0.05] | [1.45, 0.95, 1.15] | |
 | `golem_C_chest_girdle` | cube | [0, 3.6, 0.1] | [2.2, 1.0, 1.3] | |
-| `golem_C_neck_gasket` | sphere | [0, 3.62, 0.2] | [0.5, 0.35, 0.5] | |
-| `golem_C_head` | sphere | [0, 4.0, 0.3] | [1.0, 1.0, 1.0] | |
-| `golem_C_brow` | cube | [0, 4.15, 0.72] | [0.7, 0.35, 0.2] | [-15, 0, 0] |
+| `golem_C_neck_gasket` | sphere | [0, 4.05, 0.25] | [0.5, 0.35, 0.5] | |
+| `golem_C_head` | sphere | [0, 4.5, 0.3] | [1.0, 1.0, 1.0] | |
+| `golem_C_brow` | cube | [0, 4.65, 0.72] | [0.7, 0.35, 0.2] | [-15, 0, 0] |
+
+> **Amended at Step 5, 2026-08-15, with the user.** The head was at Y=4.0 and the
+> neck gasket at 3.62. Measured: the chest girdle spans 3.1–4.1, so **0.6 of the
+> 1.0 head sat inside it** and the total came to 4.5 against the design's stated
+> ~5.0. *"Head at the shoulder line"* reads two ways; centring the head ON 4.0
+> rather than AT it reconciles the design's own total and leaves 0.1 of
+> interpenetration instead of 0.6. The neck gasket moves up to the new seam.
+> Measured after: total **5.0**, head 4.0–5.0, buried **0.1**, foot bottom 0.0,
+> fist bottom 0.75.
 | `golem_L_shoulder` | sphere | [1.15, 3.95, 0.15] | [1.1, 1.1, 1.1] | |
 | `golem_L_upperarm` | cylinder | [1.25, 3.35, 0.15] | [0.62, 1.2, 0.62] | |
 | `golem_L_elbow_gasket` | sphere | [1.25, 2.75, 0.15] | [0.6, 0.3, 0.6] | |
@@ -664,9 +673,9 @@ Parts — `chunk`, `kind`, `pos`, `dim`, `rotate` where non-zero:
   "golem_C_waist_gasket":  [0, 2.9, 0.02],
   "golem_C_belly":         [0, 2.9, 0.02],
   "golem_C_chest_girdle":  [0, 3.45, 0.05],
-  "golem_C_neck_gasket":   [0, 3.62, 0.2],
-  "golem_C_head":          [0, 3.62, 0.2],
-  "golem_C_brow":          [0, 4.0, 0.3],
+  "golem_C_neck_gasket":   [0, 4.05, 0.25],
+  "golem_C_head":          [0, 4.05, 0.25],
+  "golem_C_brow":          [0, 4.5, 0.3],
   "golem_L_shoulder":      [0.9, 3.85, 0.1],
   "golem_L_upperarm":      [1.25, 3.95, 0.15],
   "golem_L_elbow_gasket":  [1.25, 2.75, 0.15],
