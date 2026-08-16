@@ -232,12 +232,20 @@ def test_the_dead_end_is_not_in_the_preamble():
     assert not any(s.startswith("FBXExportScaleFactor") for s in export.FBX_PREAMBLE_MEL)
 
 
-def test_the_handler_module_imports_outside_maya():
-    # evals/maya_export.py imports it from a plain interpreter. If anything
-    # moves `import maya.cmds` to module level, that breaks all three delivery
-    # generators at import time.
-    assert export.FBX_PREAMBLE_MEL[0] == "FBXResetExport"
+def test_the_preamble_is_the_measured_five_in_order():
+    # FBXResetExport first, or a setting from a previous export survives.
+    assert export.FBX_PREAMBLE_MEL == (
+        "FBXResetExport",
+        "FBXExportFileVersion -v FBX202000",
+        "FBXExportUpAxis y",
+        "FBXExportInputConnections -v false",
+        "FBXExportEmbeddedTextures -v false",
+    )
 ```
+
+(That `evals/maya_export.py` imports the handler from a plain interpreter is already proved by
+this file: `import maya_export` at module scope would raise if anything moved `import maya.cmds`
+to the handler's module level.)
 
 - [ ] **Step 2: Run the test to verify it fails**
 

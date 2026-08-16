@@ -64,6 +64,7 @@ class TestRegistration:
             "maya_new_scene",
             "maya_open_scene",
             "maya_save_scene",
+            "maya_export_fbx",
             "maya_reset_namespace",
             "maya_create_primitive",
             "maya_duplicate",
@@ -351,6 +352,51 @@ class TestSessionTools:
         run(mcp.call_tool("maya_new_scene", {}))
         assert conn.calls[0]["cmd"] == "new_scene"
         assert conn.calls[0]["params"] == {"confirm": False, "linear_unit": "cm"}
+
+    def test_maya_export_fbx_forwards_params(self):
+        conn = FakeConn(
+            responses={"export_fbx": {
+                "path": "x.fbx", "bytes": 1234, "fbx_version": 7700,
+                "node_count": 3, "mesh_count": 1, "root_nodes": ["|golem_arm"],
+                "unit_scale_factor": 100.0, "metres_per_unit": 1.0,
+            }}
+        )
+        mcp = server_mod.create_server(conn)
+        result = run(
+            mcp.call_tool(
+                "maya_export_fbx",
+                {
+                    "path": "x.fbx",
+                    "metres_per_unit": 1.0,
+                    "nodes": ["golem_arm"],
+                },
+            )
+        )
+        assert result.is_error is False
+        assert conn.calls[0]["cmd"] == "export_fbx"
+        assert conn.calls[0]["params"] == {
+            "path": "x.fbx", "metres_per_unit": 1.0, "nodes": ["golem_arm"],
+        }
+        assert result.structured_content["fbx_version"] == 7700
+
+    def test_maya_export_fbx_forwards_nodes_omitted_as_none(self):
+        conn = FakeConn(
+            responses={"export_fbx": {
+                "path": "x.fbx", "bytes": 1234, "fbx_version": 7700,
+                "node_count": 3, "mesh_count": 1, "root_nodes": ["|golem_arm"],
+                "unit_scale_factor": 100.0, "metres_per_unit": 1.0,
+            }}
+        )
+        mcp = server_mod.create_server(conn)
+        run(
+            mcp.call_tool(
+                "maya_export_fbx", {"path": "x.fbx", "metres_per_unit": 1.0}
+            )
+        )
+        assert conn.calls[0]["cmd"] == "export_fbx"
+        assert conn.calls[0]["params"] == {
+            "path": "x.fbx", "metres_per_unit": 1.0, "nodes": None,
+        }
 
 
 class TestLinearUnitReachesTheToolSurface:
