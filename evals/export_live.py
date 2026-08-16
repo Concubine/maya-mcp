@@ -156,7 +156,26 @@ def main():
         check("and the refused file is NOT on disk", not os.path.exists(bad),
               "a warning the caller can ignore is not a gate")
 
-        # 3. refused before Maya is touched
+        # 3. a good file already at the path must SURVIVE a failed export.
+        # Without the temp-and-rename flow, cmds.file(force=True) overwrote it
+        # and the gate's own unlink then deleted it - re-exporting over a
+        # shipped delivery after a bad scene edit destroyed the delivery.
+        occupied = os.path.join(OUT_DIR, "occupied.fbx")
+        with open(occupied, "wb") as fh:
+            fh.write(b"a previously delivered asset")
+        name = build_cube(scale=0.01)
+        response = export(occupied, nodes=[name])
+        check("a failed export over an existing file is refused",
+              bool(response.get("error")),
+              str(response.get("error", ""))[:160])
+        survived = (os.path.exists(occupied)
+                    and open(occupied, "rb").read() == b"a previously delivered asset")
+        check("and the file that was already there is UNTOUCHED", survived,
+              "byte-compared, not just existence-checked")
+        check("and no .part.fbx was left behind",
+              not os.path.exists(occupied + ".part.fbx"))
+
+        # 4. refused before Maya is touched
         never = os.path.join(OUT_DIR, "never_written.fbx")
         if os.path.exists(never):
             os.unlink(never)

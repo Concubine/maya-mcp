@@ -788,10 +788,13 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
     ) -> ExportFbxResult:
         """Export FBX and gate the result on the BYTES it just wrote.
 
-        Refuses and DELETES the file if any node carries a non-identity scale
-        or the unit declaration disagrees with the geometry - the two ways a
-        wrong-sized asset renders correctly and ships anyway. Everything
-        returned is read back out of the file, not queried from the scene."""
+        Writes to a temporary sibling and moves it into place only once it
+        passes, so a refused export leaves nothing new behind and never
+        destroys a file already at that path. It is refused if any node carries
+        a non-identity scale or the unit declaration disagrees with the
+        geometry - the two ways a wrong-sized asset renders correctly and ships
+        anyway. Everything returned is read back out of the file, not queried
+        from the scene."""
         return ExportFbxResult.model_validate(
             maya.request(
                 "export_fbx",
