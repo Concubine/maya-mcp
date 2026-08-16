@@ -144,3 +144,74 @@ def test_the_shipped_golem_passes_the_gate():
     # A real 33-chunk artifact, committed. If this ever fails, either the gate
     # is wrong or a delivery regressed - both worth stopping for.
     assert export.gate_violations(fbxbytes.read_fbx(GOLEM)) == []
+
+
+from maya_plugin.dispatcher import HandlerError    # noqa: E402
+
+
+def _params(tmp_path, **over):
+    out = {"path": str(tmp_path / "out.fbx"), "metres_per_unit": 1.0}
+    out.update(over)
+    return out
+
+
+def test_a_good_call_normalises_the_path(tmp_path):
+    path, nodes = export._validate(_params(tmp_path))
+    assert path.endswith("/out.fbx")
+    assert "\\" not in path
+    assert nodes is None
+
+
+def test_metres_per_unit_has_no_default(tmp_path):
+    params = _params(tmp_path)
+    del params["metres_per_unit"]
+    with pytest.raises(HandlerError) as exc:
+        export._validate(params)
+    assert "metres_per_unit" in str(exc.value)
+    # The hint must say WHY there is no default, or the next caller invents one.
+    assert "629" in (exc.value.hint or "")
+
+
+def test_a_hundred_metres_per_unit_is_refused_not_converted(tmp_path):
+    with pytest.raises(HandlerError) as exc:
+        export._validate(_params(tmp_path, metres_per_unit=100.0))
+    assert "only 1.0" in str(exc.value)
+    # Refused, not fixed: the only way to "convert" is the compensating root
+    # scale, which is the defect. The hint has to point at baking instead.
+    assert "freeze" in (exc.value.hint or "")
+
+
+@pytest.mark.parametrize("bad", [None, "1.0", True, [1.0]])
+def test_metres_per_unit_must_be_a_number(tmp_path, bad):
+    with pytest.raises(HandlerError):
+        export._validate(_params(tmp_path, metres_per_unit=bad))
+
+
+def test_the_path_must_be_an_fbx(tmp_path):
+    with pytest.raises(HandlerError) as exc:
+        export._validate(_params(tmp_path, path=str(tmp_path / "out.obj")))
+    assert ".fbx" in str(exc.value)
+
+
+def test_the_path_must_be_absolute(tmp_path):
+    with pytest.raises(HandlerError) as exc:
+        export._validate(_params(tmp_path, path="out.fbx"))
+    assert "absolute" in str(exc.value)
+
+
+def test_a_missing_directory_is_refused(tmp_path):
+    with pytest.raises(HandlerError) as exc:
+        export._validate(_params(tmp_path, path=str(tmp_path / "nope" / "out.fbx")))
+    assert "does not exist" in str(exc.value)
+
+
+def test_an_empty_node_list_is_refused(tmp_path):
+    # [] would silently export nothing; omitting the param means "everything".
+    with pytest.raises(HandlerError) as exc:
+        export._validate(_params(tmp_path, nodes=[]))
+    assert "omit" in (exc.value.hint or "")
+
+
+def test_a_node_list_survives_validation(tmp_path):
+    _path, nodes = export._validate(_params(tmp_path, nodes=["golem_C_pelvis"]))
+    assert nodes == ["golem_C_pelvis"]

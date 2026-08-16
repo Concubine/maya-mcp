@@ -81,3 +81,64 @@ def gate_violations(facts) -> List[str]:
             "are metres, so the file would contradict itself"
             % (facts.unit_scale_factor, fbxbytes.DECLARES_METRES))
     return out
+
+
+def _validate(params: Dict[str, Any]) -> Tuple[str, Optional[List[str]]]:
+    """Check every parameter before touching Maya. A bad call must cost nothing."""
+    path = params.get("path")
+    if not isinstance(path, str) or not path.strip():
+        raise HandlerError(
+            "missing required param 'path'",
+            hint="pass an absolute path ending in .fbx, e.g. "
+                 "path='D:/deliver/golem.fbx'")
+    path = path.strip().replace("\\", "/")
+    if not path.lower().endswith(".fbx"):
+        raise HandlerError(
+            "path %r must end in .fbx" % path,
+            hint="this tool writes FBX only")
+    if not os.path.isabs(path):
+        raise HandlerError(
+            "path %r must be absolute" % path,
+            hint="a relative path resolves against Maya's working directory, "
+                 "which is not the directory you ran anything from")
+    parent = os.path.dirname(path)
+    if not os.path.isdir(parent):
+        raise HandlerError(
+            "the directory %r does not exist" % parent,
+            hint="create it first - this tool does not make directories it was "
+                 "not asked to make")
+
+    if params.get("metres_per_unit") is None:
+        raise HandlerError(
+            "missing required param 'metres_per_unit'",
+            hint="pass metres_per_unit=1.0. It has NO default on purpose: a "
+                 "guess about what one unit means is exactly what shipped three "
+                 "deliveries at 100x (maya-mcp #629), and no in-Maya check can "
+                 "see that defect")
+    mpu = params["metres_per_unit"]
+    if isinstance(mpu, bool) or not isinstance(mpu, (int, float)):
+        raise HandlerError(
+            "metres_per_unit must be a number, got %r" % (mpu,),
+            hint="pass metres_per_unit=1.0")
+    if abs(float(mpu) - 1.0) > SCALE_TOL:
+        raise HandlerError(
+            "metres_per_unit=%g is refused; only 1.0 exports" % mpu,
+            hint="this is not a conversion the exporter can make. "
+                 "FBXExportScaleFactor only multiplies the root node scale, so "
+                 "the vertices would stay the wrong size and the file would "
+                 "carry the compensating scale this tool rejects. Scale the "
+                 "geometry and freeze it so one unit means one metre, then "
+                 "export with metres_per_unit=1.0")
+
+    nodes = params.get("nodes")
+    if nodes is not None:
+        if not isinstance(nodes, list) or not all(isinstance(n, str) for n in nodes):
+            raise HandlerError(
+                "nodes must be a list of object names",
+                hint="e.g. nodes=['golem_C_pelvis'], or omit it to export "
+                     "the whole scene")
+        if not nodes:
+            raise HandlerError(
+                "nodes is an empty list, which would export nothing",
+                hint="omit nodes entirely to export the whole scene")
+    return path, nodes
