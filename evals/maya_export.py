@@ -23,6 +23,12 @@ was load-bearing: the heroes select one group so one Null took the 0.01, while
 the kit selects 41 roots so all 41 Meshes took it. One preamble, one behaviour.
 """
 
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from maya_plugin.handlers import export as _export  # noqa: E402
+
 # Scale the exported roots to metre magnitude and freeze, so the vertices
 # themselves carry metres. Runs AFTER UVs are assigned and after the in-Maya
 # checks: freezing a uniform scale does not touch UVs, and the checks are
@@ -47,27 +53,26 @@ AUTHORING_UNIT = "cm"
 # constant is a property of the authoring convention. 1 unit = 1 m means 1.0.
 UV_PER_METRE = 1.0
 
-EXPORT_PREAMBLE = r'''
-import maya.cmds as cmds
-import maya.mel as mel
-cmds.loadPlugin("fbxmaya", quiet=True)
-mel.eval('FBXResetExport')
-mel.eval('FBXExportFileVersion -v FBX202000')
-mel.eval('FBXExportUpAxis y')
-mel.eval('FBXExportInputConnections -v false')
-mel.eval('FBXExportEmbeddedTextures -v false')
-mel.eval('FBXExportScaleFactor %g' % EXPORT_SCALE_FACTOR)
-'''
-
-# Once the scene is metre-native there is no unit conversion left to make, so
-# the exporter writes no compensating node and the factor must be 1. Measured
-# both ways: at 100 the heroes' group Null came back at scale (100,100,100) and
-# all 41 kit meshes at (100,100,100), with the vertices already correct in both.
+# One definition, composed. The statements and the factor live in
+# maya_plugin/handlers/export.py, which is what maya_export_fbx runs - so this
+# preamble and the tool cannot drift apart. tests/test_export_fbx.py pins the
+# composed string byte-for-byte against what the generators shipped, because
+# re-validating a change here would cost a live art run.
 #
-# This is only true BECAUSE the authoring unit changed. A metre-authored scene
-# does get a 0.01 conversion node, which is what made 100 look right earlier -
-# it was cancelling a conversion that no longer happens.
-EXPORT_SCALE_FACTOR = 1.0
+# The three consumers - evals/demigol_kit.py, evals/demigol_structures.py and
+# evals/units_live.py - prepend their own `EXPORT_SCALE_FACTOR = ...` line, so
+# the last statement stays a runtime substitution rather than a baked number.
+EXPORT_SCALE_FACTOR = _export.EXPORT_SCALE_FACTOR
+
+EXPORT_PREAMBLE = "\n".join(
+    ["",
+     "import maya.cmds as cmds",
+     "import maya.mel as mel",
+     'cmds.loadPlugin("fbxmaya", quiet=True)']
+    + ["mel.eval(%r)" % statement for statement in _export.FBX_PREAMBLE_MEL]
+    + ["mel.eval('FBXExportScaleFactor %g' % EXPORT_SCALE_FACTOR)",
+       ""]
+)
 
 # Both manifests carry this verbatim. Per Demigol #606, the failure class is a
 # manifest field a consumer cannot tell apart from a wish - so the `units`
