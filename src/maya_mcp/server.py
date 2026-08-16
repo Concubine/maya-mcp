@@ -774,7 +774,10 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         metres_per_unit: Annotated[float, Field(description=(
             "What one scene unit means in metres. REQUIRED, and only 1.0 "
             "exports - there is no default because a guess here is what "
-            "shipped three deliveries at 100x. If your scene is not "
+            "shipped three deliveries at 100x. Do NOT try to satisfy yourself "
+            "in-scene first: the defect is written by the FBX exporter and is "
+            "absent from the Maya scene, so every measurement you can take "
+            "there reads correct while the file is wrong. If your scene is not "
             "metre-native, scale and freeze it first: the exporter cannot fix "
             "vertex magnitude, it can only add a compensating node scale, "
             "which this tool rejects."
