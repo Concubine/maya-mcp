@@ -146,3 +146,39 @@ def check_rig_delivery(path, height_m, ceiling_m, height_tol=1e-3):
             "factor of %.5g" % (label, measured, height_m, measured / height_m))
 
     return out
+
+
+def check_poses(path, poses, height_tol=1e-3):
+    """Assert every pose in `poses` reproduces the height it declares.
+
+    A pose is per-chunk rotations and nothing else, so it can be applied to the
+    delivered bytes and measured there - which is the only check that covers
+    both files at once. It catches a pose naming a chunk the FBX does not have,
+    a pose that quietly carries a translation, and a poses file left behind by
+    a re-export.
+    """
+    facts = fbx_probe.read_fbx(path)
+    known = {n.name for n in facts.nodes}
+    label = getattr(path, "name", str(path))
+    out = []
+
+    for name in sorted(poses):
+        pose = poses[name]
+        rotations = pose["rotations_deg"]
+        missing = sorted(set(rotations) - known)
+        if missing:
+            out.append("%s: pose %r names %d chunks the file does not have: %s"
+                       % (label, name, len(missing), missing[:4]))
+            continue
+        absent = sorted(known - set(rotations))
+        if absent:
+            out.append("%s: pose %r leaves %d chunks unstated: %s - a pose must "
+                       "be complete, or a consumer inherits whatever was there"
+                       % (label, name, len(absent), absent[:4]))
+        lo, hi = fbx_probe.world_vertex_bounds(facts, rotations)
+        measured = hi[1] - lo[1]
+        if abs(measured - pose["bbox_height_m"]) > height_tol:
+            out.append("%s: pose %r composes to %.5f m, but declares %.5f m"
+                       % (label, name, measured, pose["bbox_height_m"]))
+
+    return out

@@ -24,6 +24,7 @@ import fbx_probe               # noqa: E402
 OUT_DIR = os.path.join(_HERE, "golem_delivery")
 FBX = os.path.join(OUT_DIR, "golem.fbx")
 CHUNKS = os.path.join(OUT_DIR, "chunks.json")
+POSES = os.path.join(OUT_DIR, "poses.json")
 MANIFEST = os.path.join(OUT_DIR, "manifest.json")
 
 ROOT = "golem_C_pelvis"
@@ -41,7 +42,61 @@ MODELLED_UNITS = 5.027162
 METRES_PER_UNIT = 0.8
 
 
-def build_manifest(chunks):
+# Break ordering is the design statement Maya can defend; the engine owns the
+# magnitude. Straight from the handoff spec's table, except `shoulder`, which
+# the spec does not list - it is the pauldron the whole arm hangs from, so it
+# is priced with the upper arm and flagged as an addition.
+BREAK = [
+    ("_gasket", 0.25, "first to go - daylight between chunks is the earliest "
+                      "'it's coming apart' read, at almost no mass cost"),
+    ("_brow", 0.5, "the kill condition: the brow carries the four tracer "
+                   "emitters, so losing it puts the visor light out"),
+    ("_fist", 0.6, "extremity, distal, high leverage"),
+    ("_foot", 0.6, "extremity, distal, high leverage"),
+    ("_forearm", 1.0, "the reference"),
+    ("_shin", 1.0, "the reference"),
+    ("_upperarm", 1.8, "losing a whole limb should cost real effort"),
+    ("_thigh", 1.8, "losing a whole limb should cost real effort"),
+    ("_shoulder", 1.8, "NOT in the spec's table - the pauldron the arm hangs "
+                       "from, priced with the upper arm"),
+    ("_head", 4.0, "extreme only"),
+]
+UNBREAKABLE = ("_pelvis", "_belly", "_chest_girdle")
+
+# Every hinge in this rig turns about LOCAL X - measured, not assumed: each
+# joint's local X maps to world X in the rest pose. Ranges are the arc the five
+# poses actually use, widened to a defensible limit, in absolute local degrees.
+JOINT = [
+    ("_pelvis",  (0, 0),      "root - the controller moves this; it has no "
+                              "parent joint to limit"),
+    ("_thigh",   (-70, 10),   "hip"),
+    ("_shin",    (0, 110),    "knee - 0 IS straight, so no-hyperextension is "
+                              "the range's own edge rather than a special case"),
+    ("_foot",    (-50, 10),   "ankle"),
+    ("_upperarm", (-120, 100), "shoulder - ASYMMETRIC and wide: crouch parks "
+                               "the arm at +95 and extend throws it to -115, a "
+                               "210 degree swing. Per the spec this is the "
+                               "named joint that earns a ConfigurableJoint"),
+    ("_forearm", (-100, 0),   "elbow - flexes one way only"),
+    ("_fist",    (-30, 30),   "wrist"),
+    ("_head",    (-25, 25),   "neck"),
+    ("_brow",    (-8, 8),     "brow plate, near-rigid on the skull"),
+    ("_belly",   (-30, 15),   "waist"),
+    ("_chest_girdle", (-30, 15), "chest"),
+    ("_gasket",  (-10, 10),   "a collar, not a joint - it rides the proximal "
+                              "member and lags it"),
+    ("_tracer_", (0, 0),      "rigid to the brow"),
+]
+
+
+def _lookup(table, name, default=None):
+    for key, *rest in table:
+        if key in name:
+            return rest
+    return default
+
+
+def build_manifest(chunks, poses):
     lo = [min(c["bbox_min_m"][i] for c in chunks.values()) for i in range(3)]
     hi = [max(c["bbox_max_m"][i] for c in chunks.values()) for i in range(3)]
     volume = sum(c["volume_m3"] for c in chunks.values())
@@ -50,7 +105,23 @@ def build_manifest(chunks):
     out = []
     for name in sorted(chunks):
         c = chunks[name]
+        mult, why = _lookup(BREAK, name, [None, None])
+        rng, joint_note = _lookup(JOINT, name, [(0, 0), "unclassified"])
+        breakable = not any(k in name for k in UNBREAKABLE) and mult is not None
         out.append({
+            "joint": {
+                "hinge_axis_local": [1, 0, 0],
+                "hinge_range_deg": list(rng),
+                "rest_deg": poses["rest"]["rotations_deg"][name],
+                "twist": "locked near zero",
+                "note": joint_note,
+            },
+            "breakable": breakable,
+            "break_impulse_mult": mult if breakable else None,
+            "break_note": (why if breakable else
+                           "the core is the body - losing it is not a damage "
+                           "state" if any(k in name for k in UNBREAKABLE) else
+                           "detaches with golem_C_brow, never on its own"),
             "name": name,
             "parent": c["parent"],
             # The rig. Proximal joint centre, world space, in the rest pose -
@@ -148,9 +219,32 @@ def build_manifest(chunks):
                     "The ten names differ only in emission: one base material "
                     "plus five seam-glow variants and four tracer emitters.",
         },
-        "poses": "NOT in this delivery. The handoff spec asks for 5 target "
-                 "poses as per-chunk rotations; this file is the rest pose "
-                 "only, and the poses are still to be authored.",
+        "poses": {
+            "file": "poses.json",
+            "form": "per-chunk ABSOLUTE local euler XYZ in degrees - set them, "
+                    "do not add them. `rest` is exactly what the FBX nodes "
+                    "already carry, so importing and doing nothing is `rest`.",
+            "list": {k: {"trigger": v["trigger"],
+                         "bbox_height_m": v["bbox_height_m"],
+                         "crown_height_m": v["crown_height_m"],
+                         "pelvis_height_m": v["pelvis_height_m"]}
+                     for k, v in poses.items()},
+            "gate": "delivery_units.check_poses re-composes every pose from the "
+                    "FBX BYTES and requires it to reach the height it declares, "
+                    "so the two files cannot drift apart.",
+            "rotation_only": "no pose touches a translate - asserted in Maya "
+                             "across all 33 chunks and all five poses.",
+            "gaskets": "the ten collars keep their rest rotation in every pose. "
+                       "They are the momentum-reading device: hung off the limb "
+                       "they collar, they should settle AFTER it stops, which is "
+                       "simulation rather than pose data.",
+            "damage": "still gets no pose, deliberately - impulse at the contact "
+                      "chunk plus joint limits and mass distribution.",
+        },
+        "emission_rule": "brow detached -> all golem emission to zero. The four "
+                         "tracer emitters are parented to golem_C_brow, so the "
+                         "visor light physically leaves with it; the body seam "
+                         "glow has to be killed by that one engine-side rule.",
         "chunks_detail": out,
     }
 
@@ -158,10 +252,13 @@ def build_manifest(chunks):
 def main():
     with open(CHUNKS) as fh:
         chunks = json.load(fh)
-    manifest = build_manifest(chunks)
+    with open(POSES) as fh:
+        poses = json.load(fh)
+    manifest = build_manifest(chunks, poses)
 
     violations = delivery_units.check_rig_delivery(
         FBX, delivery_units.GOLEM_HEIGHT_M, delivery_units.GOLEM_CEILING_M)
+    violations += delivery_units.check_poses(FBX, poses)
     if violations:
         print("DELIVERY IS NOT METRE-TRUE - refusing to write a manifest for it:")
         for v in violations:

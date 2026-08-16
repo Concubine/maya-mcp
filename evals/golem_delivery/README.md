@@ -8,9 +8,11 @@ metre-native with identity scales.** Built through the MCP tools for maya-mcp
 | file | what |
 |---|---|
 | `golem.fbx` | the delivery. One tree rooted at `golem_C_pelvis`, translate+rotate only |
-| `manifest.json` | per-chunk pivot, collider box, volume, mass share, centre of mass, tri count, material |
+| `manifest.json` | per-chunk pivot, joint limits, breakage, collider box, volume, mass share, centre of mass, tri count, material |
+| `poses.json` | the five target poses as per-chunk absolute local rotations |
 | `golem_metre.mb` | the Maya scene the FBX was written from, after the bake |
 | `chunks.json` | the raw measurements taken out of that scene; the manifest is derived from it |
+| `poses_side.png` | the five poses side-on, in the order they fire |
 | `hero_*.png` | Arnold renders (front / side / three-quarter) |
 
 Rebuild the manifest and re-run the gate:
@@ -66,18 +68,54 @@ chunk's proximal joint centre in world space**, which differs on purpose from
 the demigol kit and hero rule (min-corner cell centre at y = 0) — a reader must
 not have to infer that.
 
-Poses are **not** in this delivery. The spec asks for five target poses as
-per-chunk rotations; this is the rest pose only.
-
 Mass ships as **volume and share**, not kilograms: total 5.2657 m³, and each
 chunk's `mass_fraction` of it. The engine's mass unit is abstract (a 3 m steel
 cell = 4.0), so a share is the part that survives their rescale.
+
+## The five poses
+
+`poses.json`, one entry per pose, each a complete map of **absolute local euler
+XYZ in degrees** for all 33 chunks — set them, don't add them. `rest` is exactly
+what the FBX nodes already carry, so importing and doing nothing is `rest`.
+
+| pose | fires on | bbox | crown | pelvis | knee |
+|---|---|---|---|---|---|
+| `crouch` | `ChargeFraction` 0→1 over the 1.1 s wind-up | 3.502 | 3.502 | 1.493 | 105° |
+| `rest` | idle | 4.022 | 4.022 | 1.967 | 47° |
+| `extend` | release | 5.063 | 4.137 | 2.080 | 0° |
+| `air` | airborne | 3.647 | 3.647 | 1.595 | 82° |
+| `absorb` | `OnLanded(speed)`, depth scaled by speed | 3.533 | 3.533 | 1.466 | 109° |
+
+`crown` is the top of the head, `bbox` includes the arms — they only differ on
+`extend`, where the arms are thrown overhead, and the distinction is there so a
+reach cannot be mistaken for standing height.
+
+The wind-up is the pose the whole jump is paid for by: torso pitched forward and
+down, pelvis at **1.493 m** against rest's 1.967, knee at 105°, and the arms
+parked at **+95°** behind. Release throws them to **−115°** — a **210° shoulder
+swing** in one beat, which is why the shoulder is the joint that gets an
+asymmetric range and a `ConfigurableJoint` where every other joint takes a cone.
+
+Every pose is **rotation-only**: no chunk's translate moves, asserted across all
+33 chunks and all five poses. The knee never passes 0°, so no-hyperextension is
+the range's own edge rather than a special case. The ten gaskets keep their rest
+rotation in every pose deliberately — they are the momentum-reading device and
+should settle *after* the limb they collar, which is simulation, not pose data.
+
+`delivery_units.check_poses` re-composes each pose **from the FBX bytes** and
+requires it to reach the height it declares, so the two files cannot drift.
 
 ## Three measurements worth arguing with
 
 - **Arm reach is 2.5528 m**, shoulder pivot to furthest fist vertex. The spec's
   own arithmetic predicted 2.56 and the geometry agrees, so its flag stands:
   `GrabReach = 4` is ~1.4 m past the arm and needs a lunge or a step.
+- **The 4.64 m reveal is not in this geometry.** The spec spends "0.8u of height
+  it never shows standing still" on `extend`; measured, straightening the legs
+  from rest buys **0.083 m**, not 0.64. `extend` reaches **4.137 m** at the
+  crown — 2.9% over rest, not 16%. The 5.063 m bbox figure is the fists
+  overhead, and calling that the golem's height would be a lie. Getting a real
+  4.64 m needs a deeper modelled crouch, which is a model change, not a pose.
 - **The joins fail under SSAO.** Gasket collars show almost no contact
   darkening; they read as balls threaded on a limb. A model note, not a tool
   note, and unchanged by this package.

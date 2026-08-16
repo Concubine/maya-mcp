@@ -21,5 +21,10 @@ evals/golem_run/checkpoints/
 evals/golem_run_2/golem_task*.mb
 evals/golem_run_2/checkpoints/
 
+# Same rule for the delivery scene: the package is the FBX, the manifest, the
+# poses and the renders. 71 MB of auto-checkpoints from posing the rig is not
+# part of it.
+evals/golem_delivery/checkpoints/
+
 # Arnold's auto-generated tiled textures, written next to any map it renders
 *.tx

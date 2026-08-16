@@ -46,9 +46,70 @@
   ],
   "note": "All ten materials sample the SHARED DEMIGOL KIT ATLAS, measured off the file nodes - not a golem-specific map set. A consumer that already has the buildings already has these three maps, and the FBX carries the UVs into them. The ten names differ only in emission: one base material plus five seam-glow variants and four tracer emitters."
  },
- "poses": "NOT in this delivery. The handoff spec asks for 5 target poses as per-chunk rotations; this file is the rest pose only, and the poses are still to be authored.",
+ "poses": {
+  "file": "poses.json",
+  "form": "per-chunk ABSOLUTE local euler XYZ in degrees - set them, do not add them. `rest` is exactly what the FBX nodes already carry, so importing and doing nothing is `rest`.",
+  "list": {
+   "absorb": {
+    "trigger": "OnLanded(speed) - deepest knee flex, scale the depth by impact speed",
+    "bbox_height_m": 3.53258,
+    "crown_height_m": 3.53258,
+    "pelvis_height_m": 1.466
+   },
+   "air": {
+    "trigger": "airborne - holding extend through a multi-second flight reads dead",
+    "bbox_height_m": 3.64654,
+    "crown_height_m": 3.64654,
+    "pelvis_height_m": 1.59451
+   },
+   "crouch": {
+    "trigger": "ChargeFraction 0 -> 1 over the 1.1 s wind-up",
+    "bbox_height_m": 3.50229,
+    "crown_height_m": 3.50229,
+    "pelvis_height_m": 1.49275
+   },
+   "extend": {
+    "trigger": "release - full push-off, the tallest pose",
+    "bbox_height_m": 5.06306,
+    "crown_height_m": 4.13677,
+    "pelvis_height_m": 2.0797
+   },
+   "rest": {
+    "trigger": "idle - the modelled crouch, exactly what the FBX nodes already carry",
+    "bbox_height_m": 4.02173,
+    "crown_height_m": 4.02173,
+    "pelvis_height_m": 1.96673
+   }
+  },
+  "gate": "delivery_units.check_poses re-composes every pose from the FBX BYTES and requires it to reach the height it declares, so the two files cannot drift apart.",
+  "rotation_only": "no pose touches a translate - asserted in Maya across all 33 chunks and all five poses.",
+  "gaskets": "the ten collars keep their rest rotation in every pose. They are the momentum-reading device: hung off the limb they collar, they should settle AFTER it stops, which is simulation rather than pose data.",
+  "damage": "still gets no pose, deliberately - impulse at the contact chunk plus joint limits and mass distribution."
+ },
+ "emission_rule": "brow detached -> all golem emission to zero. The four tracer emitters are parented to golem_C_brow, so the visor light physically leaves with it; the body seam glow has to be killed by that one engine-side rule.",
  "chunks_detail": [
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     -30,
+     15
+    ],
+    "rest_deg": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "waist"
+   },
+   "breakable": false,
+   "break_impulse_mult": null,
+   "break_note": "the core is the body - losing it is not a damage state",
    "name": "golem_C_belly",
    "parent": "golem_C_pelvis",
    "pivot_m": [
@@ -94,6 +155,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     -8,
+     8
+    ],
+    "rest_deg": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "brow plate, near-rigid on the skull"
+   },
+   "breakable": true,
+   "break_impulse_mult": 0.5,
+   "break_note": "the kill condition: the brow carries the four tracer emitters, so losing it puts the visor light out",
    "name": "golem_C_brow",
    "parent": "golem_C_head",
    "pivot_m": [
@@ -139,6 +221,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     -30,
+     15
+    ],
+    "rest_deg": [
+     8.2875,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "chest"
+   },
+   "breakable": false,
+   "break_impulse_mult": null,
+   "break_note": "the core is the body - losing it is not a damage state",
    "name": "golem_C_chest_girdle",
    "parent": "golem_C_belly",
    "pivot_m": [
@@ -184,6 +287,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     -25,
+     25
+    ],
+    "rest_deg": [
+     -7.7242,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "neck"
+   },
+   "breakable": true,
+   "break_impulse_mult": 4.0,
+   "break_note": "extreme only",
    "name": "golem_C_head",
    "parent": "golem_C_chest_girdle",
    "pivot_m": [
@@ -229,6 +353,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     -10,
+     10
+    ],
+    "rest_deg": [
+     -7.7242,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "a collar, not a joint - it rides the proximal member and lags it"
+   },
+   "breakable": true,
+   "break_impulse_mult": 0.25,
+   "break_note": "first to go - daylight between chunks is the earliest 'it's coming apart' read, at almost no mass cost",
    "name": "golem_C_neck_gasket",
    "parent": "golem_C_chest_girdle",
    "pivot_m": [
@@ -274,6 +419,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     0,
+     0
+    ],
+    "rest_deg": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "root - the controller moves this; it has no parent joint to limit"
+   },
+   "breakable": false,
+   "break_impulse_mult": null,
+   "break_note": "the core is the body - losing it is not a damage state",
    "name": "golem_C_pelvis",
    "parent": null,
    "pivot_m": [
@@ -319,6 +485,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     0,
+     0
+    ],
+    "rest_deg": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "rigid to the brow"
+   },
+   "breakable": false,
+   "break_impulse_mult": null,
+   "break_note": "detaches with golem_C_brow, never on its own",
    "name": "golem_C_tracer_core",
    "parent": "golem_C_brow",
    "pivot_m": [
@@ -364,6 +551,27 @@
    "role": "tracer_emitter"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     0,
+     0
+    ],
+    "rest_deg": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "rigid to the brow"
+   },
+   "breakable": false,
+   "break_impulse_mult": null,
+   "break_note": "detaches with golem_C_brow, never on its own",
    "name": "golem_C_tracer_trail1",
    "parent": "golem_C_brow",
    "pivot_m": [
@@ -409,6 +617,27 @@
    "role": "tracer_emitter"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     0,
+     0
+    ],
+    "rest_deg": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "rigid to the brow"
+   },
+   "breakable": false,
+   "break_impulse_mult": null,
+   "break_note": "detaches with golem_C_brow, never on its own",
    "name": "golem_C_tracer_trail2",
    "parent": "golem_C_brow",
    "pivot_m": [
@@ -454,6 +683,27 @@
    "role": "tracer_emitter"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     0,
+     0
+    ],
+    "rest_deg": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "rigid to the brow"
+   },
+   "breakable": false,
+   "break_impulse_mult": null,
+   "break_note": "detaches with golem_C_brow, never on its own",
    "name": "golem_C_tracer_trail3",
    "parent": "golem_C_brow",
    "pivot_m": [
@@ -499,6 +749,27 @@
    "role": "tracer_emitter"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     -10,
+     10
+    ],
+    "rest_deg": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "a collar, not a joint - it rides the proximal member and lags it"
+   },
+   "breakable": true,
+   "break_impulse_mult": 0.25,
+   "break_note": "first to go - daylight between chunks is the earliest 'it's coming apart' read, at almost no mass cost",
    "name": "golem_C_waist_gasket",
    "parent": "golem_C_pelvis",
    "pivot_m": [
@@ -544,6 +815,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     -10,
+     10
+    ],
+    "rest_deg": [
+     -11.5503,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "a collar, not a joint - it rides the proximal member and lags it"
+   },
+   "breakable": true,
+   "break_impulse_mult": 0.25,
+   "break_note": "first to go - daylight between chunks is the earliest 'it's coming apart' read, at almost no mass cost",
    "name": "golem_L_ankle_gasket",
    "parent": "golem_L_shin",
    "pivot_m": [
@@ -589,6 +881,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     -10,
+     10
+    ],
+    "rest_deg": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "a collar, not a joint - it rides the proximal member and lags it"
+   },
+   "breakable": true,
+   "break_impulse_mult": 0.25,
+   "break_note": "first to go - daylight between chunks is the earliest 'it's coming apart' read, at almost no mass cost",
    "name": "golem_L_elbow_gasket",
    "parent": "golem_L_upperarm",
    "pivot_m": [
@@ -634,6 +947,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     -30,
+     30
+    ],
+    "rest_deg": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "wrist"
+   },
+   "breakable": true,
+   "break_impulse_mult": 0.6,
+   "break_note": "extremity, distal, high leverage",
    "name": "golem_L_fist",
    "parent": "golem_L_forearm",
    "pivot_m": [
@@ -679,6 +1013,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     -50,
+     10
+    ],
+    "rest_deg": [
+     -21.5288,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "ankle"
+   },
+   "breakable": true,
+   "break_impulse_mult": 0.6,
+   "break_note": "extremity, distal, high leverage",
    "name": "golem_L_foot",
    "parent": "golem_L_shin",
    "pivot_m": [
@@ -724,6 +1079,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     -100,
+     0
+    ],
+    "rest_deg": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "elbow - flexes one way only"
+   },
+   "breakable": true,
+   "break_impulse_mult": 1.0,
+   "break_note": "the reference",
    "name": "golem_L_forearm",
    "parent": "golem_L_upperarm",
    "pivot_m": [
@@ -769,6 +1145,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     -10,
+     10
+    ],
+    "rest_deg": [
+     24.6182,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "a collar, not a joint - it rides the proximal member and lags it"
+   },
+   "breakable": true,
+   "break_impulse_mult": 0.25,
+   "break_note": "first to go - daylight between chunks is the earliest 'it's coming apart' read, at almost no mass cost",
    "name": "golem_L_knee_gasket",
    "parent": "golem_L_thigh",
    "pivot_m": [
@@ -814,6 +1211,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     0,
+     110
+    ],
+    "rest_deg": [
+     46.7412,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "knee - 0 IS straight, so no-hyperextension is the range's own edge rather than a special case"
+   },
+   "breakable": true,
+   "break_impulse_mult": 1.0,
+   "break_note": "the reference",
    "name": "golem_L_shin",
    "parent": "golem_L_thigh",
    "pivot_m": [
@@ -859,6 +1277,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     0,
+     0
+    ],
+    "rest_deg": [
+     -7.7242,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "unclassified"
+   },
+   "breakable": true,
+   "break_impulse_mult": 1.8,
+   "break_note": "NOT in the spec's table - the pauldron the arm hangs from, priced with the upper arm",
    "name": "golem_L_shoulder",
    "parent": "golem_C_chest_girdle",
    "pivot_m": [
@@ -904,6 +1343,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     -70,
+     10
+    ],
+    "rest_deg": [
+     -20.0,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "hip"
+   },
+   "breakable": true,
+   "break_impulse_mult": 1.8,
+   "break_note": "losing a whole limb should cost real effort",
    "name": "golem_L_thigh",
    "parent": "golem_C_pelvis",
    "pivot_m": [
@@ -949,6 +1409,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     -120,
+     100
+    ],
+    "rest_deg": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "shoulder - ASYMMETRIC and wide: crouch parks the arm at +95 and extend throws it to -115, a 210 degree swing. Per the spec this is the named joint that earns a ConfigurableJoint"
+   },
+   "breakable": true,
+   "break_impulse_mult": 1.8,
+   "break_note": "losing a whole limb should cost real effort",
    "name": "golem_L_upperarm",
    "parent": "golem_L_shoulder",
    "pivot_m": [
@@ -994,6 +1475,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     -10,
+     10
+    ],
+    "rest_deg": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "a collar, not a joint - it rides the proximal member and lags it"
+   },
+   "breakable": true,
+   "break_impulse_mult": 0.25,
+   "break_note": "first to go - daylight between chunks is the earliest 'it's coming apart' read, at almost no mass cost",
    "name": "golem_L_wrist_gasket",
    "parent": "golem_L_forearm",
    "pivot_m": [
@@ -1039,6 +1541,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     -10,
+     10
+    ],
+    "rest_deg": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "a collar, not a joint - it rides the proximal member and lags it"
+   },
+   "breakable": true,
+   "break_impulse_mult": 0.25,
+   "break_note": "first to go - daylight between chunks is the earliest 'it's coming apart' read, at almost no mass cost",
    "name": "golem_R_ankle_gasket",
    "parent": "golem_R_shin",
    "pivot_m": [
@@ -1084,6 +1607,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     -10,
+     10
+    ],
+    "rest_deg": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "a collar, not a joint - it rides the proximal member and lags it"
+   },
+   "breakable": true,
+   "break_impulse_mult": 0.25,
+   "break_note": "first to go - daylight between chunks is the earliest 'it's coming apart' read, at almost no mass cost",
    "name": "golem_R_elbow_gasket",
    "parent": "golem_R_upperarm",
    "pivot_m": [
@@ -1129,6 +1673,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     -30,
+     30
+    ],
+    "rest_deg": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "wrist"
+   },
+   "breakable": true,
+   "break_impulse_mult": 0.6,
+   "break_note": "extremity, distal, high leverage",
    "name": "golem_R_fist",
    "parent": "golem_R_forearm",
    "pivot_m": [
@@ -1174,6 +1739,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     -50,
+     10
+    ],
+    "rest_deg": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "ankle"
+   },
+   "breakable": true,
+   "break_impulse_mult": 0.6,
+   "break_note": "extremity, distal, high leverage",
    "name": "golem_R_foot",
    "parent": "golem_R_shin",
    "pivot_m": [
@@ -1219,6 +1805,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     -100,
+     0
+    ],
+    "rest_deg": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "elbow - flexes one way only"
+   },
+   "breakable": true,
+   "break_impulse_mult": 1.0,
+   "break_note": "the reference",
    "name": "golem_R_forearm",
    "parent": "golem_R_upperarm",
    "pivot_m": [
@@ -1264,6 +1871,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     -10,
+     10
+    ],
+    "rest_deg": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "a collar, not a joint - it rides the proximal member and lags it"
+   },
+   "breakable": true,
+   "break_impulse_mult": 0.25,
+   "break_note": "first to go - daylight between chunks is the earliest 'it's coming apart' read, at almost no mass cost",
    "name": "golem_R_knee_gasket",
    "parent": "golem_R_thigh",
    "pivot_m": [
@@ -1309,6 +1937,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     0,
+     110
+    ],
+    "rest_deg": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "knee - 0 IS straight, so no-hyperextension is the range's own edge rather than a special case"
+   },
+   "breakable": true,
+   "break_impulse_mult": 1.0,
+   "break_note": "the reference",
    "name": "golem_R_shin",
    "parent": "golem_R_thigh",
    "pivot_m": [
@@ -1354,6 +2003,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     0,
+     0
+    ],
+    "rest_deg": [
+     -7.7242,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "unclassified"
+   },
+   "breakable": true,
+   "break_impulse_mult": 1.8,
+   "break_note": "NOT in the spec's table - the pauldron the arm hangs from, priced with the upper arm",
    "name": "golem_R_shoulder",
    "parent": "golem_C_chest_girdle",
    "pivot_m": [
@@ -1399,6 +2069,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     -70,
+     10
+    ],
+    "rest_deg": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "hip"
+   },
+   "breakable": true,
+   "break_impulse_mult": 1.8,
+   "break_note": "losing a whole limb should cost real effort",
    "name": "golem_R_thigh",
    "parent": "golem_C_pelvis",
    "pivot_m": [
@@ -1444,6 +2135,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     -120,
+     100
+    ],
+    "rest_deg": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "shoulder - ASYMMETRIC and wide: crouch parks the arm at +95 and extend throws it to -115, a 210 degree swing. Per the spec this is the named joint that earns a ConfigurableJoint"
+   },
+   "breakable": true,
+   "break_impulse_mult": 1.8,
+   "break_note": "losing a whole limb should cost real effort",
    "name": "golem_R_upperarm",
    "parent": "golem_R_shoulder",
    "pivot_m": [
@@ -1489,6 +2201,27 @@
    "role": "chunk"
   },
   {
+   "joint": {
+    "hinge_axis_local": [
+     1,
+     0,
+     0
+    ],
+    "hinge_range_deg": [
+     -10,
+     10
+    ],
+    "rest_deg": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "twist": "locked near zero",
+    "note": "a collar, not a joint - it rides the proximal member and lags it"
+   },
+   "breakable": true,
+   "break_impulse_mult": 0.25,
+   "break_note": "first to go - daylight between chunks is the earliest 'it's coming apart' read, at almost no mass cost",
    "name": "golem_R_wrist_gasket",
    "parent": "golem_R_forearm",
    "pivot_m": [

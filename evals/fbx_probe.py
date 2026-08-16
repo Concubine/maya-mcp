@@ -181,14 +181,19 @@ def _rotation(deg, order):
             [cx * sy * cz + sx * sz, cx * sy * sz - sx * cz, cx * cy]]
 
 
-def _local(node):
+def _local(node, rotation=None):
     """Return (M, t) such that a point p in this node's space maps to p.M + t.
 
     Maya writes, and FBX stores, `(p - rp) . R + rp + translation`. Scaling is
     applied about the origin: exact for the identity scale a delivery must have,
     and the scale check runs first precisely so this is never the loose one.
+
+    `rotation` overrides the node's own euler triple, which is how a POSE is
+    measured: a pose is per-chunk rotations and nothing else, so substituting
+    them here and re-composing is the whole of applying one.
     """
-    R = _rotation(node.rotation, node.rotation_order)
+    R = _rotation(node.rotation if rotation is None else rotation,
+                  node.rotation_order)
     s = node.scaling
     M = [[R[r][c] * s[r] for c in range(3)] for r in range(3)]
     rp = node.rotation_pivot
@@ -197,13 +202,17 @@ def _local(node):
     return M, offset
 
 
-def world_vertex_bounds(facts):
+def world_vertex_bounds(facts, rotations=None):
     """Axis-aligned bounds of every vertex, composed through the hierarchy.
 
     The demigol gate could read vertex magnitude straight out of the file
     because its chunks sit in one flat rank. A rig cannot: a 4 m creature is 33
     chunks whose own vertices are all under 1 m, so the only way to assert the
     delivered height from the BYTES is to compose the tree.
+
+    `rotations` maps node name -> euler triple in degrees and applies a POSE:
+    the delivery states poses as per-chunk rotations, so measuring one is
+    substituting them here. Names absent from the map keep the file's own.
     """
     by_uid = {n.uid: n for n in facts.nodes if n.uid is not None}
     lo = [float("inf")] * 3
@@ -217,7 +226,7 @@ def world_vertex_bounds(facts):
         seen = set()
         while walker is not None and walker.uid not in seen:
             seen.add(walker.uid)
-            chain.append(_local(walker))
+            chain.append(_local(walker, (rotations or {}).get(walker.name)))
             walker = by_uid.get(walker.parent)
         for i in range(0, len(verts), 3):
             p = list(verts[i:i + 3])

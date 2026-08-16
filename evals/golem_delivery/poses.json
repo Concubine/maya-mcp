@@ -1,0 +1,907 @@
+{
+ "absorb": {
+  "bbox_height_m": 3.53258,
+  "crown_height_m": 3.53258,
+  "joints_deg": {
+   "ankle": -43.529,
+   "elbow": -45.0,
+   "hip": -60.0,
+   "knee": 108.741,
+   "shoulder": -12.0
+  },
+  "pelvis_height_m": 1.466,
+  "plant_offset_y_m": -0.494,
+  "rotations_deg": {
+   "golem_C_belly": [
+    -12.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_brow": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_chest_girdle": [
+    -5.7125,
+    0.0,
+    0.0
+   ],
+   "golem_C_head": [
+    6.2758,
+    0.0,
+    0.0
+   ],
+   "golem_C_neck_gasket": [
+    -7.7242,
+    0.0,
+    0.0
+   ],
+   "golem_C_pelvis": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_tracer_core": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_tracer_trail1": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_tracer_trail2": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_tracer_trail3": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_waist_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_L_ankle_gasket": [
+    -11.5503,
+    0.0,
+    0.0
+   ],
+   "golem_L_elbow_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_L_fist": [
+    -14.0,
+    0.0,
+    0.0
+   ],
+   "golem_L_foot": [
+    -43.5288,
+    0.0,
+    0.0
+   ],
+   "golem_L_forearm": [
+    -45.0,
+    0.0,
+    0.0
+   ],
+   "golem_L_knee_gasket": [
+    24.6182,
+    0.0,
+    0.0
+   ],
+   "golem_L_shin": [
+    108.7412,
+    0.0,
+    0.0
+   ],
+   "golem_L_shoulder": [
+    -7.7242,
+    0.0,
+    0.0
+   ],
+   "golem_L_thigh": [
+    -60.0,
+    0.0,
+    0.0
+   ],
+   "golem_L_upperarm": [
+    -12.0,
+    0.0,
+    12.0
+   ],
+   "golem_L_wrist_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_ankle_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_elbow_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_fist": [
+    -14.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_foot": [
+    -22.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_forearm": [
+    -45.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_knee_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_shin": [
+    62.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_shoulder": [
+    -7.7242,
+    0.0,
+    0.0
+   ],
+   "golem_R_thigh": [
+    -40.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_upperarm": [
+    -12.0,
+    0.0,
+    -12.0
+   ],
+   "golem_R_wrist_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ]
+  },
+  "trigger": "OnLanded(speed) - deepest knee flex, scale the depth by impact speed"
+ },
+ "air": {
+  "bbox_height_m": 3.64654,
+  "crown_height_m": 3.64654,
+  "joints_deg": {
+   "ankle": -5.529,
+   "elbow": -30.0,
+   "hip": -65.0,
+   "knee": 81.741,
+   "shoulder": 12.0
+  },
+  "pelvis_height_m": 1.59451,
+  "plant_offset_y_m": -0.36549,
+  "rotations_deg": {
+   "golem_C_belly": [
+    2.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_brow": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_chest_girdle": [
+    6.2875,
+    0.0,
+    0.0
+   ],
+   "golem_C_head": [
+    -5.7242,
+    0.0,
+    0.0
+   ],
+   "golem_C_neck_gasket": [
+    -7.7242,
+    0.0,
+    0.0
+   ],
+   "golem_C_pelvis": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_tracer_core": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_tracer_trail1": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_tracer_trail2": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_tracer_trail3": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_waist_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_L_ankle_gasket": [
+    -11.5503,
+    0.0,
+    0.0
+   ],
+   "golem_L_elbow_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_L_fist": [
+    -12.0,
+    0.0,
+    0.0
+   ],
+   "golem_L_foot": [
+    -5.5288,
+    0.0,
+    0.0
+   ],
+   "golem_L_forearm": [
+    -30.0,
+    0.0,
+    0.0
+   ],
+   "golem_L_knee_gasket": [
+    24.6182,
+    0.0,
+    0.0
+   ],
+   "golem_L_shin": [
+    81.7412,
+    0.0,
+    0.0
+   ],
+   "golem_L_shoulder": [
+    -7.7242,
+    0.0,
+    0.0
+   ],
+   "golem_L_thigh": [
+    -65.0,
+    0.0,
+    0.0
+   ],
+   "golem_L_upperarm": [
+    12.0,
+    0.0,
+    22.0
+   ],
+   "golem_L_wrist_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_ankle_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_elbow_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_fist": [
+    -12.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_foot": [
+    16.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_forearm": [
+    -30.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_knee_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_shin": [
+    35.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_shoulder": [
+    -7.7242,
+    0.0,
+    0.0
+   ],
+   "golem_R_thigh": [
+    -45.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_upperarm": [
+    12.0,
+    0.0,
+    -22.0
+   ],
+   "golem_R_wrist_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ]
+  },
+  "trigger": "airborne - holding extend through a multi-second flight reads dead"
+ },
+ "crouch": {
+  "bbox_height_m": 3.50229,
+  "crown_height_m": 3.50229,
+  "joints_deg": {
+   "ankle": -39.529,
+   "elbow": -16.0,
+   "hip": -60.0,
+   "knee": 104.741,
+   "shoulder": 95.0
+  },
+  "pelvis_height_m": 1.49275,
+  "plant_offset_y_m": -0.46725,
+  "rotations_deg": {
+   "golem_C_belly": [
+    -20.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_brow": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_chest_girdle": [
+    -9.7125,
+    0.0,
+    0.0
+   ],
+   "golem_C_head": [
+    8.2758,
+    0.0,
+    0.0
+   ],
+   "golem_C_neck_gasket": [
+    -7.7242,
+    0.0,
+    0.0
+   ],
+   "golem_C_pelvis": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_tracer_core": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_tracer_trail1": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_tracer_trail2": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_tracer_trail3": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_waist_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_L_ankle_gasket": [
+    -11.5503,
+    0.0,
+    0.0
+   ],
+   "golem_L_elbow_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_L_fist": [
+    -8.0,
+    0.0,
+    0.0
+   ],
+   "golem_L_foot": [
+    -39.5288,
+    0.0,
+    0.0
+   ],
+   "golem_L_forearm": [
+    -16.0,
+    0.0,
+    0.0
+   ],
+   "golem_L_knee_gasket": [
+    24.6182,
+    0.0,
+    0.0
+   ],
+   "golem_L_shin": [
+    104.7412,
+    0.0,
+    0.0
+   ],
+   "golem_L_shoulder": [
+    -7.7242,
+    0.0,
+    0.0
+   ],
+   "golem_L_thigh": [
+    -60.0,
+    0.0,
+    0.0
+   ],
+   "golem_L_upperarm": [
+    95.0,
+    0.0,
+    -8.0
+   ],
+   "golem_L_wrist_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_ankle_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_elbow_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_fist": [
+    -8.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_foot": [
+    -18.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_forearm": [
+    -16.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_knee_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_shin": [
+    58.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_shoulder": [
+    -7.7242,
+    0.0,
+    0.0
+   ],
+   "golem_R_thigh": [
+    -40.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_upperarm": [
+    95.0,
+    0.0,
+    8.0
+   ],
+   "golem_R_wrist_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ]
+  },
+  "trigger": "ChargeFraction 0 -> 1 over the 1.1 s wind-up"
+ },
+ "extend": {
+  "bbox_height_m": 5.06306,
+  "crown_height_m": 4.13677,
+  "joints_deg": {
+   "ankle": -7.529,
+   "elbow": -18.0,
+   "hip": 0.0,
+   "knee": 0.0,
+   "shoulder": -115.0
+  },
+  "pelvis_height_m": 2.0797,
+  "plant_offset_y_m": 0.1197,
+  "rotations_deg": {
+   "golem_C_belly": [
+    -4.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_brow": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_chest_girdle": [
+    10.2875,
+    0.0,
+    0.0
+   ],
+   "golem_C_head": [
+    -15.7242,
+    0.0,
+    0.0
+   ],
+   "golem_C_neck_gasket": [
+    -7.7242,
+    0.0,
+    0.0
+   ],
+   "golem_C_pelvis": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_tracer_core": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_tracer_trail1": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_tracer_trail2": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_tracer_trail3": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_waist_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_L_ankle_gasket": [
+    -11.5503,
+    0.0,
+    0.0
+   ],
+   "golem_L_elbow_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_L_fist": [
+    -4.0,
+    0.0,
+    0.0
+   ],
+   "golem_L_foot": [
+    -7.5288,
+    0.0,
+    0.0
+   ],
+   "golem_L_forearm": [
+    -18.0,
+    0.0,
+    0.0
+   ],
+   "golem_L_knee_gasket": [
+    24.6182,
+    0.0,
+    0.0
+   ],
+   "golem_L_shin": [
+    0.0002,
+    0.0,
+    0.0
+   ],
+   "golem_L_shoulder": [
+    -7.7242,
+    0.0,
+    0.0
+   ],
+   "golem_L_thigh": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_L_upperarm": [
+    -115.0,
+    0.0,
+    -10.0
+   ],
+   "golem_L_wrist_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_ankle_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_elbow_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_fist": [
+    -4.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_foot": [
+    14.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_forearm": [
+    -18.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_knee_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_shin": [
+    -46.741,
+    0.0,
+    0.0
+   ],
+   "golem_R_shoulder": [
+    -7.7242,
+    0.0,
+    0.0
+   ],
+   "golem_R_thigh": [
+    20.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_upperarm": [
+    -115.0,
+    0.0,
+    10.0
+   ],
+   "golem_R_wrist_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ]
+  },
+  "trigger": "release - full push-off, the tallest pose"
+ },
+ "rest": {
+  "bbox_height_m": 4.02173,
+  "crown_height_m": 4.02173,
+  "joints_deg": {
+   "ankle": -21.529,
+   "elbow": 0.0,
+   "hip": -20.0,
+   "knee": 46.741,
+   "shoulder": 0.0
+  },
+  "pelvis_height_m": 1.96673,
+  "plant_offset_y_m": 0.00673,
+  "rotations_deg": {
+   "golem_C_belly": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_brow": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_chest_girdle": [
+    8.2875,
+    0.0,
+    0.0
+   ],
+   "golem_C_head": [
+    -7.7242,
+    0.0,
+    0.0
+   ],
+   "golem_C_neck_gasket": [
+    -7.7242,
+    0.0,
+    0.0
+   ],
+   "golem_C_pelvis": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_tracer_core": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_tracer_trail1": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_tracer_trail2": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_tracer_trail3": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_C_waist_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_L_ankle_gasket": [
+    -11.5503,
+    0.0,
+    0.0
+   ],
+   "golem_L_elbow_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_L_fist": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_L_foot": [
+    -21.5288,
+    0.0,
+    0.0
+   ],
+   "golem_L_forearm": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_L_knee_gasket": [
+    24.6182,
+    0.0,
+    0.0
+   ],
+   "golem_L_shin": [
+    46.7412,
+    0.0,
+    0.0
+   ],
+   "golem_L_shoulder": [
+    -7.7242,
+    0.0,
+    0.0
+   ],
+   "golem_L_thigh": [
+    -20.0,
+    0.0,
+    0.0
+   ],
+   "golem_L_upperarm": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_L_wrist_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_ankle_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_elbow_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_fist": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_foot": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_forearm": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_knee_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_shin": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_shoulder": [
+    -7.7242,
+    0.0,
+    0.0
+   ],
+   "golem_R_thigh": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_upperarm": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "golem_R_wrist_gasket": [
+    0.0,
+    0.0,
+    0.0
+   ]
+  },
+  "trigger": "idle - the modelled crouch, exactly what the FBX nodes already carry"
+ }
+}

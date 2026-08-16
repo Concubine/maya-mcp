@@ -116,6 +116,36 @@ def test_reader_composes_the_rig_hierarchy():
     assert abs((hi[1] - lo[1]) - 4.02173) < 1e-4
 
 
+POSES = REPO / "evals" / "golem_delivery" / "poses.json"
+
+
+def _poses():
+    with open(POSES) as fh:
+        return json.load(fh)
+
+
+def test_every_pose_composes_to_its_declared_height():
+    # The strongest cross-check in the delivery: Maya measured these heights by
+    # posing the live rig, and this re-derives them from the FBX bytes with an
+    # independent composer. crouch 3.502 / rest 4.022 / extend 5.063.
+    violations = delivery_units.check_poses(GOLEM, _poses())
+    assert violations == [], "\n".join(violations)
+
+
+def test_pose_check_catches_a_pose_that_drifted_from_the_geometry():
+    poses = _poses()
+    poses["extend"]["bbox_height_m"] = 4.64      # the figure the spec pinned
+    violations = delivery_units.check_poses(GOLEM, poses)
+    assert any("extend" in v and "4.64" in v for v in violations), violations
+
+
+def test_pose_check_catches_a_chunk_the_file_does_not_have():
+    poses = _poses()
+    poses["rest"]["rotations_deg"]["golem_C_tail"] = [0, 0, 0]
+    violations = delivery_units.check_poses(GOLEM, poses)
+    assert any("golem_C_tail" in v for v in violations), violations
+
+
 def _fake_rig(scaling=(1.0, 1.0, 1.0), height=4.02173):
     root = fbx_probe.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1,
                              geometry=10, scaling=scaling)
