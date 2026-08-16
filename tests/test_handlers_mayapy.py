@@ -408,6 +408,175 @@ class TestBooleanInMaya:
         assert any("auto_boolean" in f for f in os.listdir(cp_dir))
 
 
+# The atlas patch every #638 test packs its chunk into: patch 0 of a 4x4 grid
+# with a 2% margin, which is where the golem run's chunks actually sat.
+PATCH_638 = (0.005, 0.755, 0.245, 0.995)
+
+
+def _uv_bounds(cmds, node):
+    flat = cmds.polyEditUV(node + ".map[*]", query=True) or []
+    us, vs = flat[0::2], flat[1::2]
+    return (min(us), min(vs), max(us), max(vs))
+
+
+def _pack_into(cmds, node, rect):
+    """Squeeze a default 0..1 layout into `rect`, the way uv_atlas does."""
+    cmds.polyEditUV(node + ".map[*]", pu=0, pv=0,
+                    su=rect[2] - rect[0], sv=rect[3] - rect[1])
+    cmds.polyEditUV(node + ".map[*]", u=rect[0], v=rect[1])
+
+
+class TestBooleanCarriesAState:
+    """#638: a boolean rebuilds the mesh, and everything that is not vertices -
+    the pivot, the place in the hierarchy, the atlas patch - was being dropped
+    silently. All three were measured lost on one call in the #601 golem run."""
+
+    def test_the_pivot_survives_the_rebuild(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        cmds.file(rename=str(tmp_path / "boolpivot.ma"))
+        cmds.polyCube(name="shoulder", w=2, h=2, d=2)
+        cmds.xform("shoulder", ws=True, t=(0, 2, 0))
+        # the rigged pivot: the ball joint at the bottom of the chunk, NOT the
+        # bbox centre the boolean would otherwise invent.
+        cmds.xform("shoulder", ws=True, pivots=(0, 1, 0))
+        cmds.polyCube(name="socket", w=1, h=1, d=1)
+        cmds.xform("socket", ws=True, t=(1, 3, 0))
+
+        result = modeling.boolean_op({
+            "a": "|shoulder", "b": "|socket", "op": "difference",
+            "new_name": "shoulder_cut",
+        })
+        pivot = cmds.xform(result["name"], q=True, ws=True, rotatePivot=True)
+        assert pivot == pytest.approx([0.0, 1.0, 0.0], abs=1e-4)
+        assert result["pivot"] == pytest.approx([0.0, 1.0, 0.0], abs=1e-4)
+        assert result["warnings"] == []
+
+    def test_the_result_stays_in_the_hierarchy(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        cmds.file(rename=str(tmp_path / "boolparent.ma"))
+        head = cmds.group(empty=True, name="golem_C_head")
+        cmds.polyCube(name="brow", w=2, h=2, d=2)
+        cmds.parent("brow", head)
+        cmds.polyCube(name="visor", w=1, h=1, d=1)
+        cmds.xform("visor", ws=True, t=(1, 1, 0))
+
+        result = modeling.boolean_op({
+            "a": "|golem_C_head|brow", "b": "|visor", "op": "difference",
+            "new_name": "brow_slotted",
+        })
+        assert result["name"] == "|golem_C_head|brow_slotted"
+        assert result["parent"] == "|golem_C_head"
+        # and the parent group is not left holding nothing: the result IS in it
+        assert cmds.listRelatives(head, children=True, fullPath=True) == [
+            "|golem_C_head|brow_slotted"
+        ]
+
+    def test_a_parent_whose_only_child_is_a_is_not_reaped(self, tmp_path):
+        """delete(constructionHistory=True) garbage-collects the consumed
+        operands, and an empty parent group goes with them - measured. The
+        result is reparented BEFORE that delete for exactly this reason."""
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        cmds.file(rename=str(tmp_path / "boolsolo.ma"))
+        solo = cmds.group(empty=True, name="soloGRP")
+        cmds.polyCube(name="onlyChild", w=2, h=2, d=2)
+        cmds.parent("onlyChild", solo)
+        cmds.polyCube(name="soloCutter", w=1, h=1, d=1)
+        cmds.xform("soloCutter", ws=True, t=(1, 1, 0))
+
+        result = modeling.boolean_op({
+            "a": "|soloGRP|onlyChild", "b": "|soloCutter", "op": "difference",
+            "new_name": "onlyChild_cut",
+        })
+        assert cmds.objExists("soloGRP")
+        assert result["parent"] == "|soloGRP"
+        assert result["warnings"] == []
+
+    def test_a_scaled_parent_does_not_leave_a_compensating_scale(self, tmp_path):
+        """Reparenting preserves world position, which hands the result the
+        INVERSE of the group's scale - the exact node state the export gate
+        refuses (#629). It has to be baked, not carried."""
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        cmds.file(rename=str(tmp_path / "boolscaled.ma"))
+        rig = cmds.group(empty=True, name="scaledGRP")
+        for axis in "XYZ":
+            cmds.setAttr(rig + ".scale" + axis, 0.8)
+        cmds.polyCube(name="chunk", w=2, h=2, d=2)
+        cmds.parent("chunk", rig)
+        before = cmds.exactWorldBoundingBox("|scaledGRP|chunk")
+        cmds.polyCube(name="scaledCutter", w=1, h=1, d=1)
+        cmds.xform("scaledCutter", ws=True, t=(1, 1, 0))
+
+        result = modeling.boolean_op({
+            "a": "|scaledGRP|chunk", "b": "|scaledCutter", "op": "difference",
+            "new_name": "chunk_cut",
+        })
+        assert cmds.getAttr(result["name"] + ".scale")[0] == pytest.approx(
+            (1.0, 1.0, 1.0), abs=1e-6
+        )
+        # baked, not lost: the geometry has not moved or resized
+        after = cmds.exactWorldBoundingBox(result["name"])
+        assert after[:3] == pytest.approx(before[:3], abs=1e-4)
+        assert any("frozen into the vertices" in w for w in result["warnings"])
+
+    def test_the_cutter_cannot_drag_the_result_out_of_its_atlas_patch(self, tmp_path):
+        """The one that would have shipped: polyCBoolOp keeps each operand's
+        own UVs, so a default-UV cutter puts the newly cut faces on the whole
+        atlas. Nothing looks wrong until the material goes on."""
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        cmds.file(rename=str(tmp_path / "booluv.ma"))
+        cmds.polyCube(name="packed", w=2, h=2, d=2)
+        _pack_into(cmds, "packed", PATCH_638)
+        assert _uv_bounds(cmds, "packed") == pytest.approx(PATCH_638, abs=1e-4)
+        cmds.polyCube(name="rawCutter", w=1, h=1, d=1)
+        cmds.xform("rawCutter", ws=True, t=(1, 1, 0))
+        assert _uv_bounds(cmds, "rawCutter") == pytest.approx((0, 0, 1, 1), abs=1e-4)
+
+        result = modeling.boolean_op({
+            "a": "|packed", "b": "|rawCutter", "op": "difference",
+            "new_name": "packed_cut",
+        })
+        u0, v0, u1, v1 = _uv_bounds(cmds, result["name"])
+        assert u0 >= PATCH_638[0] - 1e-4 and v0 >= PATCH_638[1] - 1e-4
+        assert u1 <= PATCH_638[2] + 1e-4 and v1 <= PATCH_638[3] + 1e-4
+        assert result["uv_bounds"] == pytest.approx(list(PATCH_638), abs=1e-3)
+        assert result["warnings"] == []
+
+    def test_a_mesh_with_no_uvs_is_not_a_failure(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        cmds.file(rename=str(tmp_path / "boolnouv.ma"))
+        cmds.polyCube(name="bare", w=2, h=2, d=2)
+        cmds.polyMapDel("bare.f[*]")
+        # the test is only worth anything if the mesh really has none left
+        assert not (cmds.polyEditUV("bare.map[*]", query=True) or [])
+        cmds.polyCube(name="bareCutter", w=1, h=1, d=1)
+        cmds.xform("bareCutter", ws=True, t=(1, 1, 0))
+
+        result = modeling.boolean_op({
+            "a": "|bare", "b": "|bareCutter", "op": "difference",
+            "new_name": "bare_cut",
+        })
+        assert result["watertight"] is True
+        assert result["warnings"] == []
+
+
 class TestEtchInMaya:
     def test_etch_carves_recess(self, tmp_path):
         import maya.cmds as cmds

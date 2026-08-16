@@ -85,6 +85,78 @@ class TestResolveCell:
             uvmath.resolve_cell("middle", 4, 4)
 
 
+def _apply_fold(fold, u, v):
+    """What Maya does with the six numbers: scale about the pivot, then move."""
+    pivot_u, pivot_v, scale_u, scale_v, delta_u, delta_v = fold
+    return (
+        pivot_u + (u - pivot_u) * scale_u + delta_u,
+        pivot_v + (v - pivot_v) * scale_v + delta_v,
+    )
+
+
+class TestFoldTransform:
+    def test_folding_a_box_onto_itself_is_the_identity(self):
+        box = (0.2, 0.3, 0.6, 0.9)
+        fold = uvmath.fold_transform(box, box)
+        assert uvmath.is_identity_fold(fold)
+        assert _apply_fold(fold, 0.4, 0.5) == pytest.approx((0.4, 0.5))
+
+    def test_the_unit_square_lands_exactly_on_an_atlas_patch(self):
+        # the #638 case: a default-UV cutter folded into a chunk's patch
+        rect = uvmath.patch_rect(4, 4, 0, 0, margin=0.02)
+        fold = uvmath.fold_transform((0.0, 0.0, 1.0, 1.0), rect)
+        assert _apply_fold(fold, 0.0, 0.0) == pytest.approx(rect[:2])
+        assert _apply_fold(fold, 1.0, 1.0) == pytest.approx(rect[2:])
+        assert not uvmath.is_identity_fold(fold)
+
+    def test_an_off_square_source_still_lands_on_the_corners(self):
+        src, dst = (0.5, 0.25, 0.75, 1.0), (0.005, 0.755, 0.245, 0.995)
+        fold = uvmath.fold_transform(src, dst)
+        assert _apply_fold(fold, src[0], src[1]) == pytest.approx(dst[:2])
+        assert _apply_fold(fold, src[2], src[3]) == pytest.approx(dst[2:])
+        mid = _apply_fold(fold, (src[0] + src[2]) / 2, (src[1] + src[3]) / 2)
+        assert mid == pytest.approx(((dst[0] + dst[2]) / 2, (dst[1] + dst[3]) / 2))
+
+    def test_a_degenerate_source_axis_is_centred_not_collapsed_to_a_corner(self):
+        # every UV on one vertical line: there is no width to scale, so the
+        # only defensible answer is the middle of the destination.
+        fold = uvmath.fold_transform((0.5, 0.0, 0.5, 1.0), (0.0, 0.0, 0.25, 1.0))
+        u, v = _apply_fold(fold, 0.5, 0.5)
+        assert u == pytest.approx(0.125)
+        assert v == pytest.approx(0.5)
+
+    def test_a_degenerate_destination_collapses_the_source_onto_it(self):
+        fold = uvmath.fold_transform((0.0, 0.0, 1.0, 1.0), (0.4, 0.4, 0.4, 0.9))
+        for u in (0.0, 0.5, 1.0):
+            assert _apply_fold(fold, u, 0.5)[0] == pytest.approx(0.4)
+
+    def test_is_identity_fold_sees_a_small_but_real_move(self):
+        fold = uvmath.fold_transform((0.0, 0.0, 1.0, 1.0), (0.0, 0.0, 1.0, 0.999))
+        assert not uvmath.is_identity_fold(fold)
+
+
+class TestRectContains:
+    def test_a_box_contains_itself(self):
+        box = (0.005, 0.755, 0.245, 0.995)
+        assert uvmath.rect_contains(box, box)
+
+    def test_a_cutters_full_range_does_not_fit_an_atlas_patch(self):
+        assert not uvmath.rect_contains(
+            (0.0, 0.0, 1.0, 1.0), (0.005, 0.755, 0.245, 0.995)
+        )
+
+    def test_escaping_on_one_side_alone_is_enough_to_fail(self):
+        patch = (0.005, 0.755, 0.245, 0.995)
+        assert not uvmath.rect_contains((0.005, 0.755, 0.3, 0.995), patch)
+        assert not uvmath.rect_contains((0.005, 0.6, 0.245, 0.995), patch)
+
+    def test_float_noise_within_tolerance_still_counts_as_inside(self):
+        patch = (0.005, 0.755, 0.245, 0.995)
+        assert uvmath.rect_contains(
+            (0.005 - 1e-9, 0.755, 0.245 + 1e-9, 0.995), patch
+        )
+
+
 class TestFitTransform:
     def test_unit_rect_is_the_identity(self):
         assert uvmath.fit_transform((0.0, 0.0, 1.0, 1.0)) == (1.0, 1.0, 0.0, 0.0)

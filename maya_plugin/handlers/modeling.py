@@ -8,10 +8,10 @@ as warnings (#577 req 4c).
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..dispatcher import HandlerError
-from . import ledger, naming
+from . import ledger, naming, uvmath
 
 PRIMITIVE_KINDS = (
     "cube", "sphere", "cylinder", "plane", "torus", "cone",
@@ -405,6 +405,96 @@ def delete_objects(params: Dict[str, Any]) -> Dict[str, Any]:
 
 
 BOOLEAN_OPS = {"union": 1, "difference": 2, "intersection": 3}
+# How far a local transform channel may sit from identity before the result is
+# considered to be carrying a compensating transform that must be baked.
+IDENTITY_TOL = 1e-6
+
+
+def _uv_bounds(cmds, shape: str) -> Optional[List[float]]:
+    """[u_min, v_min, u_max, v_max] over every UV on `shape`, or None if it has none."""
+    flat = cmds.polyEditUV(shape + ".map[*]", query=True) or []
+    if not flat:
+        return None
+    us, vs = flat[0::2], flat[1::2]
+    return [min(us), min(vs), max(us), max(vs)]
+
+
+def _fold_cutter_uvs(cmds, target: Optional[List[float]], b_shape: str) -> None:
+    """Move the cutter's UVs into `target` BEFORE the boolean runs.
+
+    polyCBoolOp keeps each operand's own UVs, so the faces the cutter
+    contributes arrive carrying the CUTTER's layout. Measured on the #638
+    repro: 22 of the result's 34 UVs sat in the chunk's atlas patch and the
+    other 12 sat in the cutter's - the newly cut face sampling a different
+    material, invisible until the texture goes on.
+
+    Folding beforehand rather than repacking afterwards is deliberate. Once the
+    two operands are merged there is no reliable way to tell whose UVs are
+    whose: matching by value mangles any of the cutter's that happen to land
+    inside the chunk's patch, and leaves the rest.
+    """
+    if target is None:
+        return
+    source = _uv_bounds(cmds, b_shape)
+    if source is None:
+        return
+    fold = uvmath.fold_transform(source, target)
+    if uvmath.is_identity_fold(fold):
+        return
+    pivot_u, pivot_v, scale_u, scale_v, delta_u, delta_v = fold
+    cmds.polyEditUV(b_shape + ".map[*]", pivotU=pivot_u, pivotV=pivot_v,
+                    scaleU=scale_u, scaleV=scale_v)
+    cmds.polyEditUV(b_shape + ".map[*]", uValue=delta_u, vValue=delta_v)
+
+
+def _carry_parent(
+    cmds, out_long: str, parent: Optional[str], b_long: str, warnings: List[str]
+) -> Tuple[str, bool]:
+    """Put the result back under A's parent, BEFORE history is deleted.
+
+    Order matters and is measured, not assumed: polyCBoolOp leaves the consumed
+    operands in place as empty transforms, and it is `delete(constructionHistory
+    =True)` that reaps them - taking A's parent group with them when A was its
+    only child. Reparenting first leaves that group holding the result, so it
+    survives.
+    """
+    if parent is None:
+        return out_long, False
+    if parent == b_long:
+        warnings.append(
+            "a's parent %s is the cutter itself, so it does not outlive this "
+            "call; the result is at the scene root" % parent
+        )
+        return out_long, False
+    if not cmds.objExists(parent):
+        warnings.append(
+            "a's parent %s no longer exists; the result is at the scene root" % parent
+        )
+        return out_long, False
+    moved = cmds.parent(out_long, parent) or [out_long]
+    return _long(cmds, moved[0]), True
+
+
+def _bake_compensating_transform(cmds, node: str) -> bool:
+    """Freeze a local transform the reparent introduced. True if anything moved.
+
+    cmds.parent preserves world position, so dropping the result under a scaled
+    or rotated group hands it the INVERSE of that group - the compensating
+    transform #629 exists to stamp out, and the one the export gate refuses by
+    name. The vertices already hold world-space geometry, so baking it costs
+    nothing and leaves the node at identity.
+    """
+    channels = (
+        ("translate", 0.0), ("rotate", 0.0), ("scale", 1.0),
+    )
+    for attr, neutral in channels:
+        values = cmds.getAttr(node + "." + attr)[0]
+        if any(abs(float(v) - neutral) > IDENTITY_TOL for v in values):
+            cmds.makeIdentity(
+                node, apply=True, translate=True, rotate=True, scale=True
+            )
+            return True
+    return False
 
 
 def _do_boolean(cmds, a_long: str, b_long: str, op: str, new_name: str) -> Dict[str, Any]:
@@ -413,18 +503,36 @@ def _do_boolean(cmds, a_long: str, b_long: str, op: str, new_name: str) -> Dict[
     Per-face shader assignment on boolean output silently no-ops and corrupts
     shading groups (redmine #577 req 1), so: delete history immediately, then
     collapse shading to one object-level SG (input A's material wins).
+
+    polyCBoolOp builds a brand-new root object, and everything A carried that
+    is not vertices is A's alone: its pivot, its place in the hierarchy, its
+    atlas patch. #638 measured all three lost on one silent call. They are read
+    off A here, before it is consumed, and put back on the result.
     """
     from . import meshcheck  # noqa: PLC0415 - keep module import cheap headless
 
     _, a_shape = naming.require_mesh(cmds, a_long)
+    # Resolved rather than taken as given: etch_text passes the glyph by short
+    # name, and _carry_parent below compares this against a long parent path.
+    b_long, b_shape = naming.require_mesh(cmds, b_long)
     fallback_sg = meshcheck.first_sg(cmds, a_shape)
+
+    a_parent = (cmds.listRelatives(a_long, parent=True, fullPath=True) or [None])[0]
+    a_pivot = [
+        float(v) for v in
+        cmds.xform(a_long, query=True, worldSpace=True, rotatePivot=True)
+    ]
+    a_uv = _uv_bounds(cmds, a_shape)
+    _fold_cutter_uvs(cmds, a_uv, b_shape)
 
     result = cmds.polyCBoolOp(a_long, b_long, op=BOOLEAN_OPS[op], name=new_name)
     out = cmds.rename(result[0], new_name)
     out_long = _long(cmds, out)
-    cmds.delete(out_long, constructionHistory=True)
 
     warnings: List[str] = []
+    out_long, reparented = _carry_parent(cmds, out_long, a_parent, b_long, warnings)
+    cmds.delete(out_long, constructionHistory=True)
+
     _, out_shape = naming.require_mesh(cmds, out_long)
     # polyCBoolOp leaves groupId nodes wired into the shape's (comp)InstObjGroups
     # to carry each operand's original per-face material group across the
@@ -436,6 +544,37 @@ def _do_boolean(cmds, a_long: str, b_long: str, op: str, new_name: str) -> Dict[
     stale_group_ids = set(cmds.listConnections(out_shape, type="groupId") or [])
     if stale_group_ids:
         cmds.delete(list(stale_group_ids))
+
+    # Freeze BEFORE placing the pivot: makeIdentity resets pivots to the origin,
+    # so a pivot set first would be silently thrown away.
+    if reparented and _bake_compensating_transform(cmds, out_long):
+        warnings.append(
+            "the result inherited a compensating transform from %s and it was "
+            "frozen into the vertices; a non-identity node scale is what the "
+            "export gate refuses (#629)" % a_parent
+        )
+    cmds.xform(out_long, worldSpace=True, pivots=tuple(a_pivot))
+    pivot = [
+        float(v) for v in
+        cmds.xform(out_long, query=True, worldSpace=True, rotatePivot=True)
+    ]
+    if max((abs(p - q) for p, q in zip(pivot, a_pivot)), default=0.0) > 1e-4:
+        warnings.append(
+            "a's pivot %s could not be carried onto the result: it sits at %s"
+            % ([round(v, 5) for v in a_pivot], [round(v, 5) for v in pivot])
+        )
+
+    uv_bounds = _uv_bounds(cmds, out_shape)
+    if a_uv is not None and uv_bounds is not None and not uvmath.rect_contains(
+        uv_bounds, a_uv
+    ):
+        warnings.append(
+            "the result's UVs span %s, outside a's %s: the newly cut faces will "
+            "sample a different part of the texture. Re-run maya_uv_atlas on "
+            "this mesh."
+            % ([round(v, 4) for v in uv_bounds], [round(v, 4) for v in a_uv])
+        )
+
     shading = meshcheck.ensure_object_shading(cmds, out_shape, fallback_sg)
     if shading["repaired"]:
         warnings.append(
@@ -455,6 +594,10 @@ def _do_boolean(cmds, a_long: str, b_long: str, op: str, new_name: str) -> Dict[
         "name": out_long,
         "tris": stats["tris"],
         "watertight": stats["watertight"],
+        "parent": (cmds.listRelatives(out_long, parent=True, fullPath=True)
+                   or [None])[0],
+        "pivot": [round(v, 6) for v in pivot],
+        "uv_bounds": None if uv_bounds is None else [round(v, 6) for v in uv_bounds],
         "warnings": warnings,
     }
 

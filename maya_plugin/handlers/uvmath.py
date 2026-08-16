@@ -121,6 +121,59 @@ def fits_in_rect(bounds: Sequence[float], rect: Sequence[float], scale: float) -
     return half_u <= rect_half_u + tol and half_v <= rect_half_v + tol
 
 
+def fold_transform(
+    src: Sequence[float], dst: Sequence[float]
+) -> Tuple[float, float, float, float, float, float]:
+    """(pivot_u, pivot_v, scale_u, scale_v, delta_u, delta_v) mapping box `src`
+    onto box `dst` - scale about `src`'s minimum corner, then move.
+
+    Unlike fit_transform this takes an arbitrary source box rather than the unit
+    square, which is what a boolean cutter needs: its UVs are wherever the
+    caller left them, and they have to end up inside the chunk's atlas patch
+    (#638). The two triples are exactly one polyEditUV scale followed by one
+    relative move.
+
+    A degenerate source axis (every UV on one line) cannot be scaled onto a
+    range, so it is CENTRED in the destination instead of collapsing to its
+    corner - the same pixel either way, but the one a reader would predict.
+    """
+    su0, sv0, su1, sv1 = (float(q) for q in src)
+    du0, dv0, du1, dv1 = (float(q) for q in dst)
+    tol = 1e-12
+    scale_u = (du1 - du0) / (su1 - su0) if abs(su1 - su0) > tol else 1.0
+    scale_v = (dv1 - dv0) / (sv1 - sv0) if abs(sv1 - sv0) > tol else 1.0
+    delta_u = (du0 if abs(su1 - su0) > tol else (du0 + du1) / 2.0) - su0
+    delta_v = (dv0 if abs(sv1 - sv0) > tol else (dv0 + dv1) / 2.0) - sv0
+    return (su0, sv0, scale_u, scale_v, delta_u, delta_v)
+
+
+def is_identity_fold(
+    fold: Sequence[float], tol: float = 1e-6
+) -> bool:
+    """Would applying `fold` leave every UV where it is (within `tol`)?
+
+    Worth asking before touching a mesh: a no-op polyEditUV still dirties the
+    scene and still costs a full UV rewrite on a dense mesh.
+    """
+    _, _, scale_u, scale_v, delta_u, delta_v = (float(q) for q in fold)
+    return (
+        abs(scale_u - 1.0) <= tol and abs(scale_v - 1.0) <= tol
+        and abs(delta_u) <= tol and abs(delta_v) <= tol
+    )
+
+
+def rect_contains(
+    inner: Sequence[float], outer: Sequence[float], tol: float = 1e-4
+) -> bool:
+    """Does `outer` contain `inner`, allowing `tol` of slop on every side?"""
+    iu0, iv0, iu1, iv1 = (float(q) for q in inner)
+    ou0, ov0, ou1, ov1 = (float(q) for q in outer)
+    return (
+        iu0 >= ou0 - tol and iv0 >= ov0 - tol
+        and iu1 <= ou1 + tol and iv1 <= ov1 + tol
+    )
+
+
 def fit_transform(rect: Sequence[float]) -> Tuple[float, float, float, float]:
     """(scale_u, scale_v, offset_u, offset_v) mapping the unit square onto rect.
 
