@@ -215,8 +215,19 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
     if violations:
         try:
             os.unlink(path)
-        except OSError:
-            pass
+        except OSError as unlink_exc:
+            # Worse than the ordinary failure below: the bad file is still on
+            # disk, and a message that claims otherwise is exactly the kind of
+            # false-green report this tool exists to prevent (#642).
+            raise HandlerError(
+                "the exported FBX failed the unit gate and COULD NOT BE "
+                "DELETED (%s) - a bad file is STILL ON DISK at %s and was NOT "
+                "removed: %s" % (unlink_exc, path, "; ".join(violations[:4])),
+                hint="the scene is the problem, not the export settings. Freeze "
+                     "transforms so no node carries scale, and author so one "
+                     "unit means one metre (linear_unit 'cm' in this repo's "
+                     "convention). Deletion itself failed - remove %s by hand "
+                     "before it reaches a delivery" % path) from unlink_exc
         raise HandlerError(
             "the exported FBX failed the unit gate and was DELETED: %s"
             % "; ".join(violations[:4]),

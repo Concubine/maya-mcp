@@ -251,8 +251,18 @@ def _install(monkeypatch, cmds, facts, mel=None):
     mel = mel or FakeMel()
     monkeypatch.setattr(export, "_cmds", lambda: cmds)
     monkeypatch.setattr(export, "_mel", lambda: mel)
+    # Recorded on the mel object, the same way FakeMel.evaluated records the
+    # preamble: a lambda whose return nobody reads proves nothing about
+    # whether the handler actually called it, only about what it would get
+    # back if it did.
+    mel.unit_scale_factor_calls = []
+
+    def _fake_set_unit_scale_factor(p, value=100.0):
+        mel.unit_scale_factor_calls.append(p)
+        return value
+
     monkeypatch.setattr(export.fbxbytes, "set_unit_scale_factor",
-                        lambda _p, value=100.0: value)
+                        _fake_set_unit_scale_factor)
     monkeypatch.setattr(export.fbxbytes, "read_fbx", lambda _p: facts)
     return mel
 
@@ -277,6 +287,9 @@ def test_a_clean_export_reports_the_file_not_the_scene(monkeypatch, tmp_path):
     assert abs(out["height_m"] - 4.02173) < 1e-6
     # The measured preamble ran, in order, with the factor last.
     assert mel.evaluated == list(export.FBX_PREAMBLE_MEL) + ["FBXExportScaleFactor 1"]
+    # The unit declaration must actually be patched, on the exact file just
+    # written - not merely importable and swallowed.
+    assert mel.unit_scale_factor_calls == [out["path"]]
 
 
 def test_a_violating_file_is_deleted_not_returned(monkeypatch, tmp_path):
@@ -290,6 +303,34 @@ def test_a_violating_file_is_deleted_not_returned(monkeypatch, tmp_path):
 
     assert "kit_root" in str(exc.value)
     assert not path.exists(), "a file that fails the gate must not reach a delivery"
+
+
+def test_a_violating_file_that_wont_unlink_says_so_and_names_the_path(
+        monkeypatch, tmp_path):
+    # A Windows AV scanner or a lingering Maya handle can hold the file open.
+    # If unlink fails, the message must not claim the file was deleted - that
+    # is precisely the false-green report this tool exists to prevent (#642).
+    bad = fbxbytes.FbxNode(name="kit_root", kind="Null", uid=1,
+                           scaling=(0.01, 0.01, 0.01))
+    path = tmp_path / "bad.fbx"
+    _install(monkeypatch, FakeCmds(), _facts([bad]))
+
+    def _refuse_to_unlink(_p):
+        raise OSError("file is in use by another process")
+
+    monkeypatch.setattr(export.os, "unlink", _refuse_to_unlink)
+
+    with pytest.raises(HandlerError) as exc:
+        export.export_fbx({"path": str(path), "metres_per_unit": 1.0})
+
+    message = str(exc.value)
+    assert "kit_root" in message
+    # The success path's exact claim must not appear here - that claim would
+    # be a lie in this branch.
+    assert "was DELETED" not in message
+    assert "NOT" in message and "DELETE" in message
+    assert str(path) in message or path.name in message
+    assert path.exists(), "the fake unlink never actually removed the file"
 
 
 def test_exporting_named_nodes_selects_them(monkeypatch, tmp_path):
