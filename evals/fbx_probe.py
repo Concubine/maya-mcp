@@ -11,6 +11,7 @@ record is EndOffset / NumProperties / PropertyListLen, a u8 name length, the
 name, its properties, optional nested records, and a null terminator record -
 EndOffset == 0 marks the end of a sibling list.
 """
+import math
 import struct
 import zlib
 from dataclasses import dataclass, field
@@ -30,6 +31,16 @@ class FbxNode:
     kind: str
     translation: tuple = ORIGIN
     scaling: tuple = IDENTITY
+    # Everything below is needed only to compose a HIERARCHY. The demigol
+    # deliveries are one flat rank of chunks under a Null, so translation alone
+    # placed them; a rig nests 33 chunks six deep and rotates ten of them about
+    # pivots that are not the origin, so a world measurement needs the lot.
+    rotation: tuple = ORIGIN
+    rotation_pivot: tuple = ORIGIN
+    rotation_order: int = 0
+    uid: Optional[int] = None
+    parent: Optional[int] = None
+    geometry: Optional[int] = None
 
 
 @dataclass
@@ -41,6 +52,9 @@ class FbxFacts:
     # Byte offset of the UnitScaleFactor double, so the declaration can be
     # corrected in place. See set_unit_scale_factor.
     unit_scale_offset: Optional[int] = None
+    # Geometry UID -> flat vertex tuple, so vertices can be matched to the node
+    # that carries them. `meshes` keeps the same tuples in file order.
+    geometries: dict = field(default_factory=dict)
 
 
 def _clean(raw):
@@ -59,6 +73,7 @@ def read_fbx(path):
     off_fmt = "<QQQ" if wide else "<III"
     off_size = 24 if wide else 12
     facts = FbxFacts(version=version)
+    _connections = []
 
     def prop(pos):
         code = data[pos:pos + 1]
@@ -103,31 +118,115 @@ def read_fbx(path):
 
             if name == "Vertices" and values and isinstance(values[0], tuple):
                 facts.meshes.append(values[0])
+                if isinstance(node, int):
+                    facts.geometries[node] = values[0]
+            elif name == "C" and len(values) >= 3:
+                # ("OO", child, parent). Geometry connects to its Model the same
+                # way a Model connects to its parent Model, so one pass wires
+                # both; the 0 parent is the scene root.
+                _connections.append((values[1], values[2]))
             elif name == "P" and values and isinstance(values[0], str):
                 key = values[0]
                 if key == "UnitScaleFactor":
                     facts.unit_scale_factor = float(values[-1])
                     facts.unit_scale_offset = starts[-1]
-                elif node is not None and key in ("Lcl Scaling", "Lcl Translation"):
-                    triple = tuple(float(v) for v in values[-3:])
-                    if key == "Lcl Scaling":
-                        node.scaling = triple
-                    else:
-                        node.translation = triple
+                elif isinstance(node, FbxNode):
+                    if key in ("Lcl Scaling", "Lcl Translation", "Lcl Rotation",
+                               "RotationPivot"):
+                        triple = tuple(float(v) for v in values[-3:])
+                        setattr(node, {"Lcl Scaling": "scaling",
+                                       "Lcl Translation": "translation",
+                                       "Lcl Rotation": "rotation",
+                                       "RotationPivot": "rotation_pivot"}[key],
+                                triple)
+                    elif key == "RotationOrder":
+                        node.rotation_order = int(values[-1])
 
             child = node
             if name == "Model":
                 strs = [v for v in values if isinstance(v, str)]
+                uid = values[0] if values and isinstance(values[0], int) else None
                 child = FbxNode(name=_clean(strs[0]) if strs else "?",
-                                kind=strs[1] if len(strs) > 1 else "?")
+                                kind=strs[1] if len(strs) > 1 else "?", uid=uid)
                 facts.nodes.append(child)
+            elif name == "Geometry":
+                child = values[0] if values and isinstance(values[0], int) else None
             if pos < end_off:
                 walk(pos, end_off, child)
             pos = end_off
         return pos
 
     walk(27, len(data), None)
+
+    by_uid = {n.uid: n for n in facts.nodes if n.uid is not None}
+    for child, parent in _connections:
+        if child in by_uid:
+            by_uid[child].parent = parent if parent in by_uid else None
+        elif child in facts.geometries and parent in by_uid:
+            by_uid[parent].geometry = child
     return facts
+
+
+def _rotation(deg, order):
+    """Row-vector rotation matrix for an XYZ euler triple, in degrees."""
+    if order:
+        # Only the default order is implemented, and a wrong assumption here
+        # would move geometry silently rather than fail. Nothing has needed it:
+        # measured 0 on every node of every delivery so far.
+        raise ValueError("rotation order %d is not implemented" % order)
+    cx, cy, cz = (math.cos(math.radians(v)) for v in deg)
+    sx, sy, sz = (math.sin(math.radians(v)) for v in deg)
+    return [[cy * cz, cy * sz, -sy],
+            [sx * sy * cz - cx * sz, sx * sy * sz + cx * cz, sx * cy],
+            [cx * sy * cz + sx * sz, cx * sy * sz - sx * cz, cx * cy]]
+
+
+def _local(node):
+    """Return (M, t) such that a point p in this node's space maps to p.M + t.
+
+    Maya writes, and FBX stores, `(p - rp) . R + rp + translation`. Scaling is
+    applied about the origin: exact for the identity scale a delivery must have,
+    and the scale check runs first precisely so this is never the loose one.
+    """
+    R = _rotation(node.rotation, node.rotation_order)
+    s = node.scaling
+    M = [[R[r][c] * s[r] for c in range(3)] for r in range(3)]
+    rp = node.rotation_pivot
+    offset = [node.translation[c] + rp[c] - sum(rp[r] * R[r][c] for r in range(3))
+              for c in range(3)]
+    return M, offset
+
+
+def world_vertex_bounds(facts):
+    """Axis-aligned bounds of every vertex, composed through the hierarchy.
+
+    The demigol gate could read vertex magnitude straight out of the file
+    because its chunks sit in one flat rank. A rig cannot: a 4 m creature is 33
+    chunks whose own vertices are all under 1 m, so the only way to assert the
+    delivered height from the BYTES is to compose the tree.
+    """
+    by_uid = {n.uid: n for n in facts.nodes if n.uid is not None}
+    lo = [float("inf")] * 3
+    hi = [float("-inf")] * 3
+    for node in facts.nodes:
+        verts = facts.geometries.get(node.geometry)
+        if not verts:
+            continue
+        chain = []
+        walker = node
+        seen = set()
+        while walker is not None and walker.uid not in seen:
+            seen.add(walker.uid)
+            chain.append(_local(walker))
+            walker = by_uid.get(walker.parent)
+        for i in range(0, len(verts), 3):
+            p = list(verts[i:i + 3])
+            for M, off in chain:
+                p = [sum(p[r] * M[r][c] for r in range(3)) + off[c] for c in range(3)]
+            for c in range(3):
+                lo[c] = min(lo[c], p[c])
+                hi[c] = max(hi[c], p[c])
+    return tuple(lo), tuple(hi)
 
 
 # FBX declares its unit as centimetres-per-file-unit: 1.0 means the numbers are

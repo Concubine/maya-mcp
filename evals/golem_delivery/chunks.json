@@ -1,0 +1,1388 @@
+{
+ "golem_C_belly": {
+  "bbox_max_m": [
+   0.58,
+   2.78,
+   0.50001
+  ],
+  "bbox_min_m": [
+   -0.58,
+   2.02,
+   -0.41999
+  ],
+  "centre_of_mass_m": [
+   0.0,
+   2.39997,
+   0.0483
+  ],
+  "collider": {
+   "centre_m": [
+    0.0,
+    2.4,
+    0.04001
+   ],
+   "size_m": [
+    1.16,
+    0.76,
+    0.92
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_material"
+  ],
+  "parent": "golem_C_pelvis",
+  "pivot_world_m": [
+   0.0,
+   2.32,
+   0.016
+  ],
+  "tris": 760,
+  "verts": 382,
+  "volume_m3": 0.415106
+ },
+ "golem_C_brow": {
+  "bbox_max_m": [
+   0.28,
+   3.87386,
+   0.68618
+  ],
+  "bbox_min_m": [
+   -0.28,
+   3.56614,
+   0.46582
+  ],
+  "centre_of_mass_m": [
+   0.0,
+   3.72006,
+   0.57229
+  ],
+  "collider": {
+   "centre_m": [
+    0.0,
+    3.72,
+    0.576
+   ],
+   "size_m": [
+    0.56,
+    0.30772,
+    0.22036
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_glow_brow"
+  ],
+  "parent": "golem_C_head",
+  "pivot_world_m": [
+   0.0,
+   3.6,
+   0.24
+  ],
+  "tris": 108,
+  "verts": 56,
+  "volume_m3": 0.023543
+ },
+ "golem_C_chest_girdle": {
+  "bbox_max_m": [
+   0.88,
+   3.32924,
+   0.66204
+  ],
+  "bbox_min_m": [
+   -0.88,
+   2.41136,
+   -0.46218
+  ],
+  "centre_of_mass_m": [
+   0.0,
+   2.87122,
+   0.1003
+  ],
+  "collider": {
+   "centre_m": [
+    0.0,
+    2.8703,
+    0.09993
+   ],
+   "size_m": [
+    1.76,
+    0.91788,
+    1.12422
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_glow_girdle"
+  ],
+  "parent": "golem_C_belly",
+  "pivot_world_m": [
+   0.0,
+   2.76,
+   0.04
+  ],
+  "tris": 92,
+  "verts": 48,
+  "volume_m3": 1.37138
+ },
+ "golem_C_head": {
+  "bbox_max_m": [
+   0.39688,
+   4.015,
+   0.63175
+  ],
+  "bbox_min_m": [
+   -0.38989,
+   3.19576,
+   -0.16472
+  ],
+  "centre_of_mass_m": [
+   -0.00038,
+   3.5995,
+   0.23706
+  ],
+  "collider": {
+   "centre_m": [
+    0.00349,
+    3.60538,
+    0.23352
+   ],
+   "size_m": [
+    0.78677,
+    0.81924,
+    0.79647
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_glow_head"
+  ],
+  "parent": "golem_C_chest_girdle",
+  "pivot_world_m": [
+   0.0,
+   3.24,
+   0.2
+  ],
+  "tris": 760,
+  "verts": 382,
+  "volume_m3": 0.252289
+ },
+ "golem_C_neck_gasket": {
+  "bbox_max_m": [
+   0.21584,
+   3.37042,
+   0.40241
+  ],
+  "bbox_min_m": [
+   -0.20284,
+   3.09187,
+   0.01202
+  ],
+  "centre_of_mass_m": [
+   0.00757,
+   3.23609,
+   0.20284
+  ],
+  "collider": {
+   "centre_m": [
+    0.0065,
+    3.23115,
+    0.20721
+   ],
+   "size_m": [
+    0.41868,
+    0.27855,
+    0.39039
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_glow_neck"
+  ],
+  "parent": "golem_C_chest_girdle",
+  "pivot_world_m": [
+   0.0,
+   3.24,
+   0.2
+  ],
+  "tris": 760,
+  "verts": 382,
+  "volume_m3": 0.022991
+ },
+ "golem_C_pelvis": {
+  "bbox_max_m": [
+   0.58695,
+   2.32191,
+   0.49697
+  ],
+  "bbox_min_m": [
+   -0.57596,
+   1.6023,
+   -0.48488
+  ],
+  "centre_of_mass_m": [
+   -0.00375,
+   1.98255,
+   0.00026
+  ],
+  "collider": {
+   "centre_m": [
+    0.00549,
+    1.9621,
+    0.00605
+   ],
+   "size_m": [
+    1.16291,
+    0.71961,
+    0.98185
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_material"
+  ],
+  "parent": null,
+  "pivot_world_m": [
+   0.0,
+   1.96,
+   0.0
+  ],
+  "tris": 1566,
+  "verts": 785,
+  "volume_m3": 0.372141
+ },
+ "golem_C_tracer_core": {
+  "bbox_max_m": [
+   0.112,
+   3.758,
+   0.6796
+  ],
+  "bbox_min_m": [
+   0.032,
+   3.69,
+   0.6356
+  ],
+  "centre_of_mass_m": [
+   0.072,
+   3.724,
+   0.6576
+  ],
+  "collider": {
+   "centre_m": [
+    0.072,
+    3.724,
+    0.6576
+   ],
+   "size_m": [
+    0.08,
+    0.068,
+    0.044
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_tracer_core_mat"
+  ],
+  "parent": "golem_C_brow",
+  "pivot_world_m": [
+   0.072,
+   3.724,
+   0.6576
+  ],
+  "tris": 12,
+  "verts": 8,
+  "volume_m3": 0.000239
+ },
+ "golem_C_tracer_trail1": {
+  "bbox_max_m": [
+   0.028,
+   3.7528,
+   0.6724
+  ],
+  "bbox_min_m": [
+   -0.036,
+   3.6952,
+   0.6364
+  ],
+  "centre_of_mass_m": [
+   -0.004,
+   3.724,
+   0.6544
+  ],
+  "collider": {
+   "centre_m": [
+    -0.004,
+    3.724,
+    0.6544
+   ],
+   "size_m": [
+    0.064,
+    0.0576,
+    0.036
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_tracer_trail1_mat"
+  ],
+  "parent": "golem_C_brow",
+  "pivot_world_m": [
+   -0.004,
+   3.724,
+   0.6544
+  ],
+  "tris": 12,
+  "verts": 8,
+  "volume_m3": 0.000133
+ },
+ "golem_C_tracer_trail2": {
+  "bbox_max_m": [
+   -0.04,
+   3.748,
+   0.668
+  ],
+  "bbox_min_m": [
+   -0.096,
+   3.7,
+   0.636
+  ],
+  "centre_of_mass_m": [
+   -0.068,
+   3.724,
+   0.652
+  ],
+  "collider": {
+   "centre_m": [
+    -0.068,
+    3.724,
+    0.652
+   ],
+   "size_m": [
+    0.056,
+    0.048,
+    0.032
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_tracer_trail2_mat"
+  ],
+  "parent": "golem_C_brow",
+  "pivot_world_m": [
+   -0.068,
+   3.724,
+   0.652
+  ],
+  "tris": 12,
+  "verts": 8,
+  "volume_m3": 8.6e-05
+ },
+ "golem_C_tracer_trail3": {
+  "bbox_max_m": [
+   -0.1,
+   3.7432,
+   0.6636
+  ],
+  "bbox_min_m": [
+   -0.148,
+   3.7048,
+   0.6356
+  ],
+  "centre_of_mass_m": [
+   -0.124,
+   3.724,
+   0.6496
+  ],
+  "collider": {
+   "centre_m": [
+    -0.124,
+    3.724,
+    0.6496
+   ],
+   "size_m": [
+    0.048,
+    0.0384,
+    0.028
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_tracer_trail3_mat"
+  ],
+  "parent": "golem_C_brow",
+  "pivot_world_m": [
+   -0.124,
+   3.724,
+   0.6496
+  ],
+  "tris": 12,
+  "verts": 8,
+  "volume_m3": 5.2e-05
+ },
+ "golem_C_waist_gasket": {
+  "bbox_max_m": [
+   0.53754,
+   2.49472,
+   0.45823
+  ],
+  "bbox_min_m": [
+   -0.5523,
+   2.16134,
+   -0.43525
+  ],
+  "centre_of_mass_m": [
+   -0.00104,
+   2.32471,
+   0.02
+  ],
+  "collider": {
+   "centre_m": [
+    -0.00738,
+    2.32803,
+    0.01149
+   ],
+   "size_m": [
+    1.08984,
+    0.33338,
+    0.89348
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_material"
+  ],
+  "parent": "golem_C_pelvis",
+  "pivot_world_m": [
+   0.0,
+   2.32,
+   0.016
+  ],
+  "tris": 760,
+  "verts": 382,
+  "volume_m3": 0.13786
+ },
+ "golem_L_ankle_gasket": {
+  "bbox_max_m": [
+   0.66105,
+   0.40326,
+   0.35256
+  ],
+  "bbox_min_m": [
+   0.19026,
+   0.1456,
+   -0.11817
+  ],
+  "centre_of_mass_m": [
+   0.43607,
+   0.2796,
+   0.12038
+  ],
+  "collider": {
+   "centre_m": [
+    0.42566,
+    0.27443,
+    0.11719
+   ],
+   "size_m": [
+    0.47079,
+    0.25766,
+    0.47073
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_material"
+  ],
+  "parent": "golem_L_shin",
+  "pivot_world_m": [
+   0.44,
+   0.28,
+   0.116
+  ],
+  "tris": 760,
+  "verts": 382,
+  "volume_m3": 0.024125
+ },
+ "golem_L_elbow_gasket": {
+  "bbox_max_m": [
+   1.24307,
+   2.34377,
+   0.35764
+  ],
+  "bbox_min_m": [
+   0.76223,
+   2.06848,
+   -0.12625
+  ],
+  "centre_of_mass_m": [
+   0.99321,
+   2.20205,
+   0.1193
+  ],
+  "collider": {
+   "centre_m": [
+    1.00265,
+    2.20613,
+    0.1157
+   ],
+   "size_m": [
+    0.48084,
+    0.27529,
+    0.48389
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_material"
+  ],
+  "parent": "golem_L_upperarm",
+  "pivot_world_m": [
+   1.0,
+   2.2,
+   0.12
+  ],
+  "tris": 760,
+  "verts": 382,
+  "volume_m3": 0.030108
+ },
+ "golem_L_fist": {
+  "bbox_max_m": [
+   1.288,
+   1.12,
+   0.4
+  ],
+  "bbox_min_m": [
+   0.712,
+   0.6,
+   -0.16
+  ],
+  "centre_of_mass_m": [
+   1.0,
+   0.86,
+   0.12
+  ],
+  "collider": {
+   "centre_m": [
+    1.0,
+    0.86,
+    0.12
+   ],
+   "size_m": [
+    0.576,
+    0.52,
+    0.56
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_material"
+  ],
+  "parent": "golem_L_forearm",
+  "pivot_world_m": [
+   1.0,
+   1.12,
+   0.12
+  ],
+  "tris": 92,
+  "verts": 48,
+  "volume_m3": 0.165681
+ },
+ "golem_L_foot": {
+  "bbox_max_m": [
+   0.74672,
+   0.29178,
+   0.75742
+  ],
+  "bbox_min_m": [
+   0.13661,
+   -0.00673,
+   -0.20661
+  ],
+  "centre_of_mass_m": [
+   0.44125,
+   0.13815,
+   0.28532
+  ],
+  "collider": {
+   "centre_m": [
+    0.44167,
+    0.14252,
+    0.27541
+   ],
+   "size_m": [
+    0.61011,
+    0.29851,
+    0.96403
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_material"
+  ],
+  "parent": "golem_L_shin",
+  "pivot_world_m": [
+   0.44,
+   0.28,
+   0.116
+  ],
+  "tris": 44,
+  "verts": 24,
+  "volume_m3": 0.153603
+ },
+ "golem_L_forearm": {
+  "bbox_max_m": [
+   1.232,
+   2.2,
+   0.352
+  ],
+  "bbox_min_m": [
+   0.768,
+   1.12,
+   -0.112
+  ],
+  "centre_of_mass_m": [
+   1.0,
+   1.68913,
+   0.12
+  ],
+  "collider": {
+   "centre_m": [
+    1.0,
+    1.66,
+    0.12
+   ],
+   "size_m": [
+    0.464,
+    1.08,
+    0.464
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_material"
+  ],
+  "parent": "golem_L_upperarm",
+  "pivot_world_m": [
+   1.0,
+   2.2,
+   0.12
+  ],
+  "tris": 76,
+  "verts": 40,
+  "volume_m3": 0.154034
+ },
+ "golem_L_knee_gasket": {
+  "bbox_max_m": [
+   0.72833,
+   1.03561,
+   0.59874
+  ],
+  "bbox_min_m": [
+   0.15275,
+   0.76107,
+   0.03314
+  ],
+  "centre_of_mass_m": [
+   0.44067,
+   0.88875,
+   0.31274
+  ],
+  "collider": {
+   "centre_m": [
+    0.44054,
+    0.89834,
+    0.31594
+   ],
+   "size_m": [
+    0.57558,
+    0.27454,
+    0.5656
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_material"
+  ],
+  "parent": "golem_L_thigh",
+  "pivot_world_m": [
+   0.44,
+   0.8928,
+   0.3008
+  ],
+  "tris": 760,
+  "verts": 382,
+  "volume_m3": 0.042316
+ },
+ "golem_L_shin": {
+  "bbox_max_m": [
+   0.68321,
+   0.96352,
+   0.53454
+  ],
+  "bbox_min_m": [
+   0.19679,
+   0.2246,
+   -0.06762
+  ],
+  "centre_of_mass_m": [
+   0.44,
+   0.61092,
+   0.2159
+  ],
+  "collider": {
+   "centre_m": [
+    0.44,
+    0.59406,
+    0.23346
+   ],
+   "size_m": [
+    0.48642,
+    0.73892,
+    0.60216
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_material"
+  ],
+  "parent": "golem_L_thigh",
+  "pivot_world_m": [
+   0.44,
+   0.8928,
+   0.3008
+  ],
+  "tris": 76,
+  "verts": 40,
+  "volume_m3": 0.093581
+ },
+ "golem_L_shoulder": {
+  "bbox_max_m": [
+   1.36417,
+   3.60143,
+   0.56428
+  ],
+  "bbox_min_m": [
+   0.47862,
+   2.74104,
+   -0.3319
+  ],
+  "centre_of_mass_m": [
+   0.90607,
+   3.21615,
+   0.1169
+  ],
+  "collider": {
+   "centre_m": [
+    0.9214,
+    3.17124,
+    0.11619
+   ],
+   "size_m": [
+    0.88555,
+    0.86039,
+    0.89618
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_glow_shoulders"
+  ],
+  "parent": "golem_C_chest_girdle",
+  "pivot_world_m": [
+   0.72,
+   3.08,
+   0.08
+  ],
+  "tris": 1158,
+  "verts": 581,
+  "volume_m3": 0.295856
+ },
+ "golem_L_thigh": {
+  "bbox_max_m": [
+   0.75918,
+   1.82903,
+   0.51403
+  ],
+  "bbox_min_m": [
+   0.12082,
+   0.81536,
+   -0.30002
+  ],
+  "centre_of_mass_m": [
+   0.44,
+   1.35259,
+   0.13359
+  ],
+  "collider": {
+   "centre_m": [
+    0.44,
+    1.3222,
+    0.107
+   ],
+   "size_m": [
+    0.63836,
+    1.01367,
+    0.81405
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_material"
+  ],
+  "parent": "golem_C_pelvis",
+  "pivot_world_m": [
+   0.44,
+   1.72,
+   0.0
+  ],
+  "tris": 76,
+  "verts": 40,
+  "volume_m3": 0.204604
+ },
+ "golem_L_upperarm": {
+  "bbox_max_m": [
+   1.248,
+   3.16,
+   0.368
+  ],
+  "bbox_min_m": [
+   0.752,
+   2.2,
+   -0.128
+  ],
+  "centre_of_mass_m": [
+   1.0,
+   2.71541,
+   0.12
+  ],
+  "collider": {
+   "centre_m": [
+    1.0,
+    2.68,
+    0.12
+   ],
+   "size_m": [
+    0.496,
+    0.96,
+    0.496
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_material"
+  ],
+  "parent": "golem_L_shoulder",
+  "pivot_world_m": [
+   1.0,
+   3.16,
+   0.12
+  ],
+  "tris": 76,
+  "verts": 40,
+  "volume_m3": 0.148397
+ },
+ "golem_L_wrist_gasket": {
+  "bbox_max_m": [
+   1.21083,
+   1.23542,
+   0.33853
+  ],
+  "bbox_min_m": [
+   0.77395,
+   1.0106,
+   -0.1149
+  ],
+  "centre_of_mass_m": [
+   1.00011,
+   1.12347,
+   0.11194
+  ],
+  "collider": {
+   "centre_m": [
+    0.99239,
+    1.12301,
+    0.11181
+   ],
+   "size_m": [
+    0.43688,
+    0.22482,
+    0.45343
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_material"
+  ],
+  "parent": "golem_L_forearm",
+  "pivot_world_m": [
+   1.0,
+   1.12,
+   0.12
+  ],
+  "tris": 760,
+  "verts": 382,
+  "volume_m3": 0.022617
+ },
+ "golem_R_ankle_gasket": {
+  "bbox_max_m": [
+   -0.19026,
+   0.40326,
+   0.35256
+  ],
+  "bbox_min_m": [
+   -0.66105,
+   0.1456,
+   -0.11817
+  ],
+  "centre_of_mass_m": [
+   -0.43607,
+   0.2796,
+   0.12038
+  ],
+  "collider": {
+   "centre_m": [
+    -0.42566,
+    0.27443,
+    0.11719
+   ],
+   "size_m": [
+    0.47079,
+    0.25766,
+    0.47073
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_material"
+  ],
+  "parent": "golem_R_shin",
+  "pivot_world_m": [
+   -0.44,
+   0.28,
+   0.116
+  ],
+  "tris": 760,
+  "verts": 382,
+  "volume_m3": 0.024125
+ },
+ "golem_R_elbow_gasket": {
+  "bbox_max_m": [
+   -0.76223,
+   2.34377,
+   0.35764
+  ],
+  "bbox_min_m": [
+   -1.24307,
+   2.06848,
+   -0.12625
+  ],
+  "centre_of_mass_m": [
+   -0.99321,
+   2.20205,
+   0.1193
+  ],
+  "collider": {
+   "centre_m": [
+    -1.00265,
+    2.20613,
+    0.1157
+   ],
+   "size_m": [
+    0.48084,
+    0.27529,
+    0.48389
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_material"
+  ],
+  "parent": "golem_R_upperarm",
+  "pivot_world_m": [
+   -1.0,
+   2.2,
+   0.12
+  ],
+  "tris": 760,
+  "verts": 382,
+  "volume_m3": 0.030108
+ },
+ "golem_R_fist": {
+  "bbox_max_m": [
+   -0.712,
+   1.12,
+   0.4
+  ],
+  "bbox_min_m": [
+   -1.288,
+   0.6,
+   -0.16
+  ],
+  "centre_of_mass_m": [
+   -1.0,
+   0.86,
+   0.12
+  ],
+  "collider": {
+   "centre_m": [
+    -1.0,
+    0.86,
+    0.12
+   ],
+   "size_m": [
+    0.576,
+    0.52,
+    0.56
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_material"
+  ],
+  "parent": "golem_R_forearm",
+  "pivot_world_m": [
+   -1.0,
+   1.12,
+   0.12
+  ],
+  "tris": 92,
+  "verts": 48,
+  "volume_m3": 0.165681
+ },
+ "golem_R_foot": {
+  "bbox_max_m": [
+   -0.13661,
+   0.29178,
+   0.75742
+  ],
+  "bbox_min_m": [
+   -0.74672,
+   -0.00673,
+   -0.20661
+  ],
+  "centre_of_mass_m": [
+   -0.44125,
+   0.13815,
+   0.28532
+  ],
+  "collider": {
+   "centre_m": [
+    -0.44167,
+    0.14252,
+    0.27541
+   ],
+   "size_m": [
+    0.61011,
+    0.29851,
+    0.96403
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_material"
+  ],
+  "parent": "golem_R_shin",
+  "pivot_world_m": [
+   -0.44,
+   0.28,
+   0.116
+  ],
+  "tris": 44,
+  "verts": 24,
+  "volume_m3": 0.153603
+ },
+ "golem_R_forearm": {
+  "bbox_max_m": [
+   -0.768,
+   2.2,
+   0.352
+  ],
+  "bbox_min_m": [
+   -1.232,
+   1.12,
+   -0.112
+  ],
+  "centre_of_mass_m": [
+   -1.0,
+   1.68913,
+   0.12
+  ],
+  "collider": {
+   "centre_m": [
+    -1.0,
+    1.66,
+    0.12
+   ],
+   "size_m": [
+    0.464,
+    1.08,
+    0.464
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_material"
+  ],
+  "parent": "golem_R_upperarm",
+  "pivot_world_m": [
+   -1.0,
+   2.2,
+   0.12
+  ],
+  "tris": 76,
+  "verts": 40,
+  "volume_m3": 0.154034
+ },
+ "golem_R_knee_gasket": {
+  "bbox_max_m": [
+   -0.15275,
+   1.03561,
+   0.59874
+  ],
+  "bbox_min_m": [
+   -0.72833,
+   0.76107,
+   0.03314
+  ],
+  "centre_of_mass_m": [
+   -0.44067,
+   0.88875,
+   0.31274
+  ],
+  "collider": {
+   "centre_m": [
+    -0.44054,
+    0.89834,
+    0.31594
+   ],
+   "size_m": [
+    0.57558,
+    0.27454,
+    0.5656
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_material"
+  ],
+  "parent": "golem_R_thigh",
+  "pivot_world_m": [
+   -0.44,
+   0.8928,
+   0.3008
+  ],
+  "tris": 760,
+  "verts": 382,
+  "volume_m3": 0.042316
+ },
+ "golem_R_shin": {
+  "bbox_max_m": [
+   -0.19679,
+   0.96352,
+   0.53454
+  ],
+  "bbox_min_m": [
+   -0.68321,
+   0.2246,
+   -0.06762
+  ],
+  "centre_of_mass_m": [
+   -0.44,
+   0.61092,
+   0.2159
+  ],
+  "collider": {
+   "centre_m": [
+    -0.44,
+    0.59406,
+    0.23346
+   ],
+   "size_m": [
+    0.48642,
+    0.73892,
+    0.60216
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_material"
+  ],
+  "parent": "golem_R_thigh",
+  "pivot_world_m": [
+   -0.44,
+   0.8928,
+   0.3008
+  ],
+  "tris": 76,
+  "verts": 40,
+  "volume_m3": 0.093581
+ },
+ "golem_R_shoulder": {
+  "bbox_max_m": [
+   -0.47862,
+   3.60143,
+   0.56428
+  ],
+  "bbox_min_m": [
+   -1.36417,
+   2.74104,
+   -0.3319
+  ],
+  "centre_of_mass_m": [
+   -0.90607,
+   3.21615,
+   0.1169
+  ],
+  "collider": {
+   "centre_m": [
+    -0.9214,
+    3.17124,
+    0.11619
+   ],
+   "size_m": [
+    0.88555,
+    0.86039,
+    0.89618
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_glow_shoulders"
+  ],
+  "parent": "golem_C_chest_girdle",
+  "pivot_world_m": [
+   -0.72,
+   3.08,
+   0.08
+  ],
+  "tris": 1158,
+  "verts": 581,
+  "volume_m3": 0.295856
+ },
+ "golem_R_thigh": {
+  "bbox_max_m": [
+   -0.12082,
+   1.82903,
+   0.51403
+  ],
+  "bbox_min_m": [
+   -0.75918,
+   0.81536,
+   -0.30002
+  ],
+  "centre_of_mass_m": [
+   -0.44,
+   1.35259,
+   0.13359
+  ],
+  "collider": {
+   "centre_m": [
+    -0.44,
+    1.3222,
+    0.107
+   ],
+   "size_m": [
+    0.63836,
+    1.01367,
+    0.81405
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_material"
+  ],
+  "parent": "golem_C_pelvis",
+  "pivot_world_m": [
+   -0.44,
+   1.72,
+   0.0
+  ],
+  "tris": 76,
+  "verts": 40,
+  "volume_m3": 0.204604
+ },
+ "golem_R_upperarm": {
+  "bbox_max_m": [
+   -0.752,
+   3.16,
+   0.368
+  ],
+  "bbox_min_m": [
+   -1.248,
+   2.2,
+   -0.128
+  ],
+  "centre_of_mass_m": [
+   -1.0,
+   2.71541,
+   0.12
+  ],
+  "collider": {
+   "centre_m": [
+    -1.0,
+    2.68,
+    0.12
+   ],
+   "size_m": [
+    0.496,
+    0.96,
+    0.496
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_material"
+  ],
+  "parent": "golem_R_shoulder",
+  "pivot_world_m": [
+   -1.0,
+   3.16,
+   0.12
+  ],
+  "tris": 76,
+  "verts": 40,
+  "volume_m3": 0.148397
+ },
+ "golem_R_wrist_gasket": {
+  "bbox_max_m": [
+   -0.77395,
+   1.23542,
+   0.33853
+  ],
+  "bbox_min_m": [
+   -1.21083,
+   1.0106,
+   -0.1149
+  ],
+  "centre_of_mass_m": [
+   -1.00011,
+   1.12347,
+   0.11194
+  ],
+  "collider": {
+   "centre_m": [
+    -0.99239,
+    1.12301,
+    0.11181
+   ],
+   "size_m": [
+    0.43688,
+    0.22482,
+    0.45343
+   ],
+   "type": "box"
+  },
+  "materials": [
+   "golem_kit_material"
+  ],
+  "parent": "golem_R_forearm",
+  "pivot_world_m": [
+   -1.0,
+   1.12,
+   0.12
+  ],
+  "tris": 760,
+  "verts": 382,
+  "volume_m3": 0.022617
+ }
+}

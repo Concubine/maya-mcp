@@ -95,6 +95,67 @@ def test_check_names_the_node_carrying_a_bad_scale(monkeypatch):
     assert any("0.01" in v for v in violations), violations
 
 
+GOLEM = REPO / "evals" / "golem_delivery" / "golem.fbx"
+
+
+def test_golem_is_metre_true():
+    violations = delivery_units.check_rig_delivery(
+        GOLEM, delivery_units.GOLEM_HEIGHT_M, delivery_units.GOLEM_CEILING_M)
+    assert violations == [], "\n".join(violations)
+
+
+def test_reader_composes_the_rig_hierarchy():
+    # The delivered height is the one number no chunk carries: every chunk's own
+    # vertices are under a metre and the 4 m comes entirely from the tree. This
+    # measured 4.021730 from the bytes against 4.021730 in Maya.
+    facts = fbx_probe.read_fbx(GOLEM)
+    assert len(facts.nodes) == 33
+    assert sum(1 for n in facts.nodes if n.parent is None) == 1
+    assert all(n.geometry in facts.geometries for n in facts.nodes)
+    lo, hi = fbx_probe.world_vertex_bounds(facts)
+    assert abs((hi[1] - lo[1]) - 4.02173) < 1e-4
+
+
+def _fake_rig(scaling=(1.0, 1.0, 1.0), height=4.02173):
+    root = fbx_probe.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1,
+                             geometry=10, scaling=scaling)
+    child = fbx_probe.FbxNode(name="golem_C_head", kind="Mesh", uid=2,
+                              parent=1, geometry=11,
+                              translation=(0.0, height, 0.0))
+    return fbx_probe.FbxFacts(
+        version=7700, nodes=[root, child],
+        meshes=[(0.0, 0.0, 0.0), (0.0, 0.0, 0.0)],
+        geometries={10: (0.0, 0.0, 0.0), 11: (0.0, 0.0, 0.0)},
+        unit_scale_factor=fbx_probe.DECLARES_METRES)
+
+
+def test_rig_check_passes_a_clean_rig(monkeypatch):
+    monkeypatch.setattr(fbx_probe, "read_fbx", lambda _p: _fake_rig())
+    assert delivery_units.check_rig_delivery(
+        "fake.fbx", delivery_units.GOLEM_HEIGHT_M,
+        delivery_units.GOLEM_CEILING_M) == []
+
+
+def test_rig_check_catches_a_scaled_chunk(monkeypatch):
+    # The scale the golem's chunks actually carried in the scene, before the
+    # bake: assemble left 21 of 33 non-uniform. Shipped, it would deform the
+    # chunk the moment the engine turned its parent.
+    monkeypatch.setattr(fbx_probe, "read_fbx",
+                        lambda _p: _fake_rig(scaling=(0.62, 1.2, 0.62)))
+    violations = delivery_units.check_rig_delivery(
+        "fake.fbx", delivery_units.GOLEM_HEIGHT_M, delivery_units.GOLEM_CEILING_M)
+    assert any("golem_C_pelvis" in v and "1.2" in v for v in violations), violations
+
+
+def test_rig_check_catches_a_centimetre_rig(monkeypatch):
+    # The #629 defect in rig form. Every chunk's vertices stay small, the header
+    # can still say metres, and only the composed height gives it away.
+    monkeypatch.setattr(fbx_probe, "read_fbx", lambda _p: _fake_rig(height=402.173))
+    violations = delivery_units.check_rig_delivery(
+        "fake.fbx", delivery_units.GOLEM_HEIGHT_M, delivery_units.GOLEM_CEILING_M)
+    assert any("factor of 100" in v for v in violations), violations
+
+
 def test_check_passes_a_clean_delivery(monkeypatch):
     facts = fbx_probe.FbxFacts(
         version=7700,

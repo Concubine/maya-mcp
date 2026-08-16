@@ -24,6 +24,12 @@ KIT_CEILING_M = 2.0     # cell half-face 1.5 + outset allowance 0.5
 HERO_CEILING_M = 6.5    # MAX_RUN 4 cells x 3 m / 2 + outset 0.5
 TOL = 1e-3
 
+# A rig has no lattice to check and its chunks are all small, so the unit
+# discriminator has to be the composed height - see check_rig_delivery.
+GOLEM_HEIGHT_M = 4.02173   # 5.027162 modelled units x the pinned 0.8 m/unit
+GOLEM_CEILING_M = 4.5      # a chunk's own vertices, in ITS space; the pelvis
+                           # sits at the origin so its span is nearly the figure
+
 
 def check_delivery(path, ceiling_m, lattice_m=1.5):
     """Return a list of human-readable violations; empty means metre-true."""
@@ -71,6 +77,12 @@ def check_delivery(path, ceiling_m, lattice_m=1.5):
             "vertices are metres, so the file contradicts itself"
             % (label, facts.unit_scale_factor, fbx_probe.DECLARES_METRES))
 
+    out.extend(_scale_and_ceiling(facts, label, ceiling_m))
+    return out
+
+
+def _scale_and_ceiling(facts, label, ceiling_m):
+    out = []
     biggest = 0.0
     for verts in facts.meshes:
         for v in verts:
@@ -81,5 +93,56 @@ def check_delivery(path, ceiling_m, lattice_m=1.5):
             "%s: largest vertex coordinate %.4f m exceeds ceiling %.1f m%s"
             % (label, biggest, ceiling_m,
                " - this is a x100 unit error" if biggest > ceiling_m * 50 else ""))
+    return out
+
+
+def check_rig_delivery(path, height_m, ceiling_m, height_tol=1e-3):
+    """The same invariant for an ARTICULATED delivery. Same list-of-strings
+    contract as check_delivery.
+
+    A rig defeats two of the three assertions above: there is no lattice to
+    divide by, and every chunk's own vertices are small whatever the unit, so
+    per-vertex magnitude no longer discriminates - a 4 m creature and a 4 cm one
+    both have sub-metre chunks. What replaces them is the COMPOSED height,
+    walked through the parent chain from the bytes, asserted against the figure
+    the manifest states. That is the number a consumer sees on import.
+
+    The scale assertion survives unchanged and matters more here, not less: 21
+    of the golem's 33 transforms carried non-uniform scale in the scene, which
+    is exactly the shape of the compensating-scale defect of maya-mcp #629.
+    """
+    facts = fbx_probe.read_fbx(path)
+    label = getattr(path, "name", str(path))
+    out = []
+
+    for node in facts.nodes:
+        if any(abs(s - 1.0) > TOL for s in node.scaling):
+            out.append(
+                "%s: node %r has scale %s, expected identity - a rigged chunk "
+                "that carries scale deforms wrong the moment its parent turns, "
+                "and hides a wrong vertex magnitude besides"
+                % (label, node.name, tuple(round(s, 6) for s in node.scaling)))
+
+    if facts.unit_scale_factor != fbx_probe.DECLARES_METRES:
+        out.append(
+            "%s: header declares UnitScaleFactor %r, expected %g (metres) - the "
+            "vertices are metres, so the file contradicts itself"
+            % (label, facts.unit_scale_factor, fbx_probe.DECLARES_METRES))
+
+    roots = [n for n in facts.nodes if n.parent is None]
+    if len(roots) != 1:
+        out.append(
+            "%s: %d root nodes %s, expected exactly one - a rig is one tree, and "
+            "a detached chunk would measure as if it were parented"
+            % (label, len(roots), [n.name for n in roots[:6]]))
+
+    out.extend(_scale_and_ceiling(facts, label, ceiling_m))
+
+    lo, hi = fbx_probe.world_vertex_bounds(facts)
+    measured = hi[1] - lo[1]
+    if abs(measured - height_m) > height_tol:
+        out.append(
+            "%s: composed height measures %.5f m, expected %.5f m - out by a "
+            "factor of %.5g" % (label, measured, height_m, measured / height_m))
 
     return out
