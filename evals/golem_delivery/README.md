@@ -88,8 +88,12 @@ cell = 4.0), so a share is the part that survives their rescale.
 
 ## Known limits
 
-- **Textures are not embedded.** The FBX carries material names only; the maps
-  live in the Maya scene beside it.
+- **Textures are not embedded** — but there is nothing missing. Measured off the
+  file nodes: all ten materials sample the **shared demigol kit atlas**
+  (`evals/demigol_kit/kit_albedo.png`, `kit_mask.png`, `kit_normal.png`), which
+  a consumer that has the buildings already has. The FBX carries the UVs into
+  it. The ten names differ only in emission — one base material, five seam-glow
+  variants, four tracer emitters.
 - The renders were made **before** the bake. The bake is a uniform 0.8 world
   scale, verified to 1.2e-7, so they are the same image of the same shape at a
   different number of metres — but they are not fresh frames of the delivered

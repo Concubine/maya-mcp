@@ -136,10 +136,18 @@ def build_manifest(chunks):
                             "golem_C_brow, so detaching the brow takes the "
                             "visor light with it.",
         "materials": sorted({m for c in chunks.values() for m in c["materials"]}),
-        "textures": "NOT embedded in the FBX (FBXExportEmbeddedTextures false). "
-                    "The material names are carried so a consumer can bind its "
-                    "own; the golem's maps live in the Maya scene beside this "
-                    "file.",
+        "textures": {
+            "embedded": False,
+            "maps": ["evals/demigol_kit/kit_albedo.png",
+                     "evals/demigol_kit/kit_mask.png",
+                     "evals/demigol_kit/kit_normal.png"],
+            "note": "All ten materials sample the SHARED DEMIGOL KIT ATLAS, "
+                    "measured off the file nodes - not a golem-specific map "
+                    "set. A consumer that already has the buildings already has "
+                    "these three maps, and the FBX carries the UVs into them. "
+                    "The ten names differ only in emission: one base material "
+                    "plus five seam-glow variants and four tracer emitters.",
+        },
         "poses": "NOT in this delivery. The handoff spec asks for 5 target "
                  "poses as per-chunk rotations; this file is the rest pose "
                  "only, and the poses are still to be authored.",
