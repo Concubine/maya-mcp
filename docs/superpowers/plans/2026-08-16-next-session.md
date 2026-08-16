@@ -55,14 +55,42 @@ it, and note its `golem.mb` is the pre-bake 5.0272-unit scene.
    definition and a test pins it byte-for-byte — but migrating those three onto
    the tool would need a live art run to re-validate, so it is its own piece of
    work, not a tail of this one.
-2. **#640** naming/parameter papercuts, **#639** no image tool writes to disk
-   (this session paid one escape for the pose sheet because of it), **#638**
-   `boolean_op` drops pivot, parent and UVs, **#636** `deform`'s bend is inert.
-3. **#579** still open: `new_scene` wedges Maya after an isolate capture of a
-   boolean-produced mesh. Prefer restarting Maya.
-4. Parked, needs the user: the tracer frame sequence, and the two motion
-   questions (`GrabReach` 4 m vs a measured 2.5528 m arm; contact-pair cost at
-   29 chunks).
+2. **#579 — `new_scene` wedges Maya. START HERE.** Re-ranked 2026-08-16 after
+   reading the ticket properly; it had been listed third with the note "prefer
+   restarting Maya", which undersold it. It is filed **High**, the recovery is
+   *killing the process and losing the session*, and it cost two sessions before
+   anyone bisected it. The expensive work is already done: the trigger is 3/3
+   reproducible — an isolate capture of a **boolean-produced** mesh, then
+   `new_scene` — and it reproduces on an **agent-launched Maya on 9878**, so it
+   can be attacked without risking the user's session. Wedging is the expected
+   outcome of a successful repro, so it must never be run on 9877.
+
+   Cheapest first experiment, from the ticket's own suggested steps: force
+   isolate teardown on every panel before `cmds.file(new=True)` and see whether
+   it clears a landmine that already reads clean by every check we have
+   (`isolateSelect -q -state` false, cameras restored, temp cam deleted, no
+   `*ViewSelected*` set). If that fails, bisect what "boolean-produced"
+   contributes — deleted history with a prior `polyCBoolOp` vs identical
+   topology built without one. That distinction decides whether it is fixable
+   plugin-side at all.
+3. **#645** the byte reader ignores `RotationOffset`/`PreRotation`/`Geometric*`
+   — measured 17% height error on `evals/structures/clock_tower.fbx`. Latent,
+   not historic: **every shipped delivery scanned clean**, golem included, so
+   the 4.02173 m gate never lied. But #603 gave `transform`/`assemble` a
+   `pivot`, and moving a pivot is what makes Maya emit those records — the next
+   asset built with pivots gets a wrong `height_m` from `maya_export_fbx`.
+   Then **#646** the whole-scene (`ea=True`) export branch has never run live.
+4. **#640** naming/parameter papercuts, **#639** no image tool writes to disk,
+   **#638** `boolean_op` drops pivot, parent and UVs, **#636** `deform`'s bend
+   is inert. Real friction, but none of them is a *wrong answer*.
+5. **Not this lane any more.** Per the 2026-08-16 split, this repo builds tools
+   and a separate agent consumes them for Demigol. **#647** (nothing this server
+   exports has ever been opened by a consumer — validate the unit claim on
+   import) is filed High and belongs to the consumer-side agent; the claim is
+   ours, the work is theirs. Same for the tracer frame sequence and the two
+   motion questions (`GrabReach` 4 m vs a measured 2.5528 m arm; contact-pair
+   cost at 29 chunks). Assets built here are test fixtures only — the line is
+   destination, not complexity.
 
 ## Three honest negatives — keep them, they are load-bearing
 
