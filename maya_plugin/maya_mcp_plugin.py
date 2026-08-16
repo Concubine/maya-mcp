@@ -13,11 +13,13 @@ clean errors instead.
 
 from __future__ import annotations
 
+import errno
 import logging
 import logging.handlers
 import os
 import socket
 import threading
+import time
 from typing import Any, Dict, Optional
 
 from . import protocol, version
@@ -46,6 +48,9 @@ from .handlers import (
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9877
+# Windows reports a taken port as WSAEADDRINUSE, which is not errno.EADDRINUSE
+# there - check both rather than let the real message escape as a bare OSError.
+WSAEADDRINUSE = 10048
 
 # Inbound requests never legitimately carry images (largest is execute_python
 # source); the 64 MB protocol cap is for image-bearing responses only.
@@ -58,6 +63,37 @@ DEFAULT_BODY_DEADLINE_S = 30.0
 log = logging.getLogger("maya_mcp_plugin")
 
 _active_server: Optional["PluginServer"] = None
+_bound_at: Optional[float] = None  # epoch seconds, set when the socket binds
+
+
+class PortInUseError(OSError):
+    """Another process already holds the port this plugin was told to bind.
+
+    An OSError subclass on purpose: this replaces the bare bind OSError with a
+    message that says what it means, and callers already catching OSError keep
+    working.
+    """
+
+
+def _port_in_use_message(host: str, port: int) -> str:
+    """Said in full, because the alternative is worse than a crash.
+
+    A Maya whose bind failed looks completely normal - it just has no plugin,
+    while the process that won the port keeps answering calls meant for this
+    one. Two Mayas on this machine lost this race silently (#648), so the
+    failure says who to ask and what to do about it.
+    """
+    return (
+        "\n" + "!" * 72 + "\n"
+        "maya-mcp could NOT bind %s:%d - another process already holds it.\n"
+        "This Maya has NO plugin listening. Anything sent to that port is being\n"
+        "answered by the other process, not by this one (maya-mcp #648).\n"
+        "Find the holder:\n"
+        "  Get-NetTCPConnection -State Listen -LocalPort %d | select OwningProcess\n"
+        "Then kill it (taskkill /F /T /PID <id>) or start this Maya on another\n"
+        "port: MAYA_MCP_PORT=<free port> before launch, or\n"
+        "maya_mcp_plugin.start_server(port=<free port>) here.\n" + "!" * 72
+    ) % (host, port, port)
 
 
 def is_maya_available() -> bool:
@@ -69,14 +105,55 @@ def is_maya_available() -> bool:
         return False
 
 
-def _ping(params: Dict[str, Any]) -> Dict[str, Any]:
-    """Liveness AND identity: which copy of the plugin is actually running.
+def _scene_name() -> Optional[str]:
+    """The open scene, or None when Maya cannot answer. Never raises: ping must
+    keep working when the thing it is reporting on does not."""
+    try:
+        import maya.cmds as cmds  # noqa: PLC0415
 
-    The live Maya imports <Documents>/maya/scripts/maya_plugin, not the repo, so
-    callers need a way to tell whether a green result describes their code. See
-    version.py; clients feed `plugin` to version.compare().
+        return cmds.file(query=True, sceneName=True) or ""
+    except Exception:  # noqa: BLE001 - see docstring
+        return None
+
+
+def _process_info() -> Dict[str, Any]:
+    """WHICH process is answering - a port is not an identity (maya-mcp #648).
+
+    An agent that launches a Maya and then talks to MAYA_MCP_PORT is only
+    assuming the answer comes from the process it started; if another Maya
+    already held that port, the launched one comes up with a dead plugin and
+    every call lands in the other session, silently. `pid` settles it, and
+    `scene` makes it recognisable to a human reading the log.
+
+    started_at is when this plugin BOUND the port, not when Maya started - it
+    is what distinguishes a restart, which is what callers actually ask about.
     """
-    return {"pong": True, "maya": is_maya_available(), "plugin": version.plugin_info()}
+    server = _active_server
+    started = _bound_at
+    return {
+        "pid": os.getpid(),
+        "host": server.host if server is not None else None,
+        "port": server.port if server is not None else None,
+        "started_at": started,
+        "uptime_s": round(time.time() - started, 1) if started else None,
+        "scene": _scene_name(),
+    }
+
+
+def _ping(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Liveness AND identity: which copy of the plugin is running, in which process.
+
+    The live Maya may import <Documents>/maya/scripts/maya_plugin rather than the
+    repo, so callers need a way to tell whether a green result describes their
+    code. See version.py; clients feed `plugin` to version.compare(). `process`
+    answers the other half - whether it describes their Maya (#648).
+    """
+    return {
+        "pong": True,
+        "maya": is_maya_available(),
+        "plugin": version.plugin_info(),
+        "process": _process_info(),
+    }
 
 
 def _build_handlers() -> Dict[str, Any]:
@@ -181,12 +258,20 @@ class PluginServer:
         token: Optional[str],
         body_deadline_s: float = DEFAULT_BODY_DEADLINE_S,
     ):
+        global _bound_at
+
         # Bind FIRST: if the port is taken, fail before spawning any thread.
         family = socket.AF_INET6 if ":" in host else socket.AF_INET
-        self._sock = socket.create_server((host, port), family=family)
+        try:
+            self._sock = socket.create_server((host, port), family=family)
+        except OSError as exc:
+            if exc.errno in (errno.EADDRINUSE, WSAEADDRINUSE):
+                raise PortInUseError(_port_in_use_message(host, port)) from exc
+            raise
         self._sock.settimeout(0.25)
         self.host = host
         self.port = self._sock.getsockname()[1]
+        _bound_at = time.time()
         self._body_deadline_s = body_deadline_s
 
         undo_open, undo_close = _undo_hooks()
@@ -351,7 +436,15 @@ def start_server(
         _active_server.stop()
         _active_server = None
 
-    _active_server = PluginServer(host, port, token, body_deadline_s=body_deadline_s)
+    try:
+        _active_server = PluginServer(host, port, token, body_deadline_s=body_deadline_s)
+    except PortInUseError as exc:
+        # userSetup starts this through executeDeferred, where a traceback is
+        # one more scrolling line in a busy script editor. Say it plainly, and
+        # to the log, before letting it raise.
+        print(str(exc))
+        log.error("%s", exc)
+        raise
     return _active_server
 
 

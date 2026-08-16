@@ -140,8 +140,15 @@ class RestoreResult(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     restored: str
+    path: Optional[str] = Field(
+        default=None, description="The checkpoint file that was actually opened."
+    )
     pre_restore_checkpoint: str = Field(
         description="Auto-checkpoint of the state before restoring, in case you change your mind."
+    )
+    pre_restore_path: Optional[str] = Field(
+        default=None,
+        description="File the pre-restore auto-checkpoint went to; pass as path= to undo this restore.",
     )
 
 
@@ -162,6 +169,11 @@ class NewSceneResult(BaseModel):
         description="Checkpoint id saved just before the discarded scene was replaced; "
         "pass to maya_restore_checkpoint to recover it.",
     )
+    pre_checkpoint_path: Optional[str] = Field(
+        default=None,
+        description="File that checkpoint went to. An empty scene resolves ids against the "
+        "workspace root instead, so this path is the reliable handle to recover it.",
+    )
     units: Optional[SceneUnits] = Field(
         default=None,
         description="The unit the new scene was set to - stated, not inherited.",
@@ -176,6 +188,11 @@ class OpenSceneResult(BaseModel):
         default=None,
         description="Checkpoint id saved just before the discarded scene was replaced; "
         "pass to maya_restore_checkpoint to recover it.",
+    )
+    pre_checkpoint_path: Optional[str] = Field(
+        default=None,
+        description="File that checkpoint went to. Opening a scene elsewhere moves which "
+        "directory ids resolve in, so this path is the reliable handle to recover it.",
     )
 
 

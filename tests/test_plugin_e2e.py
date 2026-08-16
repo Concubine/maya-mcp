@@ -6,6 +6,7 @@ undo hooks), and execute_python is pure Python — so the full M0 spine
 """
 
 import os
+import socket
 
 import pytest
 
@@ -65,6 +66,44 @@ class TestLoop:
         assert version.compare(plugin, plugin["digest"]) is None
         assert version.compare(plugin, "a-different-tree") is not None
         conn.close()
+
+    def test_ping_says_which_process_is_answering(self, plugin_server):
+        """maya-mcp #648: a port is not an identity. Two Mayas on one machine
+        lost a bind race silently because nothing in the protocol said whose
+        process was on the other end."""
+        srv = plugin_server()
+        conn = MayaConnection(port=srv.port)
+        process = conn.request("ping", {}, timeout_s=5)["process"]
+        assert process["pid"] == os.getpid()
+        assert process["port"] == srv.port
+        assert process["host"] == "127.0.0.1"
+        assert process["uptime_s"] >= 0.0
+        assert process["scene"] is None  # headless: Maya cannot answer
+        conn.close()
+
+    def test_a_taken_port_fails_loudly_instead_of_starting_a_deaf_maya(self, plugin_server):
+        """The losing Maya used to come up looking normal with no plugin, while
+        the winner answered calls meant for it. The failure now says who to ask."""
+        srv = plugin_server()
+        with pytest.raises(maya_mcp_plugin.PortInUseError) as exc_info:
+            maya_mcp_plugin.PluginServer("127.0.0.1", srv.port, None)
+        message = str(exc_info.value)
+        assert str(srv.port) in message
+        assert "OwningProcess" in message  # how to find the process that won
+
+    def test_start_server_prints_the_bind_failure_before_raising(self, capsys):
+        # userSetup starts the plugin via executeDeferred, where a bare
+        # traceback is easy to miss.
+        holder = socket.create_server(("127.0.0.1", 0))
+        previous = maya_mcp_plugin._active_server
+        maya_mcp_plugin._active_server = None
+        try:
+            with pytest.raises(maya_mcp_plugin.PortInUseError):
+                maya_mcp_plugin.start_server(port=holder.getsockname()[1])
+            assert "could NOT bind" in capsys.readouterr().out
+        finally:
+            maya_mcp_plugin._active_server = previous
+            holder.close()
 
     def test_handler_needing_maya_returns_traceback_error(self, plugin_server):
         srv = plugin_server()

@@ -41,6 +41,7 @@ class FakeCmds:
             raise AssertionError("unexpected file query")
         if kw.get("new"):
             self.new_calls += 1
+            self.scene_name = ""  # an empty scene is untitled, as in Maya
             # Maya resets the linear unit to the user's preference on a new
             # scene. Modelled so a set-BEFORE-file() refactor is silently
             # undone here exactly as it would be in Maya, and the ordering
@@ -55,6 +56,10 @@ class FakeCmds:
             return None
         if kw.get("open"):
             self.opened.append(args[0])
+            # Maya's scene name follows the opened file - and _checkpoint_dir
+            # is derived from it, which is the whole of #649. Modelled here so
+            # the tests below can see where the NEXT checkpoint would land.
+            self.scene_name = args[0]
             return None
         if kw.get("rename"):
             value = kw["rename"]
@@ -78,6 +83,9 @@ class FakeCmds:
 def fake(tmp_path, monkeypatch):
     fake = FakeCmds(tmp_path)
     monkeypatch.setattr(session, "_cmds", lambda: fake)
+    # The id -> path registry is module state that outlives one handler call
+    # by design; give each test a clean one.
+    monkeypatch.setattr(session, "_WRITTEN", {})
     return fake
 
 
@@ -129,6 +137,104 @@ def test_restore_takes_pre_restore_checkpoint_then_opens(fake, tmp_path):
     assert result["restored"] == "003_target"
     assert any("auto_pre_restore" in p for p in fake.saved_to)
     assert fake.opened and fake.opened[0].endswith("003_target.ma")
+
+
+class TestCheckpointIdsSurviveASceneChange:
+    """maya-mcp #649 - a checkpoint id is unique only inside ONE directory, and
+    that directory is derived from the open scene. Every destructive op hands
+    out an id and then changes the scene, so the documented recovery path
+    resolved somewhere else: unreachable at best, a DIFFERENT scene's
+    checkpoint of the same number at worst."""
+
+    def test_new_scenes_own_checkpoint_is_restorable_afterwards(self, fake, tmp_path):
+        scene_dir = tmp_path / "shot"
+        scene_dir.mkdir()
+        fake.scene_name = str(scene_dir / "golem.ma")
+
+        result = session.new_scene({"confirm": True})
+        assert fake.scene_name == ""  # ids now resolve against the workspace root
+
+        restored = session.restore_checkpoint({"checkpoint_id": result["pre_checkpoint"]})
+        assert restored["path"] == result["pre_checkpoint_path"]
+        assert os.path.dirname(restored["path"]) == str(scene_dir / "checkpoints")
+
+    def test_open_scene_returns_the_path_of_its_own_checkpoint(self, fake, tmp_path):
+        scene_dir = tmp_path / "shot"
+        scene_dir.mkdir()
+        fake.scene_name = str(scene_dir / "golem.ma")
+        target = tmp_path / "other.ma"
+        target.write_text("x")
+
+        result = session.open_scene({"path": str(target), "confirm": True})
+        assert result["pre_checkpoint_path"].startswith(str(scene_dir / "checkpoints"))
+        assert session.restore_checkpoint(
+            {"checkpoint_id": result["pre_checkpoint"]}
+        )["path"] == result["pre_checkpoint_path"]
+
+    def test_an_id_never_resolves_to_another_directorys_file(self, fake, tmp_path):
+        (tmp_path / "shot_a").mkdir()
+        fake.scene_name = str(tmp_path / "shot_a" / "a.ma")
+        saved = session.checkpoint({"label": "target"})
+
+        # the same NNN_label, a different scene's work - silently opening this
+        # instead of the file the id was issued for is the dangerous half.
+        decoy = tmp_path / "shot_b" / "checkpoints"
+        decoy.mkdir(parents=True)
+        (decoy / "001_target.ma").write_text("the wrong scene")
+        fake.scene_name = str(tmp_path / "shot_b" / "b.ma")
+
+        restored = session.restore_checkpoint({"checkpoint_id": "001_target"})
+        assert restored["path"] == saved["path"]
+        assert fake.opened[-1] == saved["path"]
+
+    def test_checkpoints_do_not_nest_after_a_restore(self, fake, tmp_path):
+        cp_dir = tmp_path / "checkpoints"
+        cp_dir.mkdir()
+        (cp_dir / "003_target.ma").write_text("x")
+        session.restore_checkpoint({"checkpoint_id": "003_target"})
+
+        # the scene is now a file INSIDE checkpoints/; the next checkpoint must
+        # land beside it, not in checkpoints/checkpoints/ with numbering reset.
+        following = session.checkpoint({"label": "after"})
+        assert os.path.dirname(following["path"]) == str(cp_dir)
+        assert not os.path.isdir(str(cp_dir / "checkpoints"))
+        assert following["checkpoint_id"] == "005_after"
+
+    def test_restore_by_path_needs_no_id(self, fake, tmp_path):
+        target = tmp_path / "elsewhere" / "007_far.ma"
+        target.parent.mkdir()
+        target.write_text("x")
+        result = session.restore_checkpoint({"path": str(target)})
+        assert result["restored"] == "007_far"
+        assert fake.opened[-1] == str(target)
+
+    def test_restore_by_missing_path_errors_before_touching_the_scene(self, fake, tmp_path):
+        with pytest.raises(HandlerError) as exc:
+            session.restore_checkpoint({"path": str(tmp_path / "nope.ma")})
+        assert "not found" in str(exc.value)
+        assert fake.opened == [] and fake.saved_to == []
+
+    def test_restore_requires_an_id_or_a_path(self, fake):
+        with pytest.raises(HandlerError) as exc:
+            session.restore_checkpoint({})
+        assert "checkpoint_id" in str(exc.value)
+
+    def test_restore_reports_how_to_undo_itself(self, fake, tmp_path):
+        cp_dir = tmp_path / "checkpoints"
+        cp_dir.mkdir()
+        (cp_dir / "003_target.ma").write_text("x")
+        result = session.restore_checkpoint({"checkpoint_id": "003_target"})
+        assert result["pre_restore_path"].endswith(
+            result["pre_restore_checkpoint"] + ".ma"
+        )
+        assert os.path.isfile(result["pre_restore_path"])
+
+    def test_a_pruned_id_does_not_resolve_to_a_stale_remembered_path(self, fake, tmp_path):
+        saved = session.checkpoint({"label": "doomed"})
+        os.unlink(saved["path"])
+        with pytest.raises(HandlerError) as exc:
+            session.restore_checkpoint({"checkpoint_id": saved["checkpoint_id"]})
+        assert "not found" in str(exc.value)
 
 
 def test_undo_counts_steps_and_stops_at_queue_end(fake):

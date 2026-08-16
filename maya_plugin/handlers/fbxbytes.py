@@ -24,6 +24,22 @@ _SIMPLE = {b"C": ("<?", 1), b"B": ("<B", 1), b"Y": ("<h", 2), b"I": ("<i", 4),
            b"F": ("<f", 4), b"D": ("<d", 8), b"L": ("<q", 8)}
 _ARRAYS = (b"f", b"d", b"l", b"i", b"c", b"b")
 
+# Every FBX property that carries a vec3 into a node's transform.
+_TRIPLES = {
+    "Lcl Translation": "translation",
+    "Lcl Rotation": "rotation",
+    "Lcl Scaling": "scaling",
+    "RotationOffset": "rotation_offset",
+    "RotationPivot": "rotation_pivot",
+    "ScalingOffset": "scaling_offset",
+    "ScalingPivot": "scaling_pivot",
+    "PreRotation": "pre_rotation",
+    "PostRotation": "post_rotation",
+    "GeometricTranslation": "geometric_translation",
+    "GeometricRotation": "geometric_rotation",
+    "GeometricScaling": "geometric_scaling",
+}
+
 
 @dataclass
 class FbxNode:
@@ -38,6 +54,21 @@ class FbxNode:
     rotation: tuple = ORIGIN
     rotation_pivot: tuple = ORIGIN
     rotation_order: int = 0
+    # FBX applies these unconditionally too, and Maya writes them the moment a
+    # pivot is moved (rotation_offset is Maya's rotatePivotTranslate) or a joint
+    # is oriented (pre_rotation is jointOrient). Dropping them reported a height
+    # 21% wrong for a file this server built - maya-mcp #645.
+    rotation_offset: tuple = ORIGIN
+    scaling_offset: tuple = ORIGIN
+    scaling_pivot: tuple = ORIGIN
+    pre_rotation: tuple = ORIGIN
+    post_rotation: tuple = ORIGIN
+    # The geometric transform belongs to the VERTICES, not to the node: it is
+    # never inherited by children. Kept apart from the chain for that reason.
+    geometric_translation: tuple = ORIGIN
+    geometric_rotation: tuple = ORIGIN
+    geometric_scaling: tuple = IDENTITY
+    inherit_type: int = 0
     uid: Optional[int] = None
     parent: Optional[int] = None
     geometry: Optional[int] = None
@@ -131,16 +162,13 @@ def read_fbx(path):
                     facts.unit_scale_factor = float(values[-1])
                     facts.unit_scale_offset = starts[-1]
                 elif isinstance(node, FbxNode):
-                    if key in ("Lcl Scaling", "Lcl Translation", "Lcl Rotation",
-                               "RotationPivot"):
-                        triple = tuple(float(v) for v in values[-3:])
-                        setattr(node, {"Lcl Scaling": "scaling",
-                                       "Lcl Translation": "translation",
-                                       "Lcl Rotation": "rotation",
-                                       "RotationPivot": "rotation_pivot"}[key],
-                                triple)
+                    if key in _TRIPLES:
+                        setattr(node, _TRIPLES[key],
+                                tuple(float(v) for v in values[-3:]))
                     elif key == "RotationOrder":
                         node.rotation_order = int(values[-1])
+                    elif key == "InheritType":
+                        node.inherit_type = int(values[-1])
 
             child = node
             if name == "Model":
@@ -181,12 +209,34 @@ def _rotation(deg, order):
             [cx * sy * cz + sx * sz, cx * sy * sz - sx * cz, cx * cy]]
 
 
+def _matmul(a, b):
+    """a then b, for row vectors: p.(a.b) applies a first."""
+    return [[sum(a[r][k] * b[k][c] for k in range(3)) for c in range(3)]
+            for r in range(3)]
+
+
+def _transposed(m):
+    """Also the inverse, for the rotation matrices this module builds."""
+    return [[m[c][r] for c in range(3)] for r in range(3)]
+
+
 def _local(node, rotation=None):
     """Return (M, t) such that a point p in this node's space maps to p.M + t.
 
-    Maya writes, and FBX stores, `(p - rp) . R + rp + translation`. Scaling is
-    applied about the origin: exact for the identity scale a delivery must have,
-    and the scale check runs first precisely so this is never the loose one.
+    FBX composes a node's local transform as
+
+        T . Roff . Rp . Rpre . R . Rpost-1 . Rp-1 . Soff . Sp . S . Sp-1
+
+    and applies every term unconditionally. In row-vector order that is
+
+        q = (p - Sp) . S + Sp + Soff
+        r = (q - Rp) . Rpost-1 . R . Rpre + Rp + Roff + T
+
+    This reader used to keep only T, R, Rp and S-about-the-origin. The rest are
+    not exotic: Maya writes Roff (rotatePivotTranslate) whenever a pivot is
+    moved - which maya_transform's `pivot` parameter does deliberately - and
+    Rpre whenever a joint is oriented. Dropping them reported 44.90 for a
+    clock tower Maya measures at 37.10 (maya-mcp #645).
 
     `rotation` overrides the node's own euler triple, which is how a POSE is
     measured: a pose is per-chunk rotations and nothing else, so substituting
@@ -194,12 +244,69 @@ def _local(node, rotation=None):
     """
     R = _rotation(node.rotation if rotation is None else rotation,
                   node.rotation_order)
+    if node.pre_rotation != ORIGIN:
+        R = _matmul(R, _rotation(node.pre_rotation, 0))
+    if node.post_rotation != ORIGIN:
+        R = _matmul(_transposed(_rotation(node.post_rotation, 0)), R)
+
     s = node.scaling
     M = [[R[r][c] * s[r] for c in range(3)] for r in range(3)]
-    rp = node.rotation_pivot
-    offset = [node.translation[c] + rp[c] - sum(rp[r] * R[r][c] for r in range(3))
-              for c in range(3)]
+    sp, so = node.scaling_pivot, node.scaling_offset
+    rp, ro = node.rotation_pivot, node.rotation_offset
+    # Everything the point picks up before the rotation, gathered so it can be
+    # rotated in one go: (Sp + Soff - Sp.S) from the scaling half, -Rp from the
+    # rotation half.
+    pre = [sp[c] + so[c] - sp[c] * s[c] - rp[c] for c in range(3)]
+    offset = [sum(pre[r] * R[r][c] for r in range(3))
+              + rp[c] + ro[c] + node.translation[c] for c in range(3)]
     return M, offset
+
+
+def _geometric(node):
+    """(M, t) for the geometric transform: (v . Gs) . Gr + Gt.
+
+    FBX applies this to the node's own vertices and NEVER to its children,
+    which is why it is not part of _local.
+    """
+    R = _rotation(node.geometric_rotation, 0)
+    gs = node.geometric_scaling
+    M = [[R[r][c] * gs[r] for c in range(3)] for r in range(3)]
+    return M, list(node.geometric_translation)
+
+
+def _is(triple, reference, tol=1e-9):
+    return all(abs(triple[c] - reference[c]) <= tol for c in range(3))
+
+
+def _has_geometric(node):
+    return not (_is(node.geometric_translation, ORIGIN)
+                and _is(node.geometric_rotation, ORIGIN)
+                and _is(node.geometric_scaling, IDENTITY))
+
+
+def _refuse_unsupported_inheritance(node, parent, posed=None):
+    """FBX InheritType 1 (eInheritRSrs) does not hand a parent's scale to a
+    rotated child the way plain parent-then-child composition does.
+
+    Maya writes InheritType 1 on every node it exports, so this cannot simply
+    be asserted away - but it only diverges when a scaled parent has a rotated
+    child, which no delivery measured so far does (scale sits on leaf meshes).
+    Refusing there beats composing a matrix that is quietly wrong: a number
+    this reader reports has to be one a consumer can trust (maya-mcp #645).
+    """
+    if parent is None or node.inherit_type == 0 or _is(parent.scaling, IDENTITY):
+        return
+    rotation = node.rotation if posed is None else posed
+    if (_is(rotation, ORIGIN) and _is(node.pre_rotation, ORIGIN)
+            and _is(node.post_rotation, ORIGIN)):
+        return
+    raise ValueError(
+        "%r is rotated under %r, which is scaled %s, with InheritType %d: FBX "
+        "does not compose that as parent-then-child and this reader will not "
+        "guess. Freeze the parent's scale, or measure in Maya."
+        % (node.name, parent.name, tuple(round(v, 4) for v in parent.scaling),
+           node.inherit_type)
+    )
 
 
 def world_vertex_bounds(facts, rotations=None):
@@ -221,13 +328,18 @@ def world_vertex_bounds(facts, rotations=None):
         verts = facts.geometries.get(node.geometry)
         if not verts:
             continue
-        chain = []
+        # The geometric transform belongs to these vertices alone, so it goes
+        # in front of the chain and no child ever sees it.
+        chain = [_geometric(node)] if _has_geometric(node) else []
         walker = node
         seen = set()
         while walker is not None and walker.uid not in seen:
             seen.add(walker.uid)
-            chain.append(_local(walker, (rotations or {}).get(walker.name)))
-            walker = by_uid.get(walker.parent)
+            posed = (rotations or {}).get(walker.name)
+            parent = by_uid.get(walker.parent)
+            _refuse_unsupported_inheritance(walker, parent, posed)
+            chain.append(_local(walker, posed))
+            walker = parent
         for i in range(0, len(verts), 3):
             p = list(verts[i:i + 3])
             for M, off in chain:

@@ -17,7 +17,14 @@ from . import ledger, units
 
 KEEP_CHECKPOINTS = 20
 MAX_UNDO_STEPS = 50
+CHECKPOINT_DIRNAME = "checkpoints"
 _NUMBERED = re.compile(r"^(\d{3})_(.+)\.ma$")
+
+# A checkpoint id is only unique inside ONE directory, and the directory is
+# derived from the open scene - which is exactly what the destructive ops that
+# hand out ids then change. So remember where every id this session wrote
+# actually went; an id is resolved against this first (maya-mcp #649).
+_WRITTEN: Dict[str, str] = {}
 
 
 def _cmds():
@@ -31,7 +38,15 @@ def _checkpoint_dir(cmds) -> str:
     base = os.path.dirname(scene) if scene else cmds.workspace(
         query=True, rootDirectory=True
     )
-    path = os.path.join(base, "checkpoints")
+    # Restoring (or opening) a checkpoint leaves the session with a scene
+    # INSIDE the checkpoints dir. Joining again would nest checkpoints/
+    # checkpoints/ one level deeper per restore, restarting numbering at 001
+    # in each new level - so the same id then names several different files
+    # (maya-mcp #649). A checkpoints dir is its own checkpoint dir.
+    if os.path.basename(os.path.normpath(base)).lower() == CHECKPOINT_DIRNAME:
+        path = base
+    else:
+        path = os.path.join(base, CHECKPOINT_DIRNAME)
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -63,7 +78,22 @@ def _save_checkpoint(cmds, label: str) -> Dict[str, str]:
             os.unlink(os.path.join(cp_dir, name))
         except OSError:
             pass
+    _WRITTEN[stem] = path
+    for stale in [k for k, v in _WRITTEN.items() if not os.path.isfile(v)]:
+        del _WRITTEN[stale]  # pruned by the ring, or deleted underneath us
     return {"checkpoint_id": stem, "path": path}
+
+
+def _resolve(cmds, checkpoint_id: str) -> Optional[str]:
+    """Where this id actually is. The remembered path wins over the current
+    scene's checkpoint dir, because the ops that hand out ids (new_scene,
+    open_scene, restore_checkpoint) move that dir out from under the id they
+    just returned - maya-mcp #649."""
+    remembered = _WRITTEN.get(checkpoint_id)
+    if remembered and os.path.isfile(remembered):
+        return remembered
+    path = os.path.join(_checkpoint_dir(cmds), checkpoint_id + ".ma")
+    return path if os.path.isfile(path) else None
 
 
 def auto_checkpoint(reason: str) -> Dict[str, str]:
@@ -88,25 +118,52 @@ def checkpoint(params: Dict[str, Any]) -> Dict[str, Any]:
 
 def restore_checkpoint(params: Dict[str, Any]) -> Dict[str, Any]:
     cmds = _cmds()
+    explicit = params.get("path")
     checkpoint_id = str(params.get("checkpoint_id") or "")
-    if ".." in checkpoint_id:
+
+    if explicit:
+        path = os.path.abspath(str(explicit))
+        if not os.path.isfile(path):
+            raise HandlerError(
+                "checkpoint file %r not found" % path,
+                hint="path must be an absolute path to a .ma written by a "
+                "checkpoint - it is returned alongside every checkpoint_id",
+            )
+        checkpoint_id = os.path.splitext(os.path.basename(path))[0]
+    elif checkpoint_id:
+        if ".." in checkpoint_id or os.path.isabs(checkpoint_id):
+            raise HandlerError(
+                "checkpoint_id %r must not contain '..' or be a path" % checkpoint_id,
+                hint="pass the NNN_label stem exactly as returned by maya_checkpoint, "
+                "e.g. '007_pre_rune' - or pass the file itself as path=",
+            )
+        path = _resolve(cmds, checkpoint_id)
+        if path is None:
+            cp_dir = _checkpoint_dir(cmds)
+            available = ", ".join(name[:-3] for _, name in _existing(cp_dir)[-5:])
+            raise HandlerError(
+                "checkpoint %r not found" % checkpoint_id,
+                hint="ids are per-directory and this session is in %s - most "
+                "recent there: %s. If the id came from before a scene change, "
+                "pass its path= instead."
+                % (cp_dir, available or "none saved yet"),
+            )
+    else:
         raise HandlerError(
-            "checkpoint_id %r must not contain '..'" % checkpoint_id,
-            hint="pass the NNN_label stem exactly as returned by maya_checkpoint, "
-            "e.g. '007_pre_rune' - not a path",
+            "missing required param 'checkpoint_id'",
+            hint="pass the NNN_label stem returned by maya_checkpoint, or path= "
+            "to restore a checkpoint file directly",
         )
-    cp_dir = _checkpoint_dir(cmds)
-    path = os.path.join(cp_dir, checkpoint_id + ".ma")
-    if not os.path.isfile(path):
-        available = ", ".join(name[:-3] for _, name in _existing(cp_dir)[-5:])
-        raise HandlerError(
-            "checkpoint %r not found" % checkpoint_id,
-            hint="most recent checkpoints: %s" % (available or "none saved yet"),
-        )
+
     pre = _save_checkpoint(cmds, "auto_pre_restore")
     cmds.file(path, open=True, force=True)
     ledger.clear()
-    return {"restored": checkpoint_id, "pre_restore_checkpoint": pre["checkpoint_id"]}
+    return {
+        "restored": checkpoint_id,
+        "path": path,
+        "pre_restore_checkpoint": pre["checkpoint_id"],
+        "pre_restore_path": pre["path"],
+    }
 
 
 restore_checkpoint.no_undo_chunk = True
@@ -184,6 +241,10 @@ def new_scene(params: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "new_scene": True,
         "pre_checkpoint": pre["checkpoint_id"],
+        # The empty scene resolves its checkpoint dir to the workspace root, so
+        # the id above no longer names a file anything can find by id alone
+        # from a stale plugin - the path is the durable handle (maya-mcp #649).
+        "pre_checkpoint_path": pre["path"],
         "units": unit_block,
     }
 
@@ -211,7 +272,8 @@ def open_scene(params: Dict[str, Any]) -> Dict[str, Any]:
     pre = auto_checkpoint("pre_open_scene")
     cmds.file(path, open=True, force=True)
     ledger.clear()
-    return {"opened": path, "pre_checkpoint": pre["checkpoint_id"]}
+    return {"opened": path, "pre_checkpoint": pre["checkpoint_id"],
+            "pre_checkpoint_path": pre["path"]}
 
 
 open_scene.no_undo_chunk = True
