@@ -16,17 +16,22 @@
    0.0483
   ],
   "collider": {
-   "centre_m": [
-    0.0,
-    2.4,
-    0.04001
+   "axis": "x",
+   "centre_local_m": [
+    -0.0,
+    0.01689,
+    0.01239
    ],
-   "size_m": [
-    1.16,
-    0.76,
-    0.92
+   "height_m": 1.16,
+   "max_escape_m": 0.00046,
+   "radius_m": 0.4729,
+   "rotation_local_deg": [
+    -26.3091,
+    -0.0,
+    180.0
    ],
-   "type": "box"
+   "type": "capsule",
+   "volume_ratio": 1.43
   },
   "materials": [
    "golem_kit_material"
@@ -58,17 +63,24 @@
    0.57229
   ],
   "collider": {
-   "centre_m": [
+   "centre_local_m": [
     0.0,
-    3.72,
-    0.576
+    3.72548,
+    0.5394
+   ],
+   "max_escape_m": 0.0,
+   "rotation_local_deg": [
+    163.9889,
+    -0.0,
+    0.0
    ],
    "size_m": [
     0.56,
-    0.30772,
-    0.22036
+    0.28112,
+    0.16196
    ],
-   "type": "box"
+   "type": "box",
+   "volume_ratio": 1.083
   },
   "materials": [
    "golem_kit_glow_brow"
@@ -100,17 +112,24 @@
    0.1003
   ],
   "collider": {
-   "centre_m": [
+   "centre_local_m": [
     0.0,
-    2.8703,
-    0.09993
+    2e-05,
+    -0.00056
+   ],
+   "max_escape_m": 0.0,
+   "rotation_local_deg": [
+    -88.2875,
+    -0.0,
+    0.0
    ],
    "size_m": [
     1.76,
-    0.91788,
-    1.12422
+    1.04,
+    0.80208
    ],
-   "type": "box"
+   "type": "box",
+   "volume_ratio": 1.071
   },
   "materials": [
    "golem_kit_glow_girdle"
@@ -142,17 +161,20 @@
    0.23706
   ],
   "collider": {
-   "centre_m": [
-    0.00349,
-    3.60538,
-    0.23352
+   "centre_local_m": [
+    0.00041,
+    0.00534,
+    -0.00213
    ],
-   "size_m": [
-    0.78677,
-    0.81924,
-    0.79647
+   "max_escape_m": 0.0,
+   "radius_m": 0.41932,
+   "rotation_local_deg": [
+    0.0,
+    0.0,
+    0.0
    ],
-   "type": "box"
+   "type": "sphere",
+   "volume_ratio": 1.224
   },
   "materials": [
    "golem_kit_glow_head"
@@ -184,17 +206,22 @@
    0.20284
   ],
   "collider": {
-   "centre_m": [
-    0.0065,
-    3.23115,
-    0.20721
+   "axis": "x",
+   "centre_local_m": [
+    0.00383,
+    -0.00689,
+    -0.00185
    ],
-   "size_m": [
-    0.41868,
-    0.27855,
-    0.39039
+   "height_m": 0.4143,
+   "max_escape_m": 0.00707,
+   "radius_m": 0.19685,
+   "rotation_local_deg": [
+    78.4949,
+    19.9491,
+    177.2179
    ],
-   "type": "box"
+   "type": "capsule",
+   "volume_ratio": 1.499
   },
   "materials": [
    "golem_kit_glow_neck"
@@ -226,17 +253,22 @@
    0.00026
   ],
   "collider": {
-   "centre_m": [
-    0.00549,
-    1.9621,
-    0.00605
+   "axis": "x",
+   "centre_local_m": [
+    0.0055,
+    1.96211,
+    0.0061
    ],
-   "size_m": [
-    1.16291,
-    0.71961,
-    0.98185
+   "height_m": 1.16286,
+   "max_escape_m": 0.02034,
+   "radius_m": 0.4943,
+   "rotation_local_deg": [
+    -88.8785,
+    -0.1518,
+    0.0445
    ],
-   "type": "box"
+   "type": "capsule",
+   "volume_ratio": 1.719
   },
   "materials": [
    "golem_kit_material"
@@ -268,17 +300,24 @@
    0.6576
   ],
   "collider": {
-   "centre_m": [
-    0.072,
-    3.724,
-    0.6576
+   "centre_local_m": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "max_escape_m": 0.0,
+   "rotation_local_deg": [
+    -0.5633,
+    -0.0,
+    0.0
    ],
    "size_m": [
     0.08,
     0.068,
     0.044
    ],
-   "type": "box"
+   "type": "box",
+   "volume_ratio": 1.002
   },
   "materials": [
    "golem_tracer_core_mat"
@@ -310,17 +349,24 @@
    0.6544
   ],
   "collider": {
-   "centre_m": [
-    -0.004,
-    3.724,
-    0.6544
+   "centre_local_m": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "max_escape_m": 0.0,
+   "rotation_local_deg": [
+    179.4367,
+    -0.0,
+    0.0
    ],
    "size_m": [
     0.064,
     0.0576,
     0.036
    ],
-   "type": "box"
+   "type": "box",
+   "volume_ratio": 0.998
   },
   "materials": [
    "golem_tracer_trail1_mat"
@@ -352,17 +398,24 @@
    0.652
   ],
   "collider": {
-   "centre_m": [
-    -0.068,
-    3.724,
-    0.652
+   "centre_local_m": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "max_escape_m": 0.0,
+   "rotation_local_deg": [
+    -0.5633,
+    -0.0,
+    0.0
    ],
    "size_m": [
     0.056,
     0.048,
     0.032
    ],
-   "type": "box"
+   "type": "box",
+   "volume_ratio": 1.0
   },
   "materials": [
    "golem_tracer_trail2_mat"
@@ -394,17 +447,24 @@
    0.6496
   ],
   "collider": {
-   "centre_m": [
-    -0.124,
-    3.724,
-    0.6496
+   "centre_local_m": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "max_escape_m": 0.0,
+   "rotation_local_deg": [
+    179.4367,
+    -0.0,
+    0.0
    ],
    "size_m": [
     0.048,
     0.0384,
     0.028
    ],
-   "type": "box"
+   "type": "box",
+   "volume_ratio": 0.992
   },
   "materials": [
    "golem_tracer_trail3_mat"
@@ -436,17 +496,24 @@
    0.02
   ],
   "collider": {
-   "centre_m": [
-    -0.00738,
-    2.32803,
-    0.01149
+   "centre_local_m": [
+    -0.0074,
+    0.0072,
+    -0.00432
+   ],
+   "max_escape_m": 0.0,
+   "rotation_local_deg": [
+    89.0349,
+    -0.4825,
+    -179.8598
    ],
    "size_m": [
-    1.08984,
-    0.33338,
-    0.89348
+    1.08986,
+    0.89332,
+    0.33272
    ],
-   "type": "box"
+   "type": "box",
+   "volume_ratio": 2.35
   },
   "materials": [
    "golem_kit_material"
@@ -478,17 +545,24 @@
    0.12038
   ],
   "collider": {
-   "centre_m": [
-    0.42566,
-    0.27443,
-    0.11719
+   "centre_local_m": [
+    -0.00397,
+    -0.00644,
+    0.00305
+   ],
+   "max_escape_m": 0.0,
+   "rotation_local_deg": [
+    76.9667,
+    61.7557,
+    -12.8428
    ],
    "size_m": [
-    0.47079,
-    0.25766,
-    0.47073
+    0.48551,
+    0.46021,
+    0.23877
    ],
-   "type": "box"
+   "type": "box",
+   "volume_ratio": 2.211
   },
   "materials": [
    "golem_kit_material"
@@ -520,17 +594,22 @@
    0.1193
   ],
   "collider": {
-   "centre_m": [
-    1.00265,
-    2.20613,
-    0.1157
+   "axis": "x",
+   "centre_local_m": [
+    -0.00921,
+    0.00583,
+    -0.00554
    ],
-   "size_m": [
-    0.48084,
-    0.27529,
-    0.48389
+   "height_m": 0.49735,
+   "max_escape_m": 0.01379,
+   "radius_m": 0.22759,
+   "rotation_local_deg": [
+    -90.3675,
+    44.24,
+    -179.8922
    ],
-   "type": "box"
+   "type": "capsule",
+   "volume_ratio": 1.868
   },
   "materials": [
    "golem_kit_material"
@@ -562,17 +641,24 @@
    0.12
   ],
   "collider": {
-   "centre_m": [
-    1.0,
-    0.86,
-    0.12
+   "centre_local_m": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "max_escape_m": 0.0,
+   "rotation_local_deg": [
+    89.4367,
+    -0.0,
+    0.0
    ],
    "size_m": [
     0.576,
-    0.52,
-    0.56
+    0.56,
+    0.52
    ],
-   "type": "box"
+   "type": "box",
+   "volume_ratio": 1.012
   },
   "materials": [
    "golem_kit_material"
@@ -604,17 +690,24 @@
    0.28532
   ],
   "collider": {
-   "centre_m": [
-    0.44167,
-    0.14252,
-    0.27541
+   "centre_local_m": [
+    0.0006,
+    1e-05,
+    0.00345
+   ],
+   "max_escape_m": 0.0,
+   "rotation_local_deg": [
+    177.9028,
+    84.473,
+    -91.459
    ],
    "size_m": [
-    0.61011,
-    0.29851,
-    0.96403
+    0.96676,
+    0.61301,
+    0.29336
    ],
-   "type": "box"
+   "type": "box",
+   "volume_ratio": 1.132
   },
   "materials": [
    "golem_kit_material"
@@ -646,17 +739,22 @@
    0.12
   ],
   "collider": {
-   "centre_m": [
-    1.0,
-    1.66,
-    0.12
+   "axis": "x",
+   "centre_local_m": [
+    0.0,
+    -0.0,
+    -0.0
    ],
-   "size_m": [
-    0.464,
-    1.08,
-    0.464
+   "height_m": 1.08,
+   "max_escape_m": 0.0961,
+   "radius_m": 0.232,
+   "rotation_local_deg": [
+    53.252,
+    0.5633,
+    90.0
    ],
-   "type": "box"
+   "type": "capsule",
+   "volume_ratio": 1.016
   },
   "materials": [
    "golem_kit_material"
@@ -688,17 +786,24 @@
    0.31274
   ],
   "collider": {
-   "centre_m": [
-    0.44054,
-    0.89834,
-    0.31594
+   "centre_local_m": [
+    0.00122,
+    0.00438,
+    0.00381
+   ],
+   "max_escape_m": 0.0,
+   "rotation_local_deg": [
+    -82.3953,
+    -29.1854,
+    175.3439
    ],
    "size_m": [
-    0.57558,
-    0.27454,
-    0.5656
+    0.58629,
+    0.55416,
+    0.2695
    ],
-   "type": "box"
+   "type": "box",
+   "volume_ratio": 2.069
   },
   "materials": [
    "golem_kit_material"
@@ -730,17 +835,22 @@
    0.2159
   ],
   "collider": {
-   "centre_m": [
-    0.44,
-    0.59406,
-    0.23346
+   "axis": "x",
+   "centre_local_m": [
+    -0.0,
+    -0.0,
+    -0.0
    ],
-   "size_m": [
-    0.48642,
-    0.73892,
-    0.60216
+   "height_m": 0.64,
+   "max_escape_m": 0.10074,
+   "radius_m": 0.24321,
+   "rotation_local_deg": [
+    55.8264,
+    9.7412,
+    90.0
    ],
-   "type": "box"
+   "type": "capsule",
+   "volume_ratio": 0.949
   },
   "materials": [
    "golem_kit_material"
@@ -772,17 +882,20 @@
    0.1169
   ],
   "collider": {
-   "centre_m": [
-    0.9214,
-    3.17124,
-    0.11619
+   "centre_local_m": [
+    0.92901,
+    3.16981,
+    0.08292
    ],
-   "size_m": [
-    0.88555,
-    0.86039,
-    0.89618
+   "max_escape_m": 0.0,
+   "radius_m": 0.47293,
+   "rotation_local_deg": [
+    0.0,
+    0.0,
+    0.0
    ],
-   "type": "box"
+   "type": "sphere",
+   "volume_ratio": 1.498
   },
   "materials": [
    "golem_kit_glow_shoulders"
@@ -814,17 +927,22 @@
    0.13359
   ],
   "collider": {
-   "centre_m": [
-    0.44,
-    1.3222,
-    0.107
+   "axis": "x",
+   "centre_local_m": [
+    -0.0,
+    0.0,
+    -0.0
    ],
-   "size_m": [
-    0.63836,
-    1.01367,
-    0.81405
+   "height_m": 0.88,
+   "max_escape_m": 0.13221,
+   "radius_m": 0.31918,
+   "rotation_local_deg": [
+    51.6301,
+    -0.0,
+    90.0
    ],
-   "type": "box"
+   "type": "capsule",
+   "volume_ratio": 1.044
   },
   "materials": [
    "golem_kit_material"
@@ -856,17 +974,22 @@
    0.12
   ],
   "collider": {
-   "centre_m": [
-    1.0,
-    2.68,
-    0.12
+   "axis": "x",
+   "centre_local_m": [
+    0.0,
+    -0.0,
+    -0.0
    ],
-   "size_m": [
-    0.496,
-    0.96,
-    0.496
+   "height_m": 0.96,
+   "max_escape_m": 0.10273,
+   "radius_m": 0.248,
+   "rotation_local_deg": [
+    54.2774,
+    0.5633,
+    90.0
    ],
-   "type": "box"
+   "type": "capsule",
+   "volume_ratio": 1.035
   },
   "materials": [
    "golem_kit_material"
@@ -898,17 +1021,24 @@
    0.11194
   ],
   "collider": {
-   "centre_m": [
-    0.99239,
-    1.12301,
-    0.11181
+   "centre_local_m": [
+    -0.002,
+    0.00317,
+    -0.01279
+   ],
+   "max_escape_m": 0.0,
+   "rotation_local_deg": [
+    85.105,
+    79.1639,
+    -5.0852
    ],
    "size_m": [
-    0.43688,
-    0.22482,
-    0.45343
+    0.4466,
+    0.43538,
+    0.22445
    ],
-   "type": "box"
+   "type": "box",
+   "volume_ratio": 1.93
   },
   "materials": [
    "golem_kit_material"
@@ -940,17 +1070,24 @@
    0.12038
   ],
   "collider": {
-   "centre_m": [
-    -0.42566,
-    0.27443,
-    0.11719
+   "centre_local_m": [
+    -0.43603,
+    0.27299,
+    0.11726
+   ],
+   "max_escape_m": 0.0,
+   "rotation_local_deg": [
+    70.8136,
+    61.3685,
+    164.3424
    ],
    "size_m": [
-    0.47079,
-    0.25766,
-    0.47073
+    0.48551,
+    0.46021,
+    0.23877
    ],
-   "type": "box"
+   "type": "box",
+   "volume_ratio": 2.211
   },
   "materials": [
    "golem_kit_material"
@@ -982,17 +1119,22 @@
    0.1193
   ],
   "collider": {
-   "centre_m": [
-    -1.00265,
-    2.20613,
-    0.1157
+   "axis": "x",
+   "centre_local_m": [
+    -0.99079,
+    2.2069,
+    0.09283
    ],
-   "size_m": [
-    0.48084,
-    0.27529,
-    0.48389
+   "height_m": 0.49735,
+   "max_escape_m": 0.01379,
+   "radius_m": 0.22759,
+   "rotation_local_deg": [
+    -89.6325,
+    44.24,
+    -0.1078
    ],
-   "type": "box"
+   "type": "capsule",
+   "volume_ratio": 1.868
   },
   "materials": [
    "golem_kit_material"
@@ -1024,17 +1166,24 @@
    0.12
   ],
   "collider": {
-   "centre_m": [
+   "centre_local_m": [
     -1.0,
-    0.86,
-    0.12
+    0.86114,
+    0.11154
+   ],
+   "max_escape_m": 0.0,
+   "rotation_local_deg": [
+    -89.4367,
+    0.0,
+    -180.0
    ],
    "size_m": [
     0.576,
-    0.52,
-    0.56
+    0.56,
+    0.52
    ],
-   "type": "box"
+   "type": "box",
+   "volume_ratio": 1.012
   },
   "materials": [
    "golem_kit_material"
@@ -1066,17 +1215,24 @@
    0.28532
   ],
   "collider": {
-   "centre_m": [
-    -0.44167,
-    0.14252,
-    0.27541
+   "centre_local_m": [
+    -0.4406,
+    0.1397,
+    0.27544
+   ],
+   "max_escape_m": 0.0,
+   "rotation_local_deg": [
+    24.8355,
+    89.6571,
+    -65.8091
    ],
    "size_m": [
-    0.61011,
-    0.29851,
-    0.96403
+    0.96676,
+    0.61301,
+    0.29336
    ],
-   "type": "box"
+   "type": "box",
+   "volume_ratio": 1.132
   },
   "materials": [
    "golem_kit_material"
@@ -1108,17 +1264,22 @@
    0.12
   ],
   "collider": {
-   "centre_m": [
+   "axis": "x",
+   "centre_local_m": [
     -1.0,
-    1.66,
-    0.12
+    1.6611,
+    0.10368
    ],
-   "size_m": [
-    0.464,
-    1.08,
-    0.464
+   "height_m": 1.08,
+   "max_escape_m": 0.0961,
+   "radius_m": 0.232,
+   "rotation_local_deg": [
+    117.5748,
+    0.5633,
+    90.0
    ],
-   "type": "box"
+   "type": "capsule",
+   "volume_ratio": 1.016
   },
   "materials": [
    "golem_kit_material"
@@ -1150,17 +1311,24 @@
    0.31274
   ],
   "collider": {
-   "centre_m": [
-    -0.44054,
-    0.89834,
-    0.31594
+   "centre_local_m": [
+    -0.44122,
+    0.89686,
+    0.30495
+   ],
+   "max_escape_m": 0.0,
+   "rotation_local_deg": [
+    -92.3166,
+    -29.4564,
+    2.0651
    ],
    "size_m": [
-    0.57558,
-    0.27454,
-    0.5656
+    0.58629,
+    0.55416,
+    0.2695
    ],
-   "type": "box"
+   "type": "box",
+   "volume_ratio": 2.069
   },
   "materials": [
    "golem_kit_material"
@@ -1192,17 +1360,22 @@
    0.2159
   ],
   "collider": {
-   "centre_m": [
+   "axis": "x",
+   "centre_local_m": [
     -0.44,
-    0.59406,
-    0.23346
+    0.5864,
+    0.2084
    ],
-   "size_m": [
-    0.48642,
-    0.73892,
-    0.60216
+   "height_m": 0.64,
+   "max_escape_m": 0.10074,
+   "radius_m": 0.24321,
+   "rotation_local_deg": [
+    129.2754,
+    -17.0,
+    90.0
    ],
-   "type": "box"
+   "type": "capsule",
+   "volume_ratio": 0.949
   },
   "materials": [
    "golem_kit_material"
@@ -1234,17 +1407,20 @@
    0.1169
   ],
   "collider": {
-   "centre_m": [
-    -0.9214,
-    3.17124,
-    0.11619
+   "centre_local_m": [
+    -0.92901,
+    3.16981,
+    0.08292
    ],
-   "size_m": [
-    0.88555,
-    0.86039,
-    0.89618
+   "max_escape_m": 0.0,
+   "radius_m": 0.47293,
+   "rotation_local_deg": [
+    0.0,
+    0.0,
+    0.0
    ],
-   "type": "box"
+   "type": "sphere",
+   "volume_ratio": 1.498
   },
   "materials": [
    "golem_kit_glow_shoulders"
@@ -1276,17 +1452,22 @@
    0.13359
   ],
   "collider": {
-   "centre_m": [
+   "axis": "x",
+   "centre_local_m": [
     -0.44,
-    1.3222,
-    0.107
+    1.3064,
+    0.1504
    ],
-   "size_m": [
-    0.63836,
-    1.01367,
-    0.81405
+   "height_m": 0.88,
+   "max_escape_m": 0.13221,
+   "radius_m": 0.31918,
+   "rotation_local_deg": [
+    -43.9317,
+    20.0,
+    90.0
    ],
-   "type": "box"
+   "type": "capsule",
+   "volume_ratio": 1.044
   },
   "materials": [
    "golem_kit_material"
@@ -1318,17 +1499,22 @@
    0.12
   ],
   "collider": {
-   "centre_m": [
+   "axis": "x",
+   "centre_local_m": [
     -1.0,
-    2.68,
-    0.12
+    2.68105,
+    0.09365
    ],
-   "size_m": [
-    0.496,
-    0.96,
-    0.496
+   "height_m": 0.96,
+   "max_escape_m": 0.10272,
+   "radius_m": 0.248,
+   "rotation_local_deg": [
+    67.9191,
+    -0.5633,
+    -90.0
    ],
-   "type": "box"
+   "type": "capsule",
+   "volume_ratio": 1.035
   },
   "materials": [
    "golem_kit_material"
@@ -1360,17 +1546,24 @@
    0.11194
   ],
   "collider": {
-   "centre_m": [
-    -0.99239,
-    1.12301,
-    0.11181
+   "centre_local_m": [
+    -0.998,
+    1.1243,
+    0.09619
+   ],
+   "max_escape_m": 0.0,
+   "rotation_local_deg": [
+    94.895,
+    79.1638,
+    -174.9148
    ],
    "size_m": [
-    0.43688,
-    0.22482,
-    0.45343
+    0.4466,
+    0.43538,
+    0.22445
    ],
-   "type": "box"
+   "type": "box",
+   "volume_ratio": 1.93
   },
   "materials": [
    "golem_kit_material"

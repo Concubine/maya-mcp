@@ -8,7 +8,7 @@ metre-native with identity scales.** Built through the MCP tools for maya-mcp
 | file | what |
 |---|---|
 | `golem.fbx` | the delivery. One tree rooted at `golem_C_pelvis`, translate+rotate only |
-| `manifest.json` | per-chunk pivot, joint limits, breakage, collider box, volume, mass share, centre of mass, tri count, material |
+| `manifest.json` | per-chunk pivot, joint limits, breakage, fitted collider primitive, volume, mass share, centre of mass, tri count, material |
 | `poses.json` | the five target poses as per-chunk absolute local rotations |
 | `golem_metre.mb` | the Maya scene the FBX was written from, after the bake |
 | `chunks.json` | the raw measurements taken out of that scene; the manifest is derived from it |
@@ -104,6 +104,37 @@ should settle *after* the limb they collar, which is simulation, not pose data.
 
 `delivery_units.check_poses` re-composes each pose **from the FBX bytes** and
 requires it to reach the height it declares, so the two files cannot drift.
+
+## Colliders — limb-shaped, not one box per chunk
+
+**13 capsules, 3 spheres, 17 boxes**, each declared in its chunk's own local
+space with a centre, a rotation, and its dimensions — so it stays right when the
+chunk turns, which a rest-pose world box does not.
+
+The type is not chosen by a threshold. Each chunk gets a frame fitted to its
+vertices, three primitives are fitted in that frame, and the one whose **volume
+best matches the sculpt's measured volume** wins: a cylinder scores the capsule,
+a slab the box, a ball the sphere. Limbs come out as limbs, feet and fists stay
+boxes, the head and both shoulder balls are spheres.
+
+`max_escape_m` on every collider says how far the sculpt pokes out of what was
+declared. It is 0 for boxes and spheres and **0.096–0.132 m on the limb
+capsules**, because a capsule's cap cuts the flat rim of a cylinder. Growing it
+to swallow the rim would push the collider past the joint it has to stop at, so
+the rim is clipped on purpose and the number is published rather than hidden.
+The spec's own position is that the collider need not match the sculpt — the
+building kit lets geometry oversail its cell by up to 0.5 m.
+
+`volume_ratio` is the other half of the honesty: 1.0 is a perfect fit, and the
+ten gasket collars sit near **2.0** because they are hollow rings and no solid
+primitive fits a ring.
+
+Two gates run on this: nothing may escape by more than 0.15 m, and **every
+mirrored pair must declare the same primitive**. The second one earned its
+place immediately — fitting in each chunk's own local axes gave the left thigh a
+capsule and the right thigh a box, because the right side carries no rest
+rotation (its tilt is baked into its vertices). Invisible in a render, obvious
+in play. The fitted frame removed it.
 
 ## Three measurements worth arguing with
 

@@ -129,6 +129,14 @@ def build_manifest(chunks, poses):
             "pivot_m": c["pivot_world_m"],
             "bbox_min_m": c["bbox_min_m"],
             "bbox_max_m": c["bbox_max_m"],
+            # Chosen by which primitive's VOLUME best matches the sculpt's own,
+            # in a frame fitted to the chunk rather than the chunk's local axes:
+            # a cylinder scores the capsule, a slab the box, a ball the sphere,
+            # with no hand-tuned aspect threshold. `max_escape_m` is how far the
+            # sculpt pokes out of what was declared - never zero for a limb,
+            # because a capsule's caps cut the flat rim of a cylinder, and
+            # growing it to swallow the rim would push it past the joint it has
+            # to stop at.
             "collider": c["collider"],
             "volume_m3": c["volume_m3"],
             # Mass is authored as volume x one density constant, so what a
@@ -249,6 +257,38 @@ def build_manifest(chunks, poses):
     }
 
 
+MAX_ESCAPE_M = 0.15     # a limb capsule cuts the rim of its own flat end; this
+                        # bounds how much, at 4 cm under the thinnest limb radius
+
+
+def check_colliders(chunks):
+    """Violations in the collider set. Mirrored chunks must agree, or the golem
+    collides differently on its two sides - which is invisible in a render and
+    obvious in play."""
+    out = []
+    for name, c in sorted(chunks.items()):
+        col = c["collider"]
+        if col["type"] not in ("box", "sphere", "capsule"):
+            out.append("%s: collider type %r is not a primitive" % (name, col["type"]))
+        if col["max_escape_m"] > MAX_ESCAPE_M:
+            out.append("%s: sculpt escapes its %s by %.3f m, over the %.2f m bound"
+                       % (name, col["type"], col["max_escape_m"], MAX_ESCAPE_M))
+    for name in sorted(chunks):
+        if not name.startswith("golem_L_"):
+            continue
+        twin = "golem_R_" + name[len("golem_L_"):]
+        if twin not in chunks:
+            out.append("%s has no mirror twin %s" % (name, twin))
+            continue
+        a, b = chunks[name]["collider"], chunks[twin]["collider"]
+        keys = ("type", "size_m", "radius_m", "height_m")
+        if [a.get(k) for k in keys] != [b.get(k) for k in keys]:
+            out.append("%s and %s disagree: %s vs %s"
+                       % (name, twin, {k: a.get(k) for k in keys if a.get(k)},
+                          {k: b.get(k) for k in keys if b.get(k)}))
+    return out
+
+
 def main():
     with open(CHUNKS) as fh:
         chunks = json.load(fh)
@@ -259,6 +299,7 @@ def main():
     violations = delivery_units.check_rig_delivery(
         FBX, delivery_units.GOLEM_HEIGHT_M, delivery_units.GOLEM_CEILING_M)
     violations += delivery_units.check_poses(FBX, poses)
+    violations += check_colliders(chunks)
     if violations:
         print("DELIVERY IS NOT METRE-TRUE - refusing to write a manifest for it:")
         for v in violations:

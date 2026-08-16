@@ -146,6 +146,33 @@ def test_pose_check_catches_a_chunk_the_file_does_not_have():
     assert any("golem_C_tail" in v for v in violations), violations
 
 
+CHUNKS = REPO / "evals" / "golem_delivery" / "chunks.json"
+
+
+def _chunks():
+    with open(CHUNKS) as fh:
+        return json.load(fh)
+
+
+def test_every_chunk_declares_a_primitive_its_sculpt_stays_inside():
+    import golem_delivery_package as pkg
+    violations = pkg.check_colliders(_chunks())
+    assert violations == [], "\n".join(violations)
+
+
+def test_collider_check_catches_a_left_right_disagreement():
+    # The right side carries no rest rotation - its tilt is baked into its
+    # vertices - so a fit done in each chunk's own local axes came out
+    # asymmetric: a capsule on the left thigh and a box on the right. Invisible
+    # in a render, obvious in play.
+    import golem_delivery_package as pkg
+    chunks = _chunks()
+    chunks["golem_R_thigh"]["collider"] = dict(chunks["golem_R_thigh"]["collider"],
+                                               type="box", size_m=[1, 1, 1])
+    violations = pkg.check_colliders(chunks)
+    assert any("golem_L_thigh" in v and "golem_R_thigh" in v for v in violations), violations
+
+
 def _fake_rig(scaling=(1.0, 1.0, 1.0), height=4.02173):
     root = fbx_probe.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1,
                              geometry=10, scaling=scaling)
