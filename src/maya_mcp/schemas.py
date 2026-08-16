@@ -555,3 +555,52 @@ class UvAtlasResult(BaseModel):
             "read as another material's pixels bleeding onto the piece."
         )
     )
+
+
+class ExportFbxResult(BaseModel):
+    """What maya_export_fbx actually wrote, read back out of the file.
+
+    Every field here is composed from the FBX bytes, never from the Maya scene.
+    That is the point of the tool: the unit defect it guards is written by the
+    exporter and is absent from the scene, so a scene-derived report would be
+    confidently wrong in exactly the case that matters.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    path: str = Field(description="The file written, with forward slashes.")
+    bytes: int = Field(description="Size on disk.")
+    fbx_version: int = Field(description="FBX format version, e.g. 7700.")
+    node_count: int = Field(description="Model records in the file.")
+    mesh_count: int = Field(description="Geometry records in the file.")
+    root_nodes: List[str] = Field(
+        description=(
+            "Nodes with no parent in the file. One for a rig; the demigol kit "
+            "legitimately has 41, so this is reported, not policed."
+        )
+    )
+    unit_scale_factor: float = Field(
+        description=(
+            "The file's own declaration, in centimetres per file unit. Always "
+            "100.0 - the export is refused otherwise."
+        )
+    )
+    metres_per_unit: float = Field(
+        description="Always 1.0; the export is refused for any other value."
+    )
+    world_bounds_min: Optional[List[float]] = Field(
+        default=None,
+        description="XYZ minimum over every vertex, composed through the "
+                    "parent chain. Null when the file holds no geometry.",
+    )
+    world_bounds_max: Optional[List[float]] = Field(
+        default=None, description="XYZ maximum, same composition."
+    )
+    height_m: Optional[float] = Field(
+        default=None,
+        description=(
+            "Y extent in metres - the number a consumer sees on import, and "
+            "the one that tells a 4 m creature from a 4 cm one when every "
+            "individual chunk is sub-metre."
+        ),
+    )

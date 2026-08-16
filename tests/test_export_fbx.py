@@ -366,3 +366,35 @@ def test_an_unknown_node_fails_before_writing_anything(monkeypatch, tmp_path):
 def test_the_command_is_registered():
     from maya_plugin import maya_mcp_plugin
     assert maya_mcp_plugin._build_handlers()["export_fbx"] is export.export_fbx
+
+
+def test_the_result_model_accepts_the_handler_payload():
+    from maya_mcp.schemas import ExportFbxResult
+    payload = {
+        "path": "D:/deliver/golem.fbx", "bytes": 481232, "fbx_version": 7700,
+        "node_count": 33, "mesh_count": 33, "root_nodes": ["golem_C_pelvis"],
+        "unit_scale_factor": 100.0, "metres_per_unit": 1.0,
+        "world_bounds_min": [-0.9, 0.0, -0.5],
+        "world_bounds_max": [0.9, 4.02173, 0.5], "height_m": 4.02173,
+    }
+    result = ExportFbxResult.model_validate(payload)
+    assert result.height_m == 4.02173
+    assert result.root_nodes == ["golem_C_pelvis"]
+
+
+def test_the_result_model_tolerates_a_geometryless_export():
+    from maya_mcp.schemas import ExportFbxResult
+    result = ExportFbxResult.model_validate({
+        "path": "D:/deliver/empty.fbx", "bytes": 1024, "fbx_version": 7700,
+        "node_count": 0, "mesh_count": 0, "root_nodes": [],
+        "unit_scale_factor": 100.0, "metres_per_unit": 1.0,
+    })
+    assert result.height_m is None
+
+
+def test_the_tool_is_exposed():
+    source = (REPO / "src" / "maya_mcp" / "server.py").read_text(encoding="utf-8")
+    assert "def maya_export_fbx(" in source
+    # Named for the format it writes. #640 is open about naming papercuts and a
+    # bare maya_export would promise OBJ and USD this tool does not have.
+    assert "def maya_export(" not in source

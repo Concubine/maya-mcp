@@ -64,6 +64,7 @@ class TestRegistration:
             "maya_new_scene",
             "maya_open_scene",
             "maya_save_scene",
+            "maya_export_fbx",
             "maya_reset_namespace",
             "maya_create_primitive",
             "maya_duplicate",

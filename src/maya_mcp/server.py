@@ -35,6 +35,7 @@ from .schemas import (
     DeformResult,
     DeleteResult,
     ExecuteResult,
+    ExportFbxResult,
     LightingResult,
     MaterialResult,
     NameResult,
@@ -76,6 +77,9 @@ CAPTURE_TIMEOUT_S = 120.0
 # of time. Raise both together or neither.
 RENDER_TIMEOUT_S = 600.0
 BOOL_TIMEOUT_S = 120.0
+# A heavy scene takes tens of seconds to write, and the handler then re-reads
+# and composes every vertex in the file before it answers.
+EXPORT_TIMEOUT_S = 300.0
 
 
 def _setup_logging() -> None:
@@ -755,6 +759,42 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         """Save the scene (.ma or .mb by extension)."""
         return SaveSceneResult.model_validate(
             maya.request("save_scene", {"path": path}, timeout_s=SESSION_TIMEOUT_S)
+        )
+
+    @mcp.tool(
+        title="Export FBX",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=True
+        ),
+    )
+    def maya_export_fbx(
+        path: Annotated[str, Field(description=(
+            "Absolute path ending in .fbx. The parent directory must exist."
+        ))],
+        metres_per_unit: Annotated[float, Field(description=(
+            "What one scene unit means in metres. REQUIRED, and only 1.0 "
+            "exports - there is no default because a guess here is what "
+            "shipped three deliveries at 100x. If your scene is not "
+            "metre-native, scale and freeze it first: the exporter cannot fix "
+            "vertex magnitude, it can only add a compensating node scale, "
+            "which this tool rejects."
+        ))],
+        nodes: Annotated[Optional[List[str]], Field(description=(
+            "Objects to export; omit to export the whole scene."
+        ))] = None,
+    ) -> ExportFbxResult:
+        """Export FBX and gate the result on the BYTES it just wrote.
+
+        Refuses and DELETES the file if any node carries a non-identity scale
+        or the unit declaration disagrees with the geometry - the two ways a
+        wrong-sized asset renders correctly and ships anyway. Everything
+        returned is read back out of the file, not queried from the scene."""
+        return ExportFbxResult.model_validate(
+            maya.request(
+                "export_fbx",
+                {"path": path, "metres_per_unit": metres_per_unit, "nodes": nodes},
+                timeout_s=EXPORT_TIMEOUT_S,
+            )
         )
 
     @mcp.tool(
