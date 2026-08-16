@@ -5,6 +5,8 @@ Viewport capture needs a GUI, so only its argument marshaling is asserted here;
 real pixels are covered by the manual M0 loop test inside Maya.
 """
 
+import math
+
 import pytest
 
 maya = pytest.importorskip("maya", reason="requires mayapy / Maya's embedded Python")
@@ -1459,7 +1461,13 @@ class TestLightingInMaya:
         result = lighting.setup_lighting({"preset": "single_sun", "intensity": 2.0})
         shapes = cmds.listRelatives(result["lights"][0], shapes=True, fullPath=True)
         assert cmds.nodeType(shapes[0]) == "directionalLight"
-        assert cmds.getAttr(shapes[0] + ".intensity") == pytest.approx(2.0)
+        # #617: `intensity` is a UNIT - 1.0 means a surface facing the key reads
+        # its own albedo - and the handler carries the pi, because Arnold's
+        # distant light and VP2 both return albedo/pi at raw intensity 1.0. So
+        # the raw attribute on the node is 2*pi, and pi is written literally
+        # rather than as lighting.FULLY_LIT: a future change to the factor
+        # SHOULD fail here and send the reader back to #617, not pass silently.
+        assert cmds.getAttr(shapes[0] + ".intensity") == pytest.approx(2.0 * math.pi)
 
 
 class TestTextureRecipesInMaya:
