@@ -42,12 +42,63 @@ FBX_PREAMBLE_MEL: Tuple[str, ...] = (
     "FBXExportEmbeddedTextures -v false",
 )
 
+# What the whole-scene branch writes BESIDES geometry, pinned at the values
+# Maya was measured to use anyway (#646): an ordinary lit scene with a user
+# camera wrote three Light Models and one Camera Model. The values do not
+# change the file - being stated does. Left unpinned, FBXResetExport's defaults
+# decide it, which is the ambient-setting problem the preamble above exists to
+# remove.
+#
+# Deliberately NOT part of FBX_PREAMBLE_MEL: that tuple composes the preamble
+# string demigol_kit.py, demigol_structures.py and units_live.py ship their
+# deliveries through, and tests/test_export_fbx.py pins it byte-for-byte
+# against a literal copied from before the composition refactor. Those
+# generators export selections of geometry, where neither flag can matter, so
+# they keep the validated string and this tool gets the determinism.
+FBX_SCENE_CONTENT_MEL: Tuple[str, ...] = (
+    "FBXExportCameras -v true",
+    "FBXExportLights -v true",
+)
+
 # Once the scene is metre-native there is no unit conversion left to make, so
 # the exporter writes no compensating node and the factor must be 1. Measured
 # both ways: at 100 the heroes' group Null came back at scale (100,100,100).
 EXPORT_SCALE_FACTOR = 1.0
 
 SCALE_TOL = 1e-3
+
+
+def _scale_reaches_vertices(facts) -> set:
+    """ids of the nodes whose scale actually multiplies a vertex.
+
+    The identity-scale rule exists to catch a scale COMPENSATING for a wrong
+    vertex magnitude, so it only means anything for a node that scales
+    vertices: the one carrying the geometry, and every ancestor above it.
+
+    Applying it to the rest is not merely redundant, it is wrong in the
+    direction that costs an export. A whole-scene export writes lights and
+    cameras as `Model` records too (measured: three Lights and a Camera from
+    an ordinary lit scene), and a scaled light, or a scaled annotation
+    locator, would refuse the whole export with a message blaming vertex
+    magnitude and advising the caller to freeze transforms - advice that means
+    nothing for a light (#646).
+
+    A locator and a group are BOTH `Null` in the file, so kind cannot separate
+    them and the test has to be structural. Kind is still consulted in one
+    direction only: a `Model` declared "Mesh" is gated even if its geometry
+    link did not resolve, because the failure to exempt is cheap and the
+    failure to gate is #629.
+    """
+    by_uid = {n.uid: n for n in facts.nodes if n.uid is not None}
+    reaching: set = set()
+    for node in facts.nodes:
+        if node.geometry is None and node.kind != "Mesh":
+            continue
+        walker = node
+        while walker is not None and id(walker) not in reaching:
+            reaching.add(id(walker))
+            walker = by_uid.get(walker.parent)
+    return reaching
 
 
 def gate_violations(facts) -> List[str]:
@@ -58,7 +109,9 @@ def gate_violations(facts) -> List[str]:
 
       scale        a compensating node scale makes a wrong vertex magnitude
                    render correctly, which is how three revisions shipped at
-                   100x with every in-Maya check green (#596, #600, #629)
+                   100x with every in-Maya check green (#596, #600, #629).
+                   Asserted on the nodes whose scale reaches a vertex - see
+                   _scale_reaches_vertices for why that is not every node
       declaration  metre-magnitude vertices declared as centimetres is the same
                    defect inverted, and a consumer measures unit scale on import
 
@@ -69,7 +122,10 @@ def gate_violations(facts) -> List[str]:
     for; the delivery gates keep asserting what they are, against the same bytes.
     """
     out: List[str] = []
+    reaching = _scale_reaches_vertices(facts)
     for node in facts.nodes:
+        if id(node) not in reaching:
+            continue
         if any(abs(s - 1.0) > SCALE_TOL for s in node.scaling):
             out.append(
                 "node %r has scale %s, expected identity - a compensating node "
@@ -191,7 +247,7 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
                      "the scene actually contains")
 
     cmds.loadPlugin("fbxmaya", quiet=True)
-    for statement in FBX_PREAMBLE_MEL:
+    for statement in FBX_PREAMBLE_MEL + FBX_SCENE_CONTENT_MEL:
         mel.eval(statement)
     # A bare float. The `-v` form raises, and both delivery generators used to
     # swallow that inside `except Exception: pass`.
