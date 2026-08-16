@@ -1,5 +1,7 @@
 """modeling handler validation tests against a fake cmds — no Maya required."""
 
+import math
+
 import pytest
 
 from maya_plugin.dispatcher import HandlerError
@@ -18,6 +20,13 @@ class FakeCmds:
         self.face_count = 1000
         self.reduced_percentage = None
         self.selection = []
+        # deform measures vertices before and after; `verts` is what a query
+        # returns and `deformed_verts`, when set, is what it returns once a
+        # deformer exists - the fake's stand-in for the mesh actually moving.
+        self.verts = [0.0, 0.0, 0.0, 1.0, 2.0, 0.5]
+        self.deformed_verts = None
+        self.angle_unit = "deg"
+        self.angle_attrs = {"curvature", "startAngle", "endAngle"}
 
     def objExists(self, name):
         return any(o == name or o.split("|")[-1] == name for o in self.objects)
@@ -69,8 +78,21 @@ class FakeCmds:
         self.xf[long_name] = ((0, 0, 0), (0, 0, 0), (1, 1, 1))
         return [name, name + "Shape"]
 
+    def getAttr(self, plug, type=False):
+        assert type, "the fake only serves type queries"
+        return "doubleAngle" if plug.split(".")[-1] in self.angle_attrs else "double"
+
+    def currentUnit(self, query=False, angle=False, **kw):
+        assert query and angle
+        return self.angle_unit
+
     def xform(self, name, **kw):
         if kw.get("query"):
+            if ".vtx[" in name:
+                built = any(c[0] in ("nonLinear", "lattice", "sculpt") for c in self.calls)
+                if self.deformed_verts is not None and built:
+                    return list(self.deformed_verts)
+                return list(self.verts)
             t, r, s = self.xf.get(name, ((0, 0, 0), (0, 0, 0), (1, 1, 1)))
             if kw.get("translation"):
                 return list(t)
@@ -512,13 +534,84 @@ def test_deform_does_not_mutate_caller_params_dict(monkeypatch):
 
 def test_deform_bakes_and_deletes_history(monkeypatch):
     fake = _mesh_fake("|col")
+    fake.deformed_verts = [0.0, 0.0, 0.0, 1.4, 2.0, 0.5]  # 0.4 of movement
     monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
     result = sculpt.deform(
         {"mesh": "|col", "deformer": "bend", "params": {"curvature": -20},
          "delete_history_after": True}
     )
-    assert result == {"deformer_nodes": [], "baked": True, "warnings": []}
+    assert result == {"deformer_nodes": [], "baked": True, "warnings": [],
+                      "max_displacement": pytest.approx(0.4)}
     assert ("delete", ("|col",)) in [(c[0], c[1]) for c in fake.calls if c[0] == "delete"]
+
+
+# --- #636: bend was inert because curvature is an ANGLE ---------------------
+
+
+def test_deform_sets_angle_params_in_degrees_whatever_the_scene_unit(monkeypatch):
+    # setAttr reads an angle-typed attribute in the scene's UI angle unit. In a
+    # radians scene, curvature=45 would otherwise mean 45 RADIANS - seven full
+    # turns - so the same call must be converted, not passed through.
+    fake = _mesh_fake("|col")
+    fake.angle_unit = "rad"
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    sculpt.deform({"mesh": "|col", "deformer": "bend",
+                   "params": {"curvature": 45, "lowBound": -1}})
+    written = {c[1]: c[2] for c in fake.calls if c[0] == "setAttr"}
+    assert written["bend1.curvature"] == pytest.approx(math.radians(45))
+    # lowBound is a plain double and must NOT be touched by the conversion
+    assert written["bend1.lowBound"] == -1
+
+
+def test_deform_leaves_angles_alone_in_a_degrees_scene(monkeypatch):
+    fake = _mesh_fake("|col")
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    sculpt.deform({"mesh": "|col", "deformer": "twist",
+                   "params": {"startAngle": 30, "endAngle": -30}})
+    written = {c[1]: c[2] for c in fake.calls if c[0] == "setAttr"}
+    assert written == {"twist1.startAngle": 30.0, "twist1.endAngle": -30.0}
+
+
+def test_deform_rejects_an_angle_unit_it_cannot_convert(monkeypatch):
+    fake = _mesh_fake("|col")
+    fake.angle_unit = "gradians"
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        sculpt.deform({"mesh": "|col", "deformer": "bend", "params": {"curvature": 45}})
+    assert "gradians" in str(exc.value)
+
+
+def test_deform_warns_when_the_mesh_did_not_move(monkeypatch):
+    # The #636 shape exactly: a bend that reports success and moves the mesh by
+    # a fraction of a percent of its own size.
+    fake = _mesh_fake("|col")
+    fake.deformed_verts = [0.0, 0.0, 0.0, 1.0015, 2.0, 0.5]
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    result = sculpt.deform({"mesh": "|col", "deformer": "bend",
+                            "params": {"curvature": 0.35}})
+    assert result["max_displacement"] == pytest.approx(0.0015)
+    assert len(result["warnings"]) == 1
+    assert "DEGREES" in result["warnings"][0]
+
+
+def test_deform_is_silent_when_the_mesh_actually_moved(monkeypatch):
+    fake = _mesh_fake("|col")
+    fake.deformed_verts = [0.0, 0.0, 0.0, 1.3, 2.0, 0.5]
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    result = sculpt.deform({"mesh": "|col", "deformer": "bend",
+                            "params": {"curvature": 45}})
+    assert result["warnings"] == []
+    assert result["max_displacement"] == pytest.approx(0.3)
+
+
+def test_deform_does_not_warn_for_a_freshly_built_lattice(monkeypatch):
+    # A lattice deforms nothing until its points are moved, so zero
+    # displacement is the correct outcome and must not read as a defect.
+    fake = _mesh_fake("|col")
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    result = sculpt.deform({"mesh": "|col", "deformer": "lattice", "params": {}})
+    assert result["max_displacement"] == 0.0
+    assert result["warnings"] == []
 
 
 def test_deform_lattice_translates_lattice_handle_not_base(monkeypatch):

@@ -297,6 +297,15 @@ class DeformResult(BaseModel):
     deformer_nodes: List[str]
     baked: bool = False
     warnings: List[str] = Field(default_factory=list)
+    max_displacement: float = Field(
+        default=0.0,
+        description=(
+            "How far the furthest vertex actually moved, in scene units, "
+            "measured before/after. The proof the deformer did something: a "
+            "value near zero against the mesh's own size means the call was a "
+            "no-op and warnings says why."
+        ),
+    )
 
 
 class RemeshResult(BaseModel):

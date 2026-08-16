@@ -1430,7 +1430,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         params: Annotated[
             Optional[dict],
             Field(description=(
-                "Deformer parameters, whitelisted per type. bend: curvature. "
+                "Deformer parameters, whitelisted per type. ANGLES ARE IN "
+                "DEGREES: bend: curvature - the bend angle, so 0.35 is a third "
+                "of a degree and does nothing; a visible hunch is 20-60. "
                 "squash: factor. twist: startAngle/endAngle. flare: curve, "
                 "startFlareX/Z, endFlareX/Z - THE taper, for a limb thick at "
                 "one end and thin at the other. sine: amplitude, wavelength, "
@@ -1456,7 +1458,8 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         """Apply a nonlinear or lattice deformer to a mesh by name. Returns the
         deformer node names so maya_execute_python can tweak their attributes
         further; delete_history_after=true bakes the shape and consumes the
-        deformer instead."""
+        deformer instead. max_displacement reports how far the furthest vertex
+        actually moved - check it, do not assume the shape changed."""
         return DeformResult.model_validate(
             maya.request(
                 "deform",

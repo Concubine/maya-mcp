@@ -890,6 +890,91 @@ class TestDeformRemeshCleanupInMaya:
         # only removes the deformer DG node, not the handle it created.
         assert cmds.ls(type="deformBend") == []
 
+    def test_bend_actually_bends_and_reports_how_far(self):
+        # #636: the old test asserted only that nodes existed, so a bend that
+        # moved the mesh by 0.1% of its height passed. Assert the geometry.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import sculpt
+
+        cmds.polyCylinder(name="col", sx=8, sy=20, height=2.0, radius=0.2)
+        result = sculpt.deform(
+            {"mesh": "|col", "deformer": "bend", "params": {"curvature": 45}}
+        )
+        # A 45-degree bend on a 2.0-tall cylinder swings its tip a third of a
+        # unit sideways. Pre-fix this measured 0.0055 (45 was read as degrees
+        # already, so it worked) - the guard that matters is the low end below.
+        assert result["max_displacement"] > 0.2, result
+        assert result["warnings"] == []
+
+    def test_bend_that_moves_nothing_says_so(self):
+        # The exact call from the golem build: curvature 0.35 is a third of a
+        # degree, and the tool must report that it did nothing.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import sculpt
+
+        cmds.polyCylinder(name="inert", sx=8, sy=20, height=2.0, radius=0.2)
+        result = sculpt.deform(
+            {"mesh": "|inert", "deformer": "bend", "params": {"curvature": 0.35}}
+        )
+        assert result["max_displacement"] < 0.01, result
+        assert len(result["warnings"]) == 1
+        assert "DEGREES" in result["warnings"][0]
+
+    def test_bend_means_degrees_in_a_radians_scene(self):
+        # setAttr reads angle attributes in the scene's UI unit, so the same
+        # curvature must survive a scene whose angles are radians.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import sculpt
+
+        def tip(mesh):
+            flat = cmds.xform(mesh + ".vtx[*]", query=True, worldSpace=True,
+                              translation=True)
+            return max(abs(flat[i]) for i in range(0, len(flat), 3))
+
+        cmds.polyCylinder(name="deg_col", sx=8, sy=20, height=2.0, radius=0.2)
+        in_degrees = sculpt.deform(
+            {"mesh": "|deg_col", "deformer": "bend", "params": {"curvature": 45}}
+        )
+        degrees_tip = tip("|deg_col")
+        try:
+            cmds.currentUnit(angle="rad")
+            cmds.polyCylinder(name="rad_col", sx=8, sy=20, height=2.0, radius=0.2)
+            in_radians = sculpt.deform(
+                {"mesh": "|rad_col", "deformer": "bend", "params": {"curvature": 45}}
+            )
+            radians_tip = tip("|rad_col")
+        finally:
+            cmds.currentUnit(angle="deg")
+        assert in_radians["max_displacement"] == pytest.approx(
+            in_degrees["max_displacement"], rel=1e-6
+        )
+        assert radians_tip == pytest.approx(degrees_tip, rel=1e-6)
+
+    def test_soft_move_refuses_a_radius_that_reaches_no_vertex(self):
+        # #636's sibling: this reported applied:1 and moved nothing.
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import sculpt
+
+        cmds.polySphere(name="far_ball", radius=1.0)
+        cmds.xform("|far_ball", translation=[5, 0, 0])
+        before = cmds.xform("|far_ball.vtx[*]", query=True, worldSpace=True,
+                            translation=True)
+        with pytest.raises(HandlerError) as exc:
+            sculpt.sculpt_ops(
+                {"mesh": "|far_ball",
+                 "ops": [{"op": "soft_move", "center": [0, 0, 0], "radius": 0.9,
+                          "delta": [0, 0.5, 0]}]}
+            )
+        assert "does not reach the mesh" in str(exc.value)
+        after = cmds.xform("|far_ball.vtx[*]", query=True, worldSpace=True,
+                           translation=True)
+        assert after == before  # refused before touching a single vertex
+
     def test_lattice_deform_baked_leaves_no_handle_transforms(self):
         # I1: cmds.delete(mesh, constructionHistory=True) removes the ffd
         # deformer DG node but NOT the transforms cmds.lattice created
