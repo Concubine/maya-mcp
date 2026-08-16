@@ -170,6 +170,12 @@ can move in the other direction.
 violation class; and the gate run over the committed `evals/golem_delivery/golem.fbx`, which is a
 real 33-chunk artifact that must pass.
 
+**The composed preamble is pinned byte-for-byte.** A test asserts `maya_export.EXPORT_PREAMBLE`
+equals the literal the generators use today. That assertion is what makes "the delivery generators
+are unaffected" a measured fact rather than a hope — without it, composing the string from the
+handler is an unverified rewrite of the export path of every shipped asset, and the only way to
+find out would be an art run.
+
 **Live** (`evals/export_live.py`): export from a real Maya and report measured bytes, node count
 and height. Per the standing rule — a headless green means nothing here, because the code path
 that matters is the one that runs inside Maya, and the deployed copy under
