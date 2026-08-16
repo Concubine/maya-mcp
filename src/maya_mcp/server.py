@@ -649,14 +649,22 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
     )
     def maya_restore_checkpoint(
         checkpoint_id: Annotated[str, Field(description=(
-            "Id returned by maya_checkpoint (NNN_label)."
-        ))],
+            "Id returned by maya_checkpoint (NNN_label). Ids are unique only "
+            "within one directory, so prefer path= for an id issued before a "
+            "new_scene/open_scene/restore."
+        ))] = "",
+        path: Annotated[str, Field(description=(
+            "Absolute path to the checkpoint .ma, as returned alongside every "
+            "checkpoint_id. Unambiguous - use it when the scene has changed since."
+        ))] = "",
     ) -> RestoreResult:
-        """Replace the current scene with a checkpoint. An auto-checkpoint of
-        the current state is taken first. Discards the undo queue (file load)."""
+        """Replace the current scene with a checkpoint, by id or by path. An
+        auto-checkpoint of the current state is taken first (its own path comes
+        back too). Discards the undo queue (file load)."""
         return RestoreResult.model_validate(
             maya.request(
-                "restore_checkpoint", {"checkpoint_id": checkpoint_id},
+                "restore_checkpoint",
+                {"checkpoint_id": checkpoint_id, "path": path},
                 timeout_s=SESSION_TIMEOUT_S,
             )
         )

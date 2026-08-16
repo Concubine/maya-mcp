@@ -84,12 +84,19 @@ Session safety:
 | cmd | params | result |
 |---|---|---|
 | `checkpoint` | `{ label }` | `{ checkpoint_id, path }` |
-| `restore_checkpoint` | `{ checkpoint_id }` | `{ restored, pre_restore_checkpoint }` |
+| `restore_checkpoint` | `{ checkpoint_id \| path }` | `{ restored, path, pre_restore_checkpoint, pre_restore_path }` |
 | `undo` | `{ steps? }` | `{ undone, requested }` |
 | `redo` | `{ steps? }` | `{ redone, requested }` |
-| `new_scene` | `{ confirm }` | `{ new_scene: true }` |
-| `open_scene` | `{ path, confirm? }` | `{ opened }` |
+| `new_scene` | `{ confirm, linear_unit? }` | `{ new_scene: true, pre_checkpoint, pre_checkpoint_path, units }` |
+| `open_scene` | `{ path, confirm? }` | `{ opened, pre_checkpoint, pre_checkpoint_path }` |
 | `save_scene` | `{ path? }` | `{ path }` |
+
+Checkpoints go to `<dir of the open scene>/checkpoints/`, so a `checkpoint_id`
+(`NNN_label`) is unique only inside one directory — and `new_scene`,
+`open_scene` and `restore_checkpoint` all change which directory that is. Ids
+issued during the session are resolved against where they were actually
+written, and every id comes back with its `path`; pass `path` instead of
+`checkpoint_id` for an id from an earlier session (#649).
 
 Scene ops:
 
