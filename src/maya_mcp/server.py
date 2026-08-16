@@ -1129,16 +1129,25 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         ),
     )
     def maya_boolean_op(
-        a: Annotated[str, Field(description="First mesh (kept material wins).")],
-        b: Annotated[str, Field(description="Second mesh; both inputs are consumed.")],
+        a: Annotated[str, Field(description=(
+            "First mesh. The result IS a rebuilt a: its material, pivot, parent "
+            "and UV bounds are what the result inherits."
+        ))],
+        b: Annotated[str, Field(description=(
+            "Second mesh; both inputs are consumed. Its UVs are folded into a's "
+            "UV bounds, so the newly cut faces stay in a's atlas patch."
+        ))],
         op: Annotated[Literal["union", "difference", "intersection"],
                       Field(description="difference = a minus b.")],
         new_name: Annotated[str, Field(min_length=1, description="Name for the result.")],
     ) -> BooleanResult:
         """Boolean two meshes. Auto-checkpoints first; deletes construction
         history and collapses shading to one object-level material (per-face
-        shading does not survive booleans). Non-watertight results come back
-        ok with a warning + cleanup hint."""
+        shading does not survive booleans). Carries a's pivot, a's parent and
+        a's UV bounds onto the result, and reports all three - cut a socket into
+        a rigged, parented, atlas-packed chunk and it stays rigged, parented and
+        packed. Non-watertight results come back ok with a warning + cleanup
+        hint."""
         return BooleanResult.model_validate(
             maya.request(
                 "boolean_op", {"a": a, "b": b, "op": op, "new_name": new_name},

@@ -253,6 +253,25 @@ class BooleanResult(BaseModel):
     name: str
     tris: int
     watertight: bool
+    parent: Optional[str] = Field(
+        default=None,
+        description=(
+            "Long name of the result's parent - a's parent, carried across the "
+            "rebuild (#638). null means the result is at the scene root."
+        ),
+    )
+    pivot: List[float] = Field(
+        default_factory=list,
+        description="World-space pivot of the result: a's pivot, carried across (#638).",
+    )
+    uv_bounds: Optional[List[float]] = Field(
+        default=None,
+        description=(
+            "[u_min, v_min, u_max, v_max] of the result's UVs. Compare with the "
+            "atlas patch the chunk belongs to: a boolean brings the cutter's "
+            "faces with it, and their UVs are folded into a's bounds (#638)."
+        ),
+    )
     warnings: List[str] = Field(default_factory=list)
     carved_text: Optional[str] = None
 
