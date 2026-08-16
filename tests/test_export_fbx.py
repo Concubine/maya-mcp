@@ -285,11 +285,14 @@ def test_a_clean_export_reports_the_file_not_the_scene(monkeypatch, tmp_path):
     assert out["metres_per_unit"] == 1.0
     assert out["bytes"] == len(b"not really an fbx")
     assert abs(out["height_m"] - 4.02173) < 1e-6
+    assert out["bounds_unavailable_reason"] is None
     # The measured preamble ran, in order, with the factor last.
     assert mel.evaluated == list(export.FBX_PREAMBLE_MEL) + ["FBXExportScaleFactor 1"]
     # The unit declaration must actually be patched, on the exact file just
-    # written - not merely importable and swallowed.
-    assert mel.unit_scale_factor_calls == [out["path"]]
+    # written - which is the TEMP file, not the final path: the write and
+    # patch happen before the gate has passed, and only os.replace at the end
+    # touches the real path.
+    assert mel.unit_scale_factor_calls == [out["path"] + ".part.fbx"]
 
 
 def test_a_violating_file_is_deleted_not_returned(monkeypatch, tmp_path):
@@ -303,6 +306,28 @@ def test_a_violating_file_is_deleted_not_returned(monkeypatch, tmp_path):
 
     assert "kit_root" in str(exc.value)
     assert not path.exists(), "a file that fails the gate must not reach a delivery"
+    assert not (tmp_path / "bad.fbx.part.fbx").exists(), \
+        "the temp file must be cleaned up too, not just left as 'not path'"
+
+
+def test_a_pre_existing_file_survives_a_failed_export(monkeypatch, tmp_path):
+    # Finding A: `cmds.file(..., force=True)` overwrites whatever sits at
+    # `path`, so re-exporting over a shipped delivery after a scene edit that
+    # trips the gate must not cost that delivery its good file. This is the
+    # test that matters most for this finding.
+    bad = fbxbytes.FbxNode(name="kit_root", kind="Null", uid=1,
+                           scaling=(0.01, 0.01, 0.01))
+    path = tmp_path / "golem.fbx"
+    original = b"THE SHIPPED, ALREADY-GATED, GOOD FBX BYTES"
+    path.write_bytes(original)
+    _install(monkeypatch, FakeCmds(), _facts([bad]))
+
+    with pytest.raises(HandlerError):
+        export.export_fbx({"path": str(path), "metres_per_unit": 1.0})
+
+    assert path.read_bytes() == original, \
+        "a failed export must never touch a pre-existing file at path"
+    assert not (tmp_path / "golem.fbx.part.fbx").exists()
 
 
 def test_a_violating_file_that_wont_unlink_says_so_and_names_the_path(
@@ -329,8 +354,72 @@ def test_a_violating_file_that_wont_unlink_says_so_and_names_the_path(
     # be a lie in this branch.
     assert "was DELETED" not in message
     assert "NOT" in message and "DELETE" in message
-    assert str(path) in message or path.name in message
-    assert path.exists(), "the fake unlink never actually removed the file"
+    temp_file = tmp_path / "bad.fbx.part.fbx"
+    # It is the TEMP file that survives now, not `path` itself - `path` was
+    # never written to. The message must still name a path a human can find
+    # and remove by hand.
+    assert str(temp_file) in message or temp_file.name in message
+    assert temp_file.exists(), "the fake unlink never actually removed the file"
+    assert not path.exists(), "path itself must never have been written to"
+
+
+def test_an_exception_between_write_and_gate_does_not_leave_a_file(
+        monkeypatch, tmp_path):
+    # Finding B: set_unit_scale_factor / read_fbx can raise for reasons that
+    # are not HandlerErrors (a truncated write, a UnitScaleFactor-less file,
+    # an unrecognised typecode). Whatever it is must not be swallowed, and
+    # must not leave an ungated, unpatched FBX on disk for a later run - or a
+    # delivery - to trip over.
+    cmds = FakeCmds()
+    _install(monkeypatch, cmds, _facts([]))
+
+    def _boom(_p):
+        raise ValueError("%s declares no UnitScaleFactor" % _p)
+
+    monkeypatch.setattr(export.fbxbytes, "set_unit_scale_factor", _boom)
+
+    path = tmp_path / "explodes.fbx"
+    with pytest.raises(ValueError, match="declares no UnitScaleFactor"):
+        export.export_fbx({"path": str(path), "metres_per_unit": 1.0})
+
+    assert not path.exists()
+    assert not (tmp_path / "explodes.fbx.part.fbx").exists(), \
+        "an unjudged, unpatched temp file must not survive the exception"
+
+
+def test_bounds_unavailable_reason_distinguishes_empty_file_from_reader_error(
+        monkeypatch, tmp_path):
+    # Finding C: the schema claims world_bounds_min is null only when "the
+    # file holds no geometry" - but _bounds also went null for a rotation
+    # order the reader cannot compose (fbxbytes.py's ValueError), which is
+    # ordinary rigging practice on a shoulder or hip, not an empty file. The
+    # caller must be able to tell the two apart.
+    cmds = FakeCmds()
+
+    # (a) genuinely empty - no nodes at all.
+    _install(monkeypatch, cmds, _facts([]))
+    out = export.export_fbx({"path": str(tmp_path / "empty.fbx"),
+                             "metres_per_unit": 1.0})
+    assert out["world_bounds_min"] is None
+    assert out["height_m"] is None
+    assert out["bounds_unavailable_reason"] == "the file holds no geometry"
+
+    # (b) real geometry, but a rotation order fbxbytes does not implement.
+    node = fbxbytes.FbxNode(name="shoulder", kind="Mesh", uid=1, geometry=1,
+                            rotation_order=2)
+    facts = _facts([node])
+    facts.meshes = [(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)]
+    facts.geometries = {1: facts.meshes[0]}
+    _install(monkeypatch, cmds, facts)
+    out2 = export.export_fbx({"path": str(tmp_path / "rigged.fbx"),
+                              "metres_per_unit": 1.0})
+    assert out2["world_bounds_min"] is None
+    assert out2["height_m"] is None
+    # The reader's own message, propagated verbatim - not the "no geometry"
+    # wording, which would be false here: mesh_count would be 1.
+    assert out2["bounds_unavailable_reason"] == \
+        "rotation order 2 is not implemented"
+    assert out2["bounds_unavailable_reason"] != "the file holds no geometry"
 
 
 def test_exporting_named_nodes_selects_them(monkeypatch, tmp_path):

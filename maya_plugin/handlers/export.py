@@ -157,21 +157,24 @@ def _mel():
 
 
 def _bounds(facts):
-    """World bounds and height from the FILE, or None when it holds no geometry.
+    """World bounds and height from the FILE, plus why they are null when they are.
 
     fbxbytes._rotation implements only the default XYZ euler order and raises
     otherwise - deliberately, since a wrong assumption would move geometry
     silently. That must not fail an export whose bytes already passed the gate,
     so a rotation order the reader cannot compose costs the measurement, not
-    the file.
+    the file. That is a DIFFERENT cause from an empty file and the schema used
+    to conflate them, so the reader's own message is propagated rather than
+    collapsed into "no geometry" - a rig with an ordinary non-default rotate
+    order on a shoulder or hip must not be reported as if it had no geometry.
     """
     try:
         lo, hi = fbxbytes.world_vertex_bounds(facts)
-    except ValueError:
-        return None, None, None
+    except ValueError as exc:
+        return None, None, None, str(exc)
     if any(v == float("inf") for v in lo):
-        return None, None, None
-    return list(lo), list(hi), hi[1] - lo[1]
+        return None, None, None, "the file holds no geometry"
+    return list(lo), list(hi), hi[1] - lo[1], None
 
 
 def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
@@ -194,50 +197,79 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
     # swallow that inside `except Exception: pass`.
     mel.eval("FBXExportScaleFactor %g" % EXPORT_SCALE_FACTOR)
 
+    # Write to a SIBLING TEMP PATH, never straight to `path`. `cmds.file(...,
+    # force=True)` overwrites whatever is already there, and re-exporting over
+    # a shipped delivery after a scene edit that leaves a violation must not
+    # cost that delivery its good file just because the new attempt failed.
+    # `path` is touched only once the gate below has passed - keep the .fbx
+    # extension, because Maya's FBX exporter is extension-sensitive.
+    tmp_path = path + ".part.fbx"
+
     if nodes:
         cmds.select(nodes, replace=True)
-        cmds.file(path, force=True, options="v=0", type="FBX export", pr=True,
-                  es=True)
+        cmds.file(tmp_path, force=True, options="v=0", type="FBX export",
+                  pr=True, es=True)
     else:
-        cmds.file(path, force=True, options="v=0", type="FBX export", pr=True,
-                  ea=True)
+        cmds.file(tmp_path, force=True, options="v=0", type="FBX export",
+                  pr=True, ea=True)
 
-    # Maya writes UnitScaleFactor 1.0 for a metre-native scene and offers no way
-    # to change it, so the declaration is corrected here: one IEEE-754 double
-    # overwritten with another of the same width, so nothing in the file moves.
-    fbxbytes.set_unit_scale_factor(path)
+    try:
+        # Maya writes UnitScaleFactor 1.0 for a metre-native scene and offers
+        # no way to change it, so the declaration is corrected here: one
+        # IEEE-754 double overwritten with another of the same width, so
+        # nothing in the file moves.
+        fbxbytes.set_unit_scale_factor(tmp_path)
 
-    # Re-read the BYTES. This is the whole point of the tool: the defect it
-    # guards is written by the exporter and is absent from the Maya scene, so
-    # every in-Maya check is structurally blind to it.
-    facts = fbxbytes.read_fbx(path)
+        # Re-read the BYTES. This is the whole point of the tool: the defect
+        # it guards is written by the exporter and is absent from the Maya
+        # scene, so every in-Maya check is structurally blind to it.
+        facts = fbxbytes.read_fbx(tmp_path)
+    except Exception:
+        # Both calls above can raise on a legitimately bad file (a truncated
+        # write, a UnitScaleFactor-less FBX, an unrecognised typecode) and
+        # neither is a HandlerError. Whatever it is, it must not leave an
+        # ungated, unpatched file behind for a later run to trip over -
+        # best-effort cleanup, then let the real exception through unchanged.
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
     violations = gate_violations(facts)
     if violations:
         try:
-            os.unlink(path)
+            os.unlink(tmp_path)
         except OSError as unlink_exc:
             # Worse than the ordinary failure below: the bad file is still on
             # disk, and a message that claims otherwise is exactly the kind of
             # false-green report this tool exists to prevent (#642).
             raise HandlerError(
                 "the exported FBX failed the unit gate and COULD NOT BE "
-                "DELETED (%s) - a bad file is STILL ON DISK at %s and was NOT "
-                "removed: %s" % (unlink_exc, path, "; ".join(violations[:4])),
+                "DELETED (%s) - a bad file is STILL ON DISK at %s (a temp "
+                "file; %s itself was never written and is untouched) and was "
+                "NOT removed: %s"
+                % (unlink_exc, tmp_path, path, "; ".join(violations[:4])),
                 hint="the scene is the problem, not the export settings. Freeze "
                      "transforms so no node carries scale, and author so one "
                      "unit means one metre (linear_unit 'cm' in this repo's "
                      "convention). Deletion itself failed - remove %s by hand "
-                     "before it reaches a delivery" % path) from unlink_exc
+                     "before it reaches a delivery" % tmp_path) from unlink_exc
         raise HandlerError(
-            "the exported FBX failed the unit gate and was DELETED: %s"
-            % "; ".join(violations[:4]),
+            "the exported FBX failed the unit gate and was never written to "
+            "%s - the temp file was deleted, and any pre-existing file at "
+            "that path was never touched: %s"
+            % (path, "; ".join(violations[:4])),
             hint="the scene is the problem, not the export settings. Freeze "
                  "transforms so no node carries scale, and author so one unit "
                  "means one metre (linear_unit 'cm' in this repo's convention). "
-                 "Nothing is written until it passes - a wrong file on disk is "
-                 "how maya-mcp #629 reached three deliveries")
+                 "Nothing reaches %s until it passes - a wrong file on disk is "
+                 "how maya-mcp #629 reached three deliveries" % path)
 
-    lo, hi, height = _bounds(facts)
+    # Only now, with the gate passed, does the real path get touched.
+    os.replace(tmp_path, path)
+
+    lo, hi, height, bounds_unavailable_reason = _bounds(facts)
     return {
         "path": path,
         "bytes": os.path.getsize(path),
@@ -250,4 +282,5 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
         "world_bounds_min": lo,
         "world_bounds_max": hi,
         "height_m": height,
+        "bounds_unavailable_reason": bounds_unavailable_reason,
     }

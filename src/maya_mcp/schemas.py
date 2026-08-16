@@ -591,16 +591,32 @@ class ExportFbxResult(BaseModel):
     world_bounds_min: Optional[List[float]] = Field(
         default=None,
         description="XYZ minimum over every vertex, composed through the "
-                    "parent chain. Null when the file holds no geometry.",
+                    "parent chain. Null when bounds_unavailable_reason is "
+                    "set - either the file holds no geometry, or the reader "
+                    "could not compose the hierarchy (a non-default rotate "
+                    "order, for instance): see that field for which.",
     )
     world_bounds_max: Optional[List[float]] = Field(
-        default=None, description="XYZ maximum, same composition."
+        default=None, description="XYZ maximum, same composition. Null "
+                    "under the same condition as world_bounds_min.",
     )
     height_m: Optional[float] = Field(
         default=None,
         description=(
             "Y extent in metres - the number a consumer sees on import, and "
             "the one that tells a 4 m creature from a 4 cm one when every "
-            "individual chunk is sub-metre."
+            "individual chunk is sub-metre. Null under the same condition as "
+            "world_bounds_min."
+        ),
+    )
+    bounds_unavailable_reason: Optional[str] = Field(
+        default=None,
+        description=(
+            "Why world_bounds_min/world_bounds_max/height_m are null, when "
+            "they are. Either 'the file holds no geometry', or the reader's "
+            "own message when it could not compose the hierarchy - for "
+            "example a node whose euler rotation order is not the default "
+            "XYZ, which is ordinary rigging practice and not an empty file. "
+            "None when the bounds were measured."
         ),
     )
