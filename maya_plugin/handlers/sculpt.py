@@ -10,6 +10,7 @@ checkpoint instead of relying on undo."""
 
 from __future__ import annotations
 
+import math
 from typing import Any, Callable, Dict, List
 
 from ..dispatcher import HandlerError
@@ -96,6 +97,18 @@ def _weighted_offset(mesh_long: str, op: Dict[str, Any], along_normal: bool) -> 
     points = fn.getPoints(om.MSpace.kWorld)
     out = om.MPointArray()
     c = om.MPoint(*center)
+    # #636's sibling: a radius smaller than the distance to the nearest vertex
+    # gives every vertex weight 0, and the op reported applied:1 having moved
+    # nothing (chest girdle 2.2 wide, radius 0.9, nearest vertex 1.23 away).
+    # Checked here, before setPoints, so the mesh is untouched when it fails.
+    nearest = min((p.distanceTo(c) for p in points), default=0.0)
+    if points and nearest >= radius:
+        raise HandlerError(
+            "radius %.6g does not reach the mesh: the nearest vertex is %.6g "
+            "from the center, so every vertex weighs 0" % (radius, nearest),
+            hint="use radius > %.6g, or move center onto the region you meant "
+                 "(vertex_id picks a vertex directly)" % nearest,
+        )
     for i in range(len(points)):
         p = points[i]
         w = sculpt_math.falloff_weight(p.distanceTo(c), radius, falloff)
@@ -311,6 +324,77 @@ DEFORMER_WHITELIST = {
     "lattice": {"divisions", "translate", "rotate"},
 }
 
+# How many degrees one unit of each Maya UI angle unit is worth. `cmds.setAttr`
+# on an angle-typed attribute reads its number in the CURRENT UI unit, so the
+# same call means different things in different scenes - dividing by this makes
+# the tool's contract (degrees, always) hold regardless of the scene setting.
+_DEGREES_PER_UI_ANGLE = {"deg": 1.0, "rad": 180.0 / math.pi, "min": 1.0 / 60.0,
+                         "sec": 1.0 / 3600.0}
+
+# Below this fraction of the mesh's own bounding-box diagonal, a deformation is
+# not something anyone asked for on purpose - it is the "reported success,
+# moved nothing" failure (#636) and must be reported as such. 1% separates the
+# two cases by an order of magnitude at both ends: the golem's inert bend moved
+# 0.07% and a 45-degree bend on a test cylinder moves 14%. The measured number
+# always ships in max_displacement, so deliberately subtle work can read it and
+# ignore the line.
+NOOP_DISPLACEMENT_RATIO = 1e-2
+
+# Why a deformer of each type can end up inert, in the order worth checking.
+# bend leads with the unit because that IS #636: curvature is an ANGLE, so
+# `curvature: 0.35` asks for a third of a degree and gets exactly that.
+_INERT_HINTS = {
+    "bend": "curvature is an ANGLE IN DEGREES (0.35 = a third of a degree, "
+            "not a bend) - a visible hunch is 20-60",
+    "twist": "startAngle/endAngle are DEGREES - a visible twist is 30+",
+    "squash": "factor is a ratio around 0 (-0.5 squashes, 0.5 stretches); 0 is "
+              "the identity",
+    "flare": "startFlare*/endFlare* are multipliers around 1.0; 1.0 is the "
+             "identity",
+    "sine": "amplitude is in scene units, not a ratio, and wavelength must be "
+            "smaller than the mesh for a wave to be visible",
+    "wave": "amplitude is in scene units, and minRadius/maxRadius bound the "
+            "wave radially in XZ - not along an axis",
+    "sculpt": "maxDisplacement is in scene units and the sculpt sphere must "
+              "overlap the mesh",
+    "lattice": "a lattice deforms nothing until its points are moved - this "
+               "call only builds it",
+}
+
+
+def _vertex_positions(cmds, mesh_long: str) -> List[float]:
+    """World-space vertex positions, flat [x,y,z,x,y,z,...].
+
+    Deliberately not exactWorldBoundingBox: that transforms the object-space
+    box and over-reports any rotated mesh. Vertices are the ground truth.
+    """
+    flat = cmds.xform(
+        mesh_long + ".vtx[*]", query=True, worldSpace=True, translation=True
+    )
+    return list(flat or [])
+
+
+def _set_deformer_attr(cmds, node: str, attr: str, value: Any) -> None:
+    """setAttr, converting degrees into whatever angle unit this scene uses.
+
+    Angle-typed attributes (bend.curvature, twist.startAngle/endAngle) are read
+    by setAttr in the current UI angular unit. Every other attribute is unitless
+    or linear and passes straight through.
+    """
+    plug = "%s.%s" % (node, attr)
+    if cmds.getAttr(plug, type=True) == "doubleAngle":
+        unit = cmds.currentUnit(query=True, angle=True)
+        per_unit = _DEGREES_PER_UI_ANGLE.get(unit)
+        if per_unit is None:
+            raise HandlerError(
+                "scene angle unit %r is not one of %s"
+                % (unit, ", ".join(sorted(_DEGREES_PER_UI_ANGLE))),
+                hint="deform states its angles in degrees and cannot convert "
+                     "into an unknown unit",
+            )
+        value = float(value) / per_unit
+    cmds.setAttr(plug, value)
+
 
 def deform(params: Dict[str, Any]) -> Dict[str, Any]:
     cmds = _cmds()
@@ -330,6 +414,11 @@ def deform(params: Dict[str, Any]) -> Dict[str, Any]:
             hint="valid params: %s" % ", ".join(sorted(DEFORMER_WHITELIST[deformer])),
         )
     handle_xform = {k: dparams.pop(k) for k in ("translate", "rotate") if k in dparams}
+    # Measured before anything is built, compared at the very end - after the
+    # attributes, after the handle placement, after any bake. #636 shipped a
+    # bend that reported success and moved the mesh by 0.1% of its own height;
+    # nothing short of the vertices could have caught that.
+    before = _vertex_positions(cmds, mesh_long)
     if deformer == "lattice":
         divisions = dparams.get("divisions", [2, 5, 2])
         # cmds.lattice returns [ffd, lattice, base]. Deformation is driven by
@@ -357,7 +446,7 @@ def deform(params: Dict[str, Any]) -> Dict[str, Any]:
         # one path serves all six types and the question stops existing.
         nodes = cmds.nonLinear(mesh_long, type=deformer)
         for attr, value in dparams.items():
-            cmds.setAttr("%s.%s" % (nodes[0], attr), value)
+            _set_deformer_attr(cmds, nodes[0], attr, value)
     else:
         # Reached only if a type is added to DEFORMER_WHITELIST without also
         # adding it to NONLINEAR_TYPES (or wiring a lattice/sculpt-style
@@ -377,6 +466,8 @@ def deform(params: Dict[str, Any]) -> Dict[str, Any]:
         cmds.xform(handle, translation=handle_xform["translate"], worldSpace=True)
     if "rotate" in handle_xform:
         cmds.xform(handle, rotation=handle_xform["rotate"], worldSpace=True)
+    moved = sculpt_math.max_displacement(before, _vertex_positions(cmds, mesh_long))
+    warnings = _inert_warnings(deformer, moved, sculpt_math.bbox_extent(before))
     if params.get("delete_history_after"):
         cmds.delete(mesh_long, constructionHistory=True)
         # constructionHistory delete only removes the deformer DG node, not
@@ -390,6 +481,26 @@ def deform(params: Dict[str, Any]) -> Dict[str, Any]:
         for handle in nodes[1:]:
             if cmds.objExists(handle):
                 cmds.delete(handle)
-        return {"deformer_nodes": [], "baked": True, "warnings": []}
+        return {"deformer_nodes": [], "baked": True, "warnings": warnings,
+                "max_displacement": moved}
     long_nodes = [(cmds.ls(n, long=True) or [n])[0] for n in nodes]
-    return {"deformer_nodes": long_nodes, "baked": False, "warnings": []}
+    return {"deformer_nodes": long_nodes, "baked": False, "warnings": warnings,
+            "max_displacement": moved}
+
+
+def _inert_warnings(deformer: str, moved: float, extent: float) -> List[str]:
+    """One warning when the mesh did not visibly move. The measured number goes
+    out either way, in max_displacement - the warning is for the case an agent
+    would otherwise read `baked: true` as "the shape changed".
+
+    lattice is exempt: a freshly built lattice deforms nothing until its points
+    are moved, so warning on it would fire on every correct call and teach
+    readers to skip the one warning that matters.
+    """
+    threshold = extent * NOOP_DISPLACEMENT_RATIO if extent > 0 else 1e-9
+    if deformer == "lattice" or moved > threshold:
+        return []
+    return [
+        "%s moved the mesh by %.6g (mesh extent %.6g) - that is not a visible "
+        "deformation. %s" % (deformer, moved, extent, _INERT_HINTS[deformer])
+    ]
