@@ -97,6 +97,18 @@ def test_the_preamble_is_the_measured_five_in_order():
     )
 
 
+def test_the_scene_content_flags_are_pinned_outside_the_shipped_preamble():
+    # #646: the whole-scene branch's content must not be decided by whatever
+    # FBXResetExport defaults to. They are pinned separately because
+    # FBX_PREAMBLE_MEL composes the string three delivery generators ship
+    # through, asserted byte-for-byte above.
+    assert export.FBX_SCENE_CONTENT_MEL == (
+        "FBXExportCameras -v true",
+        "FBXExportLights -v true",
+    )
+    assert not set(export.FBX_SCENE_CONTENT_MEL) & set(export.FBX_PREAMBLE_MEL)
+
+
 def _facts(nodes=(), unit=None):
     return fbxbytes.FbxFacts(
         version=7700, nodes=list(nodes), meshes=[],
@@ -111,12 +123,70 @@ def test_a_clean_file_has_no_violations():
 def test_a_compensating_node_scale_is_a_violation():
     # The exact shape of maya-mcp #629: vertices 100x too large, a 0.01 on the
     # root, and the prefab renders correctly while the bare mesh does not.
-    node = fbxbytes.FbxNode(name="kit_root", kind="Null", uid=1,
+    # The mesh child is what makes the root's scale reach a vertex, and #629's
+    # root did carry one - without it this is an empty group scaled in an
+    # otherwise empty file, which is nobody's defect.
+    root = fbxbytes.FbxNode(name="kit_root", kind="Null", uid=1,
                             scaling=(0.01, 0.01, 0.01))
-    violations = export.gate_violations(_facts([node]))
+    mesh = fbxbytes.FbxNode(name="kit_piece", kind="Mesh", uid=2, parent=1,
+                            geometry=99)
+    violations = export.gate_violations(_facts([root, mesh]))
     assert len(violations) == 1
     assert "kit_root" in violations[0]
     assert "identity" in violations[0]
+
+
+# --- #646: the scale rule only means something where a vertex can feel it ----
+
+
+def test_a_scaled_light_does_not_refuse_a_whole_scene_export():
+    # A whole-scene export writes lights as Model records (measured live: three
+    # of them from an ordinary lit scene). A scale on one cannot hide a vertex
+    # magnitude, and "freeze transforms" is not an action for a light.
+    mesh = fbxbytes.FbxNode(name="asset", kind="Mesh", uid=1, geometry=99)
+    light = fbxbytes.FbxNode(name="mcpLight_key", kind="Light", uid=2,
+                             scaling=(4.0, 4.0, 4.0))
+    assert export.gate_violations(_facts([mesh, light])) == []
+
+
+def test_a_scaled_annotation_locator_does_not_refuse_the_export():
+    # A locator and a group are BOTH "Null" in the file, so this and the test
+    # below are the pair that proves the check is structural, not by kind.
+    mesh = fbxbytes.FbxNode(name="asset", kind="Mesh", uid=1, geometry=99)
+    locator = fbxbytes.FbxNode(name="annotation", kind="Null", uid=2,
+                               scaling=(3.0, 3.0, 3.0))
+    assert export.gate_violations(_facts([mesh, locator])) == []
+
+
+def test_a_scaled_group_ABOVE_geometry_is_still_a_violation():
+    group = fbxbytes.FbxNode(name="assetGRP", kind="Null", uid=1,
+                             scaling=(0.8, 0.8, 0.8))
+    mesh = fbxbytes.FbxNode(name="asset", kind="Mesh", uid=2, parent=1,
+                            geometry=99)
+    violations = export.gate_violations(_facts([group, mesh]))
+    assert len(violations) == 1
+    assert "assetGRP" in violations[0]
+
+
+def test_a_scaled_light_that_PARENTS_geometry_is_still_a_violation():
+    # setup_lighting's own tests build a light transform with a locator under
+    # it, so a light with children is a real scene shape - and then its scale
+    # does reach the vertices.
+    light = fbxbytes.FbxNode(name="mcpLight_key", kind="Light", uid=1,
+                             scaling=(4.0, 4.0, 4.0))
+    mesh = fbxbytes.FbxNode(name="badge", kind="Mesh", uid=2, parent=1,
+                            geometry=99)
+    violations = export.gate_violations(_facts([light, mesh]))
+    assert len(violations) == 1
+    assert "mcpLight_key" in violations[0]
+
+
+def test_a_mesh_whose_geometry_link_did_not_resolve_is_still_gated():
+    # Exempting by mistake costs #629; gating by mistake costs a warning. The
+    # kind is trusted in that one direction only.
+    node = fbxbytes.FbxNode(name="orphan", kind="Mesh", uid=1,
+                            scaling=(0.01, 0.01, 0.01))
+    assert len(export.gate_violations(_facts([node]))) == 1
 
 
 def test_a_wrong_declaration_is_a_violation():
@@ -286,8 +356,11 @@ def test_a_clean_export_reports_the_file_not_the_scene(monkeypatch, tmp_path):
     assert out["bytes"] == len(b"not really an fbx")
     assert abs(out["height_m"] - 4.02173) < 1e-6
     assert out["bounds_unavailable_reason"] is None
-    # The measured preamble ran, in order, with the factor last.
-    assert mel.evaluated == list(export.FBX_PREAMBLE_MEL) + ["FBXExportScaleFactor 1"]
+    # The measured preamble ran, in order, then the scene-content flags, with
+    # the factor last.
+    assert mel.evaluated == (list(export.FBX_PREAMBLE_MEL)
+                             + list(export.FBX_SCENE_CONTENT_MEL)
+                             + ["FBXExportScaleFactor 1"])
     # The unit declaration must actually be patched, on the exact file just
     # written - which is the TEMP file, not the final path: the write and
     # patch happen before the gate has passed, and only os.replace at the end
@@ -298,8 +371,12 @@ def test_a_clean_export_reports_the_file_not_the_scene(monkeypatch, tmp_path):
 def test_a_violating_file_is_deleted_not_returned(monkeypatch, tmp_path):
     bad = fbxbytes.FbxNode(name="kit_root", kind="Null", uid=1,
                            scaling=(0.01, 0.01, 0.01))
+    # The mesh under it is what makes the root's scale reach a vertex - #629's
+    # root carried one, and the gate only asserts identity where it can matter.
+    under = fbxbytes.FbxNode(name="kit_piece", kind="Mesh", uid=2, parent=1,
+                             geometry=99)
     path = tmp_path / "bad.fbx"
-    _install(monkeypatch, FakeCmds(), _facts([bad]))
+    _install(monkeypatch, FakeCmds(), _facts([bad, under]))
 
     with pytest.raises(HandlerError) as exc:
         export.export_fbx({"path": str(path), "metres_per_unit": 1.0})
@@ -317,10 +394,14 @@ def test_a_pre_existing_file_survives_a_failed_export(monkeypatch, tmp_path):
     # test that matters most for this finding.
     bad = fbxbytes.FbxNode(name="kit_root", kind="Null", uid=1,
                            scaling=(0.01, 0.01, 0.01))
+    # The mesh under it is what makes the root's scale reach a vertex - #629's
+    # root carried one, and the gate only asserts identity where it can matter.
+    under = fbxbytes.FbxNode(name="kit_piece", kind="Mesh", uid=2, parent=1,
+                             geometry=99)
     path = tmp_path / "golem.fbx"
     original = b"THE SHIPPED, ALREADY-GATED, GOOD FBX BYTES"
     path.write_bytes(original)
-    _install(monkeypatch, FakeCmds(), _facts([bad]))
+    _install(monkeypatch, FakeCmds(), _facts([bad, under]))
 
     with pytest.raises(HandlerError):
         export.export_fbx({"path": str(path), "metres_per_unit": 1.0})
@@ -337,8 +418,12 @@ def test_a_violating_file_that_wont_unlink_says_so_and_names_the_path(
     # is precisely the false-green report this tool exists to prevent (#642).
     bad = fbxbytes.FbxNode(name="kit_root", kind="Null", uid=1,
                            scaling=(0.01, 0.01, 0.01))
+    # The mesh under it is what makes the root's scale reach a vertex - #629's
+    # root carried one, and the gate only asserts identity where it can matter.
+    under = fbxbytes.FbxNode(name="kit_piece", kind="Mesh", uid=2, parent=1,
+                             geometry=99)
     path = tmp_path / "bad.fbx"
-    _install(monkeypatch, FakeCmds(), _facts([bad]))
+    _install(monkeypatch, FakeCmds(), _facts([bad, under]))
 
     def _refuse_to_unlink(_p):
         raise OSError("file is in use by another process")
