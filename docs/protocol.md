@@ -71,11 +71,17 @@ Failure — tracebacks are sacred, never truncated:
 
 | cmd | params | result |
 |---|---|---|
-| `ping` | `{}` | `{ pong: true, maya: bool }` |
+| `ping` | `{}` | `{ pong, maya, plugin: {package_dir, digest, stamp}, process: {pid, host, port, started_at, uptime_s, scene} }` |
 | `execute_python` | `{ code, timeout_s?, risky? }` | `{ stdout, stderr, result_repr, traceback, namespace_keys, checkpoint? }` |
 | `reset_namespace` | `{}` | `{ reset: true }` |
 | `get_scene_graph` | `{ filter?, max_objects?, cursor? }` | `{ objects: [...], total, cursor }` |
 | `capture_viewport` | `{ angles?, shading?, wireframe_overlay?, buffer?, isolate?, frame_all?, resolution? }` | `{ images: [{angle, png_b64}], camera_positions: [...] }` |
+
+`ping` answers two questions a caller cannot answer for itself: `plugin` says
+which *code* is live (feed it to `version.compare`), `process` says which
+*process* is answering — a port is not an identity, and a Maya that lost the
+bind race is indistinguishable from yours without a pid (#648). A bind failure
+raises `PortInUseError` rather than leaving a Maya running with no listener.
 
 ## Commands (M1)
 
