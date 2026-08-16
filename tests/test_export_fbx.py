@@ -95,3 +95,52 @@ def test_the_preamble_is_the_measured_five_in_order():
         "FBXExportInputConnections -v false",
         "FBXExportEmbeddedTextures -v false",
     )
+
+
+def _facts(nodes=(), unit=None):
+    return fbxbytes.FbxFacts(
+        version=7700, nodes=list(nodes), meshes=[],
+        unit_scale_factor=fbxbytes.DECLARES_METRES if unit is None else unit)
+
+
+def test_a_clean_file_has_no_violations():
+    node = fbxbytes.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1)
+    assert export.gate_violations(_facts([node])) == []
+
+
+def test_a_compensating_node_scale_is_a_violation():
+    # The exact shape of maya-mcp #629: vertices 100x too large, a 0.01 on the
+    # root, and the prefab renders correctly while the bare mesh does not.
+    node = fbxbytes.FbxNode(name="kit_root", kind="Null", uid=1,
+                            scaling=(0.01, 0.01, 0.01))
+    violations = export.gate_violations(_facts([node]))
+    assert len(violations) == 1
+    assert "kit_root" in violations[0]
+    assert "identity" in violations[0]
+
+
+def test_a_wrong_declaration_is_a_violation():
+    violations = export.gate_violations(_facts(unit=1.0))
+    assert len(violations) == 1
+    assert "UnitScaleFactor" in violations[0]
+
+
+def test_forty_one_roots_is_not_a_violation():
+    # The one-root rule belongs to check_rig_delivery. The demigol kit exports
+    # 41 roots and is correct; a universal gate that rejected it would be wrong.
+    nodes = [fbxbytes.FbxNode(name="kit_piece_%02d" % i, kind="Mesh", uid=i)
+             for i in range(41)]
+    assert export.gate_violations(_facts(nodes)) == []
+
+
+def test_a_big_vertex_is_not_this_gates_business():
+    # The ceiling is a per-delivery contract envelope and stays in evals/.
+    facts = _facts([fbxbytes.FbxNode(name="tower", kind="Mesh", uid=1)])
+    facts.meshes = [(0.0, 0.0, 0.0, 900.0, 900.0, 900.0)]
+    assert export.gate_violations(facts) == []
+
+
+def test_the_shipped_golem_passes_the_gate():
+    # A real 33-chunk artifact, committed. If this ever fails, either the gate
+    # is wrong or a delivery regressed - both worth stopping for.
+    assert export.gate_violations(fbxbytes.read_fbx(GOLEM)) == []

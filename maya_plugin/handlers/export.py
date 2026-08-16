@@ -48,3 +48,36 @@ FBX_PREAMBLE_MEL: Tuple[str, ...] = (
 EXPORT_SCALE_FACTOR = 1.0
 
 SCALE_TOL = 1e-3
+
+
+def gate_violations(facts) -> List[str]:
+    """Ways the written file breaks the export invariant, as readable strings.
+
+    Two assertions, and only two, because these are the two that hold for EVERY
+    export this server can be asked to make:
+
+      scale        a compensating node scale makes a wrong vertex magnitude
+                   render correctly, which is how three revisions shipped at
+                   100x with every in-Maya check green (#596, #600, #629)
+      declaration  metre-magnitude vertices declared as centimetres is the same
+                   defect inverted, and a consumer measures unit scale on import
+
+    Deliberately absent, though evals/delivery_units.py checks them: the
+    one-root rule (a RIG rule - the demigol kit legitimately exports 41 roots)
+    and the lattice/ceiling checks (per-delivery contract envelopes, not
+    properties of a correct export). This tool asserts what it is responsible
+    for; the delivery gates keep asserting what they are, against the same bytes.
+    """
+    out: List[str] = []
+    for node in facts.nodes:
+        if any(abs(s - 1.0) > SCALE_TOL for s in node.scaling):
+            out.append(
+                "node %r has scale %s, expected identity - a compensating node "
+                "scale hides a wrong vertex magnitude"
+                % (node.name, tuple(round(s, 6) for s in node.scaling)))
+    if facts.unit_scale_factor != fbxbytes.DECLARES_METRES:
+        out.append(
+            "the file declares UnitScaleFactor %r, expected %g - the vertices "
+            "are metres, so the file would contradict itself"
+            % (facts.unit_scale_factor, fbxbytes.DECLARES_METRES))
+    return out
