@@ -75,7 +75,7 @@ Failure — tracebacks are sacred, never truncated:
 | `execute_python` | `{ code, timeout_s?, risky? }` | `{ stdout, stderr, result_repr, traceback, namespace_keys, checkpoint? }` |
 | `reset_namespace` | `{}` | `{ reset: true }` |
 | `get_scene_graph` | `{ filter?, max_objects?, cursor? }` | `{ objects: [...], total, cursor }` |
-| `capture_viewport` | `{ angles?, shading?, wireframe_overlay?, buffer?, isolate?, frame_all?, resolution? }` | `{ images: [{angle, png_b64}], camera_positions: [...] }` |
+| `capture_viewport` | `{ angles?, shading?, wireframe_overlay?, buffer?, isolate?, target?, frame_all?, resolution? }` | `{ images: [{angle, png_b64}], camera_positions: [...] }` |
 
 `ping` answers two questions a caller cannot answer for itself: `plugin` says
 which *code* is live (feed it to `version.compare`), `process` says which
@@ -167,7 +167,7 @@ Lighting and materials:
 
 | cmd | params | result |
 |---|---|---|
-| `render_scene` | `{ angles?, renderer?, resolution?, isolate?, samples?, fallback_light? }` | `{ images: [{angle, png_b64}], camera_positions: [...], renderer, samples, fallback_light }` |
+| `render_scene` | `{ angles?, renderer?, resolution?, isolate?, target?, zoom?, relight?, samples?, fallback_light? }` | `{ images: [{angle, png_b64}], camera_positions: [...], renderer, samples, fallback_light }` |
 
 `render_scene` is the second eye. `capture_viewport` reads the VP2 viewport, so
 it is fast, needs a mapped window, and draws transmission as plain transparency -
@@ -185,6 +185,39 @@ Two details worth knowing before calling it:
   `distinct_colors` per frame, and errors when every frame is blank. A render of
   an empty or unlit scene is a valid PNG with a success status, so blankness has
   to be measured rather than assumed away.
+
+## Framing, and writing images to disk
+
+**`target` frames; `isolate` hides.** Both `render_scene` and `capture_viewport`
+take the pair, and either may be used alone. With neither, the whole scene is
+framed — *lights excluded*. That exclusion is the fix for #639: `ls(geometry=True)`
+returns light shapes, and a `setup_lighting(preset='environment')` dome measures
+±1000 units, so "frame everything" put the camera 5294 units from a 5-unit
+subject and returned a photograph of the sky. The blank guard could not catch it
+either, because a dome fills the frame with opaque pixels. Lights are identified
+by asking Maya (`getClassification(type, satisfies='light')`), not from a list,
+so a renderer this code has never heard of is covered too; a caller who names a
+light in `target` or `isolate` still gets it framed.
+
+**`path` writes the image.** All four image tools — `maya_capture_viewport`,
+`maya_capture_turntable`, `maya_render_scene`, `maya_render_sheet` — take an
+optional `path`, and this is a *server-side* parameter: no plugin command sees
+it. The rules are `export_fbx`'s, deliberately, so there is one path contract
+across the tool surface:
+
+- absolute, ending in `.png`;
+- the parent directory must already exist — these tools do not create
+  directories they were not asked to create;
+- validated **before** Maya is asked for anything, so a typo does not cost a
+  render;
+- the bytes written are the full-resolution ones the plugin produced, not the
+  copy downscaled to what an LLM can read.
+
+A call that makes one image writes exactly the path given. A call that makes
+several inserts the label before the extension — `D:/run/hero.png` with angles
+`front` and `side` writes `hero_front.png` and `hero_side.png` — and the result
+carries a `wrote: [...]` line naming every file, so a manifest can be built from
+the call's own report.
 
 **Server-side only, no plugin command:** `maya_load_reference_image` and
 `maya_compare_to_reference` (the two remaining M2 tools in `src/maya_mcp/server.py`) never

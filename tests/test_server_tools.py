@@ -1294,3 +1294,157 @@ class TestLightingPresets:
         tools = {t.name: t for t in run(mcp.list_tools())}
         schema = str(tools["maya_setup_lighting"].input_schema)
         assert "metal" in schema and "BLACK" in schema
+
+
+class TestImageToolsWriteFiles:
+    """#639: `render_scene`, `render_sheet`, `capture_viewport` and
+    `capture_turntable` all returned the image as the call's value and cleaned
+    up after themselves. After a full art run the project's images folder held
+    exactly one stale temp file, so the run's stills had to escape to
+    execute_python and call the plugin's own renderer."""
+
+    @staticmethod
+    def _subject_png(size=64):
+        img = PILImage.new("RGB", (size, size), (20, 20, 24))
+        img.paste(PILImage.new("RGB", (size // 2, size // 2), (200, 140, 90)), (4, 4))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+
+    def _capture_conn(self, angles):
+        return FakeConn(responses={"capture_viewport": {
+            "images": [{"angle": a, "png_b64": self._subject_png()} for a in angles],
+            "camera_positions": [],
+        }})
+
+    def _render_conn(self, angles):
+        return FakeConn(responses={"render_scene": {
+            "images": [{"angle": a, "label": a, "png_b64": self._subject_png()}
+                       for a in angles],
+            "camera_positions": [], "renderer": "arnold", "samples": 3,
+            "fallback_light": False, "zoom": 1.0, "relit_lights": 0,
+        }})
+
+    def test_one_capture_lands_at_exactly_the_path_asked_for(self, tmp_path):
+        target = tmp_path / "hero.png"
+        mcp = server_mod.create_server(self._capture_conn(["three_quarter"]))
+        result = run(mcp.call_tool("maya_capture_viewport", {
+            "angles": ["three_quarter"], "path": str(target),
+        }))
+        assert result.is_error is False
+        assert target.exists() and target.stat().st_size > 0
+
+    def test_several_angles_get_one_file_each_named_by_angle(self, tmp_path):
+        mcp = server_mod.create_server(self._capture_conn(["front", "side"]))
+        result = run(mcp.call_tool("maya_capture_viewport", {
+            "angles": ["front", "side"], "path": str(tmp_path / "hero.png"),
+        }))
+        assert result.is_error is False
+        assert (tmp_path / "hero_front.png").exists()
+        assert (tmp_path / "hero_side.png").exists()
+        assert not (tmp_path / "hero.png").exists()
+
+    def test_the_written_paths_are_reported_so_a_manifest_can_name_them(self, tmp_path):
+        mcp = server_mod.create_server(self._capture_conn(["front", "side"]))
+        result = run(mcp.call_tool("maya_capture_viewport", {
+            "angles": ["front", "side"], "path": str(tmp_path / "hero.png"),
+        }))
+        text = " ".join(c.text for c in result.content
+                        if getattr(c, "type", None) == "text")
+        assert "wrote:" in text
+        assert "hero_front.png" in text and "hero_side.png" in text
+
+    def test_the_file_keeps_full_resolution_not_the_downscaled_message_copy(
+        self, tmp_path
+    ):
+        """The point of writing to disk is the deliverable. Saving the copy
+        that was shrunk to what an LLM can read would make asking Maya for
+        2048 pointless."""
+        big = 1600
+        conn = FakeConn(responses={"capture_viewport": {
+            "images": [{"angle": "front", "png_b64": self._subject_png(big)}],
+            "camera_positions": [],
+        }})
+        mcp = server_mod.create_server(conn)
+        target = tmp_path / "big.png"
+        result = run(mcp.call_tool("maya_capture_viewport", {
+            "angles": ["front"], "path": str(target), "resolution": big,
+        }))
+        on_disk = PILImage.open(target)
+        assert on_disk.width == big
+        picture = [c for c in result.content if getattr(c, "type", None) == "image"][0]
+        in_message = PILImage.open(io.BytesIO(base64.b64decode(picture.data)))
+        assert in_message.width < big  # downscaled for the message, not the file
+
+    def test_a_turntable_writes_the_composited_sheet(self, tmp_path):
+        conn = FakeConn(responses={"capture_turntable": {
+            "images": [{"index": i, "azimuth": 90.0 * i,
+                        "png_b64": self._subject_png()} for i in range(4)],
+            "n_frames": 4,
+        }})
+        mcp = server_mod.create_server(conn)
+        target = tmp_path / "turn.png"
+        run(mcp.call_tool("maya_capture_turntable", {
+            "n_frames": 4, "path": str(target),
+        }))
+        sheet = PILImage.open(target)
+        assert sheet.width > 64  # a grid, not one cell
+
+    def test_a_render_writes_its_frames(self, tmp_path):
+        mcp = server_mod.create_server(self._render_conn(["front", "side"]))
+        run(mcp.call_tool("maya_render_scene", {
+            "angles": ["front", "side"], "path": str(tmp_path / "shot.png"),
+        }))
+        assert (tmp_path / "shot_front.png").exists()
+        assert (tmp_path / "shot_side.png").exists()
+
+    def test_a_render_sheet_writes_one_sheet(self, tmp_path):
+        conn = FakeConn(responses={"render_sheet": {
+            "images": [{"angle": "three_quarter", "label": label,
+                        "png_b64": self._subject_png()}
+                       for label in ("|kit_a", "|kit_b")],
+            "camera_positions": [], "renderer": "hw2", "samples": 2,
+            "fallback_light": False, "zoom": 1.0, "relit_lights": 0,
+        }})
+        mcp = server_mod.create_server(conn)
+        target = tmp_path / "kit.png"
+        run(mcp.call_tool("maya_render_sheet", {
+            "subjects": ["|kit_a", "|kit_b"], "path": str(target),
+        }))
+        assert target.exists()
+
+    def test_a_bad_path_costs_nothing_because_it_is_caught_first(self, tmp_path):
+        """A rendered frame is seconds and a sheet is seconds times the kit.
+        Discovering a typo'd path after the pixels exist would throw all of
+        that away, so the path is validated before Maya is asked anything."""
+        conn = self._capture_conn(["front"])
+        mcp = server_mod.create_server(conn)
+        with pytest.raises(Exception, match="does not exist"):
+            run(mcp.call_tool("maya_capture_viewport", {
+                "angles": ["front"], "path": str(tmp_path / "nope" / "hero.png"),
+            }))
+        assert conn.calls == []  # Maya was never asked to capture
+        assert not (tmp_path / "nope").exists()
+
+    def test_no_path_writes_nothing_and_still_returns_the_image(self, tmp_path):
+        mcp = server_mod.create_server(self._capture_conn(["front"]))
+        result = run(mcp.call_tool("maya_capture_viewport", {"angles": ["front"]}))
+        assert result.is_error is False
+        assert [c for c in result.content if getattr(c, "type", None) == "image"]
+        assert list(tmp_path.iterdir()) == []
+        text = " ".join(c.text for c in result.content
+                        if getattr(c, "type", None) == "text")
+        assert "wrote:" not in text
+
+
+class TestCaptureViewportTargetReachesMaya:
+    def test_target_is_forwarded(self):
+        conn = FakeConn(responses={
+            "capture_viewport": {"images": [], "camera_positions": []}
+        })
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_capture_viewport", {
+            "angles": ["front"], "target": ["|golem|chest"],
+        }))
+        assert conn.calls[0]["params"]["target"] == ["|golem|chest"]
+        assert conn.calls[0]["params"]["isolate"] is None

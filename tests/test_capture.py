@@ -242,17 +242,19 @@ class TestMarshaling:
         calls = []
 
         def fake_capture(angle, shading, wireframe_overlay, buffer, isolate,
-                         frame_all, resolution, lighting, shadows):
+                         frame_all, resolution, lighting, shadows, frame_on=None):
             calls.append((angle, shading, wireframe_overlay, buffer, isolate,
-                          frame_all, resolution, lighting, shadows))
+                          frame_all, resolution, lighting, shadows, frame_on))
             return {"png_b64": "ZmFrZQ==", "camera_position": [0, 0, 10],
                     "camera_rotation": [0, 0, 0], "camera": "|mayaMcpTempCam"}
 
         monkeypatch.setattr(capture, "_capture_one", fake_capture)
         result = capture.capture_viewport(
             {"angles": ["front", "top"], "resolution": 4096, "shading": "wireframe",
-             "wireframe_overlay": False, "isolate": ["|golem"], "frame_all": False}
+             "wireframe_overlay": False, "isolate": ["|golem"], "frame_all": False,
+             "target": ["|golem|chest"]}
         )
+        assert all(c[9] == ["|golem|chest"] for c in calls)
         assert [c[0] for c in calls] == ["front", "top"]
         assert all(c[1] == "wireframe" for c in calls)
         assert all(c[2] is False for c in calls)
@@ -564,3 +566,143 @@ def test_turntable_caps_at_sixteen_frames(monkeypatch):
     with pytest.raises(HandlerError) as exc:
         capture.capture_turntable({"target": "|golem", "n_frames": 32})
     assert "16" in str(exc.value)
+
+
+class FakeSceneCmds:
+    """A scene of shapes with node types and boxes - enough for framing math.
+
+    Classification answers the way Maya 2027 measurably does: every light type
+    satisfies 'light', mesh and locator do not.
+    """
+
+    LIGHT_TYPES = {"aiSkyDomeLight", "aiAreaLight", "directionalLight", "pointLight"}
+
+    def __init__(self, shapes):
+        self.shapes = shapes  # name -> (nodeType, (minx,miny,minz,maxx,maxy,maxz))
+        self.unknown_classification = set()
+
+    def ls(self, *args, geometry=False, visible=False, long=False, **kw):
+        assert geometry and visible
+        return list(self.shapes)
+
+    def nodeType(self, name):
+        return self.shapes[name][0]
+
+    def getClassification(self, node_type, satisfies=None):
+        if node_type in self.unknown_classification:
+            raise RuntimeError("unknown node type")
+        assert satisfies == "light"
+        return ["drawdb/light:light"] if node_type in self.LIGHT_TYPES else []
+
+    def objExists(self, name):
+        return name in self.shapes
+
+    def exactWorldBoundingBox(self, *names):
+        boxes = [self.shapes[n][1] for n in names]
+        return [min(b[i] for b in boxes) for i in range(3)] + [
+            max(b[i] for b in boxes) for i in range(3, 6)
+        ]
+
+
+# The measured #639 scene: a 5-unit cube and one setup_lighting dome.
+DOME_SCENE = {
+    "golemChestShape": ("mesh", (-2.5, -2.5, -2.5, 2.5, 2.5, 2.5)),
+    "mcpLight_domeShape": ("aiSkyDomeLight", (-1000, -1000, -1000, 1000, 1000, 1000)),
+}
+
+
+class TestFramingExcludesLights:
+    def test_a_dome_does_not_decide_the_frame(self):
+        fake = FakeSceneCmds(DOME_SCENE)
+        assert capture._scene_bbox(fake, None) == (
+            [-2.5, -2.5, -2.5], [2.5, 2.5, 2.5]
+        )
+
+    def test_without_the_filter_the_dome_would_have_won(self):
+        fake = FakeSceneCmds(DOME_SCENE)
+        every = fake.exactWorldBoundingBox(*fake.shapes)
+        assert every[3] == 1000  # the unfiltered answer
+        assert capture.framable_geometry(fake) == ["golemChestShape"]
+
+    def test_the_defect_as_a_distance(self):
+        """What the dome's bbox does to the camera, in units - the same order
+        as the 5294 the #601 run measured on a real scene."""
+        dome_pos, _ = capture.camera_placement(
+            "three_quarter", [-1000, -1000, -1000], [1000, 1000, 1000]
+        )
+        subject_pos, _ = capture.camera_placement(
+            "three_quarter", [-2.5, -2.5, -2.5], [2.5, 2.5, 2.5]
+        )
+        assert math.dist([0, 0, 0], dome_pos) > 5000
+        assert math.dist([0, 0, 0], subject_pos) < 20
+
+    def test_every_light_type_is_excluded_not_just_the_dome(self):
+        fake = FakeSceneCmds({
+            "bodyShape": ("mesh", (-1, -1, -1, 1, 1, 1)),
+            "sunShape": ("directionalLight", (-50, -50, -50, 50, 50, 50)),
+            "bulbShape": ("pointLight", (-70, -70, -70, 70, 70, 70)),
+            "panelShape": ("aiAreaLight", (-90, -90, -90, 90, 90, 90)),
+        })
+        assert capture.framable_geometry(fake) == ["bodyShape"]
+
+    def test_a_locator_is_not_a_light_and_still_frames(self):
+        fake = FakeSceneCmds({
+            "bodyShape": ("mesh", (-1, -1, -1, 1, 1, 1)),
+            "annotationShape": ("locator", (0, 0, 0, 3, 3, 3)),
+        })
+        assert capture._scene_bbox(fake, None) == ([-1, -1, -1], [3, 3, 3])
+
+    def test_naming_the_dome_explicitly_still_frames_it(self):
+        # the filter is the FALLBACK's, not a veto on what a caller asked for
+        fake = FakeSceneCmds(DOME_SCENE)
+        assert capture._scene_bbox(fake, ["mcpLight_domeShape"]) == (
+            [-1000, -1000, -1000], [1000, 1000, 1000]
+        )
+
+    def test_an_unclassifiable_node_stays_in_frame(self):
+        # absence of an answer is not an answer: dropping it would silently
+        # shrink the frame around a plugin shape nobody here has heard of
+        fake = FakeSceneCmds({"weirdShape": ("someVendorMesh", (-4, -4, -4, 4, 4, 4))})
+        fake.unknown_classification.add("someVendorMesh")
+        assert capture.framable_geometry(fake) == ["weirdShape"]
+
+    def test_a_scene_of_nothing_but_lights_still_returns_a_sane_box(self):
+        fake = FakeSceneCmds({
+            "domeShape": ("aiSkyDomeLight", (-1000, -1000, -1000, 1000, 1000, 1000)),
+        })
+        assert capture._scene_bbox(fake, None) == (
+            [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]
+        )
+
+
+class TestCaptureViewportTarget:
+    def _spy(self, monkeypatch):
+        seen = {}
+
+        def fake_capture_one(angle, *args, **kwargs):
+            seen["frame_on"] = kwargs.get("frame_on")
+            seen["isolate"] = args[3]
+            return {"png_b64": "x", "camera_position": [0, 0, 0],
+                    "camera_rotation": [0, 0, 0], "camera": "|cam"}
+
+        monkeypatch.setattr(capture, "_capture_one", fake_capture_one)
+        return seen
+
+    def test_target_frames_without_isolating(self, monkeypatch):
+        seen = self._spy(monkeypatch)
+        capture.capture_viewport({"angles": ["front"], "target": ["|golem|chest"]})
+        assert seen["frame_on"] == ["|golem|chest"]
+        assert seen["isolate"] is None  # nothing was hidden to achieve it
+
+    def test_a_bare_string_target_is_accepted(self, monkeypatch):
+        seen = self._spy(monkeypatch)
+        capture.capture_viewport({"angles": ["front"], "target": "|golem|chest"})
+        assert seen["frame_on"] == ["|golem|chest"]
+
+    def test_a_bad_target_is_rejected_before_any_capture(self, monkeypatch):
+        monkeypatch.setattr(
+            capture, "_capture_one",
+            lambda *a, **k: pytest.fail("captured despite an invalid target"),
+        )
+        with pytest.raises(HandlerError, match="target"):
+            capture.capture_viewport({"target": [1, 2]})
