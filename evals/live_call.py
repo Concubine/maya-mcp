@@ -46,14 +46,18 @@ def _send(command: str, params: dict, timeout_s: float, port: int) -> dict:
         sock.close()
 
 
-def _ping_result(port: int) -> dict:
-    """The ping payload, or {} if nothing can be told. Never raises: an
-    unreachable plugin is the caller's problem to report, and a check that
-    breaks the run it protects is worse than no check."""
+def _ping_result(port: int) -> dict | None:
+    """The ping payload, or None when nothing answered at all.
+
+    None and {} are different answers and must stay that way: "no plugin is
+    listening" is not "a plugin answered without saying who it is". Never
+    raises - an unreachable plugin is the caller's problem to report, and a
+    check that breaks the run it protects is worse than no check.
+    """
     try:
         return (_send("ping", {}, 10.0, port).get("result") or {})
     except Exception:  # noqa: BLE001 - see docstring
-        return {}
+        return None
 
 
 def staleness_warning(port: int | None = None) -> str | None:
@@ -61,7 +65,10 @@ def staleness_warning(port: int | None = None) -> str | None:
 
     Returns the warning text, or None when they agree / nothing can be told.
     """
-    plugin = _ping_result(port or DEFAULT_PORT).get("plugin")
+    result = _ping_result(port or DEFAULT_PORT)
+    if result is None:
+        return None  # nothing answered; that is not a staleness verdict
+    plugin = result.get("plugin")
     try:
         return version.compare(
             plugin,
@@ -87,6 +94,13 @@ def _handshake(port: int) -> None:
     carries the evidence of what it was actually measured against.
     """
     result = _ping_result(port)
+    if result is None:
+        # Nothing is listening. Say only that: the call that follows fails
+        # immediately with the connection error, which is the real answer, and
+        # a staleness or identity verdict here would be invented.
+        print("nothing answered a ping on port %d - no plugin is listening there."
+              % port, file=sys.stderr, flush=True)
+        return
     try:
         warning = version.compare(
             result.get("plugin"),
