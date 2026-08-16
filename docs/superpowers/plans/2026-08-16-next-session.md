@@ -39,10 +39,22 @@ it, and note its `golem.mb` is the pre-bake 5.0272-unit scene.
 
 ## Open, in the order I would take them
 
-1. **#642 — there is no export tool.** Every delivery so far has gone through
-   `execute_python` with a hand-maintained MEL preamble (`evals/maya_export.py`).
-   The one decision most likely to ship a broken asset is the one the server has
-   no opinion about. This is the ranked next piece of MCP work.
+1. ~~**#642 — there is no export tool.**~~ **DONE** — `maya_export_fbx` shipped
+   on branch `export-tool`. `metres_per_unit` is required with no default and
+   only `1.0` proceeds; the handler patches the unit declaration, **re-reads the
+   bytes it just wrote**, and on any violation deletes the file and raises. The
+   gate is two assertions — identity node scales and a declaration of 100.0 —
+   deliberately *not* the one-root rule (the kit legitimately has 41 roots) or
+   the ceiling (a per-delivery envelope, still in `evals/delivery_units.py`).
+   Live: 8/8 on 9877, span 3.00000 m for a 3-unit cube, a 0.01 node scale
+   refused with the file confirmed gone from disk.
+
+   **Left open on purpose:** `evals/demigol_kit.py`, `evals/demigol_structures.py`
+   and `evals/units_live.py` still export through `maya_export.EXPORT_PREAMBLE`.
+   That string is now *composed* from the handler's own data, so there is one
+   definition and a test pins it byte-for-byte — but migrating those three onto
+   the tool would need a live art run to re-validate, so it is its own piece of
+   work, not a tail of this one.
 2. **#640** naming/parameter papercuts, **#639** no image tool writes to disk
    (this session paid one escape for the pose sheet because of it), **#638**
    `boolean_op` drops pivot, parent and UVs, **#636** `deform`'s bend is inert.
