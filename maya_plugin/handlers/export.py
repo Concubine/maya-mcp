@@ -142,3 +142,101 @@ def _validate(params: Dict[str, Any]) -> Tuple[str, Optional[List[str]]]:
                 "nodes is an empty list, which would export nothing",
                 hint="omit nodes entirely to export the whole scene")
     return path, nodes
+
+
+def _cmds():
+    import maya.cmds as cmds  # noqa: PLC0415 - only importable inside Maya
+
+    return cmds
+
+
+def _mel():
+    import maya.mel as mel  # noqa: PLC0415 - only importable inside Maya
+
+    return mel
+
+
+def _bounds(facts):
+    """World bounds and height from the FILE, or None when it holds no geometry.
+
+    fbxbytes._rotation implements only the default XYZ euler order and raises
+    otherwise - deliberately, since a wrong assumption would move geometry
+    silently. That must not fail an export whose bytes already passed the gate,
+    so a rotation order the reader cannot compose costs the measurement, not
+    the file.
+    """
+    try:
+        lo, hi = fbxbytes.world_vertex_bounds(facts)
+    except ValueError:
+        return None, None, None
+    if any(v == float("inf") for v in lo):
+        return None, None, None
+    return list(lo), list(hi), hi[1] - lo[1]
+
+
+def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
+    path, nodes = _validate(params)
+    cmds = _cmds()
+    mel = _mel()
+
+    if nodes:
+        missing = [n for n in nodes if not cmds.objExists(n)]
+        if missing:
+            raise HandlerError(
+                "no such object(s): %s" % ", ".join(missing[:6]),
+                hint="names are case-sensitive; maya_get_scene_graph lists what "
+                     "the scene actually contains")
+
+    cmds.loadPlugin("fbxmaya", quiet=True)
+    for statement in FBX_PREAMBLE_MEL:
+        mel.eval(statement)
+    # A bare float. The `-v` form raises, and both delivery generators used to
+    # swallow that inside `except Exception: pass`.
+    mel.eval("FBXExportScaleFactor %g" % EXPORT_SCALE_FACTOR)
+
+    if nodes:
+        cmds.select(nodes, replace=True)
+        cmds.file(path, force=True, options="v=0", type="FBX export", pr=True,
+                  es=True)
+    else:
+        cmds.file(path, force=True, options="v=0", type="FBX export", pr=True,
+                  ea=True)
+
+    # Maya writes UnitScaleFactor 1.0 for a metre-native scene and offers no way
+    # to change it, so the declaration is corrected here: one IEEE-754 double
+    # overwritten with another of the same width, so nothing in the file moves.
+    fbxbytes.set_unit_scale_factor(path)
+
+    # Re-read the BYTES. This is the whole point of the tool: the defect it
+    # guards is written by the exporter and is absent from the Maya scene, so
+    # every in-Maya check is structurally blind to it.
+    facts = fbxbytes.read_fbx(path)
+    violations = gate_violations(facts)
+    if violations:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise HandlerError(
+            "the exported FBX failed the unit gate and was DELETED: %s"
+            % "; ".join(violations[:4]),
+            hint="the scene is the problem, not the export settings. Freeze "
+                 "transforms so no node carries scale, and author so one unit "
+                 "means one metre (linear_unit 'cm' in this repo's convention). "
+                 "Nothing is written until it passes - a wrong file on disk is "
+                 "how maya-mcp #629 reached three deliveries")
+
+    lo, hi, height = _bounds(facts)
+    return {
+        "path": path,
+        "bytes": os.path.getsize(path),
+        "fbx_version": facts.version,
+        "node_count": len(facts.nodes),
+        "mesh_count": len(facts.meshes),
+        "root_nodes": [n.name for n in facts.nodes if n.parent is None],
+        "unit_scale_factor": facts.unit_scale_factor,
+        "metres_per_unit": 1.0,
+        "world_bounds_min": lo,
+        "world_bounds_max": hi,
+        "height_m": height,
+    }

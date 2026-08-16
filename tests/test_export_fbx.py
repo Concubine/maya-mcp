@@ -215,3 +215,113 @@ def test_an_empty_node_list_is_refused(tmp_path):
 def test_a_node_list_survives_validation(tmp_path):
     _path, nodes = export._validate(_params(tmp_path, nodes=["golem_C_pelvis"]))
     assert nodes == ["golem_C_pelvis"]
+
+
+class FakeCmds:
+    """Just enough Maya to drive the handler: record the calls, write a file."""
+
+    def __init__(self, existing=("golem_C_pelvis",)):
+        self.existing = set(existing)
+        self.calls = []
+
+    def loadPlugin(self, name, quiet=False):
+        self.calls.append(("loadPlugin", name))
+
+    def objExists(self, name):
+        return name in self.existing
+
+    def select(self, names, replace=False):
+        self.calls.append(("select", names))
+
+    def file(self, path, **kw):
+        self.calls.append(("file", path, kw))
+        with open(path, "wb") as fh:
+            fh.write(b"not really an fbx")
+
+
+class FakeMel:
+    def __init__(self):
+        self.evaluated = []
+
+    def eval(self, statement):
+        self.evaluated.append(statement)
+
+
+def _install(monkeypatch, cmds, facts, mel=None):
+    mel = mel or FakeMel()
+    monkeypatch.setattr(export, "_cmds", lambda: cmds)
+    monkeypatch.setattr(export, "_mel", lambda: mel)
+    monkeypatch.setattr(export.fbxbytes, "set_unit_scale_factor",
+                        lambda _p, value=100.0: value)
+    monkeypatch.setattr(export.fbxbytes, "read_fbx", lambda _p: facts)
+    return mel
+
+
+def test_a_clean_export_reports_the_file_not_the_scene(monkeypatch, tmp_path):
+    node = fbxbytes.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1, geometry=7)
+    facts = _facts([node])
+    facts.meshes = [(0.0, 0.0, 0.0, 1.0, 4.02173, 1.0)]
+    facts.geometries = {7: facts.meshes[0]}
+    cmds = FakeCmds()
+    mel = _install(monkeypatch, cmds, facts)
+
+    out = export.export_fbx({"path": str(tmp_path / "golem.fbx"),
+                             "metres_per_unit": 1.0})
+
+    assert out["fbx_version"] == 7700
+    assert out["node_count"] == 1
+    assert out["root_nodes"] == ["golem_C_pelvis"]
+    assert out["unit_scale_factor"] == 100.0
+    assert out["metres_per_unit"] == 1.0
+    assert out["bytes"] == len(b"not really an fbx")
+    assert abs(out["height_m"] - 4.02173) < 1e-6
+    # The measured preamble ran, in order, with the factor last.
+    assert mel.evaluated == list(export.FBX_PREAMBLE_MEL) + ["FBXExportScaleFactor 1"]
+
+
+def test_a_violating_file_is_deleted_not_returned(monkeypatch, tmp_path):
+    bad = fbxbytes.FbxNode(name="kit_root", kind="Null", uid=1,
+                           scaling=(0.01, 0.01, 0.01))
+    path = tmp_path / "bad.fbx"
+    _install(monkeypatch, FakeCmds(), _facts([bad]))
+
+    with pytest.raises(HandlerError) as exc:
+        export.export_fbx({"path": str(path), "metres_per_unit": 1.0})
+
+    assert "kit_root" in str(exc.value)
+    assert not path.exists(), "a file that fails the gate must not reach a delivery"
+
+
+def test_exporting_named_nodes_selects_them(monkeypatch, tmp_path):
+    cmds = FakeCmds()
+    _install(monkeypatch, cmds, _facts([]))
+    export.export_fbx({"path": str(tmp_path / "one.fbx"), "metres_per_unit": 1.0,
+                       "nodes": ["golem_C_pelvis"]})
+    assert ("select", ["golem_C_pelvis"]) in cmds.calls
+    kw = [c for c in cmds.calls if c[0] == "file"][0][2]
+    assert kw.get("es") is True and "ea" not in kw
+
+
+def test_exporting_everything_does_not_select(monkeypatch, tmp_path):
+    cmds = FakeCmds()
+    _install(monkeypatch, cmds, _facts([]))
+    export.export_fbx({"path": str(tmp_path / "all.fbx"), "metres_per_unit": 1.0})
+    assert not any(c[0] == "select" for c in cmds.calls)
+    kw = [c for c in cmds.calls if c[0] == "file"][0][2]
+    assert kw.get("ea") is True and "es" not in kw
+
+
+def test_an_unknown_node_fails_before_writing_anything(monkeypatch, tmp_path):
+    cmds = FakeCmds()
+    _install(monkeypatch, cmds, _facts([]))
+    path = tmp_path / "ghost.fbx"
+    with pytest.raises(HandlerError) as exc:
+        export.export_fbx({"path": str(path), "metres_per_unit": 1.0,
+                           "nodes": ["no_such_thing"]})
+    assert "no_such_thing" in str(exc.value)
+    assert not path.exists()
+
+
+def test_the_command_is_registered():
+    from maya_plugin import maya_mcp_plugin
+    assert maya_mcp_plugin._build_handlers()["export_fbx"] is export.export_fbx
