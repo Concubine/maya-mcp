@@ -284,8 +284,18 @@ def framable_geometry(cmds) -> List[str]:
     ]
 
 
-def _scene_bbox(cmds, isolate: Optional[List[str]]):
-    """World bbox of the isolate set, or of all visible non-light geometry."""
+def _scene_bbox(cmds, isolate: Optional[List[str]], visible_only: bool = False):
+    """World bbox of the isolate set, or of all visible non-light geometry.
+
+    `visible_only` measures what will actually appear rather than what the
+    target contains. `exactWorldBoundingBox` includes a transform's children
+    regardless of their visibility - measured: a parent whose only distant child
+    is hidden still reports the child's corner at 20.5, and `ignoreInvisible=True`
+    reports 0.5 - so framing a contact-sheet cell whose sub-assemblies have just
+    been hidden would still frame the whole subtree, leaving the piece a speck
+    (#640). Off by default: a caller who frames on an object they hid means that
+    object's place in the world, not an empty box.
+    """
     if isolate:
         missing = [n for n in isolate if not cmds.objExists(n)]
         if missing:
@@ -299,7 +309,17 @@ def _scene_bbox(cmds, isolate: Optional[List[str]]):
         targets = framable_geometry(cmds)
     if not targets:
         return [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]
-    bbox = cmds.exactWorldBoundingBox(*targets)
+    if visible_only:
+        bbox = cmds.exactWorldBoundingBox(*targets, ignoreInvisible=True)
+        # When NOTHING under the targets is visible, Maya answers with an
+        # INVERTED sentinel box - measured as [1e20, 1e20, 1e20, -1e20, -1e20,
+        # -1e20]. Fed to camera_placement that put a camera 5.8e20 units out, a
+        # frame of nothing that reads as a broken renderer rather than a hidden
+        # subject. Fall back to where the target actually is.
+        if any(lo > hi for lo, hi in zip(bbox[:3], bbox[3:])):
+            bbox = cmds.exactWorldBoundingBox(*targets)
+    else:
+        bbox = cmds.exactWorldBoundingBox(*targets)
     return list(bbox[:3]), list(bbox[3:])
 
 

@@ -27,7 +27,13 @@ from typing import Any, Callable, Dict, Optional
 from . import protocol
 
 DEFAULT_TIMEOUT_S = 30.0
-MAX_TIMEOUT_S = 600.0
+# Raised from 600 for #640. A timeout here does NOT stop the command - Maya runs
+# it to completion on the main thread and the session stays busy either way - so
+# this ceiling only decides how long the caller waits before being told
+# something it cannot act on. A 29-cell Arnold contact sheet needs longer than
+# ten minutes, and the timeout hint tells callers to pass a larger timeout_s, so
+# a ceiling below what a legitimate render costs made that advice unfollowable.
+MAX_TIMEOUT_S = 1800.0
 # Past this many seconds stuck, the BusyError hint stops sounding like a
 # normal "still running" wait and starts telling the caller it may be
 # permanently wedged. Comfortably above MAX_TIMEOUT_S so it never fires for
@@ -118,7 +124,8 @@ class Dispatcher:
         timeout_s = frame.get("timeout_s", self._default_timeout_s)
         if not isinstance(timeout_s, (int, float)) or isinstance(timeout_s, bool) or timeout_s <= 0:
             timeout_s = self._default_timeout_s
-        timeout_s = min(float(timeout_s), MAX_TIMEOUT_S)
+        requested_timeout_s = float(timeout_s)
+        timeout_s = min(requested_timeout_s, MAX_TIMEOUT_S)
 
         params = frame.get("params") or {}
         fut: Future = Future()
@@ -162,13 +169,28 @@ class Dispatcher:
                     # Running on Maya's main thread; keep _inflight set so the
                     # session stays busy until the straggler finishes.
                     self._straggler = fut
+            # Do not advise a larger timeout_s when the caller is already at the
+            # ceiling - that advice cannot be followed, and following it is what
+            # #640 found impossible.
+            if timeout_s >= MAX_TIMEOUT_S:
+                hint = (
+                    "the command is still running in Maya and the session is busy "
+                    "until it finishes. This was already the maximum timeout "
+                    "(%.0f s), so waiting longer is not available: split the work "
+                    "- fewer subjects per sheet, fewer samples, or a lower "
+                    "resolution." % MAX_TIMEOUT_S
+                )
+            else:
+                hint = (
+                    "the command is still running in Maya and the session is busy "
+                    "until it finishes; for long operations pass a larger "
+                    "timeout_s (up to %.0f s) or split the work" % MAX_TIMEOUT_S
+                )
             return protocol.make_error(
                 req_id,
                 "TimeoutError",
                 "command %r did not finish within %.1f s" % (cmd, timeout_s),
-                hint="the command is still running in Maya and the session is busy "
-                "until it finishes; for long operations pass a larger timeout_s "
-                "or split the work",
+                hint=hint,
             )
 
     def shutdown(self, join_timeout_s: float = 2.0) -> None:

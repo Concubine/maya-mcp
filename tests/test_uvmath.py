@@ -85,6 +85,43 @@ class TestResolveCell:
             uvmath.resolve_cell("middle", 4, 4)
 
 
+class TestPatchArrivesAsText:
+    """#640-3: `patch: 0` was refused with an error naming the form it was given.
+
+    The MCP schema typed it as `object`, which constrains nothing and coerces
+    nothing, so a client sending 0 could deliver the string "0" - and the plugin
+    is reachable over raw TCP besides, where nothing validates at all. A digit
+    string is an integer index that arrived as text; anything else still fails.
+    """
+
+    def test_a_digit_string_is_the_index_it_looks_like(self):
+        assert uvmath.resolve_cell("0", 4, 4) == (0, 0)
+        assert uvmath.resolve_cell("5", 4, 4) == (1, 1)
+
+    def test_surrounding_whitespace_does_not_change_the_answer(self):
+        assert uvmath.resolve_cell(" 3 ", 4, 4) == (3, 0)
+
+    def test_a_pair_of_digit_strings_works_too(self):
+        assert uvmath.resolve_cell(["2", "1"], 4, 4) == (2, 1)
+
+    def test_a_text_index_past_the_end_is_still_refused(self):
+        with pytest.raises(HandlerError) as exc:
+            uvmath.resolve_cell("16", 4, 4)
+        assert "outside" in str(exc.value)
+
+    def test_a_word_is_still_not_an_index(self):
+        for bad in ("middle", "", "1.5", "0x3", "--2"):
+            with pytest.raises(HandlerError):
+                uvmath.resolve_cell(bad, 4, 4)
+
+    def test_a_float_is_still_not_an_index(self):
+        # 2.5 is not a patch, and neither is True. Coercion is for TEXT that is
+        # already an integer, not for widening what counts as one.
+        for bad in (2.5, True, None):
+            with pytest.raises(HandlerError):
+                uvmath.resolve_cell(bad, 4, 4)
+
+
 def _apply_fold(fold, u, v):
     """What Maya does with the six numbers: scale about the pivot, then move."""
     pivot_u, pivot_v, scale_u, scale_v, delta_u, delta_v = fold

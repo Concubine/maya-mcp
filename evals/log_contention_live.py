@@ -306,15 +306,27 @@ def part_b():
     check("B3 the pid in the filename is the pid that answered",
           os.path.basename(expected) == "plugin-%s.log" % pid)
 
-    # The shared file is the thing that used to deadlock. A live plugin must not
-    # be appending to it at all any more.
+    # The shared file is the thing that used to deadlock, so THIS process must
+    # not be in it. Asserted per-pid rather than by the file's age: a Maya started
+    # before this fix landed is still running the old plugin and still appending
+    # to the shared file quite correctly, which made an age check fail for a
+    # reason that had nothing to do with the fix.
     legacy = os.path.join(logdir, "plugin.log")
     if not os.path.exists(legacy):
-        check("B4 the shared plugin.log is untouched", True, "no legacy file present")
+        check("B4 the answering process is not in the shared plugin.log", True,
+              "no legacy file present")
     else:
-        age_s = time.time() - os.path.getmtime(legacy)
-        check("B4 the shared plugin.log is untouched", age_s > 3600,
-              "last written %.1f h ago (%d bytes)" % (age_s / 3600.0, os.path.getsize(legacy)))
+        with open(legacy, "r", encoding="utf-8", errors="replace") as fh:
+            legacy_text = fh.read()
+        mine = "(pid %s)" % pid
+        others = sorted(
+            {line.split("(pid ")[1].split(")")[0]
+             for line in legacy_text.splitlines() if "(pid " in line}
+        )
+        check("B4 the answering process is not in the shared plugin.log",
+              mine not in legacy_text,
+              "pids appearing in the legacy file: %s (this one is %s)"
+              % (others or "none recorded", pid))
 
 
 def main():

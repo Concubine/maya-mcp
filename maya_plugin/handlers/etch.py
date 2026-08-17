@@ -275,10 +275,12 @@ def etch_text(params: Dict[str, Any]) -> Dict[str, Any]:
             cmds.polyNormal(glyph_tf, normalMode=0, userNormalMode=0)
         cmds.delete(glyph_tf, constructionHistory=True)  # freeze type network out
 
+        # Raw, not uniquified: etching into X and keeping the result called X is
+        # the natural request, and X is consumed by this boolean (#640).
         result = modeling._do_boolean(
             cmds, mesh_long, glyph_tf, "difference",
-            naming.unique_name(cmds, str(params.get("new_name") or "") or
-                               mesh_long.split("|")[-1] + "_etched"),
+            str(params.get("new_name") or "").strip()
+            or mesh_long.split("|")[-1] + "_etched",
         )
     finally:
         # zero orphan history nodes: sweep anything the Type network left behind

@@ -497,8 +497,31 @@ def _bake_compensating_transform(cmds, node: str) -> bool:
     return False
 
 
+def _claim_name(cmds, node: str, requested: str) -> str:
+    """Rename `node` to `requested` if that name is free by now; else leave it.
+
+    Called after the history delete, which is the first moment a name belonging
+    to a consumed operand becomes available. Before then Maya still holds it -
+    polyCBoolOp leaves both operands as emptied transforms - so reserving the
+    name up front produced `X_001` for the most natural request there is: cut a
+    socket into X and have the result still be called X (#640).
+
+    A name genuinely held by an unrelated object is left alone: the staged name
+    stays, which is exactly what the caller got before this existed.
+    """
+    if node.split("|")[-1] == requested:
+        return node
+    if naming.unique_name(cmds, requested) != requested:
+        return node
+    return _long(cmds, cmds.rename(node, requested))
+
+
 def _do_boolean(cmds, a_long: str, b_long: str, op: str, new_name: str) -> Dict[str, Any]:
     """Shared boolean core: polyCBoolOp + the golem-run cleanup discipline.
+
+    `new_name` is the name the caller ASKED for, not a pre-uniquified one: it
+    may be a's or b's own name, and honouring that needs the claim to happen at
+    a specific point in this sequence. See _claim_name.
 
     Per-face shader assignment on boolean output silently no-ops and corrupts
     shading groups (redmine #577 req 1), so: delete history immediately, then
@@ -525,13 +548,25 @@ def _do_boolean(cmds, a_long: str, b_long: str, op: str, new_name: str) -> Dict[
     a_uv = _uv_bounds(cmds, a_shape)
     _fold_cutter_uvs(cmds, a_uv, b_shape)
 
-    result = cmds.polyCBoolOp(a_long, b_long, op=BOOLEAN_OPS[op], name=new_name)
-    out = cmds.rename(result[0], new_name)
+    # Staged under a name that cannot collide with the operands Maya still
+    # holds; the requested one is claimed after the history delete below.
+    staged = naming.unique_name(cmds, new_name)
+    result = cmds.polyCBoolOp(a_long, b_long, op=BOOLEAN_OPS[op], name=staged)
+    out = cmds.rename(result[0], staged)
     out_long = _long(cmds, out)
 
     warnings: List[str] = []
     out_long, reparented = _carry_parent(cmds, out_long, a_parent, b_long, warnings)
     cmds.delete(out_long, constructionHistory=True)
+    # The operands' emptied transforms are gone now, so a name that was theirs
+    # is free. This is the only moment it can be taken.
+    out_long = _claim_name(cmds, out_long, new_name)
+    if out_long.split("|")[-1] != new_name:
+        warnings.append(
+            "the result is called %s, not the requested %r: that name is held by "
+            "another object which this call did not consume"
+            % (out_long.split("|")[-1], new_name)
+        )
 
     _, out_shape = naming.require_mesh(cmds, out_long)
     # polyCBoolOp leaves groupId nodes wired into the shape's (comp)InstObjGroups
@@ -624,7 +659,9 @@ def boolean_op(params: Dict[str, Any]) -> Dict[str, Any]:
     from . import session  # noqa: PLC0415
 
     session.auto_checkpoint("boolean")
-    return _do_boolean(cmds, a_long, b_long, op, naming.unique_name(cmds, requested))
+    # Raw, not uniquified: new_name may be a's or b's, and both are about to
+    # stop existing. _do_boolean claims it at the only moment it is free (#640).
+    return _do_boolean(cmds, a_long, b_long, op, requested.strip())
 
 
 MIN_TARGET_POLYCOUNT = 100
