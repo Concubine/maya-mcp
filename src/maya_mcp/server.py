@@ -76,10 +76,14 @@ SCENE_TIMEOUT_S = 30.0
 CAPTURE_TIMEOUT_S = 120.0
 # A rendered frame is seconds, not milliseconds, and four of them at high
 # sample counts is minutes - a capture-sized timeout would kill good renders.
-# This is the plugin dispatcher's MAX_TIMEOUT_S exactly: asking for more is
-# silently clamped there, so four 2048px frames at 8 samples can still run out
-# of time. Raise both together or neither.
+# The default the render tools use when the caller says nothing.
 RENDER_TIMEOUT_S = 600.0
+# The ceiling, and the dispatcher's MAX_TIMEOUT_S exactly: asking for more is
+# silently clamped there, so the two must move together. Both render tools take
+# a timeout_s now - a 29-cell Arnold sheet exceeded the old 600 s ceiling, and
+# the timeout error told the caller to pass a larger timeout_s that no schema
+# offered and no ceiling would have honoured (#640).
+MAX_RENDER_TIMEOUT_S = 1800.0
 BOOL_TIMEOUT_S = 120.0
 # A heavy scene takes tens of seconds to write, and the handler then re-reads
 # and composes every vertex in the file before it answers.
@@ -493,6 +497,12 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "angles the angle name goes in before the extension: "
             "'D:/run/hero.png' writes hero_front.png, hero_side.png."
         ))] = None,
+        timeout_s: Annotated[float, Field(ge=30.0, le=MAX_RENDER_TIMEOUT_S, description=(
+            "Seconds to wait for ALL the angles. Four 2048px frames at 8 samples "
+            "can exceed the 600 s default. A timeout does not stop the render - "
+            "Maya finishes it and the session stays busy - so raising this costs "
+            "nothing and a timeout costs you the frames."
+        ))] = RENDER_TIMEOUT_S,
     ) -> list:
         """Render frames through the render pipeline instead of the viewport.
 
@@ -507,7 +517,7 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
              "isolate": isolate, "target": target, "zoom": zoom,
              "relight": relight, "samples": samples,
              "fallback_light": fallback_light},
-            timeout_s=RENDER_TIMEOUT_S,
+            timeout_s=timeout_s,
         )
         content: List[Union[Image, str]] = []
         frames = []
@@ -595,6 +605,14 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "Absolute .png path to also WRITE the sheet to, at full cell "
             "resolution. The parent directory must already exist."
         ))] = None,
+        timeout_s: Annotated[float, Field(ge=30.0, le=MAX_RENDER_TIMEOUT_S, description=(
+            "Seconds to wait for the whole sheet. Every cell is a full render, "
+            "so this is per-CALL, not per-cell: 29 Arnold cells can exceed the "
+            "600 s default. Raise it rather than letting the call time out - the "
+            "render keeps going in Maya either way and the session stays busy "
+            "until it finishes, so a timeout costs you the images without saving "
+            "any time."
+        ))] = RENDER_TIMEOUT_S,
     ) -> list:
         """Render a whole kit as ONE contact-sheet image, in one call.
 
@@ -609,7 +627,7 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "render_sheet",
             {"subjects": subjects, "angle": angle, "renderer": renderer,
              "resolution": resolution, "isolate": isolate, "samples": samples},
-            timeout_s=RENDER_TIMEOUT_S,
+            timeout_s=timeout_s,
         )
         shots = result.get("images", [])
         cells = [
@@ -630,6 +648,10 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             # not render".
             "blank cells: " + (json.dumps(blank) if blank else "none"),
         ]
+        # A subject containing another is a decision this tool made about what
+        # the cell shows; unstated, it reads as a broken render (#640).
+        for warning in result.get("warnings", []):
+            content.append("note: " + warning)
         wrote = _write_frames(out_path, ["sheet"], [sheet])
         if wrote:
             content.append(wrote)
@@ -1046,7 +1068,11 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "Defaults to the origin."
         ))] = None,
         name_prefix: Annotated[Optional[str], Field(description=(
-            "Base name for the copies; defaults to the source's short name."
+            "Base name for the copies; defaults to the source's short name. "
+            "radial and linear append _1.._N, since N copies need N names. "
+            "mirror makes exactly ONE copy and takes this as its NAME verbatim - "
+            "pass name_prefix='golem_R_arm' and that is what the copy is called, "
+            "no suffix. Omit it and the mirror falls back to <source>_1."
         ))] = None,
         group_name: Annotated[Optional[str], Field(description=(
             "Parent the copies under a new group of this name. The source is "
@@ -1224,7 +1250,13 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         ))],
         op: Annotated[Literal["union", "difference", "intersection"],
                       Field(description="difference = a minus b.")],
-        new_name: Annotated[str, Field(min_length=1, description="Name for the result.")],
+        new_name: Annotated[str, Field(min_length=1, description=(
+            "Name for the result. This MAY be a's or b's own name - both are "
+            "consumed by the boolean, so cutting a socket into X and having the "
+            "result still be called X is expressible and is usually what you "
+            "want. Only a name held by some OTHER object gets a _NNN suffix, and "
+            "then it says so in warnings."
+        ))],
     ) -> BooleanResult:
         """Boolean two meshes. Auto-checkpoints first; deletes construction
         history and collapses shading to one object-level material (per-face
@@ -1370,7 +1402,10 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "Meshes to pack. All of them land in the SAME patch, so pass the "
             "group of parts that share one material region."
         ))],
-        patch: Annotated[object, Field(description=(
+        # Typed as a real union, not `object`: `object` constrains nothing, so a
+        # client sending "0" got the STRING through untouched and the handler
+        # rejected the very form its own error message named (#640).
+        patch: Annotated[Union[int, List[int]], Field(description=(
             "Which patch to write to: an integer index, or [col, row]. Index 0 "
             "is the TOP-LEFT patch and counts along the row first - the way the "
             "atlas image reads in a viewer."
@@ -1449,7 +1484,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "Extra in-plane rotation in degrees (180 = inverted)."
         ))] = 0.0,
         new_name: Annotated[Optional[str], Field(description=(
-            "Name for the carved result; defaults to <mesh>_etched."
+            "Name for the carved result; defaults to <mesh>_etched. May be "
+            "`mesh`'s own name - the boolean consumes it - so etching a plate and "
+            "keeping its name is expressible."
         ))] = None,
     ) -> BooleanResult:
         """Carve text into a mesh face in ONE call: glyph -> sized -> oriented

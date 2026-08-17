@@ -133,6 +133,8 @@ A boolean builds a **new object**, so everything that is not vertices has to be 
 * **`pivot`** — `a`'s world-space pivot, not the new mesh's bounding-box centre. This is what makes `boolean_op` safe to use after `transform`'s `pivot` or `assemble`'s `pivots` (#603).
 * **`uv_bounds`** — `[u_min, v_min, u_max, v_max]` of the result. `polyCBoolOp` keeps **each operand's own** UV layout, so the faces the cutter contributes arrive carrying the cutter's UVs: on an atlas-packed chunk cut with a default-UV cutter, the new face samples the whole atlas instead of its own patch, and nothing looks wrong until the material goes on. `b`'s UVs are folded into `a`'s bounds before the boolean runs (folding first, because once merged there is no reliable way to tell the two operands' UVs apart). `uv_bounds` is `null` when the result has no UVs at all.
 
+**`new_name` may be `a`'s or `b`'s own name** (#640). Both operands are consumed, so "cut a socket into X and have the result still be called X" is the natural request — and it used to be inexpressible, returning `X_001`, because the name was reserved while Maya still held it: `polyCBoolOp` leaves both operands as emptied transforms until the construction-history delete reaps them. The result is therefore created under a staged name and claims the requested one immediately after that delete, which is the only moment it is free. A name held by an object this call does **not** consume is never stolen: the staged name stays and `warnings` says which object holds it.
+
 `deform`'s `deformer` is one of `bend`, `squash`, `twist`, `flare`, `sine`, `wave` (all `cmds.nonLinear` types), plus `sculpt` and `lattice`. `flare`, `sine` and `wave` are new in M2.4. Each type whitelists its own `params` keys (they land as attributes on the deformer node under exactly those names); `wave` is the one exception with no `lowBound`/`highBound` at all, since it bounds radially via `minRadius`/`maxRadius` instead.
 
 **Angle params are degrees** (`bend`'s `curvature`, `twist`'s `startAngle`/`endAngle`). Those attributes are angle-typed, and `cmds.setAttr` reads an angle in whatever unit the scene's UI is set to — so `deform` converts from degrees into that unit and the number means the same thing in every scene. `curvature: 0.35` is a third of a degree, which is what made `bend` look inert (#636); a visible hunch is 20–60.
@@ -186,6 +188,39 @@ Two details worth knowing before calling it:
   an empty or unlit scene is a valid PNG with a success status, so blankness has
   to be measured rather than assumed away.
 
+| cmd | params | result |
+|---|---|---|
+| `render_sheet` | `{ subjects, angle?, renderer?, resolution?, isolate?, samples? }` | `{ images: [{angle, label, png_b64}], camera_positions: [...], renderer, samples, fallback_light, warnings }` |
+
+`render_sheet` is one frame per subject sharing one renderer, camera and set of
+render globals; the server composites the cells into a single sheet image. It is
+`render_scene`'s loop with a different list, so they share the same
+implementation.
+
+**Its cells are siblings, and that changes what `isolate` means** (#640).
+`render_scene`'s `isolate` keeps the target's whole subtree, which is right when
+you isolate an assembly to look at the assembly. In a sheet the other subjects
+are *rival cells*, not content — so on a parented rig 14 of 29 cells came back
+rendering sub-assemblies, `golem_C_pelvis` rendering the entire golem. Each cell
+now hides the descendants that are themselves subjects, while descendants that
+are **not** cells of their own (a bolt, a trim strip) stay in frame, and
+`warnings` names every subject that contains another. Framing follows the same
+rule: `exactWorldBoundingBox` includes hidden children, so a cell framed on its
+subject's transform was still framed on the subtree it had just hidden, leaving
+the piece a speck. Sheet cells are framed on what they actually show
+(`ignoreInvisible`). `isolate: false` restores the whole-subtree behaviour, since
+a caller declining isolation wants the surroundings.
+
+**Timeouts.** Every cell is a full render, so a sheet's cost is per-call, not
+per-cell: 29 Arnold cells at 256 px exceeded the old 600 s ceiling, which *was*
+the old default — so the timeout error's own advice to "pass a larger timeout_s"
+could not be followed twice over. Both render tools now take `timeout_s`
+(30 s–1800 s), and the dispatcher's `MAX_TIMEOUT_S` was raised to match. A
+timeout never stops the command: Maya runs it to completion on the main thread
+and the session stays busy either way, so raising the timeout costs nothing and
+timing out costs the images. At the ceiling the error stops recommending a larger
+value and says to split the work instead.
+
 ## Framing, and writing images to disk
 
 **`target` frames; `isolate` hides.** Both `render_scene` and `capture_viewport`
@@ -228,11 +263,29 @@ fresh `capture_viewport` result (a command that IS on the list above) entirely o
 side. This is why the M2 tool count (7, README's table) and the M2 command count above (5) don't
 match — reconcile them by the two lists here, not by assuming a 1:1 tool-to-command mapping.
 
+## Commands (M2.3)
+
+| cmd | params | result |
+|---|---|---|
+| `uv_atlas` | `{ names, patch?, cols?, rows?, margin?, mode?, projection?, world_scale? }` | `{ meshes: [{name, uv_bounds, inside_patch}], atlas, patch, patch_rect, margin, projection, normalized, world_scale, all_inside, warnings }` |
+
+**`patch` is an integer index or an explicit `[col, row]`** — index 0 is the
+top-left patch and the index counts along the row first, the way the atlas image
+reads in a viewer. The integer form was documented but *refused* (#640): the MCP
+tool typed the parameter as `object`, which constrains nothing and therefore
+coerces nothing, so `patch: 0` could arrive as the string `"0"` and the handler
+rejected it with an error naming the very form it had just been handed. The schema
+now declares a real `int | [int, int]` union, and the handler reads a numeric
+string as the integer it is, since the plugin is reachable over raw TCP where
+nothing validates at all. Non-numeric text, floats and booleans are still refused.
+
 ## Commands (M2.4)
 
 | cmd | params | result |
 |---|---|---|
 | `array` | `{ name, mode, count?, axis?, center?, angle?, offset?, step_rotate?, step_scale?, pivot?, name_prefix?, group_name? }` | `{ names: [...], mode, group, signed_volume, warnings }` |
+
+**`name_prefix` is a prefix for `radial` and `linear`, and the NAME for `mirror`** (#640). An array of 12 needs 12 distinct names, so those two append `_1`..`_N`. A mirror makes exactly **one** copy, so numbering it was never collision avoidance — it cost the #601 golem run 11 renames, one per mirrored chunk, and nothing in the scene held any of the un-suffixed names. Pass `name_prefix='golem_R_arm'` to a mirror and the copy is called `golem_R_arm`. If that name really is taken, a suffix is added *and* `warnings` says so, because a silent rename is what made the caller check all eleven by hand. Omitting `name_prefix` still gives `<source>_1`: the fallback stem is the source's own name, which is by definition taken.
 
 ## Delivery
 

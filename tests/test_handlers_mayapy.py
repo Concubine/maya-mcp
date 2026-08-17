@@ -426,6 +426,122 @@ def _pack_into(cmds, node, rect):
     cmds.polyEditUV(node + ".map[*]", u=rect[0], v=rect[1])
 
 
+class TestBooleanCanReuseAConsumedName:
+    """#640-1: `new_name` collided with an input the call itself consumes.
+
+    `boolean_op(a=shoulder, b=cutter, new_name="shoulder")` returned
+    `shoulder_001`, because the name was reserved while Maya still held it -
+    polyCBoolOp leaves both operands as emptied transforms until the history
+    delete reaps them. So the most natural request there is, cut a socket into X
+    and have it still be called X, could not be expressed. It cost the #601 run
+    3 renames.
+
+    Only a real Maya can settle this: the whole question is when the operands
+    actually stop existing, which is precisely what a fake decides for itself.
+    """
+
+    def test_the_result_can_take_a_s_own_name(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        cmds.file(rename=str(tmp_path / "boolname.ma"))
+        cmds.polyCube(name="golem_L_shoulder", w=2, h=2, d=2)
+        cmds.polyCube(name="socket_cutter", w=1, h=1, d=1)
+        cmds.xform("socket_cutter", ws=True, t=(1, 1, 0))
+
+        result = modeling.boolean_op({
+            "a": "|golem_L_shoulder", "b": "|socket_cutter",
+            "op": "difference", "new_name": "golem_L_shoulder",
+        })
+        assert result["name"] == "|golem_L_shoulder"
+        assert cmds.objExists("|golem_L_shoulder")
+        assert not cmds.objExists("golem_L_shoulder_001")
+        assert result["warnings"] == []
+
+    def test_the_result_can_take_b_s_own_name(self, tmp_path):
+        """b is consumed too, so its name is equally free."""
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        cmds.file(rename=str(tmp_path / "boolnameb.ma"))
+        cmds.polyCube(name="plate", w=4, h=4, d=4)
+        cmds.polyCube(name="keeper", w=1, h=1, d=1)
+        cmds.xform("keeper", ws=True, t=(2, 2, 0))
+
+        result = modeling.boolean_op({
+            "a": "|plate", "b": "|keeper", "op": "difference",
+            "new_name": "keeper",
+        })
+        assert result["name"] == "|keeper"
+
+    def test_a_name_held_by_an_UNCONSUMED_object_is_still_refused(self, tmp_path):
+        """The safety half. A name belonging to something this call does not
+        consume must not be stolen - and the caller has to be told."""
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        cmds.file(rename=str(tmp_path / "boolnamebystander.ma"))
+        cmds.polyCube(name="host", w=2, h=2, d=2)
+        cmds.polyCube(name="cutter2", w=1, h=1, d=1)
+        cmds.xform("cutter2", ws=True, t=(1, 1, 0))
+        cmds.polyCube(name="bystander", w=1, h=1, d=1)
+        cmds.xform("bystander", ws=True, t=(20, 0, 0))
+
+        result = modeling.boolean_op({
+            "a": "|host", "b": "|cutter2", "op": "difference",
+            "new_name": "bystander",
+        })
+        assert result["name"] != "|bystander"
+        assert cmds.objExists("|bystander")  # untouched
+        assert any("bystander" in w for w in result["warnings"]), (
+            "silently returning a different name is what cost the run its renames"
+        )
+
+    def test_the_claimed_name_keeps_everything_638_carried(self, tmp_path):
+        """The rename happens late in the sequence, after the reparent, the
+        freeze and the pivot. Claiming the name must not undo any of that."""
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        cmds.file(rename=str(tmp_path / "boolnamestate.ma"))
+        head = cmds.group(empty=True, name="golem_C_head")
+        cmds.polyCube(name="brow", w=2, h=2, d=2)
+        cmds.parent("brow", head)
+        cmds.xform("|golem_C_head|brow", ws=True, pivots=(0, 1, 0))
+        cmds.polyCube(name="visor2", w=1, h=1, d=1)
+        cmds.xform("visor2", ws=True, t=(1, 1, 0))
+
+        result = modeling.boolean_op({
+            "a": "|golem_C_head|brow", "b": "|visor2", "op": "difference",
+            "new_name": "brow",
+        })
+        assert result["name"] == "|golem_C_head|brow"
+        assert result["parent"] == "|golem_C_head"
+        assert result["pivot"] == pytest.approx([0.0, 1.0, 0.0], abs=1e-4)
+
+    def test_etch_text_can_keep_the_plate_s_name(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import etch
+
+        try:
+            cmds.loadPlugin("Type", quiet=True)
+        except Exception:
+            pytest.skip("Type plugin unavailable in standalone")
+        cmds.file(rename=str(tmp_path / "etchname.ma"))
+        cmds.polyCube(name="sigil_plate", w=4, h=4, d=4)
+
+        result = etch.etch_text({
+            "mesh": "|sigil_plate", "text": "A", "face": 0, "width": 2.0,
+            "depth": 0.3, "new_name": "sigil_plate",
+        })
+        assert result["name"] == "|sigil_plate"
+
+
 class TestBooleanCarriesAState:
     """#638: a boolean rebuilds the mesh, and everything that is not vertices -
     the pivot, the place in the hierarchy, the atlas patch - was being dropped
@@ -2005,3 +2121,52 @@ class TestFramingExcludesLightsInMaya:
         assert bbox_min[0] == pytest.approx(-2.5, abs=1e-4)
         position, _ = capture.camera_placement("three_quarter", bbox_min, bbox_max)
         assert math.dist([0, 0, 0], position) < 100.0
+
+
+class TestBboxSeesHiddenChildren:
+    """#640-4's load-bearing measurement, pinned against the real Maya.
+
+    The fake cmds in tests/test_render.py encodes these two answers, and the
+    sheet's framing fix rests entirely on the second one. If a Maya version ever
+    changed either, the headless tests would keep passing while every nested
+    sheet cell went back to framing a subtree it had hidden.
+    """
+
+    def _nested(self, cmds, tmp_path, name):
+        cmds.file(rename=str(tmp_path / name))
+        parent = cmds.polyCube(name="pelvisBox", w=1, h=1, d=1)[0]
+        child = cmds.polyCube(name="chestBox", w=1, h=1, d=1)[0]
+        cmds.xform(child, ws=True, t=(20, 0, 0))
+        cmds.parent(child, parent)
+        return parent, cmds.listRelatives(child, shapes=True, fullPath=True)[0]
+
+    def test_a_parents_bbox_includes_a_HIDDEN_child(self, tmp_path):
+        import maya.cmds as cmds
+
+        parent, child_shape = self._nested(cmds, tmp_path, "bboxhidden.ma")
+        cmds.hide(child_shape)
+        assert cmds.exactWorldBoundingBox(parent)[3] == pytest.approx(20.5, abs=1e-4), (
+            "hiding a child does NOT shrink the parent's box - which is why "
+            "hiding the sub-assemblies was not enough to fix the framing"
+        )
+
+    def test_ignoreInvisible_is_what_measures_what_will_be_seen(self, tmp_path):
+        import maya.cmds as cmds
+
+        parent, child_shape = self._nested(cmds, tmp_path, "bboxignore.ma")
+        cmds.hide(child_shape)
+        assert cmds.exactWorldBoundingBox(
+            parent, ignoreInvisible=True
+        )[3] == pytest.approx(0.5, abs=1e-4)
+
+    def test_scene_bbox_passes_the_flag_through(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import capture
+
+        parent, child_shape = self._nested(cmds, tmp_path, "bboxflag.ma")
+        cmds.hide(child_shape)
+        _, subtree_max = capture._scene_bbox(cmds, [parent])
+        _, visible_max = capture._scene_bbox(cmds, [parent], visible_only=True)
+        assert subtree_max[0] == pytest.approx(20.5, abs=1e-4)
+        assert visible_max[0] == pytest.approx(0.5, abs=1e-4)

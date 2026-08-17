@@ -498,8 +498,22 @@ def _restore_rig(cmds, rig: Dict[str, float]) -> None:
             pass
 
 
-def _hide_non_targets(cmds, isolate: List[str]) -> List[str]:
+def _under_any(name: str, roots: set) -> bool:
+    return any(name.startswith(root + "|") for root in roots)
+
+
+def _hide_non_targets(
+    cmds, isolate: List[str], exclude: Optional[List[str]] = None
+) -> List[str]:
     """Hide every piece of geometry that is not in `isolate`; return what was hidden.
+
+    `exclude` overrides the descendant rule below. Keeping a target's whole
+    subtree is right for render_scene - isolate an assembly and you want to see
+    the assembly - but a contact sheet's cells are siblings in one list, and on a
+    parented rig one subject contains another: 14 of 29 cells came back as
+    sub-assemblies, `golem_C_pelvis` rendering the entire golem (#640). The other
+    subjects go in `exclude`, so each cell shows its own piece while descendants
+    that are NOT cells of their own (a bolt, a trim strip) stay in frame.
 
     Panel isolation is a viewport concept and invisible to a render, so
     isolating here means hiding the rest - and putting it back afterwards.
@@ -515,6 +529,17 @@ def _hide_non_targets(cmds, isolate: List[str]) -> List[str]:
     for name in isolate:
         for long_name in cmds.ls(name, long=True) or [name]:
             keep.add(long_name)
+    # Only excluded names UNDER a kept target matter: exclude exists purely to
+    # override the descendant rule. An excluded ANCESTOR is already hidden by the
+    # ordinary rule, and treating it as banished hid the kept target's own shape -
+    # measured, the chest cell came back empty and its camera was placed 5.8e20
+    # units out, because a subject nested between two other subjects has one of
+    # them above it (#640).
+    banished = set()
+    for name in exclude or []:
+        for long_name in cmds.ls(name, long=True) or [name]:
+            if long_name not in keep and _under_any(long_name, keep):
+                banished.add(long_name)
     # An aiSkyDomeLight answers ls(geometry=True). Hiding it turned every
     # isolated render under the environment/hdri presets into a pure black
     # frame - and those are the only presets in which a metal can be judged at
@@ -527,7 +552,11 @@ def _hide_non_targets(cmds, isolate: List[str]) -> List[str]:
     for name in cmds.ls(geometry=True, long=True) or []:
         if name in lights:
             continue
-        if name in keep or any(name.startswith(target + "|") for target in keep):
+        if name in keep:
+            continue
+        if _under_any(name, keep) and not (
+            name in banished or _under_any(name, banished)
+        ):
             continue
         try:
             if not cmds.getAttr(name + ".visibility"):
@@ -608,13 +637,50 @@ def render_sheet(params: Dict[str, Any]) -> Dict[str, Any]:
     # piece in front of forty others. Opting out is allowed for a subject that
     # needs its surroundings (a transmissive material refracts them).
     isolate_each = bool(params.get("isolate", True))
+    # The other subjects are this cell's rivals, not its content: on a parented
+    # rig one subject contains another, and keeping the subtree made 14 of 29
+    # cells render sub-assemblies (#640). Each cell frames what it still shows.
     shots = [
         {"label": subject, "angle": angle,
          "isolate": [subject] if isolate_each else None,
-         "frame_on": [subject]}
+         "exclude": [s for s in subjects if s != subject] if isolate_each else None,
+         "frame_on": [subject],
+         "frame_visible_only": isolate_each}
         for subject in subjects
     ]
-    return _run_shots(_cmds(), shots, params)
+    result = _run_shots(_cmds(), shots, params)
+    result["warnings"] = _nesting_warnings(_cmds(), subjects) + result.get(
+        "warnings", []
+    )
+    return result
+
+
+def _nesting_warnings(cmds, subjects: List[str]) -> List[str]:
+    """Say which subjects contain which others - the cells whose content changed.
+
+    The nesting is hidden in the hierarchy, and a caller reading a sheet cannot
+    tell "this piece looks like the whole rig" from "this piece IS the whole
+    rig". Naming it is cheap and turns a surprise into a stated decision.
+    """
+    resolved = {}
+    for subject in subjects:
+        matches = cmds.ls(subject, long=True) or []
+        if len(matches) == 1:
+            resolved[subject] = matches[0]
+    warnings = []
+    for subject, long_name in resolved.items():
+        contained = sorted(
+            other for other, other_long in resolved.items()
+            if other != subject and other_long.startswith(long_name + "|")
+        )
+        if contained:
+            warnings.append(
+                "%s contains %d other subject(s) (%s): their geometry was hidden "
+                "in %s's cell, which shows only its own pieces"
+                % (subject, len(contained), ", ".join(contained[:4])
+                   + (", ..." if len(contained) > 4 else ""), subject)
+            )
+    return warnings
 
 
 def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dict[str, Any]:
@@ -680,25 +746,32 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
 
         images_out = []
         positions = []
-        current_isolate: Optional[List[str]] = None
+        # (isolate, exclude) - the pair that decides what is visible.
+        current_isolate: Optional[tuple] = None
         for index, shot in enumerate(shots):
             angle = shot["angle"]
             # Re-hide only when the visible set actually changes: render_scene
             # holds one isolate set across all its angles, and re-walking every
             # shape in a 45,000-renderer city per frame would cost more than the
             # renders.
-            if shot["isolate"] != current_isolate:
+            # The exclude set differs per sheet cell even when isolate does not,
+            # so both have to be part of "did the visible set change".
+            visible_key = (shot["isolate"], shot.get("exclude"))
+            if visible_key != current_isolate:
                 for name in hidden:
                     try:
                         cmds.showHidden(name)
                     except Exception:
                         pass
                 hidden = (
-                    _hide_non_targets(cmds, shot["isolate"]) if shot["isolate"] else []
+                    _hide_non_targets(cmds, shot["isolate"], shot.get("exclude"))
+                    if shot["isolate"] else []
                 )
-                current_isolate = shot["isolate"]
+                current_isolate = visible_key
 
-            bbox_min, bbox_max = capture._scene_bbox(cmds, shot["frame_on"])
+            bbox_min, bbox_max = capture._scene_bbox(
+                cmds, shot["frame_on"], visible_only=bool(shot.get("frame_visible_only"))
+            )
             # "current" has no meaning without a panel to read a camera from;
             # it degrades to the default judging angle rather than failing a
             # render the caller could not have known was panel-dependent.

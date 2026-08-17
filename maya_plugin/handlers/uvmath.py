@@ -57,16 +57,39 @@ def patch_rect(cols: Any, rows: Any, col: Any, row: Any, margin: float = 0.0) ->
     return (u0, v0, u0 + w - 2 * inset_u, v0 + h - 2 * inset_v)
 
 
+def _as_index(value: Any) -> Any:
+    """An int, or a string of digits read as one; anything else unchanged.
+
+    The plugin is reachable directly over TCP, not only through the typed MCP
+    schema, so a caller can still hand us the string "0". Rejecting it made
+    `patch: 0` fail with an error that named the integer form it had just been
+    given (#640) - the number arrived as text and nothing coerced it.
+    """
+    if isinstance(value, bool) or isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        # int() is the judge rather than a hand-rolled digit test: "--2" passes
+        # a lstrip("+-").isdigit() check and then raises, which turned a bad
+        # patch into a ValueError escaping as an unhandled crash instead of the
+        # HandlerError the caller can read.
+        try:
+            return int(value.strip())
+        except ValueError:
+            return value
+    return value
+
+
 def resolve_cell(patch: Any, cols: Any, rows: Any) -> Tuple[int, int]:
     """Accept either a flat index or an explicit [col, row]; return (col, row)."""
     cols, rows = _grid(cols, rows)
+    patch = _as_index(patch)
     if isinstance(patch, (list, tuple)):
         if len(patch) != 2:
             raise HandlerError(
                 "patch as a pair must be [col, row], got %r" % (patch,),
                 hint="or pass a single integer index counted from the top-left",
             )
-        col, row = patch
+        col, row = (_as_index(v) for v in patch)
         if any(isinstance(v, bool) or not isinstance(v, int) for v in (col, row)):
             raise HandlerError("patch [col, row] must be integers, got %r" % (patch,))
         if not (0 <= col < cols and 0 <= row < rows):

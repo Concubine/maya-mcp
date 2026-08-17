@@ -433,6 +433,60 @@ class TestMirror:
         array.array({"name": "|tooth", "mode": "mirror", "axis": "x"})
         assert [op for op, _ in fake.calls].count("polyNormal") == 1
 
+    def test_a_named_mirror_gets_that_name_verbatim(self, fake):
+        """#640-2: all 11 mirror calls in the #601 run came back as
+        golem_R_<part>_1 with nothing in the scene holding the un-suffixed name,
+        so the suffix was unconditional rather than collision avoidance - 11
+        rename calls, doubling an 11-call task to 22."""
+        result = array.array({
+            "name": "|tooth", "mode": "mirror", "axis": "x",
+            "name_prefix": "golem_R_tooth",
+        })
+        assert result["names"] == ["|golem_R_tooth"]
+        assert not any("already" in w for w in result["warnings"]), (
+            "nothing held that name, so nothing should be said about collisions"
+        )
+
+    def test_an_unnamed_mirror_still_numbers_the_copy(self, fake):
+        """Without name_prefix the stem IS the source's own name, which is by
+        definition taken - so a suffix is real collision avoidance there and the
+        familiar _1 is kept rather than becoming _001."""
+        result = array.array({"name": "|tooth", "mode": "mirror", "axis": "x"})
+        assert result["names"] == ["|tooth_1"]
+
+    def test_a_taken_name_is_suffixed_and_says_so(self, fake):
+        fake.objects.append("|golem_R_tooth")
+        result = array.array({
+            "name": "|tooth", "mode": "mirror", "axis": "x",
+            "name_prefix": "golem_R_tooth",
+        })
+        assert result["names"] == ["|golem_R_tooth_001"]
+        assert any("already" in w for w in result["warnings"]), (
+            "a silent rename is what made the caller check all 11 by hand"
+        )
+
+    def test_radial_and_linear_still_number_their_copies(self, fake):
+        """The suffix is right where N copies need N names - only mirror, which
+        makes exactly one, was wrong."""
+        # The source is element 0 of the array, so count=N makes N-1 copies.
+        # What is asserted is the NUMBERING, not that convention.
+        radial = array.array({
+            "name": "|tooth", "mode": "radial", "count": 4,
+            "name_prefix": "cog",
+        })
+        assert len(radial["names"]) > 1
+        assert radial["names"] == [
+            "|cog_%d" % i for i in range(1, len(radial["names"]) + 1)
+        ]
+        linear = array.array({
+            "name": "|tooth", "mode": "linear", "count": 3,
+            "offset": [1.0, 0.0, 0.0], "name_prefix": "rail",
+        })
+        assert len(linear["names"]) > 1
+        assert linear["names"] == [
+            "|rail_%d" % i for i in range(1, len(linear["names"]) + 1)
+        ]
+
     def test_temporary_group_is_deleted(self, fake):
         result = array.array({"name": "|tooth", "mode": "mirror", "axis": "x"})
         ops = [op for op, _ in fake.calls]

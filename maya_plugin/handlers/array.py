@@ -32,8 +32,16 @@ def _short(name: str) -> str:
     return name.split("|")[-1]
 
 
-def _duplicate(cmds, source: str, prefix: str, index: int) -> str:
-    new_name = naming.unique_name(cmds, "%s_%d" % (prefix, index))
+def _duplicate(cmds, source: str, prefix: str, index: Optional[int] = None) -> str:
+    """One copy named `prefix_<index>`, or exactly `prefix` when index is None.
+
+    An array of 12 needs 12 distinct names, so radial and linear number their
+    copies. Mirror makes exactly ONE, and numbering it turned every mirror call
+    into a rename: the suffix was unconditional rather than collision
+    avoidance, and nothing in the scene held the un-suffixed name (#640).
+    """
+    requested = prefix if index is None else "%s_%d" % (prefix, index)
+    new_name = naming.unique_name(cmds, requested)
     copy = cmds.duplicate(source, name=new_name, returnRootsOnly=True)[0]
     return _long(cmds, copy)
 
@@ -108,7 +116,12 @@ def array(params: Dict[str, Any]) -> Dict[str, Any]:
     elif mode == "linear":
         names = _linear(cmds, source, prefix, params)
     else:
-        names, signed, mirror_warnings = _mirror(cmds, source, prefix, params)
+        # Whether the caller NAMED the copy matters: `prefix` otherwise defaults
+        # to the source's own short name, which is by definition taken, so using
+        # it verbatim would only ever produce a suffix anyway (#640).
+        names, signed, mirror_warnings = _mirror(
+            cmds, source, prefix, params, named=requested_prefix is not None
+        )
         warnings.extend(mirror_warnings)
 
     group_name = params.get("group_name")
@@ -200,9 +213,14 @@ def _mesh_signed_volume(cmds, transform: str) -> Optional[float]:
 
 
 def _mirror(
-    cmds, source: str, prefix: str, params: Dict[str, Any]
+    cmds, source: str, prefix: str, params: Dict[str, Any], named: bool = False
 ) -> Tuple[List[str], Optional[float], List[str]]:
     """One copy, reflected across the world plane perpendicular to `axis`.
+
+    `named` says the caller passed name_prefix, in which case it is the copy's
+    NAME and is used verbatim. A mirror makes exactly one copy, so numbering it
+    was never collision avoidance - it cost the #601 golem run 11 renames, one
+    per mirrored chunk, none of whose un-suffixed names anything held (#640).
 
     Two traps, both encoded here.
 
@@ -233,7 +251,14 @@ def _mirror(
             hint="mirror needs a single polygon mesh; mirror each chunk and group the results",
         ) from exc
 
-    copy = _duplicate(cmds, source, prefix, 1)
+    copy = _duplicate(cmds, source, prefix, None if named else 1)
+    warnings: List[str] = []
+    if named and _short(copy) != prefix:
+        warnings.append(
+            "the mirrored copy is called %s, not %r: that name was already "
+            "taken, so a suffix was added to avoid the collision"
+            % (_short(copy), prefix)
+        )
     grp = cmds.group(copy, world=True, name=naming.unique_name(cmds, "%s_mirrorGrp" % prefix))
     grp = _long(cmds, grp)
     cmds.xform(grp, worldSpace=True, pivots=tuple(pivot))
@@ -254,7 +279,6 @@ def _mirror(
     cmds.delete(copy, constructionHistory=True)
 
     signed = _mesh_signed_volume(cmds, copy)
-    warnings: List[str] = []
     if signed is None:
         # Absence of evidence is not evidence of absence: a genuinely
         # black, inward-facing mesh must not come back with a clean

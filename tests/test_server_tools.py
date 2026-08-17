@@ -6,6 +6,7 @@ Uses the real MCPServer with an injected fake connection — no Maya, no sockets
 import asyncio
 import base64
 import io
+import json
 
 import pytest
 from PIL import Image as PILImage
@@ -1435,6 +1436,108 @@ class TestImageToolsWriteFiles:
         text = " ".join(c.text for c in result.content
                         if getattr(c, "type", None) == "text")
         assert "wrote:" not in text
+
+
+class TestRenderTimeoutIsReachable:
+    """#640-5: 29 Arnold cells exceeded the limit, and the timeout error told the
+    caller to pass a larger timeout_s that no schema offered - and that no
+    ceiling would have honoured, since the default WAS the dispatcher's maximum.
+    """
+
+    @staticmethod
+    def _sheet_conn():
+        return FakeConn(responses={"render_sheet": {
+            "images": [{"angle": "three_quarter", "label": "|kit_a",
+                        "png_b64": TestImageToolsWriteFiles._subject_png()}],
+            "camera_positions": [], "renderer": "arnold", "samples": 2,
+            "fallback_light": False, "zoom": 1.0, "relit_lights": 0,
+        }})
+
+    def test_a_sheet_defaults_to_the_render_timeout(self):
+        conn = self._sheet_conn()
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_render_sheet", {"subjects": ["|kit_a"]}))
+        assert conn.calls[0]["timeout_s"] == server_mod.RENDER_TIMEOUT_S
+
+    def test_a_sheet_can_be_given_longer(self):
+        conn = self._sheet_conn()
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_render_sheet", {
+            "subjects": ["|kit_a"], "timeout_s": 1500.0,
+        }))
+        assert conn.calls[0]["timeout_s"] == 1500.0
+
+    def test_render_scene_takes_one_too(self):
+        conn = FakeConn(responses={"render_scene": {
+            "images": [], "camera_positions": [], "renderer": "arnold",
+            "samples": 3, "fallback_light": False, "zoom": 1.0, "relit_lights": 0,
+        }})
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_render_scene", {
+            "angles": ["front"], "timeout_s": 1200.0,
+        }))
+        assert conn.calls[0]["timeout_s"] == 1200.0
+
+    def test_the_ceiling_is_the_dispatchers_ceiling(self):
+        """Above the dispatcher's MAX_TIMEOUT_S the plugin silently clamps, so a
+        schema that accepted more would be promising something it cannot keep."""
+        from maya_plugin import dispatcher
+
+        assert server_mod.MAX_RENDER_TIMEOUT_S == dispatcher.MAX_TIMEOUT_S
+
+    def test_asking_past_the_ceiling_is_refused_rather_than_clamped(self):
+        conn = self._sheet_conn()
+        mcp = server_mod.create_server(conn)
+        with pytest.raises(Exception):
+            run(mcp.call_tool("maya_render_sheet", {
+                "subjects": ["|kit_a"],
+                "timeout_s": server_mod.MAX_RENDER_TIMEOUT_S + 1.0,
+            }))
+        assert conn.calls == []
+
+
+class TestUvAtlasPatchAcceptsAnInteger:
+    """#640-3: `patch: 0` was refused by the handler with an error naming the
+    integer form it had just been handed - the schema typed it as `object`, which
+    constrains nothing and coerces nothing."""
+
+    @staticmethod
+    def _conn():
+        return FakeConn(responses={"uv_atlas": {
+            "meshes": [], "atlas": [4, 4], "patch": [0, 0],
+            "patch_rect": [0.0, 0.75, 0.25, 1.0], "margin": 0.02,
+            "projection": "auto", "normalized": True, "all_inside": True,
+        }})
+
+    def test_a_bare_integer_index_reaches_maya(self):
+        conn = self._conn()
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_uv_atlas", {"names": ["|chunk"], "patch": 0}))
+        assert conn.calls[0]["params"]["patch"] == 0
+
+    def test_a_col_row_pair_still_works(self):
+        conn = self._conn()
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_uv_atlas", {"names": ["|chunk"], "patch": [2, 1]}))
+        assert conn.calls[0]["params"]["patch"] == [2, 1]
+
+    def test_a_numeric_string_is_coerced_to_the_integer_it_is(self):
+        """The exact failure: the number arrived as text. A typed union coerces
+        it; `object` passed it straight through to a handler that refused it."""
+        conn = self._conn()
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_uv_atlas", {"names": ["|chunk"], "patch": "0"}))
+        assert conn.calls[0]["params"]["patch"] == 0
+
+    def test_the_schema_declares_a_type_at_all(self):
+        """`object` is why nothing coerced. If this reverts, the tool goes back
+        to accepting anything and failing deep in the handler."""
+        mcp = server_mod.create_server(self._conn())
+        tool = next(t for t in run(mcp.list_tools()) if t.name == "maya_uv_atlas")
+        schema = tool.input_schema["properties"]["patch"]
+        assert schema != {}, "patch has no type constraint at all"
+        declared = json.dumps(schema)
+        assert "integer" in declared
 
 
 class TestCaptureViewportTargetReachesMaya:

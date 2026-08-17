@@ -119,6 +119,9 @@ class FakeCmds:
         self._geometry = list(geometry)
         self._transforms = sorted({s.rsplit("|", 1)[0] for s in self._geometry})
         self.visibility = {name: True for name in self._geometry}
+        # Per-shape world boxes, for tests that care where things are. Anything
+        # unlisted is the unit box.
+        self.boxes = {}
 
     # --- queries
     def ls(self, *args, **kwargs):
@@ -145,8 +148,30 @@ class FakeCmds:
     def objExists(self, name):
         return name in self._transforms or name in self._geometry or name in self.created
 
-    def exactWorldBoundingBox(self, *targets):
-        return [-1.0, -1.0, -1.0, 1.0, 1.0, 1.0]
+    def exactWorldBoundingBox(self, *targets, **kwargs):
+        """A transform's box INCLUDES its descendants - and, unless
+        ignoreInvisible is asked for, includes hidden ones too.
+
+        Both halves are measured against Maya 2027 (mayapy): a parent whose only
+        distant child is hidden still reports that child's corner at 20.5, and
+        ignoreInvisible=True reports 0.5. A fake that ignored the flag would let
+        #640's second half - a sheet cell framed on the whole subtree it had
+        just hidden - stay green.
+        """
+        ignore_invisible = bool(kwargs.get("ignoreInvisible"))
+        boxes = []
+        for target in targets:
+            for shape in self._geometry:
+                if shape != target and not shape.startswith(target + "|"):
+                    continue
+                if ignore_invisible and not self.visibility.get(shape, True):
+                    continue
+                boxes.append(self.boxes.get(shape, (-1.0, -1.0, -1.0, 1.0, 1.0, 1.0)))
+        if not boxes:
+            return [-1.0, -1.0, -1.0, 1.0, 1.0, 1.0]
+        return [min(b[i] for b in boxes) for i in range(3)] + [
+            max(b[i] for b in boxes) for i in range(3, 6)
+        ]
 
     def getAttr(self, attr):
         if attr.endswith(".translate") or attr.endswith(".rotate"):
@@ -225,8 +250,15 @@ def _stub_render_frame(tmp_path, fake):
     def render_frame(cmds, camera, prefix, renderer, resolution, samples):
         path = tmp_path / (prefix + ".png")
         PILImage.new("RGB", (8, 8), (120, 30, 30)).save(path)
-        fake.written.append({"prefix": prefix, "renderer": renderer,
-                             "resolution": resolution, "samples": samples})
+        fake.written.append({
+            "prefix": prefix, "renderer": renderer,
+            "resolution": resolution, "samples": samples,
+            # Per-FRAME state. `fake.hidden` accumulates across a sheet and
+            # showHidden does not unwind it, so only a snapshot taken at render
+            # time can say what a given cell actually showed.
+            "visible": sorted(n for n, on in fake.visibility.items() if on),
+            "camera_translate": fake.attrs.get(camera + ".translate"),
+        })
         return str(path)
 
     return render_frame
@@ -510,6 +542,128 @@ class TestRenderSheet:
 
     def test_a_sheet_does_not_pollute_the_undo_queue(self):
         assert render.render_sheet.no_undo_chunk is True
+
+
+# A parented rig, as the #601 golem was: the pelvis contains the chest, which
+# contains the head. Every one of the three is also a subject of the sheet.
+NESTED_RIG = (
+    "|golem|pelvis|pelvisShape",
+    "|golem|pelvis|chest|chestShape",
+    "|golem|pelvis|chest|head|headShape",
+)
+
+
+@pytest.fixture
+def nested_maya(monkeypatch, tmp_path):
+    fake = FakeCmds(lights=["|keyLightShape"], geometry=NESTED_RIG)
+    # Spread them out, so framing the whole subtree is measurably different
+    # from framing one chunk.
+    fake.boxes = {
+        "|golem|pelvis|pelvisShape": (-1.0, 0.0, -1.0, 1.0, 2.0, 1.0),
+        "|golem|pelvis|chest|chestShape": (-2.0, 2.0, -2.0, 2.0, 6.0, 2.0),
+        "|golem|pelvis|chest|head|headShape": (-1.0, 6.0, -1.0, 1.0, 8.0, 1.0),
+    }
+    monkeypatch.setattr(render, "_cmds", lambda: fake)
+    monkeypatch.setattr(render, "_render_frame", _stub_render_frame(tmp_path, fake))
+    return fake
+
+
+class TestSheetCellsOnANestedRig:
+    """#640-4: a subject that CONTAINS other subjects rendered them too.
+
+    14 of 29 cells came back as sub-assemblies on the golem sheet -
+    `golem_C_pelvis` rendered the entire golem. Keeping a target's descendants is
+    right for render_scene, where you isolate an assembly to see the assembly.
+    In a sheet the other cells are siblings in one list, not content.
+    """
+
+    SUBJECTS = ["|golem|pelvis", "|golem|pelvis|chest", "|golem|pelvis|chest|head"]
+
+    def test_a_containing_subject_hides_the_subjects_it_contains(self, nested_maya):
+        render.render_sheet({"subjects": self.SUBJECTS})
+        # Cell 0 is the pelvis: the chest and head are subjects of their own, so
+        # its frame must have shown neither. This is the 14-of-29 defect.
+        pelvis_cell = nested_maya.written[0]["visible"]
+        assert "|golem|pelvis|pelvisShape" in pelvis_cell
+        assert "|golem|pelvis|chest|chestShape" not in pelvis_cell
+        assert "|golem|pelvis|chest|head|headShape" not in pelvis_cell
+
+    def test_a_descendant_that_is_NOT_a_subject_stays_in_frame(self, monkeypatch, tmp_path):
+        """A bolt on the pelvis is part of the pelvis. Only rival CELLS go."""
+        fake = FakeCmds(
+            lights=["|keyLightShape"],
+            geometry=NESTED_RIG + ("|golem|pelvis|bolt|boltShape",),
+        )
+        monkeypatch.setattr(render, "_cmds", lambda: fake)
+        monkeypatch.setattr(render, "_render_frame", _stub_render_frame(tmp_path, fake))
+        render.render_sheet({"subjects": ["|golem|pelvis", "|golem|pelvis|chest"]})
+        pelvis_cell = fake.written[0]["visible"]
+        assert "|golem|pelvis|bolt|boltShape" in pelvis_cell
+        assert "|golem|pelvis|chest|chestShape" not in pelvis_cell
+
+    def test_the_cell_is_framed_on_what_it_shows_not_on_the_subtree(self, nested_maya):
+        """The other half of the defect. Hiding the sub-assemblies is not enough:
+        exactWorldBoundingBox includes hidden children, so the camera still
+        framed the whole rig and left the piece a speck.
+
+        Asserted against camera_placement's own answer for each box rather than a
+        magic distance, so it says WHICH framing happened.
+        """
+        render.render_sheet({"subjects": self.SUBJECTS})
+        placed = list(nested_maya.written[0]["camera_translate"])
+
+        chunk_only, _ = capture.camera_placement(
+            "three_quarter", [-1.0, 0.0, -1.0], [1.0, 2.0, 1.0]
+        )
+        whole_subtree, _ = capture.camera_placement(
+            "three_quarter", [-2.0, 0.0, -2.0], [2.0, 8.0, 2.0]
+        )
+        assert placed == pytest.approx(list(chunk_only), abs=1e-6)
+        assert placed != pytest.approx(list(whole_subtree), abs=1e-6), (
+            "the pelvis cell is framed on the whole rig it just hid"
+        )
+
+    def test_a_subject_nested_BETWEEN_two_others_still_shows_itself(self, nested_maya):
+        """Found by the live gate, not by design. The chest has the pelvis above
+        it and the head below it, both subjects. Treating an excluded ANCESTOR as
+        banished hid the chest's own shape: the cell came back empty and its
+        camera was placed 5.8e20 units out. exclude exists only to override the
+        descendant rule, so an ancestor in it is already handled and must be
+        ignored."""
+        render.render_sheet({"subjects": self.SUBJECTS})
+        chest_cell = nested_maya.written[1]["visible"]
+        assert "|golem|pelvis|chest|chestShape" in chest_cell, (
+            "the middle subject hid its own geometry: %s" % chest_cell
+        )
+        assert "|golem|pelvis|pelvisShape" not in chest_cell
+        assert "|golem|pelvis|chest|head|headShape" not in chest_cell
+
+    def test_no_cell_is_framed_from_absurdly_far_away(self, nested_maya):
+        """The symptom that exposed the bug above, pinned as its own claim: a
+        camera 5.8e20 units out renders a frame of nothing and reads as a broken
+        renderer."""
+        render.render_sheet({"subjects": self.SUBJECTS})
+        for cell in nested_maya.written:
+            placed = cell["camera_translate"]
+            assert max(abs(v) for v in placed) < 1e4, (
+                "cell %r placed its camera at %r" % (cell["prefix"], placed)
+            )
+
+    def test_nesting_is_reported_not_silent(self, nested_maya):
+        out = render.render_sheet({"subjects": self.SUBJECTS})
+        warnings = " ".join(out["warnings"])
+        assert "|golem|pelvis" in warnings
+        assert "contains 2 other subject" in warnings
+
+    def test_a_flat_kit_gets_no_nesting_warning(self, fake_maya):
+        out = render.render_sheet({"subjects": ["|ball", "|floor"]})
+        assert out["warnings"] == []
+
+    def test_declining_isolation_keeps_the_whole_subtree(self, nested_maya):
+        """isolate=False means the caller wants the surroundings, and a
+        contained subject is part of them."""
+        render.render_sheet({"subjects": self.SUBJECTS, "isolate": False})
+        assert nested_maya.hidden == []
 
 
 class FakeArnoldCmds(FakeCmds):

@@ -580,6 +580,7 @@ class FakeSceneCmds:
     def __init__(self, shapes):
         self.shapes = shapes  # name -> (nodeType, (minx,miny,minz,maxx,maxy,maxz))
         self.unknown_classification = set()
+        self.visible = {name: True for name in shapes}
 
     def ls(self, *args, geometry=False, visible=False, long=False, **kw):
         assert geometry and visible
@@ -597,8 +598,17 @@ class FakeSceneCmds:
     def objExists(self, name):
         return name in self.shapes
 
-    def exactWorldBoundingBox(self, *names):
+    def exactWorldBoundingBox(self, *names, **kwargs):
         boxes = [self.shapes[n][1] for n in names]
+        if kwargs.get("ignoreInvisible"):
+            boxes = [
+                self.shapes[n][1] for n in names if self.visible.get(n, True)
+            ]
+        if not boxes:
+            # Maya's answer for "nothing visible" is an INVERTED sentinel box,
+            # measured on 2027 as [1e20]*3 + [-1e20]*3. Reproducing it is the
+            # point: fed to camera_placement it put a camera 5.8e20 units out.
+            return [1e20, 1e20, 1e20, -1e20, -1e20, -1e20]
         return [min(b[i] for b in boxes) for i in range(3)] + [
             max(b[i] for b in boxes) for i in range(3, 6)
         ]
@@ -673,6 +683,53 @@ class TestFramingExcludesLights:
         assert capture._scene_bbox(fake, None) == (
             [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]
         )
+
+
+class TestVisibleOnlyFraming:
+    """#640-4: framing a contact-sheet cell on what it SHOWS, not on what its
+    subject contains. exactWorldBoundingBox includes hidden children."""
+
+    SCENE = {
+        "pelvisShape": ("mesh", (-1, 0, -1, 1, 2, 1)),
+        "chestShape": ("mesh", (-2, 2, -2, 2, 8, 2)),
+    }
+
+    def test_off_by_default_a_hidden_object_still_counts(self):
+        """A caller who frames on something they hid means its place in the
+        world, not an empty box - so this must stay opt-in."""
+        fake = FakeSceneCmds(self.SCENE)
+        fake.visible["chestShape"] = False
+        assert capture._scene_bbox(fake, ["pelvisShape", "chestShape"]) == (
+            [-2, 0, -2], [2, 8, 2]
+        )
+
+    def test_on_request_the_hidden_object_drops_out(self):
+        fake = FakeSceneCmds(self.SCENE)
+        fake.visible["chestShape"] = False
+        assert capture._scene_bbox(
+            fake, ["pelvisShape", "chestShape"], visible_only=True
+        ) == ([-1, 0, -1], [1, 2, 1])
+
+    def test_an_all_hidden_target_falls_back_instead_of_returning_the_sentinel(self):
+        """Maya answers an all-invisible query with an INVERTED box (min 1e20,
+        max -1e20). Passed to camera_placement that put the camera 5.8e20 units
+        out - a frame of nothing that reads as a broken renderer. Measured on
+        2027; found by the live gate."""
+        fake = FakeSceneCmds(self.SCENE)
+        fake.visible["pelvisShape"] = False
+        fake.visible["chestShape"] = False
+        bbox_min, bbox_max = capture._scene_bbox(
+            fake, ["pelvisShape", "chestShape"], visible_only=True
+        )
+        assert bbox_min == [-2, 0, -2] and bbox_max == [2, 8, 2]
+        assert all(lo <= hi for lo, hi in zip(bbox_min, bbox_max))
+
+    def test_the_sentinel_would_have_produced_an_absurd_camera(self):
+        """What the guard prevents, stated in units."""
+        position, _ = capture.camera_placement(
+            "three_quarter", [1e20, 1e20, 1e20], [-1e20, -1e20, -1e20]
+        )
+        assert max(abs(v) for v in position) > 1e19
 
 
 class TestCaptureViewportTarget:
