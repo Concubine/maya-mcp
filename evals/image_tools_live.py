@@ -19,6 +19,12 @@ place both halves exist: the framing fix lives in the plugin and the file
 writing lives in the server, and #639 is about what a caller gets from one
 tool call.
 
+The pixel A/B at step 3b needs a viewport that is ON SCREEN. It does not need
+the user's own Maya - an agent-launched one blasts real pixels once its window
+is foregrounded and un-minimized, and returns a fully transparent frame while
+it is not. The eval measures which case it is in and skips the A/B loudly
+rather than reading a transparent capture as a pass.
+
 DESTRUCTIVE: calls new_scene. Defaults to port 9878 (the disposable
 agent-launched Maya) and refuses 9877 unless MAYA_MCP_ALLOW_USER_SESSION=1.
 
@@ -143,15 +149,12 @@ def main() -> None:
           distance < 100.0,
           "camera at %.1f units from a %.0f-unit subject (was 5498 pre-fix)"
           % (distance, SUBJECT_HALF * 2))
-    # capture_viewport's PIXELS are not evidence here and must never be read as
-    # if they were: an agent-launched Maya has no mapped window, so every
-    # playblast comes back fully transparent - measured below on the
-    # angle='current', frame_all=False path, which this fix never touches. The
-    # framing claim above rests on the placement math, which is real; the
-    # pixel claim is made against the render path instead.
+    # Whether capture_viewport's PIXELS are evidence at all depends on the
+    # window: a playblast of an off-screen viewport is fully transparent and
+    # proves nothing. Measured here, acted on at 3b - never assumed.
     frame = pictures(shot)[0]
     opaque = sum(frame.convert("RGBA").getchannel("A").histogram()[9:])
-    print("     (viewport pixels: %d of %d opaque - see the note in main())"
+    print("     (viewport pixels: %d of %d opaque)"
           % (opaque, frame.width * frame.height))
 
     rendered = run(mcp.call_tool("maya_render_scene", {
@@ -200,18 +203,48 @@ def main() -> None:
           "%dpx on disk, %dpx in the message"
           % (PILImage.open(os.path.join(OUT_DIR, "framing.png")).width, frame.width))
 
-    # Say out loud, once, that this Maya cannot playblast - so a reader of this
-    # output never mistakes a transparent capture for a passing one.
-    blind = run(mcp.call_tool("maya_capture_viewport", {
-        "angles": ["current"], "frame_all": False, "resolution": 64,
-    }))
-    blind_frame = pictures(blind)[0].convert("RGBA")
-    blind_opaque = sum(blind_frame.getchannel("A").histogram()[9:])
-    print("\nviewport playblast in THIS Maya: %d of %d pixels opaque%s"
-          % (blind_opaque, blind_frame.width * blind_frame.height,
-             " - an agent-launched Maya has no mapped window, so viewport "
-             "PIXELS prove nothing here; the framing checks above rest on the "
-             "camera placement" if blind_opaque == 0 else ""))
+    # ---- 3b. the defect and the fix, in PIXELS ----
+    #
+    # A playblast needs a viewport that is actually on screen. It does NOT need
+    # the user's own Maya: an agent-launched one blasts fine once its window is
+    # foregrounded and not minimized, and returns a fully transparent frame
+    # while it is not. That is measured either way below, and the A/B is only
+    # claimed when there are real pixels to claim it from - a transparent
+    # capture must never be read as a passing one.
+    if opaque == 0:
+        print("\nSKIPPED the pixel A/B: this Maya's viewport is not on screen, "
+              "so every playblast is fully transparent (%d of %d opaque). "
+              "Foreground and un-minimize the Maya window and re-run to get it. "
+              "The framing checks above rest on the camera placement, which is "
+              "real either way." % (opaque, frame.width * frame.height))
+    else:
+        def footprint_of(params):
+            shot = run(mcp.call_tool("maya_capture_viewport",
+                                     dict(params, resolution=256)))
+            image = pictures(shot)[0].convert("RGBA")
+            lit = sum(image.getchannel("A").histogram()[9:])
+            return lit / (image.width * image.height), camera_distance(shot)
+
+        # Framing ON the dome is what the fallback used to do by accident, so
+        # asking for it explicitly reproduces the defect inside the fixed build.
+        sky, sky_distance = footprint_of(
+            {"angles": ["three_quarter"], "target": [dome["lights"][0]]}
+        )
+        subject, subject_distance = footprint_of({"angles": ["three_quarter"]})
+        head, head_distance = footprint_of(
+            {"angles": ["three_quarter"], "target": ["|golemHead"]}
+        )
+        check("framing the dome really is a photograph of nothing",
+              sky == 0.0,
+              "%.2f%% of the frame lit from %.0f units - the ticket's blank image"
+              % (sky * 100, sky_distance))
+        check("and the fixed fallback puts the subject in shot",
+              subject > 0.02,
+              "%.2f%% lit from %.1f units" % (subject * 100, subject_distance))
+        check("target closes in further still, in pixels",
+              head > subject,
+              "head %.2f%% at %.1f units vs scene %.2f%% at %.1f units"
+              % (head * 100, head_distance, subject * 100, subject_distance))
 
     multi = run(mcp.call_tool("maya_capture_viewport", {
         "angles": ["front", "side"], "resolution": 256,
