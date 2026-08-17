@@ -315,7 +315,7 @@ maya_reset_namespace()
 
 **Viewport hygiene.** Capture tools snapshot and restore every setting they touch (active camera, shading mode, SSAO, isolate state). A perception call must be side-effect-free.
 
-**Logging.** Both processes log to rotating files (`~/.maya-mcp/logs/`); `MAYA_MCP_LOG_LEVEL=DEBUG` logs full frames minus image payloads.
+**Logging.** Both processes log to rotating files in `~/.maya-mcp/logs/` (`MAYA_MCP_LOG_DIR` to relocate); `MAYA_MCP_LOG_LEVEL=DEBUG` logs full frames minus image payloads. **One file per process** — `plugin-<pid>.log`, `server-<pid>.log` — because a log file is also an identity: the pid in the name is the pid `ping` reports, which is what you need when two Mayas are confusing each other (#648). It is not only a convenience. Concurrent processes are the normal case here (#577), Windows cannot rename a file another process holds open, and `RotatingFileHandler` treats a failed rename as a failed *record* — so one shared file goes permanently and silently dead the moment it reaches the cap while a second Maya has it open (#650). Rollover that fails anyway degrades to appending past the cap and says so once, in the log: an oversized log is a nuisance, a log that stops is a lie. Old sessions' files are pruned on startup, and a live session's log is protected by the OS refusing to delete a held file.
 
 **Security.** `maya_execute_python` is arbitrary code execution on the user's machine — the README must say so plainly. Plugin binds loopback only by default; non-loopback binding requires both an explicit env opt-in and a token. AI-provider keys live only in the MCP server process. `install.py` never modifies files outside Maya's prefs directory without printing exactly what it will do and asking.
 

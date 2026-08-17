@@ -5,13 +5,14 @@ undo hooks), and execute_python is pure Python — so the full M0 spine
 (client -> TCP -> dispatcher -> handler -> response) is exercised for real.
 """
 
+import logging
 import os
 import socket
 
 import pytest
 
 from maya_mcp.connection import MayaConnection, MayaError
-from maya_plugin import maya_mcp_plugin
+from maya_plugin import logsetup, maya_mcp_plugin
 from maya_plugin.handlers import code_exec
 
 
@@ -247,10 +248,24 @@ class TestHardening:
         finally:
             blocker.close()
 
-    def test_bad_log_level_does_not_crash_setup(self, monkeypatch):
+    def test_bad_log_level_does_not_crash_setup(self, monkeypatch, tmp_path):
         monkeypatch.setenv("MAYA_MCP_LOG_LEVEL", "trace ")
+        # MAYA_MCP_LOG_DIR keeps this out of the user's real ~/.maya-mcp/logs,
+        # which it used to write a stray pytest-process log into (#650).
+        monkeypatch.setenv("MAYA_MCP_LOG_DIR", str(tmp_path))
         maya_mcp_plugin._setup_logging()  # must not raise
 
         from maya_mcp import server as server_mod
 
         server_mod._setup_logging()  # must not raise
+
+        # Each process logs to its own file now, so the two never contend.
+        pid = os.getpid()
+        for handler in (
+            maya_mcp_plugin.log.handlers + logging.getLogger("maya_mcp").handlers
+        ):
+            if isinstance(handler, logsetup.ResilientRotatingFileHandler):
+                assert handler.baseFilename.endswith("-%d.log" % pid)
+                handler.close()
+        maya_mcp_plugin.log.handlers = []
+        logging.getLogger("maya_mcp").handlers = []
