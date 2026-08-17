@@ -105,6 +105,38 @@ def _setup_logging() -> None:
         pass
 
 
+# Image tools that can produce more than one frame per call name their files
+# by label; the sheet tools produce one image and use `path` as given. Both go
+# through _write_frames, so the reporting line is identical across all four.
+def _resolve_path(path: Optional[str]) -> Optional[str]:
+    """Validate an output path BEFORE Maya is asked to do anything.
+
+    A rendered frame costs seconds; a contact sheet costs seconds times the
+    kit. Discovering a typo'd path after the pixels exist would throw all of
+    that away, so this runs first - the same discipline export_fbx states as
+    "a bad call must cost nothing".
+    """
+    return images.resolve_output_path(path) if path is not None else None
+
+
+def _write_frames(path: Optional[str], labels, pngs) -> Optional[str]:
+    """Write full-resolution frames to an already-resolved path.
+
+    Returns the line describing them, or None when no path was asked for. The
+    bytes written are the ones the plugin produced, NOT the copy downscaled for
+    the message: a deliverable that came back at 768px because that is what an
+    LLM can read would be a strange thing to have asked Maya to render at 2048
+    (#639).
+    """
+    if path is None:
+        return None
+    written = [
+        images.write_png(out, png)
+        for out, png in zip(images.label_paths(path, labels), pngs)
+    ]
+    return "wrote: " + json.dumps(written)
+
+
 def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
     """Build the MCPServer; the connection is injectable for tests."""
     maya = conn if conn is not None else MayaConnection()
@@ -281,19 +313,39 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             Optional[List[str]],
             Field(description="Show only these objects (canonical long names)."),
         ] = None,
+        target: Annotated[
+            Optional[List[str]],
+            Field(description=(
+                "Frame ON these objects without hiding anything else — use this "
+                "to close in on one part while its surroundings stay in shot. "
+                "With neither target nor isolate the whole scene is framed, "
+                "lights excluded."
+            )),
+        ] = None,
         frame_all: Annotated[
             bool, Field(description="Frame the subject before capturing.")
         ] = True,
         resolution: Annotated[
             int, Field(ge=64, le=2048, description="Capture resolution in pixels.")
         ] = 768,
+        path: Annotated[
+            Optional[str],
+            Field(description=(
+                "Absolute .png path to also WRITE the capture to, at full "
+                "resolution. The parent directory must already exist. With "
+                "several angles the angle name goes in before the extension: "
+                "'D:/run/hero.png' writes hero_front.png, hero_side.png."
+            )),
+        ] = None,
     ) -> list:  # images + text; media results carry no structured-output schema
         """Capture the Maya viewport from one or more angles — your eyes.
 
-        Returns one image per angle plus a text summary of camera positions.
+        Returns one image per angle plus a text summary of camera positions,
+        and writes the frames to disk when given a path.
         Captures are side-effect-free: all viewport state is restored."""
         if len(angles) > 4:
             raise ValueError("at most 4 angles per call; split larger captures")
+        out_path = _resolve_path(path)
         result = maya.request(
             "capture_viewport",
             {
@@ -304,18 +356,26 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 "lighting": lighting,
                 "shadows": shadows,
                 "isolate": isolate,
+                "target": target,
                 "frame_all": frame_all,
                 "resolution": resolution,
             },
             timeout_s=CAPTURE_TIMEOUT_S,
         )
+        shots = result.get("images", [])
         content: List[Union[Image, str]] = []
-        for shot in result.get("images", []):
+        for shot in shots:
             png = images.decode_and_downscale(shot["png_b64"])
             content.append(Image(data=png, format="png"))
         content.append(
             "camera_positions: " + json.dumps(result.get("camera_positions", []))
         )
+        wrote = _write_frames(
+            out_path, [s["angle"] for s in shots],
+            [base64.b64decode(s["png_b64"]) for s in shots],
+        )
+        if wrote:
+            content.append(wrote)
         return content
 
     @mcp.tool(
@@ -346,10 +406,18 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             Literal["default", "scene", "flat"],
             Field(description="'scene' uses the scene's own lights."),
         ] = "default",
+        path: Annotated[
+            Optional[str],
+            Field(description=(
+                "Absolute .png path to also WRITE the contact sheet to, at full "
+                "cell resolution. The parent directory must already exist."
+            )),
+        ] = None,
     ) -> list:
         """Orbit the subject and return a single contact-sheet image.
 
         Eight views for the token cost of one image - the final judgement pass."""
+        out_path = _resolve_path(path)
         result = maya.request(
             "capture_turntable",
             {"target": target, "n_frames": n_frames,
@@ -361,7 +429,7 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             for shot in result.get("images", [])
         ]
         sheet = images.contact_sheet(cells)
-        return [
+        content: List[Union[Image, str]] = [
             Image(data=images.decode_and_downscale(
                 base64.b64encode(sheet).decode("ascii")), format="png"),
             "turntable: %d frames, azimuths %s" % (
@@ -369,6 +437,10 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 json.dumps([s["azimuth"] for s in result.get("images", [])]),
             ),
         ]
+        wrote = _write_frames(out_path, ["sheet"], [sheet])
+        if wrote:
+            content.append(wrote)
+        return content
 
     @mcp.tool(
         title="Render scene",
@@ -424,6 +496,12 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "Add a temporary key light when the scene has none, so an unlit "
             "scene does not come back as an indistinguishable black frame."
         ))] = True,
+        path: Annotated[Optional[str], Field(description=(
+            "Absolute .png path to also WRITE the frames to, at full render "
+            "resolution. The parent directory must already exist. With several "
+            "angles the angle name goes in before the extension: "
+            "'D:/run/hero.png' writes hero_front.png, hero_side.png."
+        ))] = None,
     ) -> list:
         """Render frames through the render pipeline instead of the viewport.
 
@@ -431,6 +509,7 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         transmission, refraction, real shadows - or when the viewport cannot
         render at all. Every frame reports its opaque pixel count, because a
         render of nothing is a valid image."""
+        out_path = _resolve_path(path)
         result = maya.request(
             "render_scene",
             {"angles": angles, "renderer": renderer, "resolution": resolution,
@@ -476,6 +555,12 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         content.append(
             "camera_positions: " + json.dumps(result.get("camera_positions", []))
         )
+        wrote = _write_frames(
+            out_path, [s["angle"] for s in result.get("images", [])],
+            [base64.b64decode(s["png_b64"]) for s in result.get("images", [])],
+        )
+        if wrote:
+            content.append(wrote)
         return content
 
     @mcp.tool(
@@ -515,6 +600,10 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         cols: Annotated[Optional[int], Field(ge=1, le=12, description=(
             "Grid columns; defaults to a roughly square layout."
         ))] = None,
+        path: Annotated[Optional[str], Field(description=(
+            "Absolute .png path to also WRITE the sheet to, at full cell "
+            "resolution. The parent directory must already exist."
+        ))] = None,
     ) -> list:
         """Render a whole kit as ONE contact-sheet image, in one call.
 
@@ -524,6 +613,7 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         happens once and the loop is just frames.
 
         Cells are row-major, top-left first, in the order given."""
+        out_path = _resolve_path(path)
         result = maya.request(
             "render_sheet",
             {"subjects": subjects, "angle": angle, "renderer": renderer,
@@ -540,7 +630,7 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             if images.pixel_stats(cell)["blank"]
         ]
         sheet = images.contact_sheet(cells, cols=cols)
-        return [
+        content: List[Union[Image, str]] = [
             Image(data=images.decode_and_downscale(
                 base64.b64encode(sheet).decode("ascii")), format="png"),
             "cells (row-major): " + json.dumps([s["label"] for s in shots]),
@@ -549,6 +639,10 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             # not render".
             "blank cells: " + (json.dumps(blank) if blank else "none"),
         ]
+        wrote = _write_frames(out_path, ["sheet"], [sheet])
+        if wrote:
+            content.append(wrote)
+        return content
 
     @mcp.tool(
         title="Load reference image",

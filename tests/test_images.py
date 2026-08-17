@@ -148,3 +148,63 @@ class TestPixelStats:
     def test_rejects_undecodable_bytes(self):
         with pytest.raises(ValueError, match="image"):
             images.pixel_stats(b"not a png")
+
+
+class TestOutputPaths:
+    """#639: the four image tools could not write a file, so a plan whose
+    deliverable was 'write every image under evals/<run>/' could not be
+    followed through the tool surface at all."""
+
+    def test_a_relative_path_is_refused(self):
+        with pytest.raises(ValueError, match="absolute"):
+            images.resolve_output_path("run/hero.png")
+
+    def test_a_non_png_extension_is_refused(self, tmp_path):
+        with pytest.raises(ValueError, match=r"\.png"):
+            images.resolve_output_path(str(tmp_path / "hero.jpg"))
+
+    def test_a_missing_directory_is_refused_rather_than_created(self, tmp_path):
+        missing = tmp_path / "nope" / "hero.png"
+        with pytest.raises(ValueError, match="does not exist"):
+            images.resolve_output_path(str(missing))
+        assert not (tmp_path / "nope").exists()
+
+    def test_backslashes_are_normalised(self, tmp_path):
+        raw = str(tmp_path).replace("/", "\\") + "\\hero.png"
+        assert images.resolve_output_path(raw) == str(tmp_path).replace(
+            "\\", "/"
+        ) + "/hero.png"
+
+    def test_one_image_keeps_the_path_it_was_given(self):
+        assert images.label_paths("D:/run/hero.png", ["front"]) == ["D:/run/hero.png"]
+
+    def test_several_images_get_the_label_before_the_extension(self):
+        assert images.label_paths("D:/run/hero.png", ["front", "three_quarter"]) == [
+            "D:/run/hero_front.png", "D:/run/hero_three_quarter.png"
+        ]
+
+    def test_a_dag_path_label_becomes_a_usable_filename(self):
+        out = images.label_paths("D:/run/kit.png", ["|golem|chest", "|golem|arm_L"])
+        assert out == ["D:/run/kit_golem_chest.png", "D:/run/kit_golem_arm_L.png"]
+
+    def test_a_label_of_nothing_still_produces_a_name(self):
+        assert images.label_paths("D:/run/x.png", ["", "|"]) == [
+            "D:/run/x_frame.png", "D:/run/x_frame.png"
+        ]
+
+    def test_write_png_lands_the_bytes(self, tmp_path):
+        target = str(tmp_path / "hero.png")
+        payload = base64.b64decode(png_b64(8, 8))
+        assert images.write_png(target, payload) == target
+        with open(target, "rb") as fh:
+            assert fh.read() == payload
+        # and nothing half-written was left behind
+        assert not (tmp_path / "hero.png.part.png").exists()
+
+    def test_write_png_replaces_an_existing_file_whole(self, tmp_path):
+        target = str(tmp_path / "hero.png")
+        images.write_png(target, base64.b64decode(png_b64(8, 8)))
+        second = base64.b64decode(png_b64(16, 16))
+        images.write_png(target, second)
+        with open(target, "rb") as fh:
+            assert fh.read() == second

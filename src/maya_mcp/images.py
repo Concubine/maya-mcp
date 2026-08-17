@@ -54,6 +54,68 @@ def decode_and_downscale(png_b64: str, max_px: int | None = None) -> bytes:
     return out.getvalue()
 
 
+def resolve_output_path(path: str) -> str:
+    """Validate an image output path on the same contract as export_fbx's.
+
+    One rule across the tool surface beats two, so the reasoning is that
+    tool's: a relative path resolves against a working directory that is not
+    the one you ran anything from, and a tool does not create directories it
+    was not asked to create.
+    """
+    if not isinstance(path, str) or not path.strip():
+        raise ValueError(
+            "path must be a non-empty string, e.g. path='D:/run/hero.png'"
+        )
+    path = path.strip().replace("\\", "/")
+    if not path.lower().endswith(".png"):
+        raise ValueError("path %r must end in .png - these tools write PNG" % path)
+    if not os.path.isabs(path):
+        raise ValueError(
+            "path %r must be absolute: a relative path resolves against the "
+            "server's working directory, not yours" % path
+        )
+    parent = os.path.dirname(path)
+    if not os.path.isdir(parent):
+        raise ValueError(
+            "the directory %r does not exist - create it first; this tool does "
+            "not make directories it was not asked to make" % parent
+        )
+    return path
+
+
+def label_paths(path: str, labels) -> list[str]:
+    """One output path per image produced by a call.
+
+    A call that makes ONE image writes exactly the path asked for. A call that
+    makes several cannot, so each label goes in before the extension:
+    `D:/run/hero.png` with angles front and side writes `hero_front.png` and
+    `hero_side.png`. Predicting the filenames matters more than brevity - the
+    caller has to be able to name them in a manifest afterwards.
+    """
+    labels = list(labels)
+    if len(labels) <= 1:
+        return [path]
+    stem, ext = os.path.splitext(path)
+    return ["%s_%s%s" % (stem, _slug(label), ext) for label in labels]
+
+
+def _slug(label: str) -> str:
+    """A label as a filename fragment. Subject names are long DAG paths."""
+    cleaned = "".join(
+        ch if (ch.isalnum() or ch in "-_") else "_" for ch in str(label).strip("|")
+    )
+    return cleaned.strip("_") or "frame"
+
+
+def write_png(path: str, png: bytes) -> str:
+    """Write PNG bytes to `path` via a sibling temp, so no reader ever sees half."""
+    tmp = path + ".part.png"
+    with open(tmp, "wb") as fh:
+        fh.write(png)
+    os.replace(tmp, path)
+    return path
+
+
 def _open(png: bytes) -> PILImage.Image:
     return PILImage.open(io.BytesIO(png)).convert("RGB")
 

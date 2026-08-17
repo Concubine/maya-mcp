@@ -129,6 +129,22 @@ def camera_placement_azimuth(azimuth_deg: float, bbox_min, bbox_max):
 # ------------------------------------------------------------------- handler
 
 
+def _names(params: Dict[str, Any], key: str, example: str) -> Optional[List[str]]:
+    """A list of object names, accepting a bare string for the one-object case."""
+    value = params.get(key)
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [value]
+    if not isinstance(value, list) or not all(isinstance(n, str) for n in value):
+        raise HandlerError(
+            "%s must be a list of object names" % key,
+            hint='e.g. %s=["%s"]; call maya_get_scene_graph for names'
+            % (key, example),
+        )
+    return value or None
+
+
 def capture_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
     angles = resolve_angles(params.get("angles"))
     shading = params.get("shading", "smoothShaded")
@@ -155,21 +171,19 @@ def capture_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
     wireframe_overlay = bool(params.get("wireframe_overlay", True))
     frame_all = bool(params.get("frame_all", True))
     resolution = clamp_resolution(params.get("resolution"))
-    isolate = params.get("isolate")
-    if isolate is not None and (
-        not isinstance(isolate, list) or not all(isinstance(n, str) for n in isolate)
-    ):
-        raise HandlerError(
-            "isolate must be a list of object names",
-            hint='e.g. isolate=["|golem"]; call maya_get_scene_graph for names',
-        )
+    isolate = _names(params, "isolate", "|golem")
+    # `target` frames without hiding anything, so a subject can be framed with
+    # its surroundings still in shot. Before #639 the only way to frame one
+    # object here was `isolate`, which also hides the rest - the very path #618
+    # was about - and frame_all with no isolate framed the sky dome.
+    target = _names(params, "target", "|golem|chest")
 
     images = []
     camera_positions = []
     for angle in angles:
         shot = _capture_one(
             angle, shading, wireframe_overlay, buffer, isolate, frame_all, resolution,
-            lighting, shadows,
+            lighting, shadows, frame_on=target,
         )
         images.append({"angle": angle, "png_b64": shot["png_b64"]})
         camera_positions.append(
@@ -240,8 +254,38 @@ capture_turntable.no_undo_chunk = True
 # ------------------------------------------------------------- maya internals
 
 
+def is_light_shape(cmds, shape: str) -> bool:
+    """Is this shape a light? Asked of Maya, not answered from a list.
+
+    `ls(geometry=True)` includes light shapes. Measured on Maya 2027: a scene
+    holding one 5-unit cube and one `setup_lighting(preset='environment')` dome
+    returns BOTH, and the dome's bbox is +/-1000 - so framing "all visible
+    geometry" put the camera 5294 units from a 5-unit subject and returned a
+    photograph of the sky (#639). The blank check could not catch it either: a
+    dome fills the frame with opaque pixels.
+
+    Maya's own classification answers for every renderer's lights, including
+    ones this code has never heard of. Measured: `aiSkyDomeLight`, `aiAreaLight`,
+    `directionalLight` and `pointLight` all satisfy 'light'; `mesh`,
+    `nurbsSurface`, `camera` and `locator` do not.
+    """
+    try:
+        return bool(cmds.getClassification(cmds.nodeType(shape), satisfies="light"))
+    except Exception:
+        # An unknown node type is not a reason to drop it from the frame.
+        return False
+
+
+def framable_geometry(cmds) -> List[str]:
+    """Every visible shape a camera should frame - which excludes the lights."""
+    return [
+        shape for shape in (cmds.ls(geometry=True, visible=True) or [])
+        if not is_light_shape(cmds, shape)
+    ]
+
+
 def _scene_bbox(cmds, isolate: Optional[List[str]]):
-    """World bbox of the isolate set, or of all visible geometry."""
+    """World bbox of the isolate set, or of all visible non-light geometry."""
     if isolate:
         missing = [n for n in isolate if not cmds.objExists(n)]
         if missing:
@@ -249,9 +293,10 @@ def _scene_bbox(cmds, isolate: Optional[List[str]]):
                 "isolate objects not found: %s" % ", ".join(missing),
                 hint="call maya_get_scene_graph to list objects",
             )
+        # A caller who names the dome means the dome: only the fallback filters.
         targets = isolate
     else:
-        targets = cmds.ls(geometry=True, visible=True) or []
+        targets = framable_geometry(cmds)
     if not targets:
         return [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]
     bbox = cmds.exactWorldBoundingBox(*targets)
@@ -420,6 +465,7 @@ def _capture_one(
     resolution: int,
     lighting: str = "default",
     shadows: bool = False,
+    frame_on: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     cmds = _cmds()
     panel = find_model_panel(cmds)
@@ -432,10 +478,15 @@ def _capture_one(
     prev_undo = cmds.undoInfo(query=True, state=True)
     cmds.undoInfo(stateWithoutFlush=False)
     try:
+        # Framing and visibility are separate questions, exactly as in
+        # render_scene: `frame_on` frames, `isolate` hides. With no frame_on,
+        # framing falls back to the isolate set - what a caller passing only
+        # isolate means.
+        framing = frame_on or isolate
         if angle == "current":
             capture_cam = state.camera
         else:
-            bbox_min, bbox_max = _scene_bbox(cmds, isolate)
+            bbox_min, bbox_max = _scene_bbox(cmds, framing)
             if isinstance(angle, (tuple, list)) and angle[0] == "azimuth":
                 position, rotation = camera_placement_azimuth(
                     float(angle[1]), bbox_min, bbox_max
@@ -465,7 +516,18 @@ def _capture_one(
             state.isolate_dirty = True
 
         if frame_all and angle != "current":
-            if isolate:
+            # NEVER viewFit allObjects: it refits to every object in the scene,
+            # dome included, which is the second half of #639 - the placement
+            # math above can exclude the lights and viewFit would put them
+            # straight back, at 5498 units and a blank white frame. Frame an
+            # explicit selection instead, and only fall back to allObjects when
+            # there is genuinely nothing to select.
+            fit_set = framing or [
+                shape for shape in framable_geometry(cmds)
+                if cmds.objExists(shape)
+            ]
+            if fit_set:
+                cmds.select(fit_set, replace=True)
                 cmds.viewFit(capture_cam, fitFactor=0.85)  # fits current selection
             else:
                 cmds.viewFit(capture_cam, allObjects=True, fitFactor=0.85)

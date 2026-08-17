@@ -38,3 +38,4 @@ evals/export_scene_live/
 # maya-mcp #645 live gate: the scene it authors to carry RotationOffset /
 # PreRotation / ScalingPivot is rebuilt on every run
 evals/fbx_probe_live/
+evals/image_tools_live/

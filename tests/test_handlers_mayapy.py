@@ -1962,3 +1962,46 @@ class TestPrimitiveBaseSize:
             "%s measures %s; every kind must fill the same unit box"
             % (kind, tuple(round(d, 3) for d in dims))
         )
+
+
+class TestFramingExcludesLightsInMaya:
+    """#639's load-bearing assumption, pinned against the real Maya: a dome is
+    returned by ls(geometry=True), and Maya's own classification calls it a
+    light. The headless tests encode these answers; this is what checks them."""
+
+    def test_ls_geometry_really_does_return_a_dome(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import capture, lighting
+
+        cmds.file(rename=str(tmp_path / "framing.ma"))
+        cmds.polyCube(name="subject", w=5, h=5, d=5)
+        result = lighting.setup_lighting({"preset": "environment"})
+        dome = result["lights"][0]
+        shape = cmds.listRelatives(dome, shapes=True, fullPath=True)[0]
+        if cmds.nodeType(shape) != "aiSkyDomeLight":
+            pytest.skip("no Arnold dome in this mayapy: %s" % cmds.nodeType(shape))
+
+        visible = cmds.ls(geometry=True, visible=True) or []
+        assert any(v.split("|")[-1] == shape.split("|")[-1] for v in visible), (
+            "the premise of the fix: a light shape comes back from ls(geometry=True)"
+        )
+        assert capture.is_light_shape(cmds, shape) is True
+        assert cmds.exactWorldBoundingBox(shape)[3] > 100  # it is enormous
+
+    def test_the_dome_does_not_decide_where_the_camera_goes(self, tmp_path):
+        import math
+
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import capture, lighting
+
+        cmds.file(rename=str(tmp_path / "framing2.ma"))
+        cmds.polyCube(name="subject2", w=5, h=5, d=5)
+        lighting.setup_lighting({"preset": "environment"})
+
+        bbox_min, bbox_max = capture._scene_bbox(cmds, None)
+        assert bbox_max[0] == pytest.approx(2.5, abs=1e-4)
+        assert bbox_min[0] == pytest.approx(-2.5, abs=1e-4)
+        position, _ = capture.camera_placement("three_quarter", bbox_min, bbox_max)
+        assert math.dist([0, 0, 0], position) < 100.0
