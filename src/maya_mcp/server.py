@@ -12,14 +12,18 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import logging.handlers
-import os
 from typing import Annotated, Dict, List, Literal, Optional, Union
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Image
 from mcp.types import ToolAnnotations
 from pydantic import Field
+
+# The plugin package ships in the same wheel (pyproject: hatch packages both),
+# and logsetup is deliberately dependency-free so the deployed plugin copy -
+# which cannot import maya_mcp - keeps working standalone. One implementation
+# beats two copies of a rollover fix, one of which would rot.
+from maya_plugin import logsetup
 
 from . import images, refstore
 from .connection import MayaConnection
@@ -83,26 +87,13 @@ EXPORT_TIMEOUT_S = 300.0
 
 
 def _setup_logging() -> None:
-    root = logging.getLogger("maya_mcp")
-    # Unknown MAYA_MCP_LOG_LEVEL values fall back to INFO; a typo'd env var
-    # must never prevent the server from starting.
-    name = os.environ.get("MAYA_MCP_LOG_LEVEL", "INFO").strip().upper()
-    level = getattr(logging, name, None)
-    root.setLevel(level if isinstance(level, int) else logging.INFO)
-    if any(isinstance(h, logging.handlers.RotatingFileHandler) for h in root.handlers):
-        return
-    log_dir = os.path.join(os.path.expanduser("~"), ".maya-mcp", "logs")
-    try:
-        os.makedirs(log_dir, exist_ok=True)
-        handler = logging.handlers.RotatingFileHandler(
-            os.path.join(log_dir, "server.log"), maxBytes=2_000_000, backupCount=3
-        )
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-        )
-        root.addHandler(handler)
-    except OSError:
-        pass
+    """One log file per process: `server-<pid>.log`.
+
+    A server is spawned per MCP client, so two clients used to share one
+    `server.log` and hit exactly the rollover deadlock #650 describes for the
+    plugin. Same cause, same fix, same module.
+    """
+    logsetup.configure(logging.getLogger("maya_mcp"), "server")
 
 
 # Image tools that can produce more than one frame per call name their files

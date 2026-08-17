@@ -91,6 +91,7 @@ Environment variables, all optional:
 | `MAYA_MCP_PORT` | `9877` | Plugin TCP port |
 | `MAYA_MCP_TOKEN` | unset | Shared secret; every frame must carry it when set |
 | `MAYA_MCP_LOG_LEVEL` | `INFO` | Rotating file logs in `~/.maya-mcp/logs/` |
+| `MAYA_MCP_LOG_DIR` | `~/.maya-mcp/logs` | Where those logs go |
 | `MAYA_MCP_MAX_IMAGE_PX` | `768` | Longest edge for returned viewport images |
 
 ## Tools

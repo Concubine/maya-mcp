@@ -15,14 +15,13 @@ from __future__ import annotations
 
 import errno
 import logging
-import logging.handlers
 import os
 import socket
 import threading
 import time
 from typing import Any, Dict, Optional
 
-from . import protocol, version
+from . import logsetup, protocol, version
 from .dispatcher import Dispatcher
 from .handlers import (
     array,
@@ -224,30 +223,11 @@ def _undo_hooks():
         return None, None
 
 
-def _log_level_from_env() -> int:
-    """MAYA_MCP_LOG_LEVEL, falling back to INFO on any unknown value —
-    a typo'd level must never take the process down."""
-    name = os.environ.get("MAYA_MCP_LOG_LEVEL", "INFO").strip().upper()
-    level = getattr(logging, name, None)
-    return level if isinstance(level, int) else logging.INFO
-
-
 def _setup_logging() -> None:
-    log.setLevel(_log_level_from_env())
-    if any(isinstance(h, logging.handlers.RotatingFileHandler) for h in log.handlers):
-        return
-    log_dir = os.path.join(os.path.expanduser("~"), ".maya-mcp", "logs")
-    try:
-        os.makedirs(log_dir, exist_ok=True)
-        handler = logging.handlers.RotatingFileHandler(
-            os.path.join(log_dir, "plugin.log"), maxBytes=2_000_000, backupCount=3
-        )
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-        )
-        log.addHandler(handler)
-    except OSError:
-        pass  # logging must never take the plugin down
+    """One log file per process: `plugin-<pid>.log`. See logsetup (#650) — a
+    single shared file cannot be rotated while another Maya holds it open, and
+    the failure is a permanent, silent log outage."""
+    logsetup.configure(log, "plugin")
 
 
 class PluginServer:
@@ -289,7 +269,14 @@ class PluginServer:
             target=self._accept_loop, name="maya-mcp-accept", daemon=True
         )
         self._accept_thread.start()
-        log.info("maya-mcp plugin listening on %s:%d", self.host, self.port)
+        # The pid is here as well as in the filename: it is what someone greps
+        # for after `ping` tells them which process they are actually talking to.
+        log.info(
+            "maya-mcp plugin listening on %s:%d (pid %d)",
+            self.host,
+            self.port,
+            os.getpid(),
+        )
 
     def _accept_loop(self) -> None:
         while not self._stop.is_set():

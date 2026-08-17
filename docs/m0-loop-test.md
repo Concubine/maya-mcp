@@ -20,8 +20,9 @@ perceive/act loop — before any more tools are built on top of it.
    maya_mcp_plugin.start_server()
    ```
 
-   Expected: no output, no freeze. `~/.maya-mcp/logs/plugin.log` gains a
-   "listening on 127.0.0.1:9877" line.
+   Expected: no output, no freeze. `~/.maya-mcp/logs/plugin-<pid>.log` gains a
+   "listening on 127.0.0.1:9877 (pid ...)" line — one file per Maya process, so
+   the pid in the name is the pid `ping` reports (#650).
 
 2. **Register the server** with Claude Code (once):
 
