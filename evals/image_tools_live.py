@@ -19,11 +19,14 @@ place both halves exist: the framing fix lives in the plugin and the file
 writing lives in the server, and #639 is about what a caller gets from one
 tool call.
 
-The pixel A/B at step 3b needs a viewport that is ON SCREEN. It does not need
-the user's own Maya - an agent-launched one blasts real pixels once its window
-is foregrounded and un-minimized, and returns a fully transparent frame while
-it is not. The eval measures which case it is in and skips the A/B loudly
-rather than reading a transparent capture as a pass.
+The pixel A/B at step 3b needs a viewport that EXISTS - not the user's own
+Maya. An agent-launched Maya blasts real pixels whenever its UI came up fully
+(and keeps working even minimized), but it sometimes comes up HALF-ALIVE: the
+plugin binds its port and every non-visual command works while the main window
+was never constructed, and then every playblast is fully transparent and stays
+that way. The eval asks Maya which state it is in - MayaWindow visible plus the
+visible panel list - and skips the A/B loudly rather than reading a transparent
+capture as a pass.
 
 DESTRUCTIVE: calls new_scene. Defaults to port 9878 (the disposable
 agent-launched Maya) and refuses 9877 unless MAYA_MCP_ALLOW_USER_SESSION=1.
@@ -149,9 +152,9 @@ def main() -> None:
           distance < 100.0,
           "camera at %.1f units from a %.0f-unit subject (was 5498 pre-fix)"
           % (distance, SUBJECT_HALF * 2))
-    # Whether capture_viewport's PIXELS are evidence at all depends on the
-    # window: a playblast of an off-screen viewport is fully transparent and
-    # proves nothing. Measured here, acted on at 3b - never assumed.
+    # Whether capture_viewport's PIXELS are evidence at all depends on whether
+    # this Maya's UI came up: a playblast from a half-alive one is fully
+    # transparent and proves nothing. Measured here, diagnosed at 3b.
     frame = pictures(shot)[0]
     opaque = sum(frame.convert("RGBA").getchannel("A").histogram()[9:])
     print("     (viewport pixels: %d of %d opaque)"
@@ -205,18 +208,30 @@ def main() -> None:
 
     # ---- 3b. the defect and the fix, in PIXELS ----
     #
-    # A playblast needs a viewport that is actually on screen. It does NOT need
-    # the user's own Maya: an agent-launched one blasts fine once its window is
-    # foregrounded and not minimized, and returns a fully transparent frame
-    # while it is not. That is measured either way below, and the A/B is only
-    # claimed when there are real pixels to claim it from - a transparent
-    # capture must never be read as a passing one.
+    # A playblast needs a viewport that EXISTS. It does not need the user's own
+    # Maya - an agent-launched one blasts real pixels whenever its UI came up
+    # fully, and keeps working even minimized - but an agent-launched Maya
+    # sometimes comes up HALF-ALIVE: the plugin binds its port and every
+    # non-visual command works while the main window was never constructed, and
+    # then every playblast is fully transparent, indefinitely.
+    #
+    # Those two states are told apart by asking Maya, not by waiting or by
+    # poking the window: MayaWindow visible plus the visible panel list. The
+    # window state is NOT the discriminator - measured, a fully-booted Maya
+    # blasts fine minimized, and a half-alive one stays blank while it is the
+    # foreground window.
+    ui = py("import maya.cmds as cmds\n"
+            "{'mainwin': cmds.window('MayaWindow', q=True, visible=True),\n"
+            " 'panels': cmds.getPanel(visiblePanels=True) or []}")
     if opaque == 0:
-        print("\nSKIPPED the pixel A/B: this Maya's viewport is not on screen, "
-              "so every playblast is fully transparent (%d of %d opaque). "
-              "Foreground and un-minimize the Maya window and re-run to get it. "
-              "The framing checks above rest on the camera placement, which is "
-              "real either way." % (opaque, frame.width * frame.height))
+        print("\nSKIPPED the pixel A/B: this Maya came up half-alive - "
+              "MayaWindow visible=%s, visible panels %s - so every playblast is "
+              "fully transparent (%d of %d opaque) and will stay that way. "
+              "Relaunch Maya until its UI comes up (the title bar reaches "
+              "'untitled - Autodesk Maya', not 'Maya-2027') and re-run. The "
+              "framing checks above rest on the camera placement, which is real "
+              "either way."
+              % (ui["mainwin"], ui["panels"], opaque, frame.width * frame.height))
     else:
         def footprint_of(params):
             shot = run(mcp.call_tool("maya_capture_viewport",
