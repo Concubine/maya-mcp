@@ -439,3 +439,114 @@ def weight_report(params: Dict[str, Any]) -> Dict[str, Any]:
         "per_joint": stats["per_joint"],
         "warnings": warnings,
     }
+
+
+MIRROR_AXES = {"x": 0, "y": 1, "z": 2}
+MIRROR_DIRECTIONS = {"+to-": True, "-to+": False}
+# Positional match radius, scene units. Numbers mean metres here (#629/#634),
+# so this is a millimetre - tight enough that a real partner is unambiguous,
+# loose enough for float noise from combine/freeze.
+MIRROR_TOL = 1e-3
+
+
+def _set_skin_weights(skin_cluster: str, mesh_shape: str, ncols: int,
+                      weights: List[float]) -> None:
+    """The one write path: the whole table in one API call, no normalization
+    by Maya (normalize=False) - rows arrive normalized from rigmath, and
+    letting the node renormalize would un-measure what we just computed."""
+    import maya.api.OpenMaya as om          # noqa: PLC0415
+    import maya.api.OpenMayaAnim as oma     # noqa: PLC0415
+
+    sel = om.MSelectionList()
+    sel.add(mesh_shape)
+    sel.add(skin_cluster)
+    dag = sel.getDagPath(0)
+    fn = oma.MFnSkinCluster(sel.getDependNode(1))
+    comp_fn = om.MFnSingleIndexedComponent()
+    comp = comp_fn.create(om.MFn.kMeshVertComponent)
+    comp_fn.setCompleteData(om.MFnMesh(dag).numVertices)
+    fn.setWeights(dag, comp, om.MIntArray(range(ncols)),
+                  om.MDoubleArray(weights), False)
+
+
+def _pose_warning(cmds, influences: List[str]) -> Optional[str]:
+    """Weight ops pair vertices by POSITION; a posed mesh pairs garbage."""
+    for joint in influences:
+        rot = cmds.getAttr(joint + ".rotate")[0]
+        if any(abs(v) > 1e-6 for v in rot):
+            return ("the skeleton is posed (%s carries rotation) - vertex "
+                    "positions drive the pairing, so mirror from the bind "
+                    "pose: reset_pose first" % _short(joint))
+    return None
+
+
+def mirror_weights(params: Dict[str, Any]) -> Dict[str, Any]:
+    cmds = _cmds()
+    mesh_long, mesh_shape = naming.require_mesh(cmds, str(params.get("mesh") or ""))
+    axis = params.get("axis", "x")
+    if axis not in MIRROR_AXES:
+        raise HandlerError("unknown axis %r; one of: x, y, z" % (axis,),
+                           hint="the mirror plane is the one the axis crosses")
+    direction = params.get("direction", "+to-")
+    if direction not in MIRROR_DIRECTIONS:
+        raise HandlerError(
+            "unknown direction %r; one of: %s"
+            % (direction, ", ".join(sorted(MIRROR_DIRECTIONS))),
+            hint="'+to-' copies the +%s side onto the -%s side" % (axis, axis))
+    sc = _skin_cluster_for(cmds, mesh_long, mesh_shape)
+    influences, weights, num_verts = _skin_weights(sc, mesh_shape)
+
+    inf_positions = [
+        [float(v) for v in cmds.xform(j, query=True, worldSpace=True,
+                                      translation=True)]
+        for j in influences]
+    mapping, unmatched = rigmath.mirror_influence_map(
+        inf_positions, MIRROR_AXES[axis], MIRROR_TOL)
+    if unmatched:
+        raise HandlerError(
+            "%d influence(s) have no mirror partner across %s: %s"
+            % (len(unmatched), axis,
+               ", ".join(_short(influences[i]) for i in unmatched[:8])),
+            hint="mirroring needs a bilaterally symmetric skeleton - a joint "
+                 "on one side must have a positional twin on the other")
+
+    warnings: List[str] = []
+    posed = _pose_warning(cmds, influences)
+    if posed:
+        warnings.append(posed)
+
+    positions = sculpt.vertex_positions(cmds, mesh_long)
+    pairs, on_plane, unpaired = rigmath.mirror_pairs(
+        positions, MIRROR_AXES[axis], MIRROR_TOL,
+        source_positive=MIRROR_DIRECTIONS[direction])
+    if unpaired:
+        warnings.append(
+            "%d source vertices are unpaired (no vertex within %g of the "
+            "reflected position) and kept their weights - the mesh is not "
+            "symmetric across %s there"
+            % (len(unpaired), MIRROR_TOL, axis))
+
+    session.auto_checkpoint("mirror_weights")
+    new_table = rigmath.mirror_weight_table(weights, len(influences), pairs,
+                                            mapping)
+    _set_skin_weights(sc, mesh_shape, len(influences), new_table)
+
+    _, after, _ = _skin_weights(sc, mesh_shape)
+    stats = rigmath.weight_stats(influences, after, num_verts,
+                                 int(cmds.getAttr(sc + ".maxInfluences")))
+    if stats["unweighted_vertices"]:
+        warnings.append("%d vertices belong to NO joint after the mirror"
+                        % stats["unweighted_vertices"])
+    return {
+        "mesh": mesh_long,
+        "skin_cluster": sc,
+        "axis": axis,
+        "direction": direction,
+        "mirrored_vertices": len(pairs),
+        "on_plane_vertices": len(on_plane),
+        "unpaired_vertices": len(unpaired),
+        "changed_vertices": rigmath.changed_rows(weights, after,
+                                                 len(influences)),
+        "unweighted_vertices": stats["unweighted_vertices"],
+        "warnings": warnings,
+    }

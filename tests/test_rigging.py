@@ -347,3 +347,87 @@ class TestWeightReport:
         with pytest.raises(HandlerError, match="not bound") as err:
             rigging.weight_report({"mesh": "serpent"})
         assert "bind_skin" in err.value.hint
+
+
+class TestMirrorWeights:
+    def _bound(self, fake, monkeypatch,
+               positions=(1.0, 0.5, 0.0,  -1.0, 0.5, 0.0),
+               weights=(0.0, 1.0, 0.0,     1.0, 0.0, 0.0),
+               joints=("|r", "|r|L_a", "|r|R_a"),
+               joint_pos=((0.0, 1, 0), (0.5, 1, 0), (-0.5, 1, 0))):
+        fake.objects.append("|hum")
+        fake.shapes = {"|hum": "|hum|humShape"}
+        def listRelatives(node, shapes=False, **kw):
+            if shapes:
+                return [fake.shapes.get(node)]
+            return FakeCmds.listRelatives(fake, node, **kw)
+        fake.listRelatives = listRelatives
+        fake.skin_history = ["skin1"]
+        fake.attrs["skin1.maxInfluences"] = 4
+        for j, p in zip(joints, joint_pos):
+            fake.attrs[j + ".rotate"] = [(0.0, 0.0, 0.0)]
+        state = {"weights": list(weights)}
+        monkeypatch.setattr(
+            rigging, "_skin_weights",
+            lambda sc, shape: (list(joints), list(state["weights"]),
+                               len(positions) // 3))
+        written = {}
+        def set_weights(sc, shape, ncols, table):
+            written["table"] = list(table)
+            state["weights"] = list(table)
+        monkeypatch.setattr(rigging, "_set_skin_weights", set_weights)
+        from maya_plugin.handlers import sculpt
+        monkeypatch.setattr(sculpt, "vertex_positions",
+                            lambda cmds, mesh: list(positions))
+        jp = {j: list(p) for j, p in zip(joints, joint_pos)}
+        def xform(node, query=False, worldSpace=False, translation=False, **kw):
+            return jp.get(node, [0.0, 0.0, 0.0])
+        fake.xform = xform
+        return written
+
+    def test_mirror_writes_swapped_columns_and_measures_back(self, fake, monkeypatch):
+        written = self._bound(fake, monkeypatch)
+        out = rigging.mirror_weights({"mesh": "hum"})
+        assert written["table"][3:6] == [0.0, 0.0, 1.0]   # L column -> R column
+        assert out["mirrored_vertices"] == 1
+        assert out["changed_vertices"] == 1
+        assert out["unweighted_vertices"] == 0
+
+    def test_unknown_axis_and_direction_are_refused(self, fake, monkeypatch):
+        self._bound(fake, monkeypatch)
+        with pytest.raises(HandlerError, match="axis"):
+            rigging.mirror_weights({"mesh": "hum", "axis": "w"})
+        with pytest.raises(HandlerError, match="direction"):
+            rigging.mirror_weights({"mesh": "hum", "direction": "sideways"})
+
+    def test_an_asymmetric_skeleton_is_refused_by_name(self, fake, monkeypatch):
+        self._bound(fake, monkeypatch,
+                    joints=("|r", "|r|L_a"),
+                    joint_pos=((0.0, 1, 0), (0.5, 1, 0)),
+                    weights=(0.0, 1.0, 1.0, 0.0))
+        with pytest.raises(HandlerError, match="no mirror partner") as err:
+            rigging.mirror_weights({"mesh": "hum"})
+        assert "L_a" in str(err.value)
+
+    def test_unpaired_vertices_warn_but_do_not_refuse(self, fake, monkeypatch):
+        self._bound(fake, monkeypatch,
+                    positions=(1.0, 0.5, 0.0,  -1.0, 0.5, 0.0,  2.0, 9.0, 0.0),
+                    weights=(0.0, 1.0, 0.0,  1.0, 0.0, 0.0,  0.0, 1.0, 0.0))
+        out = rigging.mirror_weights({"mesh": "hum"})
+        assert out["unpaired_vertices"] == 1
+        assert any("unpaired" in w for w in out["warnings"])
+
+    def test_a_posed_skeleton_warns_before_mirroring(self, fake, monkeypatch):
+        self._bound(fake, monkeypatch)
+        fake.attrs["|r|L_a.rotate"] = [(0.0, 0.0, 30.0)]
+        out = rigging.mirror_weights({"mesh": "hum"})
+        assert any("posed" in w for w in out["warnings"])
+
+    def test_mirror_checkpoints_once_after_validation(self, fake, monkeypatch):
+        self._bound(fake, monkeypatch)
+        events = []
+        monkeypatch.setattr(session, "auto_checkpoint",
+                            lambda reason: events.append(reason) or
+                            {"checkpoint_id": "001", "path": "x.ma"})
+        rigging.mirror_weights({"mesh": "hum"})
+        assert events == ["mirror_weights"]

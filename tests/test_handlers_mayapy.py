@@ -2412,6 +2412,71 @@ class TestWeightReportInMaya:
             rigging.weight_report({"mesh": mesh})
 
 
+class TestMirrorWeightsInMaya:
+    def _bilateral(self, cmds, rigging):
+        """A cube spanning x in [-1, 1] bound to a 3-joint T: center root,
+        one joint per side."""
+        mesh = cmds.polyCube(width=2, height=1, depth=1,
+                             subdivisionsX=8, name="mir_box")[0]
+        mesh = cmds.ls(mesh, long=True)[0]
+        skel = rigging.create_skeleton({"joints": [
+            {"name": "mir_root", "position": [0, 0.5, 0]},
+            {"name": "mir_L", "position": [0.7, 0.5, 0], "parent": "mir_root"},
+            {"name": "mir_R", "position": [-0.7, 0.5, 0], "parent": "mir_root"},
+        ]})
+        rigging.bind_skin({"mesh": mesh, "root": skel["root"]})
+        return mesh, skel
+
+    def test_hand_authored_left_weights_arrive_on_the_right(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import rigging
+
+        mesh, skel = self._bilateral(cmds, rigging)
+        # Deliberately skew ONE +X vertex fully to the LEFT joint.
+        sc = rigging.weight_report({"mesh": mesh})["skin_cluster"]
+        shape = cmds.listRelatives(mesh, shapes=True, fullPath=True)[0]
+        target = None
+        for i in range(cmds.polyEvaluate(mesh, vertex=True)):
+            pos = cmds.xform("%s.vtx[%d]" % (mesh, i), query=True,
+                             worldSpace=True, translation=True)
+            if pos[0] > 0.9:
+                target = i
+                break
+        cmds.skinPercent(sc, "%s.vtx[%d]" % (mesh, target),
+                         transformValue=[("mir_L", 1.0)])
+        out = rigging.mirror_weights({"mesh": mesh, "axis": "x"})
+        assert out["mirrored_vertices"] > 0
+        assert out["changed_vertices"] > 0
+        assert out["unweighted_vertices"] == 0
+        # The mirrored twin of `target` is fully owned by mir_R now.
+        pos = cmds.xform("%s.vtx[%d]" % (mesh, target), query=True,
+                         worldSpace=True, translation=True)
+        for i in range(cmds.polyEvaluate(mesh, vertex=True)):
+            q = cmds.xform("%s.vtx[%d]" % (mesh, i), query=True,
+                           worldSpace=True, translation=True)
+            if (abs(q[0] + pos[0]) < 1e-3 and abs(q[1] - pos[1]) < 1e-3
+                    and abs(q[2] - pos[2]) < 1e-3):
+                w = cmds.skinPercent(sc, "%s.vtx[%d]" % (mesh, i),
+                                     query=True, value=True)
+                assert max(w) == pytest.approx(1.0, abs=1e-6)
+                infs = cmds.skinCluster(sc, query=True, influence=True)
+                assert infs[w.index(max(w))].split("|")[-1] == "mir_R"
+                break
+        else:
+            pytest.fail("no mirrored twin found for the authored vertex")
+
+    def test_mirror_is_idempotent(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import rigging
+
+        mesh, skel = self._bilateral(cmds, rigging)
+        rigging.mirror_weights({"mesh": mesh})
+        out = rigging.mirror_weights({"mesh": mesh})
+        assert out["changed_vertices"] == 0
+
+
 class TestExportSkinsInMaya:
     def _bound(self, cmds, rigging, name):
         mesh = _serpent_cylinder(cmds, name=name, height=2.0, sections=6)

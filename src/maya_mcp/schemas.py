@@ -801,3 +801,23 @@ class WeightReportResult(BaseModel):
             "joints' are both legible here."))
     per_joint: List[SkinJointStats]
     warnings: List[str] = Field(default_factory=list)
+
+
+class MirrorWeightsResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    mesh: str
+    skin_cluster: str
+    axis: str
+    direction: str
+    mirrored_vertices: int = Field(
+        description="Source-side vertices whose rows were written across.")
+    on_plane_vertices: int
+    unpaired_vertices: int = Field(
+        description=(
+            "Source vertices with no positional twin - an asymmetric mesh, "
+            "left unchanged and warned about, never guessed."))
+    changed_vertices: int = Field(
+        description="MEASURED after re-reading the table, not computed.")
+    unweighted_vertices: int
+    warnings: List[str] = Field(default_factory=list)

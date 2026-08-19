@@ -64,6 +64,7 @@ from .schemas import (
     TransformResult,
     UndoResult,
     ViewportState,
+    MirrorWeightsResult,
     WeightReportResult,
 )
 
@@ -2110,6 +2111,36 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         weight-sum drift. Read-only."""
         return WeightReportResult.model_validate(
             maya.request("weight_report", {"mesh": mesh},
+                         timeout_s=BOOL_TIMEOUT_S)
+        )
+
+    @mcp.tool(
+        title="Mirror skin weights",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=True
+        ),
+    )
+    def maya_mirror_weights(
+        mesh: Annotated[str, Field(description="A bound mesh (long name).")],
+        axis: Annotated[Literal["x", "y", "z"], Field(description=(
+            "Mirror plane normal. x mirrors across the YZ plane - the "
+            "bilateral-creature default."
+        ))] = "x",
+        direction: Annotated[Literal["+to-", "-to+"], Field(description=(
+            "'+to-' copies the +axis side onto the -axis side. Author left "
+            "(+X, Maya convention), mirror to right."
+        ))] = "+to-",
+    ) -> MirrorWeightsResult:
+        """Copy one side's skin weights onto the other, by position.
+
+        Vertices pair with the vertex nearest their reflection; influences
+        pair the same way, so L_shoulder weights land on R_shoulder. Refuses
+        an asymmetric skeleton (a joint with no twin); asymmetric mesh
+        regions are counted in unpaired_vertices and left unchanged. Run from
+        the bind pose - a posed mesh pairs garbage and warns."""
+        return MirrorWeightsResult.model_validate(
+            maya.request("mirror_weights",
+                         {"mesh": mesh, "axis": axis, "direction": direction},
                          timeout_s=BOOL_TIMEOUT_S)
         )
 

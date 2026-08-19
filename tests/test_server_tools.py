@@ -97,6 +97,7 @@ class TestRegistration:
             "maya_pose_skeleton",
             "maya_reset_pose",
             "maya_weight_report",
+            "maya_mirror_weights",
         }
 
     def test_annotations_declare_read_only_vs_destructive(self):
@@ -1639,3 +1640,16 @@ class TestRiggingTools:
         assert conn.calls[0]["cmd"] == "weight_report"
         assert conn.calls[0]["params"] == {"mesh": "|h"}
         assert result.structured_content["vertices"] == 8
+
+    def test_mirror_weights_marshals_and_validates(self):
+        conn = FakeConn(responses={"mirror_weights": {
+            "mesh": "|h", "skin_cluster": "hSkin", "axis": "x",
+            "direction": "+to-", "mirrored_vertices": 4, "on_plane_vertices": 2,
+            "unpaired_vertices": 0, "changed_vertices": 3,
+            "unweighted_vertices": 0, "warnings": []}})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_mirror_weights", {"mesh": "|h"}))
+        assert conn.calls[0]["cmd"] == "mirror_weights"
+        assert conn.calls[0]["params"] == {
+            "mesh": "|h", "axis": "x", "direction": "+to-"}
+        assert result.structured_content["mirrored_vertices"] == 4
