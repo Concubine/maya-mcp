@@ -269,6 +269,27 @@ class TestPoseValidation:
         assert any("no skinned mesh" in w for w in out["warnings"])
         assert out["max_displacement"] == 0.0
 
+    def test_a_unique_short_name_resolves_to_its_joint(self, fake):
+        fake.objects += ["|r", "|r|arm"]
+        fake.parents["|r|arm"] = "|r"
+        out = rigging.pose_skeleton({"root": "r", "rotations": {"arm": [0, 0, 10]}})
+        wrote = [c for c in fake.calls
+                 if c[0] == "setAttr" and c[1] == "|r|arm.rotate"]
+        assert wrote
+        assert out["applied"] == 1
+
+    def test_an_ambiguous_short_name_is_refused_with_the_long_name_fix(self, fake):
+        fake.objects += ["|r", "|r|a", "|r|b", "|r|a|tip", "|r|b|tip"]
+        fake.parents.update({
+            "|r|a": "|r",
+            "|r|b": "|r",
+            "|r|a|tip": "|r|a",
+            "|r|b|tip": "|r|b",
+        })
+        with pytest.raises(HandlerError, match="ambiguous") as err:
+            rigging.pose_skeleton({"root": "r", "rotations": {"tip": [0, 0, 10]}})
+        assert "|r|a|tip" in err.value.hint
+
 
 class TestResetPose:
     def test_unbound_skeleton_zeroes_rotations_with_a_warning(self, fake):
