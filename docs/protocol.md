@@ -71,7 +71,7 @@ Failure — tracebacks are sacred, never truncated:
 
 | cmd | params | result |
 |---|---|---|
-| `ping` | `{}` | `{ pong, maya, plugin: {package_dir, digest, stamp}, process: {pid, host, port, started_at, uptime_s, scene} }` |
+| `ping` | `{}` | `{ pong, maya, plugin: {package_dir, digest, stamp, loaded_digest, loaded_stamp, imported_at, restart_required}, process: {pid, host, port, started_at, uptime_s, scene} }` |
 | `execute_python` | `{ code, timeout_s?, risky? }` | `{ stdout, stderr, result_repr, traceback, namespace_keys, checkpoint? }` |
 | `reset_namespace` | `{}` | `{ reset: true }` |
 | `get_scene_graph` | `{ filter?, max_objects?, cursor? }` | `{ objects: [...], total, cursor }` |
@@ -82,6 +82,22 @@ which *code* is live (feed it to `version.compare`), `process` says which
 *process* is answering — a port is not an identity, and a Maya that lost the
 bind race is indistinguishable from yours without a pid (#648). A bind failure
 raises `PortInUseError` rather than leaving a Maya running with no listener.
+
+**`plugin` carries two identities, and the difference between them is a
+finding** (#604). `digest`/`stamp` describe the files **on disk right now**;
+`loaded_digest`/`loaded_stamp` describe what this session **imported**, captured
+once at plugin load. A running Maya holds the modules it imported at startup —
+`install.py` rewrites the disk and reloads nothing — so in the window between a
+deploy and a restart the two diverge, and the disk names exactly the code that
+is *not* answering. Judging by disk is how the old handshake read CLEAN against
+a stale session while a caller measured the old handlers and attributed the
+results to the new branch; the same window made two fresh #640 fixes read as
+regressions. `version.compare` therefore judges by `loaded_digest` (falling
+back to `digest` for pre-#604 plugins) and has a distinct verdict for the
+window: *deployed but not restarted*, whose advice is restart — not the
+redeploy that has already run and cannot help. `restart_required` is the same
+divergence as a bare boolean, for humans reading a raw ping. Gated live by
+`evals/staleness_live.py`, which walks the actual window on a real Maya.
 
 ## Commands (M1)
 
