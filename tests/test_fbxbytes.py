@@ -163,3 +163,94 @@ class TestAgainstTheCommittedArtifact:
             os.path.join(REPO, "evals", "golem_delivery", "golem.fbx"))
         lo, hi = fbxbytes.world_vertex_bounds(facts)
         assert hi[1] - lo[1] == pytest.approx(4.02173, abs=1e-5)
+
+
+class TestSkinRecordMath:
+    """skin_facts on synthetic facts - the algebra, no file needed."""
+
+    def _facts(self, indexes, weights, verts=4):
+        facts = FbxFacts(version=7500)
+        facts.geometries = {10: tuple([0.0] * (verts * 3))}
+        facts.skins = {20: {"geometry": 10, "clusters": [30]}}
+        facts.clusters = {30: {"indexes": tuple(indexes),
+                               "weights": tuple(weights), "model": 40}}
+        facts.bind_pose_count = 1
+        return facts
+
+    def test_full_ownership_sums_to_one(self):
+        facts = self._facts([0, 1, 2, 3], [1.0, 1.0, 1.0, 1.0])
+        out = fbxbytes.skin_facts(facts)
+        assert out["deformers"] == 1
+        assert out["clusters"] == 1
+        assert out["influenced_models"] == 1
+        assert out["bind_pose_present"] is True
+        assert out["max_weight_sum_error"] == pytest.approx(0.0)
+        assert out["unweighted_file_vertices"] == 0
+        assert out["unavailable_reason"] is None
+
+    def test_a_vertex_with_no_weight_is_counted(self):
+        facts = self._facts([0, 1, 2], [1.0, 1.0, 1.0])
+        assert fbxbytes.skin_facts(facts)["unweighted_file_vertices"] == 1
+
+    def test_an_unnormalised_sum_is_an_error_magnitude(self):
+        facts = self._facts([0, 1, 2, 3], [1.0, 1.0, 1.0, 0.7])
+        assert fbxbytes.skin_facts(facts)["max_weight_sum_error"] == pytest.approx(0.3)
+
+    def test_mismatched_arrays_null_the_number_with_a_reason(self):
+        facts = self._facts([0, 1], [1.0])
+        out = fbxbytes.skin_facts(facts)
+        assert out["max_weight_sum_error"] is None
+        assert "indexes" in out["unavailable_reason"]
+
+    def test_a_file_with_no_skins_reads_as_zero_not_error(self):
+        out = fbxbytes.skin_facts(FbxFacts(version=7500))
+        assert out["deformers"] == 0
+        assert out["bind_pose_present"] is False
+
+
+class TestSkinRecordsFromTheCommittedArtifact:
+    def _facts(self):
+        return fbxbytes.read_fbx(os.path.join(
+            REPO, "evals", "rigging_fixtures", "skinned_cylinder.fbx"))
+
+    def test_the_skin_and_its_clusters_are_found(self):
+        facts = self._facts()
+        assert len(facts.skins) == 1
+        assert len(facts.clusters) == 3          # one per joint
+        skin = next(iter(facts.skins.values()))
+        assert skin["geometry"] in facts.geometries
+        assert sorted(skin["clusters"]) == sorted(facts.clusters)
+
+    def test_every_cluster_links_a_limb_model(self):
+        facts = self._facts()
+        limb_uids = {n.uid for n in facts.nodes if n.kind == "LimbNode"}
+        assert len(limb_uids) == 3
+        assert {c["model"] for c in facts.clusters.values()} == limb_uids
+
+    def test_weight_sums_read_from_the_bytes(self):
+        out = fbxbytes.skin_facts(self._facts())
+        assert out["bind_pose_present"] is True
+        assert out["unweighted_file_vertices"] == 0
+        # 9.568305e-4 in this artifact, and NOT float noise: Maya's own
+        # in-scene sums are 1.0 to 2.2e-16, but its FBX exporter drops every
+        # weight below 1e-3 and does not renormalise what is left, so 40 of
+        # these 140 vertices lost one influence on the way out. The reader is
+        # reporting that faithfully; what a gate should tolerate is
+        # export.WEIGHT_SUM_TOL's problem, and it is 1e-2 for this reason.
+        assert out["max_weight_sum_error"] < 1e-3
+        assert out["max_weight_sum_error"] > 1e-9
+
+    def test_joint_hierarchy_survives_the_extra_connections(self):
+        # The Model->Cluster connection must not clobber the Model->Model
+        # parent link - the regression the wiring rework risks.
+        facts = self._facts()
+        limbs = [n for n in facts.nodes if n.kind == "LimbNode"]
+        parents = [n.parent for n in limbs]
+        assert sum(1 for p in parents if p is None) <= 1
+        assert sum(1 for p in parents if p is not None) >= 2
+
+    def test_the_unskinned_golem_still_reads_clean(self):
+        facts = fbxbytes.read_fbx(
+            os.path.join(REPO, "evals", "golem_delivery", "golem.fbx"))
+        assert facts.skins == {}
+        assert fbxbytes.skin_facts(facts)["deformers"] == 0

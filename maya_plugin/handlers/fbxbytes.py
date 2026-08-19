@@ -86,6 +86,11 @@ class FbxFacts:
     # Geometry UID -> flat vertex tuple, so vertices can be matched to the node
     # that carries them. `meshes` keeps the same tuples in file order.
     geometries: dict = field(default_factory=dict)
+    # Skin records (#602 phase 1). skins: deformer uid -> {"geometry": uid,
+    # "clusters": [uid]}; clusters: uid -> {"indexes", "weights", "model"}.
+    skins: dict = field(default_factory=dict)
+    clusters: dict = field(default_factory=dict)
+    bind_pose_count: int = 0
 
 
 def _clean(raw):
@@ -106,7 +111,13 @@ def read_fbx(path):
     facts = FbxFacts(version=version)
     _connections = []
 
-    def prop(pos):
+    def prop(pos, want_ints=False):
+        """Decode one property. `want_ints` is gated by the CALLER on purpose.
+
+        Int arrays are decoded only where a record needs them (a cluster's
+        Indexes), never for PolygonVertexIndex - a 4M-face kit would balloon
+        this reader's memory for numbers nothing asks about.
+        """
         code = data[pos:pos + 1]
         pos += 1
         if code in _SIMPLE:
@@ -123,9 +134,10 @@ def read_fbx(path):
             pos += 12
             payload = data[pos:pos + comp]
             pos += comp
-            if code == b"d":
+            if code == b"d" or (want_ints and code == b"i"):
                 raw = zlib.decompress(payload) if encoding == 1 else payload
-                return struct.unpack("<%dd" % length, raw), pos
+                fmt = ("<%dd" if code == b"d" else "<%di") % length
+                return struct.unpack(fmt, raw), pos
             return None, pos
         raise ValueError("unknown FBX typecode %r at %d" % (code, pos))
 
@@ -144,7 +156,7 @@ def read_fbx(path):
             starts = []
             for _ in range(nprops):
                 starts.append(pos + 1)   # skip the typecode byte
-                val, pos = prop(pos)
+                val, pos = prop(pos, want_ints=(name == "Indexes"))
                 values.append(val)
 
             if name == "Vertices" and values and isinstance(values[0], tuple):
@@ -179,6 +191,29 @@ def read_fbx(path):
                 facts.nodes.append(child)
             elif name == "Geometry":
                 child = values[0] if values and isinstance(values[0], int) else None
+            elif name == "Deformer":
+                uid = values[0] if values and isinstance(values[0], int) else None
+                strs = [v for v in values if isinstance(v, str)]
+                klass = strs[-1] if strs else ""
+                if uid is not None and klass == "Skin":
+                    facts.skins[uid] = {"geometry": None, "clusters": []}
+                    child = ("skin", uid)
+                elif uid is not None and klass == "Cluster":
+                    facts.clusters[uid] = {"indexes": (), "weights": (),
+                                           "model": None}
+                    child = ("cluster", uid)
+            elif name == "Pose":
+                strs = [v for v in values if isinstance(v, str)]
+                if strs and strs[-1] == "BindPose":
+                    facts.bind_pose_count += 1
+            elif (name == "Indexes" and isinstance(node, tuple)
+                    and node[0] == "cluster" and values
+                    and isinstance(values[0], tuple)):
+                facts.clusters[node[1]]["indexes"] = values[0]
+            elif (name == "Weights" and isinstance(node, tuple)
+                    and node[0] == "cluster" and values
+                    and isinstance(values[0], tuple)):
+                facts.clusters[node[1]]["weights"] = values[0]
             if pos < end_off:
                 walk(pos, end_off, child)
             pos = end_off
@@ -188,10 +223,19 @@ def read_fbx(path):
 
     by_uid = {n.uid: n for n in facts.nodes if n.uid is not None}
     for child, parent in _connections:
-        if child in by_uid:
+        if child in by_uid and (parent in by_uid or parent == 0):
+            # 0 is the scene root: an explicit "no parent", kept distinct
+            # from connections into non-Model records (clusters, materials),
+            # which must not null a real parent.
             by_uid[child].parent = parent if parent in by_uid else None
+        elif child in by_uid and parent in facts.clusters:
+            facts.clusters[parent]["model"] = child
         elif child in facts.geometries and parent in by_uid:
             by_uid[parent].geometry = child
+        elif child in facts.clusters and parent in facts.skins:
+            facts.skins[parent]["clusters"].append(child)
+        elif child in facts.skins and parent in facts.geometries:
+            facts.skins[child]["geometry"] = parent
     return facts
 
 
@@ -375,3 +419,66 @@ def set_unit_scale_factor(path, value=DECLARES_METRES):
         fh.seek(facts.unit_scale_offset)
         fh.write(struct.pack("<d", float(value)))
     return read_fbx(path).unit_scale_factor
+
+
+def skin_facts(facts, tol=1e-3):
+    """What the file's skin records actually hold. Reading, not policy.
+
+    Weight sums are composed per vertex across every cluster of each skin; a
+    correct bind normalises them to 1.0 in the file. max_weight_sum_error is
+    measured over vertices carrying ANY weight; vertices carrying none are
+    counted separately - the file-side image of bind_skin's
+    unweighted_vertices gate. Anything this reader cannot verify goes out as
+    None with a reason, never a plausible guess (#645).
+    """
+    influenced = {c["model"] for c in facts.clusters.values()
+                  if c["model"] is not None}
+    max_err = None
+    unweighted = 0
+    reasons = []
+    for uid, skin in facts.skins.items():
+        verts = facts.geometries.get(skin["geometry"])
+        if not verts:
+            reasons.append(
+                "skin %d connects to no geometry this reader holds" % uid)
+            continue
+        num = len(verts) // 3
+        sums = [0.0] * num
+        readable = True
+        for cluster_uid in skin["clusters"]:
+            cluster = facts.clusters.get(cluster_uid) or {}
+            idx = cluster.get("indexes") or ()
+            wts = cluster.get("weights") or ()
+            if len(idx) != len(wts):
+                readable = False
+                reasons.append(
+                    "cluster %d holds %d indexes but %d weights"
+                    % (cluster_uid, len(idx), len(wts)))
+                continue
+            for i, w in zip(idx, wts):
+                if 0 <= i < num:
+                    sums[i] += w
+                else:
+                    readable = False
+                    reasons.append(
+                        "cluster %d indexes vertex %d of %d"
+                        % (cluster_uid, i, num))
+                    break
+        if not readable:
+            continue
+        for s in sums:
+            if s <= tol:
+                unweighted += 1
+            else:
+                err = abs(s - 1.0)
+                if max_err is None or err > max_err:
+                    max_err = err
+    return {
+        "deformers": len(facts.skins),
+        "clusters": len(facts.clusters),
+        "influenced_models": len(influenced),
+        "bind_pose_present": facts.bind_pose_count > 0,
+        "max_weight_sum_error": max_err,
+        "unweighted_file_vertices": unweighted,
+        "unavailable_reason": "; ".join(reasons) or None,
+    }
