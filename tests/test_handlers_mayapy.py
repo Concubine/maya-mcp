@@ -2170,3 +2170,53 @@ class TestBboxSeesHiddenChildren:
         _, visible_max = capture._scene_bbox(cmds, [parent], visible_only=True)
         assert subtree_max[0] == pytest.approx(20.5, abs=1e-4)
         assert visible_max[0] == pytest.approx(0.5, abs=1e-4)
+
+
+class TestCreateSkeletonInMaya:
+    def test_chain_builds_parented_joints_at_the_positions(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import rigging
+
+        out = rigging.create_skeleton({
+            "chain": [[0, 0, 0], [0, 2, 0], [0, 4, 0]], "chain_prefix": "sp"})
+        assert out["root"] == "|sp_01"
+        assert cmds.nodeType(out["root"]) == "joint"
+        assert [tuple(round(v, 6) for v in j["position"])
+                for j in out["joints"]] == [(0, 0, 0), (0, 2, 0), (0, 4, 0)]
+        # Parented: moving the root carries the chain.
+        cmds.xform("|sp_01", worldSpace=True, translation=[1, 0, 0])
+        tip = cmds.xform(out["joints"][2]["name"], query=True,
+                         worldSpace=True, translation=True)
+        assert tip[0] == pytest.approx(1.0)
+
+    def test_default_orient_aims_x_at_the_child_and_zeroes_the_leaf(self):
+        from maya_plugin.handlers import rigging
+
+        out = rigging.create_skeleton({
+            "chain": [[0, 0, 0], [0, 2, 0]], "chain_prefix": "o"})
+        # A straight +Y chain under xyz/yup: X aims at the child, so the root
+        # carries a 90-degree orient about Z, and the leaf carries none.
+        assert out["joints"][0]["orient"][2] == pytest.approx(90.0, abs=1e-4)
+        assert out["joints"][1]["orient"] == pytest.approx([0.0, 0.0, 0.0])
+
+    def test_explicit_orient_overrides_and_reports_in_degrees(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import rigging
+
+        cmds.currentUnit(angle="rad")
+        try:
+            out = rigging.create_skeleton({"joints": [
+                {"name": "solo", "position": [0, 0, 0], "orient": [0, 45, 0]}]})
+            assert out["joints"][0]["orient"][1] == pytest.approx(45.0, abs=1e-4)
+        finally:
+            cmds.currentUnit(angle="deg")
+
+    def test_single_joint_skeleton_works(self):
+        from maya_plugin.handlers import rigging
+
+        out = rigging.create_skeleton({"joints": [
+            {"name": "lone", "position": [1, 2, 3]}]})
+        assert out["root"] == "|lone"
+        assert out["joints"][0]["position"] == pytest.approx([1.0, 2.0, 3.0])
