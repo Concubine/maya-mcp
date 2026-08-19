@@ -904,6 +904,13 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         nodes: Annotated[Optional[List[str]], Field(description=(
             "Objects to export; omit to export the whole scene."
         ))] = None,
+        include_skins: Annotated[bool, Field(description=(
+            "Export skinCluster deformers and the BindPose with the mesh. "
+            "The gate then also verifies, from the bytes: skin records "
+            "present, per-vertex weight sums ~1.0, BindPose present, and "
+            "identity scale on every joint. For a selected export, list the "
+            "skeleton root in nodes alongside the mesh."
+        ))] = False,
     ) -> ExportFbxResult:
         """Export FBX and gate the result on the BYTES it just wrote.
 
@@ -917,7 +924,8 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         return ExportFbxResult.model_validate(
             maya.request(
                 "export_fbx",
-                {"path": path, "metres_per_unit": metres_per_unit, "nodes": nodes},
+                {"path": path, "metres_per_unit": metres_per_unit,
+                 "nodes": nodes, "include_skins": include_skins},
                 timeout_s=EXPORT_TIMEOUT_S,
             )
         )

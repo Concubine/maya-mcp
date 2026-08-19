@@ -60,6 +60,48 @@ FBX_SCENE_CONTENT_MEL: Tuple[str, ...] = (
     "FBXExportLights -v true",
 )
 
+# Skin export switches, both states explicit so FBXResetExport's defaults never
+# decide it (the same determinism argument as FBX_SCENE_CONTENT_MEL).
+#
+# MEASURED under mayapy, not read in a manual. `FBXExportSkins -v true` alone
+# carries the skinCluster deformer, one cluster per joint and the BindPose,
+# PROVIDED the selection lists the skeleton root alongside the mesh: with
+# nodes=[mesh, root], all four of {both flags, skins only, input connections
+# only, neither} wrote byte-identical 48192-byte files. So the extra
+# `FBXExportInputConnections -v true` this was first written with buys nothing
+# for the documented call and is deliberately NOT here - turning it on makes a
+# SELECTED export silently drag in every input-connected node (materials,
+# texture networks, constraint targets) that the caller did not ask for, and
+# the preamble pins it false for exactly that reason.
+#
+# What it did buy: with nodes=[mesh] and the root left out, input connections
+# ON pulls the joints in and the export succeeds. That convenience is refused
+# on purpose. With it off, the file carries a deformer record with ZERO
+# clusters (measured: deformers=1, clusters=0, 140 unweighted vertices), and
+# skin_violations names the missing skeleton - a refusal that tells the caller
+# what to fix beats an export that quietly widened its own selection.
+FBX_SKINS_MEL = {
+    True: ("FBXExportSkins -v true",),
+    False: ("FBXExportSkins -v false",),
+}
+
+# A file-side weight sum further than this from 1.0 was not normalised and will
+# deform differently in every consumer.
+#
+# MEASURED, and NOT the 1e-3 this was first written with: Maya's FBX exporter
+# DROPS every skin weight strictly below 1e-3 and does not renormalise what is
+# left. Across four binds the smallest weight kept was 1.072e-3 and the largest
+# dropped 9.941e-4, while Maya's own in-scene sums were 1.0 to 2.2e-16. A
+# vertex therefore loses up to (influences - 1) x 1e-3, and bind_skin allows
+# MAX_INFLUENCES_CEILING = 8, so the arithmetic worst case is 7e-3. At 1e-3
+# this gate REFUSED a correct 12-joint max_influences=8 bind whose file-side
+# error was 1.381872e-3 (a 20-joint one measured 9.940742e-4, inside the old
+# tolerance by 0.6%). 1e-2 clears the exporter's own pruning with room and
+# still catches what this check is for - an unnormalised bind, or a lost
+# influence set, which are order 0.1 to 1.0, not 0.001. A vertex left with NO
+# ownership at all is counted separately, by unweighted_file_vertices.
+WEIGHT_SUM_TOL = 1e-2
+
 # Once the scene is metre-native there is no unit conversion left to make, so
 # the exporter writes no compensating node and the factor must be 1. Measured
 # both ways: at 100 the heroes' group Null came back at scale (100,100,100).
@@ -87,12 +129,13 @@ def _scale_reaches_vertices(facts) -> set:
     them and the test has to be structural. Kind is still consulted in one
     direction only: a `Model` declared "Mesh" is gated even if its geometry
     link did not resolve, because the failure to exempt is cheap and the
-    failure to gate is #629.
+    failure to gate is #629. A skinned joint's scale multiplies vertices
+    without being the mesh's ancestor, so LimbNodes gate like meshes (#602 P1).
     """
     by_uid = {n.uid: n for n in facts.nodes if n.uid is not None}
     reaching: set = set()
     for node in facts.nodes:
-        if node.geometry is None and node.kind != "Mesh":
+        if node.geometry is None and node.kind not in ("Mesh", "LimbNode"):
             continue
         walker = node
         while walker is not None and id(walker) not in reaching:
@@ -139,7 +182,40 @@ def gate_violations(facts) -> List[str]:
     return out
 
 
-def _validate(params: Dict[str, Any]) -> Tuple[str, Optional[List[str]]]:
+def skin_violations(sfacts) -> List[str]:
+    """Ways the skin records break the include_skins contract."""
+    out: List[str] = []
+    if sfacts["deformers"] == 0:
+        out.append(
+            "include_skins=true but the file holds no skin deformer - "
+            "nothing exported is bound, or the mesh went out without its "
+            "skeleton")
+        return out
+    if sfacts["clusters"] == 0 or sfacts["influenced_models"] == 0:
+        # Measured: a selected export listing the mesh WITHOUT the skeleton
+        # root writes a deformer record with no clusters at all. Named
+        # separately because the symptom it produces downstream - every vertex
+        # unweighted - reads like a bad bind rather than a short selection.
+        out.append(
+            "the file's skin deformer links no joints (%d clusters, %d "
+            "influenced models) - a selected export must list the skeleton "
+            "root alongside the mesh"
+            % (sfacts["clusters"], sfacts["influenced_models"]))
+        return out
+    if not sfacts["bind_pose_present"]:
+        out.append("the file holds no BindPose record")
+    if sfacts["unweighted_file_vertices"]:
+        out.append("%d file vertices carry no weight"
+                   % sfacts["unweighted_file_vertices"])
+    err = sfacts["max_weight_sum_error"]
+    if err is not None and err > WEIGHT_SUM_TOL:
+        out.append("per-vertex weight sums are off by up to %g" % err)
+    if sfacts["unavailable_reason"]:
+        out.append("skin records unreadable: %s" % sfacts["unavailable_reason"])
+    return out
+
+
+def _validate(params: Dict[str, Any]) -> Tuple[str, Optional[List[str]], bool]:
     """Check every parameter before touching Maya. A bad call must cost nothing."""
     path = params.get("path")
     if not isinstance(path, str) or not path.strip():
@@ -186,6 +262,13 @@ def _validate(params: Dict[str, Any]) -> Tuple[str, Optional[List[str]]]:
                  "geometry and freeze it so one unit means one metre, then "
                  "export with metres_per_unit=1.0")
 
+    include_skins = params.get("include_skins", False)
+    if not isinstance(include_skins, bool):
+        raise HandlerError(
+            "include_skins must be true or false, got %r" % (include_skins,),
+            hint="true exports skinCluster deformers and the BindPose "
+                 "alongside the mesh")
+
     nodes = params.get("nodes")
     if nodes is not None:
         if not isinstance(nodes, list) or not all(isinstance(n, str) for n in nodes):
@@ -197,7 +280,7 @@ def _validate(params: Dict[str, Any]) -> Tuple[str, Optional[List[str]]]:
             raise HandlerError(
                 "nodes is an empty list, which would export nothing",
                 hint="omit nodes entirely to export the whole scene")
-    return path, nodes
+    return path, nodes, include_skins
 
 
 def _cmds():
@@ -234,7 +317,7 @@ def _bounds(facts):
 
 
 def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
-    path, nodes = _validate(params)
+    path, nodes, include_skins = _validate(params)
     cmds = _cmds()
     mel = _mel()
 
@@ -247,7 +330,8 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
                      "the scene actually contains")
 
     cmds.loadPlugin("fbxmaya", quiet=True)
-    for statement in FBX_PREAMBLE_MEL + FBX_SCENE_CONTENT_MEL:
+    for statement in (FBX_PREAMBLE_MEL + FBX_SCENE_CONTENT_MEL
+                      + FBX_SKINS_MEL[include_skins]):
         mel.eval(statement)
     # A bare float. The `-v` form raises, and both delivery generators used to
     # swallow that inside `except Exception: pass`.
@@ -293,6 +377,19 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
         raise
 
     violations = gate_violations(facts)
+    skin_block = None
+    skin_bad: List[str] = []
+    if include_skins:
+        skin_block = fbxbytes.skin_facts(facts)
+        skin_bad = skin_violations(skin_block)
+        violations += skin_bad
+    # "Freeze transforms" is the action for a unit violation and means nothing
+    # for a skin one, so the hint gains the action that DOES apply, and only
+    # when a skin violation is among the reasons.
+    skin_hint = (
+        " For skin violations: the mesh must be bound (maya_bind_skin reported "
+        "unweighted_vertices=0) and a selected export ('nodes') must list the "
+        "skeleton root alongside the mesh." if skin_bad else "")
     if violations:
         try:
             os.unlink(tmp_path)
@@ -310,7 +407,8 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
                      "transforms so no node carries scale, and author so one "
                      "unit means one metre (linear_unit 'cm' in this repo's "
                      "convention). Deletion itself failed - remove %s by hand "
-                     "before it reaches a delivery" % tmp_path) from unlink_exc
+                     "before it reaches a delivery" % tmp_path
+                     + skin_hint) from unlink_exc
         raise HandlerError(
             "the exported FBX failed the unit gate and was never written to "
             "%s - the temp file was deleted, and any pre-existing file at "
@@ -320,7 +418,8 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
                  "transforms so no node carries scale, and author so one unit "
                  "means one metre (linear_unit 'cm' in this repo's convention). "
                  "Nothing reaches %s until it passes - a wrong file on disk is "
-                 "how maya-mcp #629 reached three deliveries" % path)
+                 "how maya-mcp #629 reached three deliveries" % path
+                 + skin_hint)
 
     # Only now, with the gate passed, does the real path get touched.
     os.replace(tmp_path, path)
@@ -339,4 +438,5 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
         "world_bounds_max": hi,
         "height_m": height,
         "bounds_unavailable_reason": bounds_unavailable_reason,
+        "skin": skin_block,
     }

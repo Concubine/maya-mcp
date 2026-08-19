@@ -2355,3 +2355,124 @@ class TestPoseSkeletonInMaya:
         # warning names the cause.
         if out["max_displacement"] < 0.05:
             assert any("near-zero" in w for w in out["warnings"])
+
+
+class TestExportSkinsInMaya:
+    def _bound(self, cmds, rigging, name):
+        mesh = _serpent_cylinder(cmds, name=name, height=2.0, sections=6)
+        skel = rigging.create_skeleton({
+            "chain": [[0, 0, 0], [0, 1, 0], [0, 2, 0]],
+            "chain_prefix": name + "_j"})
+        rigging.bind_skin({"mesh": mesh, "root": skel["root"]})
+        return mesh, skel
+
+    def test_a_skinned_selected_export_carries_the_records(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import export, fbxbytes, rigging
+
+        mesh, skel = self._bound(cmds, rigging, "xtube")
+        out = export.export_fbx({
+            "path": str(tmp_path / "skinned.fbx").replace("\\", "/"),
+            "metres_per_unit": 1.0,
+            "nodes": [mesh, skel["root"]],
+            "include_skins": True,
+        })
+        assert out["skin"]["deformers"] == 1
+        assert out["skin"]["clusters"] == 3
+        assert out["skin"]["bind_pose_present"] is True
+        assert out["skin"]["unweighted_file_vertices"] == 0
+        assert out["skin"]["max_weight_sum_error"] < 1e-3
+        facts = fbxbytes.read_fbx(out["path"])
+        assert {n.kind for n in facts.nodes} >= {"Mesh", "LimbNode"}
+
+    def test_default_export_stays_skinless(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import export, fbxbytes, rigging
+
+        mesh, skel = self._bound(cmds, rigging, "ytube")
+        out = export.export_fbx({
+            "path": str(tmp_path / "plain.fbx").replace("\\", "/"),
+            "metres_per_unit": 1.0,
+            "nodes": [mesh],
+        })
+        assert out["skin"] is None
+        assert fbxbytes.read_fbx(out["path"]).skins == {}
+
+    def test_include_skins_without_a_bound_mesh_is_refused(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import export
+
+        cube = cmds.polyCube(name="dryCube", ch=False)[0]
+        with pytest.raises(HandlerError, match="no skin deformer"):
+            export.export_fbx({
+                "path": str(tmp_path / "dry.fbx").replace("\\", "/"),
+                "metres_per_unit": 1.0,
+                "nodes": [cube],
+                "include_skins": True,
+            })
+        assert not (tmp_path / "dry.fbx").exists()
+
+    def test_leaving_the_skeleton_out_of_nodes_is_refused_by_name(self, tmp_path):
+        """The measurement behind FBX_SKINS_MEL[True] being skins-only.
+
+        With input connections left off (the preamble's setting), selecting the
+        mesh WITHOUT its root writes a deformer record carrying zero clusters.
+        Turning FBXExportInputConnections on would make this succeed by
+        silently widening the selection; it is refused instead, and the message
+        has to name the missing skeleton rather than just the unweighted count.
+        """
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import export, rigging
+
+        mesh, _skel = self._bound(cmds, rigging, "ztube")
+        with pytest.raises(HandlerError, match="skeleton root") as exc:
+            export.export_fbx({
+                "path": str(tmp_path / "short.fbx").replace("\\", "/"),
+                "metres_per_unit": 1.0,
+                "nodes": [mesh],
+                "include_skins": True,
+            })
+        assert "links no joints" in str(exc.value)
+        assert not (tmp_path / "short.fbx").exists()
+
+    def test_a_max_influences_bind_survives_the_exporters_weight_pruning(
+            self, tmp_path):
+        """WEIGHT_SUM_TOL is 1e-2 because of THIS export, measured here.
+
+        Maya's FBX exporter drops every skin weight below 1e-3 and does not
+        renormalise, while Maya's own in-scene sums are 1.0 to 2.2e-16. A
+        12-joint max_influences=8 bind loses up to three such weights on one
+        vertex, so it left the file 1.38e-3 short of 1.0 - and the original
+        1e-3 tolerance refused a bind nothing is wrong with.
+        """
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import export, rigging
+
+        mesh = _serpent_cylinder(cmds, name="ptube", height=4.0, sections=24)
+        skel = rigging.create_skeleton({
+            "chain": [[0, i * (4.0 / 11), 0] for i in range(12)],
+            "chain_prefix": "p_j"})
+        bind = rigging.bind_skin({"mesh": mesh, "root": skel["root"],
+                                  "max_influences": 8})
+        assert bind["unweighted_vertices"] == 0
+
+        out = export.export_fbx({
+            "path": str(tmp_path / "pruned.fbx").replace("\\", "/"),
+            "metres_per_unit": 1.0,
+            "nodes": [mesh, skel["root"]],
+            "include_skins": True,
+        })
+        err = out["skin"]["max_weight_sum_error"]
+        assert out["skin"]["unweighted_file_vertices"] == 0
+        assert err < export.WEIGHT_SUM_TOL
+        # The pruning is real, not hypothetical: if this ever drops to float
+        # noise the exporter changed and the tolerance can be revisited.
+        assert err > 1e-9, (
+            "the exporter no longer prunes weights - remeasure WEIGHT_SUM_TOL")

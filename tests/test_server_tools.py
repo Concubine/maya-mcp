@@ -381,8 +381,10 @@ class TestSessionTools:
         assert conn.calls[0]["cmd"] == "export_fbx"
         assert conn.calls[0]["params"] == {
             "path": "x.fbx", "metres_per_unit": 1.0, "nodes": ["golem_arm"],
+            "include_skins": False,
         }
         assert result.structured_content["fbx_version"] == 7700
+        assert result.structured_content["skin"] is None
 
     def test_maya_export_fbx_forwards_nodes_omitted_as_none(self):
         conn = FakeConn(
@@ -401,7 +403,33 @@ class TestSessionTools:
         assert conn.calls[0]["cmd"] == "export_fbx"
         assert conn.calls[0]["params"] == {
             "path": "x.fbx", "metres_per_unit": 1.0, "nodes": None,
+            "include_skins": False,
         }
+
+    def test_maya_export_fbx_forwards_include_skins_and_surfaces_the_block(self):
+        conn = FakeConn(
+            responses={"export_fbx": {
+                "path": "x.fbx", "bytes": 1234, "fbx_version": 7700,
+                "node_count": 4, "mesh_count": 1, "root_nodes": ["|tube"],
+                "unit_scale_factor": 100.0, "metres_per_unit": 1.0,
+                "skin": {"deformers": 1, "clusters": 3,
+                         "influenced_models": 3, "bind_pose_present": True,
+                         "max_weight_sum_error": 2e-7,
+                         "unweighted_file_vertices": 0,
+                         "unavailable_reason": None},
+            }}
+        )
+        mcp = server_mod.create_server(conn)
+        result = run(
+            mcp.call_tool(
+                "maya_export_fbx",
+                {"path": "x.fbx", "metres_per_unit": 1.0,
+                 "nodes": ["tube", "j1"], "include_skins": True},
+            )
+        )
+        assert conn.calls[0]["params"]["include_skins"] is True
+        assert result.structured_content["skin"]["clusters"] == 3
+        assert result.structured_content["skin"]["bind_pose_present"] is True
 
 
 class TestLinearUnitReachesTheToolSurface:

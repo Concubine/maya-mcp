@@ -602,6 +602,26 @@ class UvAtlasResult(BaseModel):
     )
 
 
+class SkinFacts(BaseModel):
+    """Skin records read back OUT OF THE FILE, never from the scene."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    deformers: int = Field(description="SkinCluster deformer records.")
+    clusters: int = Field(description="Per-joint cluster records.")
+    influenced_models: int = Field(
+        description="Distinct joint Models the clusters link.")
+    bind_pose_present: bool
+    max_weight_sum_error: Optional[float] = Field(
+        default=None,
+        description=(
+            "Furthest any vertex's file-side weight sum sits from 1.0. Null "
+            "when the records could not be read - see unavailable_reason, "
+            "never a guess."))
+    unweighted_file_vertices: int = 0
+    unavailable_reason: Optional[str] = None
+
+
 class ExportFbxResult(BaseModel):
     """What maya_export_fbx actually wrote, read back out of the file.
 
@@ -665,6 +685,9 @@ class ExportFbxResult(BaseModel):
             "None when the bounds were measured."
         ),
     )
+    skin: Optional[SkinFacts] = Field(
+        default=None,
+        description="Skin facts when include_skins=true; null otherwise.")
 
 
 class SkeletonJoint(BaseModel):

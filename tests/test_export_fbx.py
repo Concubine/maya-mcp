@@ -109,6 +109,23 @@ def test_the_scene_content_flags_are_pinned_outside_the_shipped_preamble():
     assert not set(export.FBX_SCENE_CONTENT_MEL) & set(export.FBX_PREAMBLE_MEL)
 
 
+def test_the_skin_switches_are_the_measured_pair():
+    # #602 P1. Both states stated so FBXResetExport's defaults never decide it,
+    # and the True branch is `FBXExportSkins` ALONE: measured under mayapy,
+    # nodes=[mesh, root] wrote byte-identical files with and without
+    # FBXExportInputConnections, and turning that on would silently widen a
+    # selected export beyond the nodes the caller named.
+    assert export.FBX_SKINS_MEL == {
+        True: ("FBXExportSkins -v true",),
+        False: ("FBXExportSkins -v false",),
+    }
+    assert not any("InputConnections" in s
+                   for s in export.FBX_SKINS_MEL[True])
+    # The preamble's own `-v false` must survive: it is the shipped setting
+    # three delivery generators export through.
+    assert "FBXExportInputConnections -v false" in export.FBX_PREAMBLE_MEL
+
+
 def _facts(nodes=(), unit=None):
     return fbxbytes.FbxFacts(
         version=7700, nodes=list(nodes), meshes=[],
@@ -189,6 +206,76 @@ def test_a_mesh_whose_geometry_link_did_not_resolve_is_still_gated():
     assert len(export.gate_violations(_facts([node]))) == 1
 
 
+# --- #602 P1: joints gate like meshes, and the skin records gate themselves ---
+
+
+def test_a_scaled_joint_is_a_violation():
+    # A skinned joint's scale multiplies vertices without being the mesh's
+    # ancestor, so LimbNodes are gated like meshes.
+    facts = _facts(nodes=[fbxbytes.FbxNode(name="hip", kind="LimbNode",
+                                           scaling=(2.0, 2.0, 2.0))])
+    assert any("hip" in v for v in export.gate_violations(facts))
+
+
+def test_an_identity_joint_is_not():
+    facts = _facts(nodes=[fbxbytes.FbxNode(name="hip", kind="LimbNode")])
+    assert export.gate_violations(facts) == []
+
+
+def test_skin_violations_compose():
+    # include_skins=true with no skin in the bytes is the false-green class.
+    sfacts = {"deformers": 0, "clusters": 0, "influenced_models": 0,
+              "bind_pose_present": False, "max_weight_sum_error": None,
+              "unweighted_file_vertices": 0, "unavailable_reason": None}
+    out = export.skin_violations(sfacts)
+    assert any("no skin deformer" in v for v in out)
+
+
+def test_a_good_skin_block_raises_nothing():
+    sfacts = {"deformers": 1, "clusters": 3, "influenced_models": 3,
+              "bind_pose_present": True, "max_weight_sum_error": 2e-7,
+              "unweighted_file_vertices": 0, "unavailable_reason": None}
+    assert export.skin_violations(sfacts) == []
+
+
+def test_bad_sums_missing_bindpose_and_unweighted_all_fire():
+    sfacts = {"deformers": 1, "clusters": 3, "influenced_models": 3,
+              "bind_pose_present": False, "max_weight_sum_error": 0.4,
+              "unweighted_file_vertices": 7, "unavailable_reason": None}
+    out = export.skin_violations(sfacts)
+    assert len(out) == 3
+
+
+def test_a_deformer_with_no_clusters_names_the_missing_skeleton():
+    # MEASURED: a selected export listing the mesh but not the skeleton root
+    # writes exactly this - one deformer record, zero clusters, and every
+    # vertex unweighted. The unweighted count alone reads like a bad bind, so
+    # the short selection is named on its own.
+    sfacts = {"deformers": 1, "clusters": 0, "influenced_models": 0,
+              "bind_pose_present": True, "max_weight_sum_error": None,
+              "unweighted_file_vertices": 140, "unavailable_reason": None}
+    out = export.skin_violations(sfacts)
+    assert len(out) == 1
+    assert "skeleton root" in out[0]
+
+
+def test_the_tolerance_clears_the_exporters_own_weight_pruning():
+    # Maya's FBX exporter drops every weight below 1e-3 without renormalising,
+    # so a vertex loses up to (influences - 1) x 1e-3 and bind_skin allows 8
+    # influences. A tolerance at or below 7e-3 refuses correct binds - one
+    # measured at 1.381872e-3 under the original 1e-3.
+    assert export.WEIGHT_SUM_TOL > 7e-3
+    good_but_pruned = {"deformers": 1, "clusters": 8, "influenced_models": 8,
+                       "bind_pose_present": True,
+                       "max_weight_sum_error": 1.381872e-3,
+                       "unweighted_file_vertices": 0,
+                       "unavailable_reason": None}
+    assert export.skin_violations(good_but_pruned) == []
+    # And it still catches what it is for: an unnormalised bind.
+    unnormalised = dict(good_but_pruned, max_weight_sum_error=0.4)
+    assert any("weight sums" in v for v in export.skin_violations(unnormalised))
+
+
 def test_a_wrong_declaration_is_a_violation():
     violations = export.gate_violations(_facts(unit=1.0))
     assert len(violations) == 1
@@ -226,10 +313,11 @@ def _params(tmp_path, **over):
 
 
 def test_a_good_call_normalises_the_path(tmp_path):
-    path, nodes = export._validate(_params(tmp_path))
+    path, nodes, include_skins = export._validate(_params(tmp_path))
     assert path.endswith("/out.fbx")
     assert "\\" not in path
     assert nodes is None
+    assert include_skins is False
 
 
 def test_metres_per_unit_has_no_default(tmp_path):
@@ -283,8 +371,14 @@ def test_an_empty_node_list_is_refused(tmp_path):
 
 
 def test_a_node_list_survives_validation(tmp_path):
-    _path, nodes = export._validate(_params(tmp_path, nodes=["golem_C_pelvis"]))
+    _path, nodes, _skins = export._validate(
+        _params(tmp_path, nodes=["golem_C_pelvis"]))
     assert nodes == ["golem_C_pelvis"]
+
+
+def test_include_skins_must_be_a_bool(tmp_path):
+    with pytest.raises(HandlerError, match="include_skins"):
+        export._validate(_params(tmp_path, include_skins="yes"))
 
 
 class FakeCmds:
@@ -360,12 +454,66 @@ def test_a_clean_export_reports_the_file_not_the_scene(monkeypatch, tmp_path):
     # the factor last.
     assert mel.evaluated == (list(export.FBX_PREAMBLE_MEL)
                              + list(export.FBX_SCENE_CONTENT_MEL)
+                             + list(export.FBX_SKINS_MEL[False])
                              + ["FBXExportScaleFactor 1"])
     # The unit declaration must actually be patched, on the exact file just
     # written - which is the TEMP file, not the final path: the write and
     # patch happen before the gate has passed, and only os.replace at the end
     # touches the real path.
     assert mel.unit_scale_factor_calls == [out["path"] + ".part.fbx"]
+    # The default is skinless, stated rather than left to FBXResetExport's
+    # defaults, and the result says so with a null rather than an absent key.
+    assert "FBXExportSkins -v false" in mel.evaluated
+    assert out["skin"] is None
+
+
+def _good_skin_block():
+    return {"deformers": 1, "clusters": 3, "influenced_models": 3,
+            "bind_pose_present": True, "max_weight_sum_error": 2e-7,
+            "unweighted_file_vertices": 0, "unavailable_reason": None}
+
+
+def test_include_skins_switches_the_mel_and_reports_the_block(
+        monkeypatch, tmp_path):
+    node = fbxbytes.FbxNode(name="tube", kind="Mesh", uid=1, geometry=7)
+    joint = fbxbytes.FbxNode(name="j1", kind="LimbNode", uid=2)
+    facts = _facts([node, joint])
+    facts.meshes = [(0.0, 0.0, 0.0, 1.0, 2.0, 1.0)]
+    facts.geometries = {7: facts.meshes[0]}
+    cmds = FakeCmds()
+    mel = _install(monkeypatch, cmds, facts)
+    monkeypatch.setattr(export.fbxbytes, "skin_facts",
+                        lambda _f: _good_skin_block())
+
+    out = export.export_fbx({"path": str(tmp_path / "skinned.fbx"),
+                             "metres_per_unit": 1.0, "include_skins": True})
+
+    assert "FBXExportSkins -v true" in mel.evaluated
+    assert "FBXExportSkins -v false" not in mel.evaluated
+    assert out["skin"] == _good_skin_block()
+
+
+def test_a_skinless_file_refuses_an_include_skins_export(monkeypatch, tmp_path):
+    # The false-green class: the caller asked for skins and the bytes hold
+    # none, so the file must not reach `path`.
+    facts = _facts([fbxbytes.FbxNode(name="tube", kind="Mesh", uid=1)])
+    _install(monkeypatch, FakeCmds(), facts)
+    empty = {"deformers": 0, "clusters": 0, "influenced_models": 0,
+             "bind_pose_present": False, "max_weight_sum_error": None,
+             "unweighted_file_vertices": 0, "unavailable_reason": None}
+    monkeypatch.setattr(export.fbxbytes, "skin_facts", lambda _f: empty)
+
+    path = tmp_path / "dry.fbx"
+    with pytest.raises(HandlerError) as exc:
+        export.export_fbx({"path": str(path), "metres_per_unit": 1.0,
+                           "include_skins": True})
+
+    assert "no skin deformer" in str(exc.value)
+    # A skin violation is not a unit violation, and "freeze transforms" is not
+    # the action: the hint has to name the one that is.
+    assert "maya_bind_skin" in (exc.value.hint or "")
+    assert not path.exists()
+    assert not (tmp_path / "dry.fbx.part.fbx").exists()
 
 
 def test_a_violating_file_is_deleted_not_returned(monkeypatch, tmp_path):
