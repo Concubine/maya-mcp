@@ -2382,6 +2382,20 @@ class TestPoseSkeletonInMaya:
         if out["max_displacement"] < 0.05:
             assert any("near-zero" in w for w in out["warnings"])
 
+    def test_per_mesh_reports_each_bound_mesh_alone(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import rigging
+
+        mesh, skel = self._bound_serpent(cmds, rigging, name="pm_tube")
+        mid = skel["joints"][1]["name"]
+        out = rigging.pose_skeleton({"root": skel["root"],
+                                     "rotations": {mid: [0, 0, 45]}})
+        assert len(out["per_mesh"]) == 1
+        assert out["per_mesh"][0]["mesh"] == mesh
+        assert out["per_mesh"][0]["max_displacement"] == pytest.approx(
+            out["max_displacement"])
+
 
 class TestWeightReportInMaya:
     def test_report_agrees_with_bind_and_is_read_only(self):

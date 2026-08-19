@@ -312,6 +312,60 @@ class TestResetPose:
         assert len(zeroed) == 2
 
 
+class TestPosePerMesh:
+    def test_reset_with_two_bind_poses_warns_and_restores_the_first(self, fake):
+        fake.objects += ["|r", "|r|a"]
+        fake.parents = {"|r|a": "|r"}
+        fake.bind_poses = ["bindPose1", "bindPose2"]
+        out = rigging.reset_pose({"root": "r"})
+        assert any("2 bind poses" in w for w in out["warnings"])
+        restored = [c for c in fake.calls
+                    if c[0] == "dagPose" and c[2].get("restore")]
+        assert restored and restored[0][1][0] == "bindPose1"
+
+    def test_pose_reports_per_mesh_and_names_the_inert_one(self, fake, monkeypatch):
+        fake.objects += ["|r", "|r|a"]
+        fake.parents = {"|r|a": "|r"}
+        fake.skin_clusters = ["scA", "scB"]
+        fake.skin_influences = {"scA": ["|r|a"], "scB": ["|r|a"]}
+        fake.skin_geometry = {"scA": ["|meshA|meshAShape"],
+                              "scB": ["|meshB|meshBShape"]}
+        fake.objects += ["|meshA", "|meshB"]
+        fake.parents.update({"|meshA|meshAShape": "|meshA",
+                             "|meshB|meshBShape": "|meshB"})
+        # _bound_meshes asks a shape for its parent transform; the base fake
+        # only answers children queries.
+        def listRelatives(node, parent=False, fullPath=False, **kw):
+            if parent:
+                p = fake.parents.get(node)
+                return [p] if p else None
+            return FakeCmds.listRelatives(fake, node, **kw)
+        fake.listRelatives = listRelatives
+        from maya_plugin.handlers import sculpt
+        state = {"posed": False}
+        def positions(cmds, mesh):
+            # meshA moves 1.0 when posed; meshB never moves.
+            if mesh == "|meshA" and state["posed"]:
+                return [0.0, 1.0, 0.0,  0.0, 3.0, 0.0]
+            if mesh == "|meshA":
+                return [0.0, 0.0, 0.0,  0.0, 2.0, 0.0]
+            return [5.0, 0.0, 0.0,  5.0, 2.0, 0.0]
+        monkeypatch.setattr(sculpt, "vertex_positions", positions)
+        real_set = fake.setAttr
+        def set_attr(plug, *values, **kw):
+            state["posed"] = True
+            return real_set(plug, *values, **kw)
+        fake.setAttr = set_attr
+        out = rigging.pose_skeleton({"root": "r",
+                                     "rotations": {"a": [0, 0, 30]}})
+        assert len(out["per_mesh"]) == 2
+        by_mesh = {m["mesh"]: m for m in out["per_mesh"]}
+        assert by_mesh["|meshA"]["max_displacement"] == pytest.approx(1.0)
+        assert by_mesh["|meshB"]["max_displacement"] == 0.0
+        assert out["max_displacement"] == pytest.approx(1.0)
+        assert any("meshB" in w and "near-zero" in w for w in out["warnings"])
+
+
 class TestWeightReport:
     def _bound_mesh(self, fake, monkeypatch):
         fake.objects.append("|serpent")

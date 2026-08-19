@@ -748,6 +748,14 @@ class PosedJoint(BaseModel):
     world_position: List[float]
 
 
+class MeshDisplacement(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    mesh: str
+    max_displacement: float
+    displaced_vertices: int
+
+
 class PoseSkeletonResult(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -761,6 +769,11 @@ class PoseSkeletonResult(BaseModel):
             "against the mesh's size means the pose did nothing and warnings "
             "says why."))
     displaced_vertices: int
+    per_mesh: List[MeshDisplacement] = Field(
+        default_factory=list,
+        description=(
+            "Displacement per bound mesh - the combined max can hide one "
+            "inert mesh among several, so each is measured alone."))
     warnings: List[str] = Field(default_factory=list)
 
 

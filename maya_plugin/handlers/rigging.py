@@ -332,11 +332,15 @@ def pose_skeleton(params: Dict[str, Any]) -> Dict[str, Any]:
 
     max_disp = 0.0
     displaced = 0
+    per_mesh: List[Dict[str, Any]] = []
     for mesh in meshes:
         after = sculpt.vertex_positions(cmds, mesh)
-        max_disp = max(max_disp,
-                       sculpt_math.max_displacement(before[mesh], after))
-        displaced += rigmath.displaced_count(before[mesh], after)
+        mesh_disp = sculpt_math.max_displacement(before[mesh], after)
+        mesh_count = rigmath.displaced_count(before[mesh], after)
+        per_mesh.append({"mesh": mesh, "max_displacement": mesh_disp,
+                         "displaced_vertices": mesh_count})
+        max_disp = max(max_disp, mesh_disp)
+        displaced += mesh_count
 
     warnings: List[str] = []
     if not meshes:
@@ -344,16 +348,20 @@ def pose_skeleton(params: Dict[str, Any]) -> Dict[str, Any]:
             "no skinned mesh is bound to this skeleton - the pose moved bare "
             "joints only; bind_skin first if deformation was the point")
     else:
-        extent = max(sculpt_math.bbox_extent(before[m]) for m in meshes)
-        if extent > 0 and max_disp < extent * NOOP_POSE_RATIO:
-            warnings.append(
-                "the pose moved the mesh by %.4g against a size of %.4g - "
-                "near-zero deformation usually means the rotations landed on "
-                "joints that own no vertices" % (max_disp, extent))
+        # Per mesh, not combined: a combined max hides one inert mesh among
+        # several (#668 review item a).
+        for entry in per_mesh:
+            extent = sculpt_math.bbox_extent(before[entry["mesh"]])
+            if extent > 0 and entry["max_displacement"] < extent * NOOP_POSE_RATIO:
+                warnings.append(
+                    "%s moved by %.4g against a size of %.4g - near-zero "
+                    "deformation usually means the rotations landed on joints "
+                    "that own none of its vertices"
+                    % (entry["mesh"], entry["max_displacement"], extent))
 
     return {"applied": len(resolved), "joints": joints_out,
             "max_displacement": max_disp, "displaced_vertices": displaced,
-            "warnings": warnings}
+            "per_mesh": per_mesh, "warnings": warnings}
 
 
 def reset_pose(params: Dict[str, Any]) -> Dict[str, Any]:
