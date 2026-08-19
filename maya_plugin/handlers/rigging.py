@@ -550,3 +550,95 @@ def mirror_weights(params: Dict[str, Any]) -> Dict[str, Any]:
         "unweighted_vertices": stats["unweighted_vertices"],
         "warnings": warnings,
     }
+
+
+def _vertex_adjacency(mesh_shape: str) -> List[List[int]]:
+    """Neighbour vertex ids per vertex, from the mesh graph."""
+    import maya.api.OpenMaya as om          # noqa: PLC0415
+
+    sel = om.MSelectionList()
+    sel.add(mesh_shape)
+    it = om.MItMeshVertex(sel.getDagPath(0))
+    adjacency: List[List[int]] = []
+    while not it.isDone():
+        adjacency.append(list(it.getConnectedVertices()))
+        it.next()
+    return adjacency
+
+
+def _resolve_influences(influences: List[str], names) -> List[int]:
+    """Column indices for user-named joints; long or unique short names."""
+    if not isinstance(names, list) or not names or not all(
+            isinstance(n, str) and n.strip() for n in names):
+        raise HandlerError("joints must be a non-empty list of joint names")
+    by_short: Dict[str, List[int]] = {}
+    for idx, j in enumerate(influences):
+        by_short.setdefault(_short(j), []).append(idx)
+    columns: List[int] = []
+    for name in names:
+        if name in influences:
+            columns.append(influences.index(name))
+            continue
+        matches = by_short.get(_short(name), [])
+        if not matches:
+            raise HandlerError(
+                "%r is not an influence of this skinCluster" % name,
+                hint="influences here: %s"
+                     % ", ".join(_short(j) for j in influences[:12]))
+        if len(matches) > 1:
+            raise HandlerError(
+                "%r is ambiguous (%d influences match)" % (name, len(matches)),
+                hint="use the long name, e.g. %s" % influences[matches[0]])
+        columns.append(matches[0])
+    return columns
+
+
+def smooth_weights(params: Dict[str, Any]) -> Dict[str, Any]:
+    cmds = _cmds()
+    mesh_long, mesh_shape = naming.require_mesh(cmds, str(params.get("mesh") or ""))
+    iterations = params.get("iterations", 1)
+    if (not isinstance(iterations, int) or isinstance(iterations, bool)
+            or not 1 <= iterations <= rigmath.MAX_SMOOTH_ITERATIONS):
+        raise HandlerError(
+            "iterations must be an integer 1..%d"
+            % rigmath.MAX_SMOOTH_ITERATIONS,
+            hint="2-3 passes visibly soften a stair-step; more is mush")
+    sc = _skin_cluster_for(cmds, mesh_long, mesh_shape)
+    max_influences = int(cmds.getAttr(sc + ".maxInfluences"))
+    influences, weights, num_verts = _skin_weights(sc, mesh_shape)
+
+    rows = None
+    if params.get("joints") is not None:
+        columns = _resolve_influences(influences, params.get("joints"))
+        ncols = len(influences)
+        rows = {v for v in range(num_verts)
+                if any(weights[v * ncols + j] > rigmath.WEIGHT_TOL
+                       for j in columns)}
+
+    # No _pose_warning here on purpose: smoothing reads the mesh GRAPH
+    # (adjacency), not positions, so pose cannot corrupt it.
+    warnings: List[str] = []
+
+    session.auto_checkpoint("smooth_weights")
+    adjacency = _vertex_adjacency(mesh_shape)
+    new_table = rigmath.smooth_weight_table(
+        weights, len(influences), adjacency, iterations, max_influences,
+        rows=rows)
+    _set_skin_weights(sc, mesh_shape, len(influences), new_table)
+
+    _, after, _ = _skin_weights(sc, mesh_shape)
+    stats = rigmath.weight_stats(influences, after, num_verts, max_influences)
+    if stats["unweighted_vertices"]:
+        warnings.append("%d vertices belong to NO joint after smoothing"
+                        % stats["unweighted_vertices"])
+    return {
+        "mesh": mesh_long,
+        "skin_cluster": sc,
+        "iterations": iterations,
+        "smoothed_vertices": num_verts if rows is None else len(rows),
+        "changed_vertices": rigmath.changed_rows(weights, after,
+                                                 len(influences)),
+        "unweighted_vertices": stats["unweighted_vertices"],
+        "max_influences_exceeded": stats["max_influences_exceeded"],
+        "warnings": warnings,
+    }

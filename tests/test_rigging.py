@@ -431,3 +431,59 @@ class TestMirrorWeights:
                             {"checkpoint_id": "001", "path": "x.ma"})
         rigging.mirror_weights({"mesh": "hum"})
         assert events == ["mirror_weights"]
+
+
+class TestSmoothWeights:
+    def _bound(self, fake, monkeypatch, weights, joints=("|r|a", "|r|b"),
+               adjacency=((1,), (0, 2), (1,))):
+        fake.objects.append("|hum")
+        fake.shapes = {"|hum": "|hum|humShape"}
+        def listRelatives(node, shapes=False, **kw):
+            if shapes:
+                return [fake.shapes.get(node)]
+            return FakeCmds.listRelatives(fake, node, **kw)
+        fake.listRelatives = listRelatives
+        fake.skin_history = ["skin1"]
+        fake.attrs["skin1.maxInfluences"] = 4
+        for j in joints:
+            fake.attrs[j + ".rotate"] = [(0.0, 0.0, 0.0)]
+        state = {"weights": list(weights)}
+        monkeypatch.setattr(
+            rigging, "_skin_weights",
+            lambda sc, shape: (list(joints), list(state["weights"]),
+                               len(weights) // len(joints)))
+        def set_weights(sc, shape, ncols, table):
+            state["weights"] = list(table)
+        monkeypatch.setattr(rigging, "_set_skin_weights", set_weights)
+        monkeypatch.setattr(rigging, "_vertex_adjacency",
+                            lambda shape: [list(a) for a in adjacency])
+        return state
+
+    def test_smooth_measures_what_changed(self, fake, monkeypatch):
+        state = self._bound(fake, monkeypatch,
+                            [1.0, 0.0, 1.0, 0.0, 0.0, 1.0])
+        out = rigging.smooth_weights({"mesh": "hum"})
+        assert out["iterations"] == 1
+        assert out["smoothed_vertices"] == 3
+        assert out["changed_vertices"] >= 1
+        assert out["unweighted_vertices"] == 0
+        assert state["weights"][2:4] == pytest.approx([0.75, 0.25])
+
+    def test_joints_filter_selects_rows_by_held_weight(self, fake, monkeypatch):
+        self._bound(fake, monkeypatch, [1.0, 0.0, 1.0, 0.0, 0.0, 1.0])
+        out = rigging.smooth_weights({"mesh": "hum", "joints": ["b"]})
+        # only v2 holds b -> only v2 is a smoothing target
+        assert out["smoothed_vertices"] == 1
+
+    def test_unknown_joint_is_refused_with_candidates(self, fake, monkeypatch):
+        self._bound(fake, monkeypatch, [1.0, 0.0, 1.0, 0.0, 0.0, 1.0])
+        with pytest.raises(HandlerError, match="not an influence") as err:
+            rigging.smooth_weights({"mesh": "hum", "joints": ["nope"]})
+        assert "a" in err.value.hint
+
+    def test_iterations_bounds(self, fake, monkeypatch):
+        self._bound(fake, monkeypatch, [1.0, 0.0, 1.0, 0.0, 0.0, 1.0])
+        with pytest.raises(HandlerError, match="iterations"):
+            rigging.smooth_weights({"mesh": "hum", "iterations": 0})
+        with pytest.raises(HandlerError, match="iterations"):
+            rigging.smooth_weights({"mesh": "hum", "iterations": 999})

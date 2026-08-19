@@ -821,3 +821,17 @@ class MirrorWeightsResult(BaseModel):
         description="MEASURED after re-reading the table, not computed.")
     unweighted_vertices: int
     warnings: List[str] = Field(default_factory=list)
+
+
+class SmoothWeightsResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    mesh: str
+    skin_cluster: str
+    iterations: int
+    smoothed_vertices: int
+    changed_vertices: int = Field(
+        description="MEASURED after re-reading the table.")
+    unweighted_vertices: int
+    max_influences_exceeded: int
+    warnings: List[str] = Field(default_factory=list)

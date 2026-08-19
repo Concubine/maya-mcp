@@ -65,6 +65,7 @@ from .schemas import (
     UndoResult,
     ViewportState,
     MirrorWeightsResult,
+    SmoothWeightsResult,
     WeightReportResult,
 )
 
@@ -2142,6 +2143,35 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             maya.request("mirror_weights",
                          {"mesh": mesh, "axis": axis, "direction": direction},
                          timeout_s=BOOL_TIMEOUT_S)
+        )
+
+    @mcp.tool(
+        title="Smooth skin weights",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_smooth_weights(
+        mesh: Annotated[str, Field(description="A bound mesh (long name).")],
+        joints: Annotated[Optional[List[str]], Field(description=(
+            "Limit smoothing to vertices these joints hold - aim it at the "
+            "hip or shoulder that stair-steps. Default: the whole mesh."
+        ))] = None,
+        iterations: Annotated[int, Field(ge=1, le=50, description=(
+            "Laplacian passes. 2-3 visibly soften a hard falloff edge."
+        ))] = 1,
+    ) -> SmoothWeightsResult:
+        """Soften stair-stepped weight falloff over the mesh graph.
+
+        Each pass averages a vertex's weights with its neighbours', then
+        prunes back to the cluster's max_influences and renormalizes, so
+        smoothing never breaks the bind's promise to the exporter. Reports
+        measured changed_vertices and post-op integrity."""
+        params = {"mesh": mesh, "iterations": iterations}
+        if joints is not None:
+            params["joints"] = joints
+        return SmoothWeightsResult.model_validate(
+            maya.request("smooth_weights", params, timeout_s=BOOL_TIMEOUT_S)
         )
 
     return mcp

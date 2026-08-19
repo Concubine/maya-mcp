@@ -98,6 +98,7 @@ class TestRegistration:
             "maya_reset_pose",
             "maya_weight_report",
             "maya_mirror_weights",
+            "maya_smooth_weights",
         }
 
     def test_annotations_declare_read_only_vs_destructive(self):
@@ -1653,3 +1654,29 @@ class TestRiggingTools:
         assert conn.calls[0]["params"] == {
             "mesh": "|h", "axis": "x", "direction": "+to-"}
         assert result.structured_content["mirrored_vertices"] == 4
+
+    def test_smooth_weights_omits_joints_when_unset(self):
+        conn = FakeConn(responses={"smooth_weights": {
+            "mesh": "|h", "skin_cluster": "hSkin", "iterations": 1,
+            "smoothed_vertices": 8, "changed_vertices": 5,
+            "unweighted_vertices": 0, "max_influences_exceeded": 0,
+            "warnings": []}})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_smooth_weights", {"mesh": "|h"}))
+        assert conn.calls[0]["cmd"] == "smooth_weights"
+        assert conn.calls[0]["params"] == {"mesh": "|h", "iterations": 1}
+        assert result.structured_content["smoothed_vertices"] == 8
+
+    def test_smooth_weights_forwards_joints_verbatim_when_given(self):
+        conn = FakeConn(responses={"smooth_weights": {
+            "mesh": "|h", "skin_cluster": "hSkin", "iterations": 2,
+            "smoothed_vertices": 3, "changed_vertices": 2,
+            "unweighted_vertices": 0, "max_influences_exceeded": 0,
+            "warnings": []}})
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool(
+            "maya_smooth_weights",
+            {"mesh": "|h", "joints": ["|r|hip"], "iterations": 2}))
+        assert conn.calls[0]["cmd"] == "smooth_weights"
+        assert conn.calls[0]["params"] == {
+            "mesh": "|h", "iterations": 2, "joints": ["|r|hip"]}

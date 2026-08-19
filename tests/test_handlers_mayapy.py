@@ -2477,6 +2477,50 @@ class TestMirrorWeightsInMaya:
         assert out["changed_vertices"] == 0
 
 
+class TestSmoothWeightsInMaya:
+    def test_smoothing_a_hard_edge_reduces_the_step(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import rigging
+
+        mesh = _serpent_cylinder(cmds, name="sm_tube")
+        skel = rigging.create_skeleton({
+            "chain": [[0, 0, 0], [0, 2, 0], [0, 4, 0]], "chain_prefix": "sm_j"})
+        bind = rigging.bind_skin({"mesh": mesh, "root": skel["root"]})
+        sc = bind["skin_cluster"]
+        # Manufacture a stair-step: every vertex below y=2 fully to joint 1,
+        # above fully to joint 2.
+        n = cmds.polyEvaluate(mesh, vertex=True)
+        for i in range(n):
+            y = cmds.xform("%s.vtx[%d]" % (mesh, i), query=True,
+                           worldSpace=True, translation=True)[1]
+            owner = "sm_j_01" if y < 2.0 else "sm_j_02"
+            cmds.skinPercent(sc, "%s.vtx[%d]" % (mesh, i),
+                             transformValue=[(owner, 1.0)])
+        out = rigging.smooth_weights({"mesh": mesh, "iterations": 2})
+        assert out["changed_vertices"] > 0
+        assert out["unweighted_vertices"] == 0
+        assert out["max_influences_exceeded"] == 0
+        # Some vertex near the seam is now genuinely shared.
+        report = rigging.weight_report({"mesh": mesh})
+        shared = [b for b in report["histogram"] if b["influences"] >= 2]
+        assert shared and sum(b["vertices"] for b in shared) > 0
+
+    def test_joint_filter_leaves_the_far_end_alone(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import rigging, sculpt
+
+        mesh = _serpent_cylinder(cmds, name="sm_tube2")
+        skel = rigging.create_skeleton({
+            "chain": [[0, 0, 0], [0, 2, 0], [0, 4, 0]], "chain_prefix": "sn_j"})
+        rigging.bind_skin({"mesh": mesh, "root": skel["root"]})
+        before = rigging.weight_report({"mesh": mesh})
+        out = rigging.smooth_weights({"mesh": mesh, "joints": ["sn_j_03"],
+                                      "iterations": 1})
+        assert out["smoothed_vertices"] < before["vertices"]
+
+
 class TestExportSkinsInMaya:
     def _bound(self, cmds, rigging, name):
         mesh = _serpent_cylinder(cmds, name=name, height=2.0, sections=6)
