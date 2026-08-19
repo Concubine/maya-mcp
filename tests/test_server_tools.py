@@ -96,6 +96,7 @@ class TestRegistration:
             "maya_bind_skin",
             "maya_pose_skeleton",
             "maya_reset_pose",
+            "maya_weight_report",
         }
 
     def test_annotations_declare_read_only_vs_destructive(self):
@@ -1623,3 +1624,18 @@ class TestRiggingTools:
             "root": "r", "rotations": {"a": [0, 0, 10]}}))
         run(mcp.call_tool("maya_reset_pose", {"root": "r"}))
         assert [c["cmd"] for c in conn.calls] == ["pose_skeleton", "reset_pose"]
+
+    def test_weight_report_marshals_and_validates(self):
+        conn = FakeConn(responses={"weight_report": {
+            "mesh": "|h", "skin_cluster": "hSkin", "vertices": 8,
+            "max_influences": 4, "unweighted_vertices": 0,
+            "unweighted_sample": [], "max_influences_exceeded": 0,
+            "exceeded_sample": [], "max_weight_sum_error": 0.0,
+            "histogram": [{"influences": 2, "vertices": 8}],
+            "per_joint": [{"joint": "|r|a", "vertices": 8, "mean_weight": 0.5}],
+            "warnings": []}})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_weight_report", {"mesh": "|h"}))
+        assert conn.calls[0]["cmd"] == "weight_report"
+        assert conn.calls[0]["params"] == {"mesh": "|h"}
+        assert result.structured_content["vertices"] == 8

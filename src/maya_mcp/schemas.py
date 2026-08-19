@@ -771,3 +771,33 @@ class ResetPoseResult(BaseModel):
     max_displacement: float = Field(
         description="How far the mesh moved coming back to the bind pose.")
     warnings: List[str] = Field(default_factory=list)
+
+
+class InfluenceBucket(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    influences: int
+    vertices: int
+
+
+class WeightReportResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    mesh: str
+    skin_cluster: str
+    vertices: int
+    max_influences: int = Field(
+        description="The cluster's own ceiling, measured from the node.")
+    unweighted_vertices: int
+    unweighted_sample: List[int] = Field(
+        description="First few unowned vertex ids - set_region_weights targets.")
+    max_influences_exceeded: int
+    exceeded_sample: List[int]
+    max_weight_sum_error: float
+    histogram: List[InfluenceBucket] = Field(
+        description=(
+            "Vertices bucketed by how many joints meaningfully hold them. "
+            "'One joint owns everything' and 'weights smeared over eight "
+            "joints' are both legible here."))
+    per_joint: List[SkinJointStats]
+    warnings: List[str] = Field(default_factory=list)

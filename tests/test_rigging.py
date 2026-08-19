@@ -310,3 +310,40 @@ class TestResetPose:
         zeroed = [c for c in fake.calls
                   if c[0] == "setAttr" and c[1].endswith(".rotate")]
         assert len(zeroed) == 2
+
+
+class TestWeightReport:
+    def _bound_mesh(self, fake, monkeypatch):
+        fake.objects.append("|serpent")
+        fake.shapes = {"|serpent": "|serpent|serpentShape"}
+        def listRelatives(node, shapes=False, **kw):
+            if shapes:
+                return [fake.shapes.get(node)]
+            return FakeCmds.listRelatives(fake, node, **kw)
+        fake.listRelatives = listRelatives
+        fake.skin_history = ["skin1"]
+        fake.attrs["skin1.maxInfluences"] = 4
+        # 3 verts x 2 joints: v2 unweighted
+        monkeypatch.setattr(
+            rigging, "_skin_weights",
+            lambda sc, shape: (["|r|a", "|r|b"],
+                               [1.0, 0.0, 0.6, 0.4, 0.0, 0.0], 3))
+
+    def test_report_is_measured_and_never_checkpoints(self, fake, monkeypatch):
+        self._bound_mesh(fake, monkeypatch)
+        monkeypatch.setattr(session, "auto_checkpoint",
+                            lambda reason: pytest.fail("a measurement checkpointed"))
+        out = rigging.weight_report({"mesh": "serpent"})
+        assert out["skin_cluster"] == "skin1"
+        assert out["vertices"] == 3
+        assert out["max_influences"] == 4
+        assert out["unweighted_vertices"] == 1
+        assert out["unweighted_sample"] == [2]
+        assert any("belong to NO joint" in w for w in out["warnings"])
+
+    def test_unbound_mesh_is_refused_with_the_bind_hint(self, fake, monkeypatch):
+        self._bound_mesh(fake, monkeypatch)
+        fake.skin_history = []
+        with pytest.raises(HandlerError, match="not bound") as err:
+            rigging.weight_report({"mesh": "serpent"})
+        assert "bind_skin" in err.value.hint

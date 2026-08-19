@@ -64,6 +64,7 @@ from .schemas import (
     TransformResult,
     UndoResult,
     ViewportState,
+    WeightReportResult,
 )
 
 log = logging.getLogger("maya_mcp.server")
@@ -2092,6 +2093,24 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         create_skeleton rest pose) and a warning says so."""
         return ResetPoseResult.model_validate(
             maya.request("reset_pose", {"root": root}, timeout_s=BOOL_TIMEOUT_S)
+        )
+
+    @mcp.tool(
+        title="Report skin weights",
+        annotations=ToolAnnotations(read_only_hint=True),
+    )
+    def maya_weight_report(
+        mesh: Annotated[str, Field(description="A bound mesh (long name).")],
+    ) -> WeightReportResult:
+        """MEASURE a bind's weights: the perception tool for weights craft.
+
+        Judge a bind from this plus a posed render, the way get_object_info
+        serves modeling: per-joint ownership, unweighted vertices (with sample
+        ids to aim set_region_weights at), influence-count histogram, and
+        weight-sum drift. Read-only."""
+        return WeightReportResult.model_validate(
+            maya.request("weight_report", {"mesh": mesh},
+                         timeout_s=BOOL_TIMEOUT_S)
         )
 
     return mcp

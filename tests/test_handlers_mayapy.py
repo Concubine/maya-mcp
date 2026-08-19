@@ -2383,6 +2383,35 @@ class TestPoseSkeletonInMaya:
             assert any("near-zero" in w for w in out["warnings"])
 
 
+class TestWeightReportInMaya:
+    def test_report_agrees_with_bind_and_is_read_only(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import rigging
+
+        mesh = _serpent_cylinder(cmds, name="wr_tube")
+        skel = rigging.create_skeleton({
+            "chain": [[0, 0, 0], [0, 2, 0], [0, 4, 0]], "chain_prefix": "wr_j"})
+        bind = rigging.bind_skin({"mesh": mesh, "root": skel["root"]})
+        out = rigging.weight_report({"mesh": mesh})
+        assert out["skin_cluster"] == bind["skin_cluster"]
+        assert out["unweighted_vertices"] == 0
+        assert out["max_influences"] == 4
+        assert out["max_weight_sum_error"] < 1e-6   # in-scene sums are exact
+        assert sum(b["vertices"] for b in out["histogram"]) == out["vertices"]
+        assert [p["joint"] for p in out["per_joint"]] == bind["influences"]
+
+    def test_report_on_an_unbound_mesh_refuses(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import rigging
+
+        mesh = _serpent_cylinder(cmds, name="wr_bare")
+        with pytest.raises(HandlerError, match="not bound"):
+            rigging.weight_report({"mesh": mesh})
+
+
 class TestExportSkinsInMaya:
     def _bound(self, cmds, rigging, name):
         mesh = _serpent_cylinder(cmds, name=name, height=2.0, sections=6)

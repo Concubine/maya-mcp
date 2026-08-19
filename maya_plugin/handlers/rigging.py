@@ -385,3 +385,57 @@ def reset_pose(params: Dict[str, Any]) -> Dict[str, Any]:
         max_disp = max(max_disp,
                        sculpt_math.max_displacement(before[mesh], after))
     return {"reset": True, "max_displacement": max_disp, "warnings": warnings}
+
+
+def _skin_cluster_for(cmds, mesh_long: str, mesh_shape: str) -> str:
+    """The mesh's one skinCluster. One is all there can be: bind_skin refuses
+    stacking, and every weight op edits an existing bind rather than guessing."""
+    existing = cmds.ls(cmds.listHistory(mesh_shape, pruneDagObjects=True) or [],
+                       type="skinCluster") or []
+    if not existing:
+        raise HandlerError(
+            "%s is not bound" % mesh_long,
+            hint="bind_skin first - weight ops edit an existing skinCluster")
+    return existing[0]
+
+
+def weight_report(params: Dict[str, Any]) -> Dict[str, Any]:
+    """The perception tool: how an agent judges weights without a viewport.
+    A measurement - no checkpoint, nothing in the scene changes."""
+    cmds = _cmds()
+    mesh_long, mesh_shape = naming.require_mesh(cmds, str(params.get("mesh") or ""))
+    sc = _skin_cluster_for(cmds, mesh_long, mesh_shape)
+    max_influences = int(cmds.getAttr(sc + ".maxInfluences"))
+    influences, weights, num_verts = _skin_weights(sc, mesh_shape)
+    stats = rigmath.weight_report_stats(influences, weights, num_verts,
+                                        max_influences)
+    warnings: List[str] = []
+    if stats["unweighted_vertices"]:
+        warnings.append(
+            "%d vertices belong to NO joint - they stay behind when the "
+            "creature moves. set_region_weights can hand them to a joint; "
+            "unweighted_sample says where to aim."
+            % stats["unweighted_vertices"])
+    if stats["max_influences_exceeded"]:
+        warnings.append(
+            "%d vertices carry more than the cluster's max_influences=%d"
+            % (stats["max_influences_exceeded"], max_influences))
+    empty = [p["joint"] for p in stats["per_joint"] if p["vertices"] == 0]
+    if empty:
+        warnings.append(
+            "%d joint(s) own no vertices: %s"
+            % (len(empty), ", ".join(_short(j) for j in empty[:8])))
+    return {
+        "mesh": mesh_long,
+        "skin_cluster": sc,
+        "vertices": num_verts,
+        "max_influences": max_influences,
+        "unweighted_vertices": stats["unweighted_vertices"],
+        "unweighted_sample": stats["unweighted_sample"],
+        "max_influences_exceeded": stats["max_influences_exceeded"],
+        "exceeded_sample": stats["exceeded_sample"],
+        "max_weight_sum_error": stats["max_weight_sum_error"],
+        "histogram": stats["histogram"],
+        "per_joint": stats["per_joint"],
+        "warnings": warnings,
+    }
