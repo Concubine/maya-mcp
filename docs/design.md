@@ -39,7 +39,7 @@ The design thesis, in priority order:
 - Optional AI mesh generation (Meshy / Hyper3D Rodin / Hunyuan3D adapter) as the organic-base-mesh escape route.
 
 **Non-goals (v1):**
-- Rigging, skinning, animation (stretch goal, out of scope).
+- ~~Rigging, skinning, animation (stretch goal, out of scope)~~ — unparked 2026-08-19; governed by `docs/superpowers/specs/2026-08-19-rigging-surface-design.md`, phase 1 shipped (#602).
 - ZBrush-grade sculpting fidelity — the loop is low-bandwidth by nature; target is "clean stylized game asset."
 - Arnold/offline rendering (viewport 2.0 hardware render only in v1; leave a `renderer` param stubbed).
 - Remote/multi-user operation. Localhost only.

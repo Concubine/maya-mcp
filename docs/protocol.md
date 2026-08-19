@@ -303,11 +303,48 @@ nothing validates at all. Non-numeric text, floats and booleans are still refuse
 
 **`name_prefix` is a prefix for `radial` and `linear`, and the NAME for `mirror`** (#640). An array of 12 needs 12 distinct names, so those two append `_1`..`_N`. A mirror makes exactly **one** copy, so numbering it was never collision avoidance — it cost the #601 golem run 11 renames, one per mirrored chunk, and nothing in the scene held any of the un-suffixed names. Pass `name_prefix='golem_R_arm'` to a mirror and the copy is called `golem_R_arm`. If that name really is taken, a suffix is added *and* `warnings` says so, because a silent rename is what made the caller check all eleven by hand. Omitting `name_prefix` still gives `<source>_1`: the fallback stem is the source's own name, which is by definition taken.
 
+## Commands (rigging phase 1 / #602)
+
+| cmd | params | result |
+|---|---|---|
+| `create_skeleton` | `{ joints? \| chain?, chain_prefix?, root_name? }` | `{ root, joints: [{name, position, parent, orient}], warnings }` |
+| `bind_skin` | `{ mesh, root, method?, max_influences? }` | `{ mesh, root, skin_cluster, influences, unweighted_vertices, max_influences_exceeded, per_joint, warnings }` |
+| `pose_skeleton` | `{ root, rotations, space? }` | `{ applied, joints: [{name, world_position}], max_displacement, displaced_vertices, warnings }` |
+| `reset_pose` | `{ root }` | `{ reset, max_displacement, warnings }` |
+
+`create_skeleton` takes either an explicit `joints` hierarchy or the `chain`
+shorthand, and validates the whole call before creating anything — a
+skeleton that dies half-built is orphan cleanup nobody asked for. Orientation
+defaults to Maya's own convention (X aims at the first child, leaves
+zeroed); whatever actually landed, default or explicit `orient` override, is
+reported per joint in **degrees**, because orientation is where every rig
+surprise lives.
+
+`bind_skin`'s `unweighted_vertices` must be `0` for a deliverable bind — a
+vertex no joint owns stays behind when the creature moves, and nothing looks
+wrong at bind time; `export_fbx(include_skins=true)` gates on the same fact
+read back from the file. `per_joint` reports each influence's vertex count
+and mean weight, which is how a bind is seen without a viewport. Re-binding
+an already-bound mesh is refused — stacked skinClusters make weights
+unexplainable — with a hint to unbind via `execute_python` or restore the
+pre-bind checkpoint.
+
+`pose_skeleton`'s `rotations` map is per-joint **local euler degrees,
+absolute** (not deltas — re-applying a pose is idempotent). This map is the
+pose currency phases 3 and 6 reuse: IK bakes into it, a clip keys it.
+`max_displacement` is measured from vertices before/after, never bounding
+boxes; a near-zero result against the mesh's own size warns, since that
+usually means the rotation landed on a joint owning no vertices.
+
+`reset_pose` restores the skeleton's `dagPose` bind pose. An unbound
+skeleton has no bind pose — rotations are zeroed instead (the
+`create_skeleton` rest pose) and a warning says so.
+
 ## Delivery
 
 | cmd | params | result |
 |---|---|---|
-| `export_fbx` | `{ path, metres_per_unit, nodes? }` | `{ path, bytes, fbx_version, node_count, mesh_count, root_nodes, unit_scale_factor, metres_per_unit, world_bounds_min, world_bounds_max, height_m, bounds_unavailable_reason }` |
+| `export_fbx` | `{ path, metres_per_unit, nodes?, include_skins? }` | `{ path, bytes, fbx_version, node_count, mesh_count, root_nodes, unit_scale_factor, metres_per_unit, world_bounds_min, world_bounds_max, height_m, bounds_unavailable_reason, skin }` |
 
 Every field of the result is read back **out of the written file**, never from the Maya scene — the unit defect this tool guards (#629) is produced by the exporter and is absent from the scene, so a scene-derived report would be confidently wrong in exactly the case that matters. The file is written to a sibling temp path and only reaches `path` once it passes; a refused export leaves whatever was already there untouched.
 
@@ -318,3 +355,18 @@ The gate makes **two** assertions. The declaration must say metres (`UnitScaleFa
 Omitting `nodes` exports the whole scene, including lights and cameras (`FBXExportCameras`/`FBXExportLights`, pinned rather than left to `FBXResetExport`'s defaults). Passing `nodes` exports that selection **plus its ancestor chain** — so a group above the selection carries its scale into the file, and the gate refuses it by name rather than silently shipping a mis-sized asset.
 
 `height_m` and the bounds are null when the reader cannot compose the hierarchy — a non-default `rotateOrder` is the case that happens in practice — and `bounds_unavailable_reason` then says which, distinctly from "the file holds no geometry". The export still succeeds: a measurement the reader cannot make must not fail bytes that already passed the gate.
+
+`include_skins` (default `false`) additionally writes the skinCluster
+deformers and the BindPose, and gates on the **file's own** skin records,
+not the scene: a skin deformer must be present, every cluster must link
+joints (a selected export listing the mesh without the skeleton root writes
+a deformer with zero clusters — named separately, since "every vertex
+unweighted" otherwise reads like a bad bind rather than a short selection),
+a BindPose record must exist, and per-vertex weight sums must be within
+`WEIGHT_SUM_TOL` = `1e-2` of 1.0. That tolerance is measured, not guessed:
+Maya's FBX exporter drops every skin weight strictly below `1e-3` without
+renormalising what is left, so a correct `max_influences=8` bind can lose up
+to ~7e-3 per vertex on export alone — a `1e-3` tolerance tried first refused
+a real, correctly-bound mesh. LimbNodes (skinned joints) gate under the same
+identity-scale rule as meshes (#629), since a joint's scale reaches a vertex
+without being its ancestor.
