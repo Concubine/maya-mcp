@@ -181,3 +181,39 @@ class TestRowPrimitives:
     def test_changed_rows_refuses_mismatched_tables(self):
         with pytest.raises(ValueError, match="not the same"):
             rigmath.changed_rows([1.0], [1.0, 0.0], 2)
+
+
+class TestWeightReportStats:
+    # 3 verts x 2 joints: v0 owned by j0, v1 split, v2 unweighted
+    TABLE = [1.0, 0.0,   0.6, 0.4,   0.0, 0.0]
+
+    def test_report_carries_the_stats_plus_samples(self):
+        out = rigmath.weight_report_stats(["j0", "j1"], self.TABLE, 3, 4)
+        assert out["unweighted_vertices"] == 1
+        assert out["unweighted_sample"] == [2]
+        assert out["exceeded_sample"] == []
+        assert out["per_joint"][0]["vertices"] == 2
+
+    def test_histogram_buckets_by_influence_count(self):
+        out = rigmath.weight_report_stats(["j0", "j1"], self.TABLE, 3, 4)
+        assert out["histogram"] == [
+            {"influences": 0, "vertices": 1},
+            {"influences": 1, "vertices": 1},
+            {"influences": 2, "vertices": 1}]
+
+    def test_weight_sum_error_measures_held_rows_only(self):
+        table = [0.7, 0.2,   0.0, 0.0]      # v0 sums to 0.9, v1 holds nothing
+        out = rigmath.weight_report_stats(["a", "b"], table, 2, 4)
+        assert out["max_weight_sum_error"] == pytest.approx(0.1)
+
+    def test_exceeded_sample_lists_the_offenders(self):
+        table = [0.4, 0.3, 0.3,   1.0, 0.0, 0.0]
+        out = rigmath.weight_report_stats(["a", "b", "c"], table, 2, 2)
+        assert out["max_influences_exceeded"] == 1
+        assert out["exceeded_sample"] == [0]
+
+    def test_sample_lists_are_capped(self):
+        table = [0.0] * 20                   # 10 verts x 2, all unweighted
+        out = rigmath.weight_report_stats(["a", "b"], table, 10, 4, sample=3)
+        assert out["unweighted_vertices"] == 10
+        assert out["unweighted_sample"] == [0, 1, 2]

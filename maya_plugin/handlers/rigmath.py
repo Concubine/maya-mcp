@@ -255,3 +255,40 @@ def changed_rows(before: List[float], after: List[float], ncols: int,
         if any(abs(after[v + j] - before[v + j]) > tol for j in range(ncols)):
             changed += 1
     return changed
+
+
+def weight_report_stats(influences: List[str], weights: List[float],
+                        num_verts: int, max_influences: int,
+                        sample: int = 8) -> Dict[str, Any]:
+    """weight_stats plus what an agent needs to ACT on a bad bind: which
+    vertices offend (sample ids for set_region_weights targeting), how far
+    sums drift, and the influence-count histogram that makes 'one joint owns
+    everything' and 'weights smeared across eight joints' both legible."""
+    out = weight_stats(influences, weights, num_verts, max_influences)
+    ncols = len(influences)
+    unweighted_sample: List[int] = []
+    exceeded_sample: List[int] = []
+    histogram: Dict[int, int] = {}
+    max_err = 0.0
+    for v in range(num_verts):
+        held = 0
+        total = 0.0
+        for j in range(ncols):
+            w = weights[v * ncols + j]
+            total += w
+            if w > WEIGHT_TOL:
+                held += 1
+        histogram[held] = histogram.get(held, 0) + 1
+        if held == 0:
+            if len(unweighted_sample) < sample:
+                unweighted_sample.append(v)
+        else:
+            max_err = max(max_err, abs(total - 1.0))
+        if held > max_influences and len(exceeded_sample) < sample:
+            exceeded_sample.append(v)
+    out["unweighted_sample"] = unweighted_sample
+    out["exceeded_sample"] = exceeded_sample
+    out["max_weight_sum_error"] = max_err
+    out["histogram"] = [{"influences": k, "vertices": histogram[k]}
+                        for k in sorted(histogram)]
+    return out
