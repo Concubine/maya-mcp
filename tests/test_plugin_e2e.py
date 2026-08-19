@@ -66,6 +66,11 @@ class TestLoop:
         assert plugin["package_dir"] == os.path.dirname(os.path.abspath(version.__file__))
         assert version.compare(plugin, plugin["digest"]) is None
         assert version.compare(plugin, "a-different-tree") is not None
+        # #604: the wire carries the LOADED identity too - what this session
+        # imported, not just what is on disk at ping time. Here nothing was
+        # redeployed mid-test, so the two must coincide.
+        assert plugin["loaded_digest"] == plugin["digest"]
+        assert plugin["restart_required"] is False
         conn.close()
 
     def test_ping_says_which_process_is_answering(self, plugin_server):

@@ -134,6 +134,70 @@ class TestCompare:
         assert "C:/fake/maya_plugin" in warning
 
 
+class TestCompareDeployedButNotRestarted:
+    """#604: the handshake read CLEAN in the one window where the danger is
+    real - after install.py, before a restart - because it judged by the disk,
+    and the disk is exactly the copy that is NOT running then. #640 hit it too:
+    two fresh fixes read as regressions against a stale in-memory plugin."""
+
+    def _window(self):
+        """The #604 window: session loaded OLD, disk holds NEW == working tree."""
+        return {
+            "package_dir": "C:/fake/maya_plugin",
+            "digest": "newnewnew",
+            "stamp": {"commit": "fff9999", "installed_at": "2026-08-19T10:00:00Z"},
+            "loaded_digest": "oldoldold",
+            "loaded_stamp": {"commit": "aaa1111", "installed_at": "2026-08-15T09:00:00Z"},
+        }
+
+    def test_the_604_window_is_a_warning_not_a_clean(self):
+        warning = version.compare(self._window(), "newnewnew")
+        assert warning is not None, (
+            "disk == working tree read as CLEAN while the session ran old code - "
+            "this is precisely the #604 bug"
+        )
+
+    def test_the_warning_says_restart_not_redeploy(self):
+        """install.py has already run; telling the caller to run it again sends
+        them around the loop that cannot fix anything."""
+        warning = version.compare(self._window(), "newnewnew")
+        assert "NOT restarted" in warning
+        assert "RESTART" in warning
+        assert "redeploy" not in warning
+
+    def test_the_stamp_shown_is_the_running_code_s_not_the_disk_s(self):
+        """The caller's question is 'whose results am I reading' - that is the
+        loaded commit. Showing the freshly installed one would name the code
+        that is precisely not answering."""
+        warning = version.compare(self._window(), "newnewnew")
+        assert "aaa1111" in warning
+        assert "fff9999" not in warning
+
+    def test_loaded_matching_the_working_tree_is_clean_even_if_disk_moved(self):
+        """Someone deployed ANOTHER tree after this session loaded. Live results
+        still describe this working tree, so this caller gets silence; the
+        other tree's deployer gets the warning on their own check."""
+        info = self._window()
+        info["loaded_digest"] = "mine"
+        info["digest"] = "someone-elses"
+        assert version.compare(info, "mine") is None
+
+    def test_a_plugin_without_the_loaded_field_keeps_disk_semantics(self):
+        """A pre-#604 plugin reports only the disk digest; treating its absence
+        as stale would warn on every old-but-matching deploy."""
+        old_style = {"package_dir": "x", "digest": "aaa", "stamp": None}
+        assert version.compare(old_style, "aaa") is None
+        assert version.compare(old_style, "bbb") is not None
+
+    def test_ordinary_stale_still_says_redeploy(self):
+        """When the disk does NOT hold the working tree, restarting alone is
+        wrong advice - the full hint must survive the new branch."""
+        info = self._window()
+        info["digest"] = "also-old"
+        warning = version.compare(info, "newnewnew")
+        assert "install.py" in warning
+
+
 class TestPluginInfo:
     def test_reports_digest_and_stamp_for_the_live_package(self, tmp_path):
         pkg = _pkg(str(tmp_path / "maya_plugin"), {"a.py": "x = 1\n"})
@@ -151,6 +215,25 @@ class TestPluginInfo:
     def test_never_raises_on_an_unreadable_package(self, tmp_path):
         info = version.plugin_info(str(tmp_path / "gone"))
         assert info["digest"] is None and info["stamp"] is None
+
+    def test_the_default_package_reports_what_it_loaded(self):
+        """For the package this module lives in, ping must say what the session
+        imported, not just what is on disk now - the two diverge in exactly the
+        window #604 is about. Here they coincide (nothing redeployed mid-test),
+        which is also the assertion."""
+        info = version.plugin_info()
+        assert info["loaded_digest"] == info["digest"]
+        assert info["restart_required"] is False
+        assert info["imported_at"]
+
+    def test_an_explicit_other_package_has_no_loaded_identity(self, tmp_path):
+        """install verification points at the DEPLOYED dir from the repo's own
+        interpreter; claiming a loaded identity for a package this process never
+        imported would be the same lie in the other direction."""
+        pkg = _pkg(str(tmp_path / "maya_plugin"), {"a.py": "x = 1\n"})
+        info = version.plugin_info(pkg)
+        assert "loaded_digest" not in info
+        assert "restart_required" not in info
 
 
 class TestGitStamp:

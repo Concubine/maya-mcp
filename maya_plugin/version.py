@@ -37,6 +37,12 @@ INSTALL_HINT = (
     "reload modules Python has already imported."
 )
 
+RESTART_HINT = (
+    "RESTART Maya (or re-import the plugin). The install has already run -\n"
+    "running it again cannot help, because Python is still holding the modules\n"
+    "it imported before the deploy."
+)
+
 
 def _iter_sources(package_dir: str):
     """(relative posix path, absolute path) for every source file that is
@@ -99,15 +105,46 @@ def read_stamp(package_dir: str) -> Optional[Dict[str, Any]]:
     return stamp if isinstance(stamp, dict) else None
 
 
+# The identity of the code that is actually RUNNING, captured once when this
+# module is imported. The plugin imports every module at load, so what was on
+# disk at that moment IS the loaded session; what is on disk LATER is whatever
+# install.py wrote since. Between a deploy and a restart the two diverge, and
+# that divergence is the one signal `ping` used to be blind to: it re-read the
+# disk on every call and reported the freshly deployed copy as "live" while the
+# interpreter still held the old modules (#604 - a caller measured the old
+# handlers and attributed the results to the new branch).
+_PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
+_LOADED_DIGEST = package_digest(_PACKAGE_DIR)
+_LOADED_STAMP = read_stamp(_PACKAGE_DIR)
+_IMPORTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def plugin_info(package_dir: Optional[str] = None) -> Dict[str, Any]:
-    """What `ping` hands back: which copy is live, and what is in it."""
+    """What `ping` hands back: which copy is LOADED, and what is on disk now.
+
+    `digest`/`stamp` describe the files on disk at call time; `loaded_digest`/
+    `loaded_stamp` describe what this session imported. The loaded pair only
+    exists for the package this module actually lives in - for an explicit
+    other `package_dir` (install verification, tests) there is no loaded copy
+    to speak about, and inventing one would be the same lie in reverse.
+    """
     if package_dir is None:
-        package_dir = os.path.dirname(os.path.abspath(__file__))
-    return {
+        package_dir = _PACKAGE_DIR
+    info: Dict[str, Any] = {
         "package_dir": package_dir,
         "digest": package_digest(package_dir),
         "stamp": read_stamp(package_dir),
     }
+    if package_dir == _PACKAGE_DIR:
+        info["loaded_digest"] = _LOADED_DIGEST
+        info["loaded_stamp"] = _LOADED_STAMP
+        info["imported_at"] = _IMPORTED_AT
+        # The human-readable form of the divergence, for anyone eyeballing a
+        # raw ping. compare() derives its own verdict and does not read this.
+        info["restart_required"] = bool(
+            _LOADED_DIGEST and info["digest"] and _LOADED_DIGEST != info["digest"]
+        )
+    return info
 
 
 def git_stamp(repo_dir: str) -> Dict[str, Any]:
@@ -141,15 +178,28 @@ def compare(
 
     Pure and total: every ambiguous case resolves to either a warning or
     silence, and silence is reserved for "they match" and "cannot tell".
+
+    The live identity is the LOADED digest when the plugin reports one, falling
+    back to the on-disk digest for plugins that predate the distinction. Judging
+    by the disk is #604's bug: in the window between install.py and a restart,
+    the disk holds exactly the code that is NOT running.
     """
     if working_digest is None:
         return None  # no working tree to compare against; do not cry wolf
 
     plugin = plugin or {}
-    live_digest = plugin.get("digest")
+    disk_digest = plugin.get("digest")
+    live_digest = plugin.get("loaded_digest") or disk_digest
     package_dir = plugin.get("package_dir") or "<unknown>"
     if live_digest == working_digest:
+        # Deliberately silent even when the DISK now differs: live results
+        # still describe this working tree, and whoever deployed the other
+        # tree gets the warning on their own next check.
         return None
+
+    deployed_not_restarted = bool(
+        plugin.get("loaded_digest") and disk_digest == working_digest
+    )
 
     lines = ["", "!" * 72]
     if not live_digest:
@@ -157,6 +207,14 @@ def compare(
             "STALE PLUGIN: the live Maya reports no package digest, which means it "
             "is running a build older than this staleness check itself."
         )
+    elif deployed_not_restarted:
+        lines.append(
+            "STALE SESSION: the deploy landed but Maya was NOT restarted. The "
+            "files on disk ARE this working tree; the running session imported "
+            "the previous copy and answers with ITS code."
+        )
+        lines.append("  loaded  digest : %s" % live_digest[:12])
+        lines.append("  on-disk digest : %s (= working tree)" % str(disk_digest)[:12])
     else:
         lines.append(
             "STALE PLUGIN: the live Maya is NOT running this working tree. Results "
@@ -165,10 +223,12 @@ def compare(
         lines.append("  deployed digest : %s" % live_digest[:12])
         lines.append("  working  digest : %s" % working_digest[:12])
 
-    stamp = plugin.get("stamp") or {}
+    # The stamp that describes the RUNNING code is the loaded one when it
+    # exists; the disk stamp describes whatever was installed most recently.
+    stamp = (plugin.get("loaded_stamp") if plugin.get("loaded_digest") else None) or plugin.get("stamp") or {}
     if stamp.get("commit"):
         lines.append(
-            "  deployed commit : %s%s (installed %s)"
+            "  running commit  : %s%s (installed %s)"
             % (
                 str(stamp["commit"])[:12],
                 "+dirty" if stamp.get("dirty") else "",
@@ -176,10 +236,10 @@ def compare(
             )
         )
     else:
-        lines.append("  deployed commit : unstamped (installed before this check, or copied by hand)")
+        lines.append("  running commit  : unstamped (installed before this check, or copied by hand)")
     if working_commit:
-        lines.append("  working  commit : %s" % str(working_commit)[:12])
+        lines.append("  working commit  : %s" % str(working_commit)[:12])
     lines.append("  live package    : %s" % package_dir)
-    lines.append(INSTALL_HINT)
+    lines.append(RESTART_HINT if deployed_not_restarted else INSTALL_HINT)
     lines.append("!" * 72)
     return "\n".join(lines)
