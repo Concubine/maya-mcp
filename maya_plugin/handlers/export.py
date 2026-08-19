@@ -188,8 +188,7 @@ def skin_violations(sfacts) -> List[str]:
     if sfacts["deformers"] == 0:
         out.append(
             "include_skins=true but the file holds no skin deformer - "
-            "nothing exported is bound, or the mesh went out without its "
-            "skeleton")
+            "nothing exported is bound")
         return out
     if sfacts["clusters"] == 0 or sfacts["influenced_models"] == 0:
         # Measured: a selected export listing the mesh WITHOUT the skeleton

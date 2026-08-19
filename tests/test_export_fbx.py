@@ -18,6 +18,7 @@ import fbx_probe                                    # noqa: E402
 from maya_plugin.handlers import fbxbytes           # noqa: E402
 import maya_export                                  # noqa: E402
 from maya_plugin.handlers import export             # noqa: E402
+from maya_plugin.handlers import rigging            # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 GOLEM = REPO / "evals" / "golem_delivery" / "golem.fbx"
@@ -261,10 +262,12 @@ def test_a_deformer_with_no_clusters_names_the_missing_skeleton():
 
 def test_the_tolerance_clears_the_exporters_own_weight_pruning():
     # Maya's FBX exporter drops every weight below 1e-3 without renormalising,
-    # so a vertex loses up to (influences - 1) x 1e-3 and bind_skin allows 8
-    # influences. A tolerance at or below 7e-3 refuses correct binds - one
-    # measured at 1.381872e-3 under the original 1e-3.
-    assert export.WEIGHT_SUM_TOL > 7e-3
+    # so a vertex loses up to (influences - 1) x 1e-3 - one measured at
+    # 1.381872e-3 under the original 1e-3. Derived from
+    # rigging.MAX_INFLUENCES_CEILING rather than the literal 7e-3 so that if
+    # the ceiling ever rises, this bound rises with it instead of silently
+    # letting the pruning worst case exceed WEIGHT_SUM_TOL unnoticed.
+    assert export.WEIGHT_SUM_TOL > (rigging.MAX_INFLUENCES_CEILING - 1) * 1e-3
     good_but_pruned = {"deformers": 1, "clusters": 8, "influenced_models": 8,
                        "bind_pose_present": True,
                        "max_weight_sum_error": 1.381872e-3,
