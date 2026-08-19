@@ -145,3 +145,12 @@ class TestDisplacedCount:
 
     def test_motion_below_tol_is_rest(self):
         assert rigmath.displaced_count([0.0, 0.0, 0.0], [0.0, 1e-7, 0.0]) == 0
+
+    def test_mismatched_lengths_are_an_internal_error(self):
+        with pytest.raises(ValueError):
+            rigmath.displaced_count([0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                                    [0.0, 0.0, 0.0])
+
+    def test_a_non_triple_length_is_an_internal_error(self):
+        with pytest.raises(ValueError):
+            rigmath.displaced_count([0.0, 0.0], [0.0, 0.0])

@@ -207,8 +207,13 @@ def weight_stats(influences: List[str], weights: List[float], num_verts: int,
 def displaced_count(before: List[float], after: List[float],
                     tol: float = 1e-5) -> int:
     """How many vertices moved more than `tol` between two flat xyz lists."""
+    if len(before) != len(after) or len(before) % 3:
+        raise ValueError(
+            "position lists are %d and %d floats; expected equal xyz triples "
+            "- a mismatch means the two captures are not the same mesh"
+            % (len(before), len(after)))
     moved = 0
-    for i in range(0, min(len(before), len(after)), 3):
+    for i in range(0, len(before), 3):
         dx = after[i] - before[i]
         dy = after[i + 1] - before[i + 1]
         dz = after[i + 2] - before[i + 2]
