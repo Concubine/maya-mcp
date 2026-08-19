@@ -2538,7 +2538,8 @@ class TestSetRegionWeightsInMaya:
         assert out["changed_vertices"] > 0
         assert out["unweighted_vertices"] == 0
         sc = out["skin_cluster"]
-        # The vertex nearest the tip is fully the tip joint's now.
+        # The vertex nearest the tip is fully the NAMED tip joint's now -
+        # not just some influence.
         n = cmds.polyEvaluate(mesh, vertex=True)
         best, best_d = None, 1e9
         for i in range(n):
@@ -2547,9 +2548,9 @@ class TestSetRegionWeightsInMaya:
             d = (p[0] ** 2 + (p[1] - 4.0) ** 2 + p[2] ** 2) ** 0.5
             if d < best_d:
                 best, best_d = i, d
-        weights = cmds.skinPercent(sc, "%s.vtx[%d]" % (mesh, best),
-                                   query=True, value=True)
-        assert max(weights) == pytest.approx(1.0, abs=1e-6)
+        w = cmds.skinPercent(sc, "%s.vtx[%d]" % (mesh, best),
+                             query=True, transform="rg_j_03")
+        assert w == pytest.approx(1.0, abs=1e-6)
 
     def test_faces_region_converts_to_vertices(self):
         import maya.cmds as cmds
@@ -2563,7 +2564,16 @@ class TestSetRegionWeightsInMaya:
         out = rigging.set_region_weights({
             "mesh": mesh, "joint": "rf_j_01", "faces": [0, 1], "weight": 1.0})
         assert out["vertices_in_region"] >= 4
-        assert out["changed_vertices"] >= 0
+        # A vertex the face->vertex conversion actually picked up is now
+        # fully the named joint's - not just "some int came back" (a freshly
+        # bound cylinder base may already fully own those verts, so this does
+        # NOT assert changed_vertices > 0, which would flake).
+        sc = out["skin_cluster"]
+        verts = cmds.ls(cmds.polyListComponentConversion(
+            "%s.f[0]" % mesh, fromFace=True, toVertex=True), flatten=True)
+        vtx = verts[0]
+        w = cmds.skinPercent(sc, vtx, query=True, transform="rf_j_01")
+        assert w == pytest.approx(1.0, abs=1e-6)
 
 
 class TestExportSkinsInMaya:

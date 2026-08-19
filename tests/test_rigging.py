@@ -581,3 +581,26 @@ class TestSetRegionWeights:
         with pytest.raises(HandlerError, match="face"):
             rigging.set_region_weights({"mesh": "hum", "joint": "a",
                                         "faces": [99], "weight": 1.0})
+
+    def test_sole_owner_vertices_is_measured_from_the_reread(
+            self, fake, monkeypatch):
+        # Vertex 0 is solely owned by 'a' ([1.0, 0.0]) and is the only vertex
+        # within_radius_of picks up; vertex 1 is untouched (outside radius).
+        state = self._bound(fake, monkeypatch, weights=(1.0, 0.0, 0.5, 0.5))
+        out = rigging.set_region_weights({
+            "mesh": "hum", "joint": "a", "within_radius_of": [0, 0, 0],
+            "radius": 0.5, "weight": 0.6})
+        # It has nobody to shed weight to, so it stays fully owned - the
+        # RE-READ table (state["weights"]) proves it, not the request.
+        assert state["weights"][:2] == pytest.approx([1.0, 0.0])
+        assert out["sole_owner_vertices"] == 1
+        assert any("solely owned by a" in w for w in out["warnings"])
+
+        # weight == 1.0 never asks anything to shed - 0 by definition, not by
+        # measurement.
+        state["weights"] = [1.0, 0.0, 0.5, 0.5]
+        out2 = rigging.set_region_weights({
+            "mesh": "hum", "joint": "a", "within_radius_of": [0, 0, 0],
+            "radius": 0.5, "weight": 1.0})
+        assert out2["sole_owner_vertices"] == 0
+        assert not any("solely owned" in w for w in out2["warnings"])

@@ -727,13 +727,32 @@ def set_region_weights(params: Dict[str, Any]) -> Dict[str, Any]:
         warnings.append(posed)
 
     session.auto_checkpoint("set_region_weights")
-    new_table, sole_owner = rigmath.apply_region_weights(
-        weights, len(influences), joint_col, factors, weight)
-    _set_skin_weights(sc, mesh_shape, len(influences), new_table)
+    ncols = len(influences)
+    new_table, _computed_sole_owner = rigmath.apply_region_weights(
+        weights, ncols, joint_col, factors, weight)
+    _set_skin_weights(sc, mesh_shape, ncols, new_table)
 
     _, after, _ = _skin_weights(sc, mesh_shape)
     stats = rigmath.weight_stats(influences, after, num_verts,
                                  int(cmds.getAttr(sc + ".maxInfluences")))
+
+    # Measured from the re-read, not the computed table (#636 lying-success
+    # class): a vertex counts as sole-owned only if it (a) had no other
+    # influence and a positive joint weight BEFORE the edit, (b) was asked to
+    # shed weight (weight < 1.0 - at weight 1.0 nothing was asked to shed, so
+    # the count is 0 by definition), and (c) is STILL fully owned in the
+    # table Maya actually holds now.
+    sole_owner = 0
+    if weight < 1.0:
+        for v in factors:
+            base = v * ncols
+            old_j = weights[base + joint_col]
+            others = sum(weights[base + j] for j in range(ncols)
+                        if j != joint_col)
+            if (others <= 0.0 and old_j > 0.0
+                    and after[base + joint_col] > 1.0 - rigmath.WEIGHT_TOL):
+                sole_owner += 1
+
     if sole_owner:
         warnings.append(
             "%d vertices are solely owned by %s - a weight below 1.0 has no "
@@ -747,8 +766,7 @@ def set_region_weights(params: Dict[str, Any]) -> Dict[str, Any]:
         "skin_cluster": sc,
         "joint": influences[joint_col],
         "vertices_in_region": len(factors),
-        "changed_vertices": rigmath.changed_rows(weights, after,
-                                                 len(influences)),
+        "changed_vertices": rigmath.changed_rows(weights, after, ncols),
         "sole_owner_vertices": sole_owner,
         "unweighted_vertices": stats["unweighted_vertices"],
         "warnings": warnings,
