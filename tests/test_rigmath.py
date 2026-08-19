@@ -311,3 +311,43 @@ class TestSmoothWeightTable:
         three = rigmath.smooth_weight_table(self.TABLE, 2, self.ADJ, 3, 4)
         assert one[0] == pytest.approx(1.0)
         assert three[0] < one[0]
+
+
+class TestRadiusFactors:
+    POS = [0.0, 0.0, 0.0,   1.0, 0.0, 0.0,   3.0, 0.0, 0.0]
+
+    def test_linear_falloff_fades_with_distance(self):
+        out = rigmath.radius_factors(self.POS, [0, 0, 0], 2.0, "linear")
+        assert out[0] == pytest.approx(1.0)
+        assert out[1] == pytest.approx(0.5)
+        assert 2 not in out
+
+    def test_none_falloff_is_flat_inside(self):
+        out = rigmath.radius_factors(self.POS, [0, 0, 0], 2.0, "none")
+        assert out == {0: 1.0, 1: 1.0}
+
+
+class TestApplyRegionWeights:
+    def test_target_blends_and_others_rescale_proportionally(self):
+        # 1 vert x 3 joints: j0 has 0.2, j1 0.6, j2 0.2 - push j0 to 0.8
+        out, sole = rigmath.apply_region_weights(
+            [0.2, 0.6, 0.2], 3, 0, {0: 1.0}, 0.8)
+        assert out == pytest.approx([0.8, 0.15, 0.05])
+        assert sole == 0
+
+    def test_factor_scales_the_blend(self):
+        out, _ = rigmath.apply_region_weights(
+            [0.0, 1.0], 2, 0, {0: 0.5}, 1.0)
+        assert out == pytest.approx([0.5, 0.5])
+
+    def test_sole_owner_with_partial_weight_is_counted(self):
+        out, sole = rigmath.apply_region_weights(
+            [1.0, 0.0], 2, 0, {0: 1.0}, 0.6)
+        assert out == pytest.approx([1.0, 0.0])   # nowhere to put the rest
+        assert sole == 1
+
+    def test_unfactored_vertices_are_untouched(self):
+        out, _ = rigmath.apply_region_weights(
+            [1.0, 0.0, 0.0, 1.0], 2, 0, {1: 1.0}, 1.0)
+        assert out[:2] == [1.0, 0.0]
+        assert out[2:] == pytest.approx([1.0, 0.0])

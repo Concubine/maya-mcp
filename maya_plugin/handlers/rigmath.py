@@ -431,3 +431,49 @@ def smooth_weight_table(weights: List[float], ncols: int,
             nxt[v * ncols:(v + 1) * ncols] = prune_row(row, max_influences)
         current = nxt
     return current
+
+
+def radius_factors(positions: List[float], center: List[float],
+                   radius: float, falloff: str) -> Dict[int, float]:
+    """Vertex -> blend factor for a spherical region. Factors are (0, 1]:
+    a zero factor is not-in-the-region, never a stored no-op."""
+    out: Dict[int, float] = {}
+    for v in range(len(positions) // 3):
+        dx = positions[3 * v] - center[0]
+        dy = positions[3 * v + 1] - center[1]
+        dz = positions[3 * v + 2] - center[2]
+        d = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if d > radius:
+            continue
+        factor = 1.0 if falloff == "none" else 1.0 - d / radius
+        if factor > 0.0:
+            out[v] = factor
+    return out
+
+
+def apply_region_weights(weights: List[float], ncols: int, joint_col: int,
+                         factors: Dict[int, float], weight: float):
+    """Blend one joint toward `weight` on the factored vertices; the other
+    influences share what remains in their existing proportions. A vertex the
+    joint solely owns cannot shed weight it has nobody to give to - it stays
+    fully owned and is counted, because a silent 0.6 that reads back 1.0 is
+    the lying-success defect class (#636)."""
+    out = list(weights)
+    sole_owner = 0
+    for v, factor in factors.items():
+        base = v * ncols
+        old_j = weights[base + joint_col]
+        new_j = old_j + (weight - old_j) * factor
+        others = sum(weights[base + j] for j in range(ncols)
+                     if j != joint_col)
+        if others > 0.0:
+            scale = (1.0 - new_j) / others
+            for j in range(ncols):
+                out[base + j] = new_j if j == joint_col \
+                    else weights[base + j] * scale
+        else:
+            if new_j < 1.0 and old_j > 0.0:
+                sole_owner += 1
+            out[base + joint_col] = 1.0 if (old_j > 0.0 or new_j > 0.0) \
+                else 0.0
+    return out, sole_owner
