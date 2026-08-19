@@ -571,6 +571,7 @@ SEPARATION = {
     # sub-cells are merged into eight sections, so the shards that ship are ~3
     # m3 whatever this says. 0.13 admits the 2x14x2 lattice at 0.214 m spacing.
     "glass": 0.21, "steel": 0.13,
+    "deck": 0.34,      # concrete's - deck breaks blocky, like a slab
 }
 
 
@@ -709,6 +710,36 @@ def seeds_steel(rng):
     return out
 
 
+def seeds_deck(rng):
+    """A roof slab: blocky like concrete, but biased to the face it is SEEN from.
+
+    Deck exists because every other role is a WALL role. A wall's exposed face
+    is horizontal, so one pattern authored on +Z serves all four wall
+    directions under a yaw. A roof's exposed face is +Y, and no yaw maps +Z
+    onto +Y - so a roof cell dressed with a wall pattern shatters as though it
+    were punched from the side, with its fine debris buried in a vertical face
+    nobody can see and its cornice hanging off a wall that is not exposed.
+
+    So this is concrete's distribution rotated into the roof's frame: a
+    jittered 3x3x3 lattice of blocky lumps, with the finer surface scatter in
+    the TOP 0.55 m instead of the front. That is where the golem lands and
+    where the slab spalls.
+    """
+    out = []
+    step = CELL / 3.0
+    for ix in range(3):
+        for iy in range(3):
+            for iz in range(3):
+                out.append((-HALF + (ix + 0.5) * step + _jit(rng, 0.30),
+                            -HALF + (iy + 0.5) * step + _jit(rng, 0.30),
+                            -HALF + (iz + 0.5) * step + _jit(rng, 0.30)))
+    for _ in range(6):
+        out.append((rng.uniform(-1.3, 1.3),
+                    rng.uniform(0.95, 1.42),          # the top 0.55 m
+                    rng.uniform(-1.3, 1.3)))
+    return out
+
+
 # How much a vertical separation counts for when gathering sub-cells into
 # sections. Below 1 it counts for LESS, so a section grows tall and narrow.
 #
@@ -778,7 +809,7 @@ def concat(a, b):
 
 
 # --------------------------------------------------------------- the patterns
-ROLES = ("concrete", "brick", "infill", "glass", "steel")
+ROLES = ("concrete", "brick", "infill", "glass", "steel", "deck")
 VARIANTS = ("a", "b", "c", "d")
 
 SEEDERS = {
@@ -787,6 +818,7 @@ SEEDERS = {
     "infill": seeds_infill,
     "glass": seeds_glass,
     "steel": seeds_steel,
+    "deck": seeds_deck,
 }
 
 # Declared per role because contract 2a asks for it, and because it is the only
@@ -812,6 +844,10 @@ DISTRIBUTION = {
              "buys raggedness, not length - height/width stays 1.09-1.23 "
              "whatever it is set to, because 8 sections of a 3 m cube are "
              "~1.5 m across by arithmetic" % STEEL_Y_WEIGHT,
+    "deck": "jittered 3x3x3 lattice (+/-0.30 m) plus 6 surface-biased seeds in "
+            "the TOP 0.55 m - concrete's distribution rotated into the roof's "
+            "frame, because a roof cell's exposed face is +Y and no yaw maps a "
+            "wall pattern's +Z onto it",
 }
 
 REBAR_PATTERNS = ("concrete",)
@@ -838,8 +874,29 @@ ORNAMENT = {          # role: (depth past the cell face, pieces across)
     "steel": (0.24, 2),
     "glass": (0.16, 3),
     "infill": (0.0, 0),
+    # The measured MAXIMUM kit oversail, because deck is the roof role and the
+    # kit's roofs are its biggest oversailers (brick and concrete roofs
+    # 0.30-0.34 m, against 0.14-0.22 for a brick facade).
+    "deck": (0.34, 3),
 }
 ORNAMENT_Y = (1.02, 1.50)
+
+# Which cell faces a role's band hangs off, as (axis, sign).
+#
+# Everything except deck is a WALL role: its exposed face is horizontal, so the
+# consumer yaws the pattern about Y to aim +Z at the street and one band on +Z
+# serves all four wall directions.
+#
+# A roof cell's exposed face is +Y, and no yaw brings +Z to +Y. Pitching the
+# whole pattern 90 degrees would put the seed bias where it belongs but would
+# stand the cornice VERTICALLY out of the roof, and a roof's oversail is an
+# eaves overhang around the perimeter. So deck is authored facing +Y with its
+# band on the four VERTICAL faces - a perimeter eaves, which is the shape a
+# roof edge actually has. The four bands meet at the corners without
+# overlapping: each spans its own face only, so the +Z band has x <= HALF and
+# the +X band has z <= HALF.
+ORNAMENT_FACES = {"deck": ((0, +1), (0, -1), (2, +1), (2, -1))}
+ORNAMENT_FACES_DEFAULT = ((2, +1),)
 
 
 def ornament_shards(role, rng):
@@ -847,21 +904,33 @@ def ornament_shards(role, rng):
     depth, pieces = ORNAMENT.get(role, (0.0, 0))
     if depth <= 0.0 or pieces <= 0:
         return []
-    lo = (-HALF, ORNAMENT_Y[0], HALF)
-    hi = (HALF, ORNAMENT_Y[1], HALF + depth)
-    solid = box_from(lo, hi)
-    seeds = [((-HALF + (k + 0.5) * (CELL / pieces) + _jit(rng, 0.22)),
-              rng.uniform(ORNAMENT_Y[0] + 0.1, ORNAMENT_Y[1] - 0.1),
-              HALF + depth * rng.uniform(0.3, 0.7))
-             for k in range(pieces)]
     out = []
-    for i, cell in enumerate(voronoi(seeds, solid)):
-        if cell is None:
-            continue
-        out.append({"poly": cell, "cell": cell, "seed": seeds[i],
-                    "seed_members": [seeds[i]], "rebar_stubs": 0,
-                    "convex_body": True, "ornament": True,
-                    "outset": depth})
+    for axis, sign in ORNAMENT_FACES.get(role, ORNAMENT_FACES_DEFAULT):
+        across = 2 if axis == 0 else 0        # the horizontal axis along the band
+        lo, hi = [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]
+        lo[across], hi[across] = -HALF, HALF
+        lo[1], hi[1] = ORNAMENT_Y
+        if sign > 0:
+            lo[axis], hi[axis] = HALF, HALF + depth
+        else:
+            lo[axis], hi[axis] = -HALF - depth, -HALF
+        solid = box_from(tuple(lo), tuple(hi))
+
+        seeds = []
+        for k in range(pieces):
+            p = [0.0, 0.0, 0.0]
+            p[across] = -HALF + (k + 0.5) * (CELL / pieces) + _jit(rng, 0.22)
+            p[1] = rng.uniform(ORNAMENT_Y[0] + 0.1, ORNAMENT_Y[1] - 0.1)
+            p[axis] = sign * (HALF + depth * rng.uniform(0.3, 0.7))
+            seeds.append(tuple(p))
+
+        for i, cell in enumerate(voronoi(seeds, solid)):
+            if cell is None:
+                continue
+            out.append({"poly": cell, "cell": cell, "seed": seeds[i],
+                        "seed_members": [seeds[i]], "rebar_stubs": 0,
+                        "convex_body": True, "ornament": True,
+                        "outset": depth})
     return out
 
 

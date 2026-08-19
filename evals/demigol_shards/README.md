@@ -2,11 +2,11 @@
 
 Third Demigol art delivery. Contract: `docs/superpowers/specs/2026-08-16-shard-library-contract.md` (revision 1), redmine #664.
 
-**20 patterns, 611 shards, 21600 triangles, 2 materials.** Five roles x four variants; a pattern is one 3 m cell pre-shattered into loose meshes, keyed to material and cell and never to a building, so this one library dresses all 50 city buildings and every one generated later.
+**24 patterns, 784 shards, 25812 triangles, 2 materials.** Five roles x four variants; a pattern is one 3 m cell pre-shattered into loose meshes, keyed to material and cell and never to a building, so this one library dresses all 50 city buildings and every one generated later.
 
 ## The rule everything rests on
 
-Contract 1b: assembled, a pattern must be indistinguishable from the intact cell it replaces. Here that is **true by construction rather than by measurement** - the shards are the Voronoi cells of a seed set clipped to the 3 m box, and every point of the box is nearest exactly one seed, so they tile it with no gap and no overlap. The measured volumes therefore test the clipper, not the design. Worst error across all 20 patterns: **4.33e-06 m3** against 27 m3.
+Contract 1b: assembled, a pattern must be indistinguishable from the intact cell it replaces. Here that is **true by construction rather than by measurement** - the shards are the Voronoi cells of a seed set clipped to the 3 m box, and every point of the box is nearest exactly one seed, so they tile it with no gap and no overlap. The measured volumes therefore test the clipper, not the design. Worst error across all 24 patterns: **4.33e-06 m3** against 27 m3.
 
 See `reassembly_*.png`, one per role: **a plain 3 m cube in the same material, the pattern assembled, and the same pattern exploded.** The control cube is there because the claim is a comparison, and because it is what caught the one defect a green gate could not - built through `MFnMesh` every edge comes out SOFT, so each flat outer facet was shaded as a dome and an exact cube rendered as a heap of pillowed stones. Every edge is hard now; a fracture face is a crease by definition.
 
@@ -19,6 +19,7 @@ See `reassembly_*.png`, one per role: **a plain 3 m cube in the same material, t
 | `infill` | 20 | plate-like, thin in depth: a curtain panel delaminating | 5 depth layers x 2x2, in-layer depth jitter +/-0.035 m - plate-like fragments 0.6 m thick |
 | `glass` | 55-56 | a shower of splinters, radial from the impact point on the pane | polar grid about a jittered impact point on +Z (4 rings, 38 seeds) confined to the front 0.42 m, plus 15 coarse seeds through the body |
 | `steel` | 10 | does NOT shatter - few large torn, bent sections | 2x14x2 lattice stretched along Y, gathered into 8 contiguous sections by nearest jittered anchor under an ANISOTROPIC metric (vertical distance weighted 0.40, so a section grows tall rather than cubic), then bent by a smooth warp that vanishes on the cell surface. Sections are UNIONS of ~7 cells, not cells - which is what makes the tear boundary ragged: 37.8 angled facets a section against 15.1 at the old 80-triangle cap. Measured: the anisotropy buys raggedness, not length - height/width stays 1.09-1.23 whatever it is set to, because 8 sections of a 3 m cube are ~1.5 m across by arithmetic |
+| `deck` | 43-44 | a roof slab: blocky like concrete, spalling at the TOP face | jittered 3x3x3 lattice (+/-0.30 m) plus 6 surface-biased seeds in the TOP 0.55 m - concrete's distribution rotated into the roof's frame, because a roof cell's exposed face is +Y and no yaw maps a wall pattern's +Z onto it |
 
 The differences are entirely in **where the seeds go** - the clipper is the same for all five. That is why the distribution is declared per role in the manifest (contract 2a): it is the dial, and it is meant to be re-runnable. Ask for a different one and it is a parameter change and a re-run, not a re-model.
 
@@ -31,6 +32,7 @@ The differences are entirely in **where the seeds go** - the clipper is the same
 | `infill` | 556-588 | 1800 | 52 | 80 | **65%** |
 | `glass` | 1620-1752 | 1800 | 72 | 80 | **90%** |
 | `steel` | 1136-1176 | 1800 | 194 | 200 | **97%** |
+| `deck` | 1020-1116 | 1800 | 72 | 80 | **90%** |
 
 The per-shard cap is **per role**: 80 everywhere, 200 for `steel`, raised by the contract owner on #664. The next section is why.
 
@@ -71,12 +73,12 @@ Every shard carries a `submeshes` array in the manifest, in FBX submesh order. *
 
 | shards | submeshes | index 0 is |
 |---|---|---|
-| 576 | `["shard_building", "shard_fracture"]` | `shard_building` |
-| 35 | `["shard_fracture"]` | `shard_fracture` |
+| 745 | `["shard_building", "shard_fracture"]` | `shard_building` |
+| 39 | `["shard_fracture"]` | `shard_fracture` |
 
-35 of 611 shards are fully interior - they have no face that was ever part of the wall's outer surface - so they carry ONE submesh and index 0 means the fracture atlas on them. A consumer that derives the order from `surface`, or assumes two submeshes everywhere, puts the fracture texture on the outside of those 35 shards and nothing fails. That is the shape of the two defects this project has already paid for: #596's 626 catalog entries bound to another building's mesh, and #630's 4096 atlas importing at 2048 - individually valid data, one wrong global assumption, no error.
+39 of 784 shards are fully interior - they have no face that was ever part of the wall's outer surface - so they carry ONE submesh and index 0 means the fracture atlas on them. A consumer that derives the order from `surface`, or assumes two submeshes everywhere, puts the fracture texture on the outside of those 39 shards and nothing fails. That is the shape of the two defects this project has already paid for: #596's 626 catalog entries bound to another building's mesh, and #630's 4096 atlas importing at 2048 - individually valid data, one wrong global assumption, no error.
 
-The claim is checked against the **exported FBX bytes**, not against the builder that wrote them: material connection order per model, and the per-polygon material indices underneath it. `611/611` models matched.
+The claim is checked against the **exported FBX bytes**, not against the builder that wrote them: material connection order per model, and the per-polygon material indices underneath it. `784/784` models matched.
 
 Interior texel density, per role, derived from the widest broken face each role actually makes:
 
@@ -87,12 +89,17 @@ Interior texel density, per role, derived from the widest broken face each role 
 | `infill` | 3.8 | 269 | 5.4 px |
 | `glass` | 3.3 | 310 | 6.2 px |
 | `steel` | 3.0 | 341 | 6.8 px |
+| `deck` | 2.6 | 394 | 7.9 px |
+
+### The steel patch mix
+
+An even pick among steel's three fracture patches put `rust` on 35% of freshly TORN sections (measured: torn 16, rust 14, dark 10 of 40). Rust is what already-exposed steel looks like; a section opened a second ago should be bright bare metal. Weighted to **10%** by the contract owner's call - enough to break up a grey block and read as decayed plant, not enough to claim every third tear is old.
 
 ## The outset (contract 1c)
 
 Sized against the kit rather than against the allowance. **Measured in `demigol_kit/manifest.json`: only 9 of the 41 kit pieces oversail at all, and the largest is 0.34 m** - brick facades 0.14-0.22, brick and concrete roofs 0.30-0.34, a concrete base 0.15, a glass sill 0.16, a steel column 0.24, and infill never. A uniform 0.5 m lip would be wrong against 32 of 41 neighbours.
 
-So the band is per role (concrete 0.20 m, brick 0.22 m, infill 0.00 m, glass 0.16 m, steel 0.24 m) and it is delivered as **its own shards** rather than welded onto the cell shards behind it. That keeps every band piece convex, keeps the cell's union at exactly 27 m3, and lets a cornice break off independently the way a cornice does.
+So the band is per role (concrete 0.20 m, brick 0.22 m, infill 0.00 m, glass 0.16 m, steel 0.24 m, deck 0.34 m) and it is delivered as **its own shards** rather than welded onto the cell shards behind it. That keeps every band piece convex, keeps the cell's union at exactly 27 m3, and lets a cornice break off independently the way a cornice does.
 
 ## The bite proof
 
@@ -120,6 +127,10 @@ So the band is per role (concrete 0.20 m, brick 0.22 m, infill 0.00 m, glass 0.1
 | `steel_b` | 10 | 0 (0%) |
 | `steel_c` | 10 | 1 (10%) |
 | `steel_d` | 10 | 1 (10%) |
+| `deck_a` | 43 | 2 (5%) |
+| `deck_b` | 43 | 4 (9%) |
+| `deck_c` | 44 | 3 (7%) |
+| `deck_d` | 43 | 3 (7%) |
 
 ### The spread is mostly the RULE, not the material
 
@@ -132,14 +143,17 @@ Last round this delivery reported the spread above - 36-44%% of a glass pattern 
 | `infill` | 8 | 58 | 41 | 80 | **20%** |
 | `glass` | 90 | 186 | 136 | 210 | **66%** |
 | `steel` | 2 | 29 | 16 | 32 | **12%** |
+| `deck` | 12 | 62 | 48 | 125 | **25%** |
 
 - `seed` - the point test, `|seed - strike| <= radius`. What the shell does today and what the contact sheet shows.
 - `seed + bound` - `<= radius + bound_radius_m`, the sphere-sphere form. A superset of `solid` by construction, so it never misses a shard the strike reaches; it over-includes instead, most on the shards whose bounding sphere fits them worst.
 - `solid` - ground truth, measured against the real surface: point-to-triangle distance over every face, plus an inside test.
 
-**One point cannot stand for a shard of up to 4.7 m3.** The point test under-removes everywhere, and it under-removes worst on the biggest shards - so a role's apparent erosion rate is largely a sampling artifact of its shard SIZE rather than a property of the material. Glass looks like it shatters partly because its splinters are small enough for a point to represent them; steel looks immovable partly because a 4 m3 section is one point.
+**One point cannot stand for a shard of up to 4.7 m3.** The point test finds only 12-66% of what a strike actually reaches, so the per-role spread above is measured through a lossy instrument.
 
-Nothing here is a change to the geometry, and no rule is imposed: `bound_radius_m` and `aabb` now ship per shard so the shell can pick its rule with the numbers in front of it. The per-role multiplier the consumer planned is still the right lever for taste - this just means it starts from a corrected baseline rather than compensating for a measurement error.
+What that spread is **not** is a simple function of shard size, and an earlier revision of this README said it was. Concrete and brick have effectively the same mean shard volume - **0.864 against 0.900 m3** - and differ 2.5x in what the point test finds. What actually drives the miss rate is where a role's seeds sit *relative to the struck face*: concrete puts 6 surface-biased seeds in the +Z 0.55 m, brick seeds at bed centres. That is authored, so it is partly a property of the role after all - the correction is to the reasoning, not to the recommendation.
+
+Nothing here is a change to the geometry, and no rule is imposed. Four fields ship per shard so the shell can choose: `seed` + `bound_radius_m` never misses and over-includes; `sample_point` + `inscribed_radius_m` never over-reaches. Together they bracket it. The per-role multiplier the consumer planned is still the right lever for taste - this just means it starts from a corrected baseline rather than compensating for a measurement error.
 
 `rebar_detail.png` is six of the 20 stub-carrying shards at close range. It doubles as the proof of the two-material split at the scale that matters: smooth kit concrete on the outer faces, exposed aggregate on the broken ones, on the same mesh.
 
@@ -165,4 +179,4 @@ set MAYA_MCP_PORT=9878 && .venv/Scripts/python.exe evals/demigol_shards.py
 ```
 **9878, not 9877.** This generator opens with `new_scene`, and 9877 is the user's own Maya session under the two-Maya policy - a `new_scene` there discards whatever is open, unsaved.
 
-The geometry is in `evals/shard_fracture.py` and has no Maya in it: `python evals/shard_fracture.py` prints the full fill/convexity/budget audit for all 20 patterns in about a second, with no scene open.
+The geometry is in `evals/shard_fracture.py` and has no Maya in it: `python evals/shard_fracture.py` prints the full fill/convexity/budget audit for all 24 patterns in about a second, with no scene open.

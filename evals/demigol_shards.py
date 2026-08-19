@@ -159,6 +159,68 @@ def _fbx_scan(path):
     return materials, models, connections, poly_mats
 
 
+def interior_point(poly):
+    """A point guaranteed INSIDE the shard, and how much room it has.
+
+    Contract 6 makes `seed` the point the game samples its damage field at, and
+    for 16 of 611 shards that point is not in the shard - up to 0.421 m outside
+    it. Those are legal Voronoi seeds (a seed may sit outside the clip box and
+    still own a cell inside it), so the self-check "every seed is its true
+    Voronoi seed" was honestly satisfied and still useless to the consumer.
+
+    Returned as a SEPARATE field rather than by correcting `seed`, because the
+    contract asks for the true seed and the shell may want both: `seed` says
+    where the cell's generator was, `sample_point` says where to sample.
+
+    The radius is the largest sphere about that point that stays inside, so
+    (sample_point, inscribed_radius_m) and (seed, bound_radius_m) BRACKET the
+    shard - one never over-reaches, the other never misses.
+    """
+    tris = [t for f in poly.faces for t in sf.triangulate(f["loop"], poly.verts)]
+
+    def clearance(p):
+        if not _inside(p, poly.verts, tris):
+            return -1.0
+        return min(_point_triangle_distance(p, poly.verts[t[0]], poly.verts[t[1]],
+                                            poly.verts[t[2]]) for t in tris)
+
+    # Candidates: the vertex average, then a coarse grid over the AABB. The
+    # average is interior for a convex body and usually for these unions, but
+    # "usually" is what the 16 seeds were, so it is never trusted - only
+    # measured.
+    n = float(len(poly.verts))
+    best = tuple(sum(v[k] for v in poly.verts) / n for k in range(3))
+    score = clearance(best)
+    lo = [min(v[k] for v in poly.verts) for k in range(3)]
+    hi = [max(v[k] for v in poly.verts) for k in range(3)]
+    for i in range(1, 6):
+        for j in range(1, 6):
+            for k in range(1, 6):
+                q = (lo[0] + (hi[0] - lo[0]) * i / 6.0,
+                     lo[1] + (hi[1] - lo[1]) * j / 6.0,
+                     lo[2] + (hi[2] - lo[2]) * k / 6.0)
+                c = clearance(q)
+                if c > score:
+                    best, score = q, c
+    if score <= 0.0:
+        raise AssertionError("no interior point found for a shard - the shell "
+                             "would have nowhere to sample")
+    # local refinement: shrink steps around the winner
+    step = max(hi[k] - lo[k] for k in range(3)) / 6.0
+    for _ in range(6):
+        moved = False
+        for axis in range(3):
+            for sign in (+1, -1):
+                q = list(best)
+                q[axis] += sign * step
+                c = clearance(tuple(q))
+                if c > score:
+                    best, score, moved = tuple(q), c, True
+        if not moved:
+            step *= 0.5
+    return best, score
+
+
 BITE_STRIKE = (0.35, -0.25, 1.5)
 BITE_RADIUS = 1.15
 
@@ -339,7 +401,11 @@ def verify_submesh_order(path, entries):
 #    atlas is 16/16 full with nowhere to put them.
 KIT_ATLAS_PX, KIT_COLS, KIT_ROWS = 4096, 4, 4
 KIT_WORLD_SCALE = 9.0            # the kit's own, so density matches exactly
-KIT_PATCH = {"brick": 0, "concrete": 2, "steel": 4, "glass": 6, "infill": 8}
+KIT_PATCH = {"brick": 0, "concrete": 2, "steel": 4, "glass": 6, "infill": 8,
+             # the game lays roof decks as STEEL and dresses them as concrete
+             # plate (#611 rule S3b), so a deck's surviving outer face must
+             # match the concrete cells it sits among, not the steel ones.
+             "deck": 2}
 
 FRAC_PX, FRAC_COLS, FRAC_ROWS = 4096, 4, 4
 FRAC_PATCH_PX = FRAC_PX // FRAC_COLS
@@ -375,7 +441,35 @@ FRACTURE_FOR = {
     "infill": ("infill_core", "infill_dark", "board_dark"),
     "glass": ("glass_edge", "glass_green"),
     "steel": ("steel_torn", "steel_dark", "rust"),
+    "deck": ("concrete_core", "concrete_dark", "concrete_coarse"),
 }
+
+# Relative weight of each patch above. Absent => equal weights.
+#
+# Steel is weighted because an even pick put `rust` on 35% of freshly TORN
+# sections (measured: torn 16, rust 14, dark 10 of 40), and rust is what
+# already-exposed steel looks like - a section opened a second ago should be
+# bright bare metal. Dropped to 10% by the contract owner's call: enough to
+# break up a grey block and read as decayed plant, not enough to claim every
+# third tear is old.
+FRACTURE_WEIGHTS = {
+    "steel": {"steel_torn": 0.55, "steel_dark": 0.35, "rust": 0.10},
+}
+
+
+def pick_fracture(role, rng):
+    """Weighted deterministic patch choice. Equal weights unless declared."""
+    keys = FRACTURE_FOR[role]
+    weights = FRACTURE_WEIGHTS.get(role)
+    if not weights:
+        return rng.pick(keys)
+    total = sum(weights[k] for k in keys)
+    t = rng.uniform(0.0, total)
+    for k in keys:
+        t -= weights[k]
+        if t <= 0.0:
+            return k
+    return keys[-1]
 REBAR_PATCH = "rebar"
 
 # The two material names, in one place, because the manifest now DECLARES the
@@ -717,7 +811,7 @@ def build_spec(scales):
                 name = shard_name(role, variant, index)
                 poly = shard["poly"]
                 rng = sf.Rng(stable_hash(role, variant, index))
-                frac_key = rng.pick(FRACTURE_FOR[role])
+                frac_key = pick_fracture(role, rng)
                 frac_patch = FRACTURE[frac_key][0]
 
                 # material 0 = the building atlas, material 1 = the fracture
@@ -768,6 +862,11 @@ def build_spec(scales):
                     "submeshes": submeshes,
                 })
 
+                sample_pt, inscribed = interior_point(poly)
+                _tris = [t for f in poly.faces
+                         for t in sf.triangulate(f["loop"], poly.verts)]
+                seed_inside = _inside(tuple(shard["seed"]), poly.verts, _tris)
+
                 cell_body = shard.get("cell") or poly
                 entries.append({
                     "name": name, "role": role, "variant": variant,
@@ -792,6 +891,9 @@ def build_spec(scales):
                     "bound_radius_m": round(
                         max(sf.norm(sf.sub(v, shard["seed"]))
                             for v in poly.verts), 5),
+                    "sample_point": [round(q, 6) for q in sample_pt],
+                    "inscribed_radius_m": round(inscribed, 5),
+                    "seed_inside": bool(seed_inside),
                     "aabb": [[round(min(v[k] for v in poly.verts), 5)
                               for k in range(3)],
                              [round(max(v[k] for v in poly.verts), 5)
@@ -1365,8 +1467,19 @@ def main():
             "min_shard_volume_waived_for": ["glass"],
             "max_outset_m": sf.MAX_OUTSET,
             "outset_per_role_m": {r: sf.ORNAMENT[r][0] for r in sf.ROLES},
+            "band_is_opt_in":
+                "THE BAND IS A SET THE CONSUMER SELECTS, NOT A FIXTURE. Only 9 "
+                "of the 41 kit pieces oversail at all, so for the other 32 an "
+                "unconditional band ADDS a cornice the intact cell never had - "
+                "the mirror image of the shrink 1c exists to prevent. Every "
+                "band shard carries `ornament: true` and they are always the "
+                "trailing indices of a pattern; cell fill is exactly 27 m3 "
+                "without them. Include them for a cell whose kit piece "
+                "oversails, drop them otherwise.",
             "outset_note":
-                "outward through the +Z cell face only, carried by dedicated "
+                "outward through the +Z cell face for the five WALL roles, and "
+                "around all four vertical faces for `deck` (a roof's oversail "
+                "is a perimeter eaves). Carried by dedicated "
                 "ornament-band shards rather than welded onto the cell shards. "
                 "Sized per role against the kit's MEASURED oversail (9 of 41 "
                 "pieces, max 0.34 m), not against the 0.5 m allowance.",
@@ -1488,6 +1601,13 @@ def main():
             "triangles": check["tris"],
             "max_triangles_per_shard": check["tris_max"],
             "vertices": check["verts_total"],
+            "vertices_note":
+                "the count in the scene. Unity will import MORE: every edge is "
+                "hard and UVs are per face-vertex, so vertices split per face. "
+                "Size any rubble merge against the SPLIT count "
+                "(triangles x 3 upper bound), not this one - #662's UInt16 "
+                "merge ceiling is 65,535 and it was already hit on M1.",
+            "vertices_split_upper_bound": check["tris"] * 3,
             "shading_groups": check["shading_groups"],
             "uv_range": [check["uv_min"], check["uv_max"]],
         },
@@ -1520,14 +1640,21 @@ def main():
                 "against a bounding volume - a bounding volume cannot be the "
                 "ground truth for a question about bounding volumes. `bound` is "
                 "a superset of `solid` by construction, and that is asserted at "
-                "build time rather than assumed. `seed` under-removes everywhere and it "
-                "under-removes MOST on the biggest shards, because one point "
-                "stands for up to 4.7 m3 of solid - so the per-role erosion "
-                "spread this delivery reported last round (36-44% of a glass "
-                "pattern against 3-9% of a brick one) is substantially an "
-                "ARTIFACT of the point test rather than a property of the "
-                "material. `bound_radius_m` and `aabb` ship per shard so the "
-                "shell can pick its rule with the numbers in front of it.",
+                "build time rather than assumed. `seed` under-removes "
+                "EVERYWHERE - 12 to 66% of what a strike actually reaches - so "
+                "the per-role erosion spread reported earlier is measured "
+                "through a lossy instrument. What that spread is NOT is a "
+                "simple function of shard size: concrete and brick have "
+                "effectively the same mean shard volume (0.864 vs 0.900 m3) "
+                "and differ 2.5x, because what decides the miss rate is where "
+                "a role's seeds sit RELATIVE TO THE STRUCK FACE - concrete's 6 "
+                "surface-biased seeds in the +Z 0.55 m against brick's "
+                "bed-centre seeding. That part is authored, so it is partly a "
+                "property of the role after all. Under `solid` the roles "
+                "converge to a much tighter band than under `seed`. "
+                "`sample_point`/`inscribed_radius_m` and `seed`/`bound_radius_m` "
+                "bracket the truth from inside and outside, so the shell can "
+                "pick its rule with the numbers in front of it.",
         },
         "deviations": DEVIATIONS,
         "shards": entries,
@@ -1663,6 +1790,7 @@ def write_readme(manifest, per_role, bites, check, scales, entries,
         "infill": "plate-like, thin in depth: a curtain panel delaminating",
         "glass": "a shower of splinters, radial from the impact point on the pane",
         "steel": "does NOT shatter - few large torn, bent sections",
+        "deck": "a roof slab: blocky like concrete, spalling at the TOP face",
     }
     for role in sf.ROLES:
         r = per_role[role]
@@ -1795,6 +1923,16 @@ def write_readme(manifest, per_role, bites, check, scales, entries,
         add("| `%s` | %.1f | %.0f | %.1f px |" % (role, scales[role], d, d * 0.02))
     add("")
 
+    add("### The steel patch mix\n")
+    add("An even pick among steel's three fracture patches put `rust` on "
+        "35%% of freshly TORN sections (measured: torn 16, rust 14, dark 10 "
+        "of 40). Rust is what already-exposed steel looks like; a section "
+        "opened a second ago should be bright bare metal. Weighted to "
+        "**%.0f%%** by the contract owner's call - enough to break up a "
+        "grey block and read as decayed plant, not enough to claim every "
+        "third tear is old.\n"
+        % (100.0 * FRACTURE_WEIGHTS["steel"]["rust"]))
+
     add("## The outset (contract 1c)\n")
     add("Sized against the kit rather than against the allowance. **Measured in "
         "`demigol_kit/manifest.json`: only 9 of the 41 kit pieces oversail at "
@@ -1843,16 +1981,22 @@ def write_readme(manifest, per_role, bites, check, scales, entries,
         "- `solid` - ground truth, measured against the real surface: "
         "point-to-triangle distance over every face, plus an inside test.\n")
     add("**One point cannot stand for a shard of up to %.1f m3.** The point "
-        "test under-removes everywhere, and it under-removes worst on the "
-        "biggest shards - so a role's apparent erosion rate is largely a "
-        "sampling artifact of its shard SIZE rather than a property of the "
-        "material. Glass looks like it shatters partly because its splinters "
-        "are small enough for a point to represent them; steel looks immovable "
-        "partly because a 4 m3 section is one point.\n"
+        "test finds only 12-66%% of what a strike actually reaches, so the "
+        "per-role spread above is measured through a lossy instrument.\n"
         % max(e["volume_m3"] for e in entries))
-    add("Nothing here is a change to the geometry, and no rule is imposed: "
-        "`bound_radius_m` and `aabb` now ship per shard so the shell can pick "
-        "its rule with the numbers in front of it. The per-role multiplier the "
+    add("What that spread is **not** is a simple function of shard size, and "
+        "an earlier revision of this README said it was. Concrete and brick "
+        "have effectively the same mean shard volume - **0.864 against 0.900 "
+        "m3** - and differ 2.5x in what the point test finds. What actually "
+        "drives the miss rate is where a role's seeds sit *relative to the "
+        "struck face*: concrete puts 6 surface-biased seeds in the +Z 0.55 m, "
+        "brick seeds at bed centres. That is authored, so it is partly a "
+        "property of the role after all - the correction is to the reasoning, "
+        "not to the recommendation.\n")
+    add("Nothing here is a change to the geometry, and no rule is imposed. "
+        "Four fields ship per shard so the shell can choose: `seed` + "
+        "`bound_radius_m` never misses and over-includes; `sample_point` + "
+        "`inscribed_radius_m` never over-reaches. Together they bracket it. The per-role multiplier the "
         "consumer planned is still the right lever for taste - this just means "
         "it starts from a corrected baseline rather than compensating for a "
         "measurement error.\n")
