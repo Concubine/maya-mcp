@@ -377,9 +377,9 @@ def main():
               % (skin["max_weight_sum_error"], WEIGHT_SUM_TOL))
 
         # The byte re-read: the tool measured the file it wrote, and this
-        # measures the same file INDEPENDENTLY, from a reader that never saw
-        # Maya. Agreement is the point - a skin block computed from a scene
-        # rather than from bytes would pass every check above.
+        # measures the same file INDEPENDENTLY, from a reader that never saw Maya.
+        # It proves fbxbytes works standalone on the shipped artifact and the
+        # numbers survived TCP/JSON transport. It does not catch exporter defects.
         facts = fbxbytes.read_fbx(fbx)
         limbs = [n for n in facts.nodes if n.kind == "LimbNode"]
         check("the bytes carry %d LimbNode joints" % JOINT_COUNT,
