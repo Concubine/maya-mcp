@@ -268,3 +268,41 @@ class TestMirrorWeightTable:
             weights, 3, [(0, 1)], [0, 2, 1])
         assert out[3:] == [0.2, 0.0, 0.8]
         assert out[:3] == [0.2, 0.8, 0.0]       # source untouched
+
+
+class TestSmoothWeightTable:
+    # 3 verts in a line (0-1-2), 2 joints, a hard stair-step at v1
+    TABLE = [1.0, 0.0,   1.0, 0.0,   0.0, 1.0]
+    ADJ = [[1], [0, 2], [1]]
+
+    def test_one_pass_softens_the_step_and_stays_normalized(self):
+        out = rigmath.smooth_weight_table(self.TABLE, 2, self.ADJ, 1, 4)
+        # v1: 0.5*own(1,0) + 0.5*mean((1,0),(0,1)) = (0.75, 0.25)
+        assert out[2:4] == pytest.approx([0.75, 0.25])
+        assert sum(out[0:2]) == pytest.approx(1.0)
+        assert sum(out[4:6]) == pytest.approx(1.0)
+
+    def test_rows_filter_limits_who_moves(self):
+        out = rigmath.smooth_weight_table(self.TABLE, 2, self.ADJ, 1, 4,
+                                          rows={1})
+        assert out[0:2] == pytest.approx([1.0, 0.0])   # v0 untouched
+        assert out[4:6] == pytest.approx([0.0, 1.0])   # v2 untouched
+        assert out[2:4] == pytest.approx([0.75, 0.25])
+
+    def test_pruning_holds_the_influence_ceiling(self):
+        table = [1.0, 0.0, 0.0,   0.0, 1.0, 0.0,   0.0, 0.0, 1.0]
+        adj = [[1, 2], [0, 2], [0, 1]]
+        out = rigmath.smooth_weight_table(table, 3, adj, 1, 2)
+        for v in range(3):
+            row = out[3 * v:3 * v + 3]
+            assert sum(1 for w in row if w > rigmath.WEIGHT_TOL) <= 2
+            assert sum(row) == pytest.approx(1.0)
+
+    def test_isolated_vertices_are_left_alone(self):
+        out = rigmath.smooth_weight_table([1.0, 0.0], 2, [[]], 3, 4)
+        assert out == [1.0, 0.0]
+
+    def test_more_iterations_move_further(self):
+        one = rigmath.smooth_weight_table(self.TABLE, 2, self.ADJ, 1, 4)
+        three = rigmath.smooth_weight_table(self.TABLE, 2, self.ADJ, 3, 4)
+        assert three[2] < one[2]          # v1's j0 share keeps eroding

@@ -393,3 +393,38 @@ def mirror_weight_table(weights: List[float], ncols: int, pairs,
         for j in range(ncols):
             out[dst * ncols + mapping[j]] = weights[src * ncols + j]
     return out
+
+
+# Half own, half neighbourhood: strong enough that 2-3 passes visibly soften
+# a stair-step, weak enough that a pass cannot invert local ownership.
+SMOOTH_ALPHA = 0.5
+MAX_SMOOTH_ITERATIONS = 50
+
+
+def smooth_weight_table(weights: List[float], ncols: int,
+                        adjacency: List[List[int]], iterations: int,
+                        max_influences: int, rows=None,
+                        alpha: float = SMOOTH_ALPHA) -> List[float]:
+    """Laplacian smoothing over the mesh graph, the fix for stair-stepped
+    falloff at hips and shoulders. Every smoothed row is pruned back to
+    max_influences and renormalized - smoothing bleeds weight onto every
+    neighbouring influence, and unchecked that breaks the bind's promise to
+    the exporter."""
+    num = len(weights) // ncols
+    targets = list(range(num)) if rows is None else sorted(rows)
+    current = list(weights)
+    for _ in range(iterations):
+        nxt = list(current)
+        for v in targets:
+            neighbours = adjacency[v]
+            if not neighbours:
+                continue
+            row = []
+            for j in range(ncols):
+                mean = (sum(nxt[n * ncols + j] for n in neighbours)
+                        / len(neighbours))
+                row.append((1.0 - alpha) * current[v * ncols + j]
+                           + alpha * mean)
+            nxt[v * ncols:(v + 1) * ncols] = prune_row(row, max_influences)
+        current = nxt
+    return current
