@@ -19,6 +19,7 @@ artifact, applied to the live scene.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, Optional
 
 from ..dispatcher import HandlerError
@@ -76,3 +77,37 @@ def set_linear_unit(cmds, unit: Optional[str]) -> Dict[str, Any]:
         return units_block(cmds)
     cmds.currentUnit(linear=unit)
     return units_block(cmds)
+
+
+# Maya's four angular units, in degrees-per-unit. setAttr/getAttr on a
+# doubleAngle attribute speak the CURRENT UI angle unit, so every handler
+# that states its angles in degrees (#636's rule) converts at this table.
+DEGREES_PER_ANGLE_UNIT = {
+    "deg": 1.0,
+    "rad": 180.0 / math.pi,
+    "min": 1.0 / 60.0,
+    "sec": 1.0 / 3600.0,
+}
+
+
+def _degrees_per_unit(cmds) -> float:
+    unit = cmds.currentUnit(query=True, angle=True)
+    per_unit = DEGREES_PER_ANGLE_UNIT.get(unit)
+    if per_unit is None:
+        raise HandlerError(
+            "scene angle unit %r is not one of %s"
+            % (unit, ", ".join(sorted(DEGREES_PER_ANGLE_UNIT))),
+            hint="this tool states its angles in degrees and cannot convert "
+                 "into an unknown unit",
+        )
+    return per_unit
+
+
+def degrees_to_ui(cmds, degrees: float) -> float:
+    """Degrees -> the scene's current angular unit, for setAttr."""
+    return float(degrees) / _degrees_per_unit(cmds)
+
+
+def ui_to_degrees(cmds, value: float) -> float:
+    """What a doubleAngle getAttr just returned -> degrees."""
+    return float(value) * _degrees_per_unit(cmds)

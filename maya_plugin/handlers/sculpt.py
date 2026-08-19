@@ -10,11 +10,10 @@ checkpoint instead of relying on undo."""
 
 from __future__ import annotations
 
-import math
 from typing import Any, Callable, Dict, List
 
 from ..dispatcher import HandlerError
-from . import naming, sculpt_math
+from . import naming, sculpt_math, units
 
 MAX_OPS = 20
 FALLOFFS = ("smooth", "linear")
@@ -324,13 +323,6 @@ DEFORMER_WHITELIST = {
     "lattice": {"divisions", "translate", "rotate"},
 }
 
-# How many degrees one unit of each Maya UI angle unit is worth. `cmds.setAttr`
-# on an angle-typed attribute reads its number in the CURRENT UI unit, so the
-# same call means different things in different scenes - dividing by this makes
-# the tool's contract (degrees, always) hold regardless of the scene setting.
-_DEGREES_PER_UI_ANGLE = {"deg": 1.0, "rad": 180.0 / math.pi, "min": 1.0 / 60.0,
-                         "sec": 1.0 / 3600.0}
-
 # Below this fraction of the mesh's own bounding-box diagonal, a deformation is
 # not something anyone asked for on purpose - it is the "reported success,
 # moved nothing" failure (#636) and must be reported as such. 1% separates the
@@ -362,7 +354,7 @@ _INERT_HINTS = {
 }
 
 
-def _vertex_positions(cmds, mesh_long: str) -> List[float]:
+def vertex_positions(cmds, mesh_long: str) -> List[float]:
     """World-space vertex positions, flat [x,y,z,x,y,z,...].
 
     Deliberately not exactWorldBoundingBox: that transforms the object-space
@@ -383,16 +375,7 @@ def _set_deformer_attr(cmds, node: str, attr: str, value: Any) -> None:
     """
     plug = "%s.%s" % (node, attr)
     if cmds.getAttr(plug, type=True) == "doubleAngle":
-        unit = cmds.currentUnit(query=True, angle=True)
-        per_unit = _DEGREES_PER_UI_ANGLE.get(unit)
-        if per_unit is None:
-            raise HandlerError(
-                "scene angle unit %r is not one of %s"
-                % (unit, ", ".join(sorted(_DEGREES_PER_UI_ANGLE))),
-                hint="deform states its angles in degrees and cannot convert "
-                     "into an unknown unit",
-            )
-        value = float(value) / per_unit
+        value = units.degrees_to_ui(cmds, value)
     cmds.setAttr(plug, value)
 
 
@@ -418,7 +401,7 @@ def deform(params: Dict[str, Any]) -> Dict[str, Any]:
     # attributes, after the handle placement, after any bake. #636 shipped a
     # bend that reported success and moved the mesh by 0.1% of its own height;
     # nothing short of the vertices could have caught that.
-    before = _vertex_positions(cmds, mesh_long)
+    before = vertex_positions(cmds, mesh_long)
     if deformer == "lattice":
         divisions = dparams.get("divisions", [2, 5, 2])
         # cmds.lattice returns [ffd, lattice, base]. Deformation is driven by
@@ -466,7 +449,7 @@ def deform(params: Dict[str, Any]) -> Dict[str, Any]:
         cmds.xform(handle, translation=handle_xform["translate"], worldSpace=True)
     if "rotate" in handle_xform:
         cmds.xform(handle, rotation=handle_xform["rotate"], worldSpace=True)
-    moved = sculpt_math.max_displacement(before, _vertex_positions(cmds, mesh_long))
+    moved = sculpt_math.max_displacement(before, vertex_positions(cmds, mesh_long))
     warnings = _inert_warnings(deformer, moved, sculpt_math.bbox_extent(before))
     if params.get("delete_history_after"):
         cmds.delete(mesh_long, constructionHistory=True)

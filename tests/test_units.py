@@ -108,3 +108,31 @@ class TestRequireKnownUnit:
             units.require_known_unit("furlong")
         assert "furlong" in str(exc.value)
         assert "cm" in exc.value.hint
+
+
+class FakeAngleCmds:
+    def __init__(self, unit):
+        self._unit = unit
+
+    def currentUnit(self, query=False, angle=False, **kw):
+        return self._unit
+
+
+class TestAngleUnits:
+    def test_degrees_pass_through_a_degree_scene(self):
+        assert units.degrees_to_ui(FakeAngleCmds("deg"), 90.0) == 90.0
+        assert units.ui_to_degrees(FakeAngleCmds("deg"), 90.0) == 90.0
+
+    def test_a_radian_scene_gets_radians(self):
+        import math
+        assert units.degrees_to_ui(FakeAngleCmds("rad"), 180.0) == pytest.approx(math.pi)
+        assert units.ui_to_degrees(FakeAngleCmds("rad"), math.pi) == pytest.approx(180.0)
+
+    def test_the_two_directions_round_trip(self):
+        cmds = FakeAngleCmds("min")
+        assert units.ui_to_degrees(cmds, units.degrees_to_ui(cmds, 33.3)) == pytest.approx(33.3)
+
+    def test_an_unknown_angle_unit_is_refused_not_guessed(self):
+        from maya_plugin.dispatcher import HandlerError
+        with pytest.raises(HandlerError, match="angle unit"):
+            units.degrees_to_ui(FakeAngleCmds("grad"), 1.0)
