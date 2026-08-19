@@ -37,6 +37,7 @@ from .handlers import (
     objinfo,
     pbr,
     render,
+    rigging,
     scene,
     sculpt,
     session,
@@ -197,6 +198,10 @@ def _build_handlers() -> Dict[str, Any]:
         "assign_material": material.assign_material,
         "assign_pbr": pbr.assign_pbr,
         "apply_texture_recipe": texture_recipes.apply_texture_recipe,
+        "create_skeleton": rigging.create_skeleton,
+        "bind_skin": rigging.bind_skin,
+        "pose_skeleton": rigging.pose_skeleton,
+        "reset_pose": rigging.reset_pose,
     }
 
 

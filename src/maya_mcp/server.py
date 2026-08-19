@@ -47,15 +47,19 @@ from .schemas import (
     ObjectInfoResult,
     OpenSceneResult,
     PbrResult,
+    PoseSkeletonResult,
     ReferenceResult,
     RemeshResult,
     RenderedFrame,
     RenderResult,
     ResetNamespaceResult,
+    ResetPoseResult,
     RestoreResult,
     SaveSceneResult,
     SceneGraphResult,
     SculptResult,
+    CreateSkeletonResult,
+    BindSkinResult,
     TextureRecipeResult,
     TransformResult,
     UndoResult,
@@ -1948,6 +1952,138 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 {"mesh": mesh, "recipe": recipe, "params": params, "slot": slot},
                 timeout_s=SCENE_TIMEOUT_S,
             )
+        )
+
+    @mcp.tool(
+        title="Create joint skeleton",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_create_skeleton(
+        joints: Annotated[Optional[List[dict]], Field(description=(
+            "Explicit form: one entry per joint - {name, position: [x,y,z] "
+            "scene units, parent?: joint name from this same call, orient?: "
+            "[x,y,z] DEGREES}. Any order; duplicate names, unknown parents "
+            "and cycles refuse the whole call before any joint exists. "
+            "Exactly one joint names no parent - a skeleton has one root."
+        ))] = None,
+        chain: Annotated[Optional[List[List[float]]], Field(description=(
+            "Shorthand for one parented run: world positions, at least 2. "
+            "Each joint parents to the previous; names are "
+            "<chain_prefix>_01, _02, ... Pass either chain or joints, never "
+            "both."
+        ))] = None,
+        chain_prefix: Annotated[str, Field(description=(
+            "Name prefix for the chain shorthand."
+        ))] = "joint",
+        root_name: Annotated[Optional[str], Field(description=(
+            "Renames the chain's first joint (the root)."
+        ))] = None,
+    ) -> CreateSkeletonResult:
+        """Build a validated joint hierarchy in one call.
+
+        Joint orientation defaults to Maya's own convention - X aims at the
+        first child, leaves zeroed - and whatever orientation actually landed
+        is reported per joint in degrees, because orientation is where every
+        rig surprise lives. Returns canonical long names; use them as the
+        keys of maya_pose_skeleton's rotations map."""
+        params = {"joints": joints, "chain": chain}
+        if chain is not None:
+            params["chain_prefix"] = chain_prefix
+            params["root_name"] = root_name
+        return CreateSkeletonResult.model_validate(
+            maya.request("create_skeleton", params, timeout_s=SCENE_TIMEOUT_S)
+        )
+
+    @mcp.tool(
+        title="Bind mesh to skeleton",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_bind_skin(
+        mesh: Annotated[str, Field(description="Mesh to bind (long name).")],
+        root: Annotated[str, Field(description=(
+            "Skeleton root joint from maya_create_skeleton. The whole "
+            "hierarchy under it becomes influences."
+        ))],
+        max_influences: Annotated[int, Field(ge=1, le=8, description=(
+            "Joints allowed per vertex. 4 is the game-engine convention."
+        ))] = 4,
+        method: Annotated[
+            Literal["closestDistance", "heatMap", "geodesicVoxel"],
+            Field(description=(
+                "Initial weighting. closestDistance is robust everywhere; "
+                "heatMap follows the surface (fails on non-manifold meshes); "
+                "geodesicVoxel handles overlapping shells."
+            )),
+        ] = "closestDistance",
+    ) -> BindSkinResult:
+        """Bind a mesh to a skeleton and MEASURE the result.
+
+        unweighted_vertices must be 0 for a deliverable bind - a vertex no
+        joint owns stays behind when the creature moves, and nothing looks
+        wrong at bind time. per_joint says which joints own which share of
+        the mesh, which is how to see a bind without a viewport. Re-binding
+        an already-bound mesh is refused (stacked skinClusters make weights
+        unexplainable) - unbind first, or restore the pre-bind checkpoint."""
+        return BindSkinResult.model_validate(
+            maya.request(
+                "bind_skin",
+                {"mesh": mesh, "root": root, "max_influences": max_influences,
+                 "method": method},
+                timeout_s=BOOL_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Pose skeleton",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=True
+        ),
+    )
+    def maya_pose_skeleton(
+        root: Annotated[str, Field(description="Skeleton root joint.")],
+        rotations: Annotated[dict, Field(description=(
+            "Map of joint name to [rx, ry, rz] local euler DEGREES - absolute "
+            "values, not deltas, so re-applying a pose is idempotent. This "
+            "map IS the pose currency: phase-3 IK bakes into it and a "
+            "phase-6 clip keys it."
+        ))],
+    ) -> PoseSkeletonResult:
+        """Apply per-joint local rotations and MEASURE what moved.
+
+        Reports every joint's achieved world position and the bound mesh's
+        max vertex displacement (vertices, never bounding boxes). A pose
+        whose displacement is near zero against the mesh's size warns
+        loudly - rotations that land on joints owning no vertices look
+        exactly like success otherwise."""
+        return PoseSkeletonResult.model_validate(
+            maya.request(
+                "pose_skeleton",
+                {"root": root, "rotations": rotations, "space": "local"},
+                timeout_s=BOOL_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Reset to bind pose",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=True
+        ),
+    )
+    def maya_reset_pose(
+        root: Annotated[str, Field(description="Skeleton root joint.")],
+    ) -> ResetPoseResult:
+        """Return a skeleton to its bind pose.
+
+        Every measurement and every export must happen from a KNOWN pose;
+        'whatever the last test left behind' is not a bind pose. Unbound
+        skeletons have no bind pose - rotations are zeroed (the
+        create_skeleton rest pose) and a warning says so."""
+        return ResetPoseResult.model_validate(
+            maya.request("reset_pose", {"root": root}, timeout_s=BOOL_TIMEOUT_S)
         )
 
     return mcp

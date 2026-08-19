@@ -92,6 +92,10 @@ class TestRegistration:
             "maya_assign_material",
             "maya_assign_pbr",
             "maya_apply_texture_recipe",
+            "maya_create_skeleton",
+            "maya_bind_skin",
+            "maya_pose_skeleton",
+            "maya_reset_pose",
         }
 
     def test_annotations_declare_read_only_vs_destructive(self):
@@ -1551,3 +1555,43 @@ class TestCaptureViewportTargetReachesMaya:
         }))
         assert conn.calls[0]["params"]["target"] == ["|golem|chest"]
         assert conn.calls[0]["params"]["isolate"] is None
+
+
+class TestRiggingTools:
+    def test_create_skeleton_marshals_the_chain_form(self):
+        conn = FakeConn(responses={"create_skeleton": {
+            "root": "|s_01",
+            "joints": [{"name": "|s_01", "position": [0, 0, 0],
+                        "parent": None, "orient": [0, 0, 0]}],
+            "warnings": []}})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_create_skeleton", {
+            "chain": [[0, 0, 0], [0, 1, 0]], "chain_prefix": "s"}))
+        assert conn.calls[0]["cmd"] == "create_skeleton"
+        assert conn.calls[0]["params"]["chain"] == [[0, 0, 0], [0, 1, 0]]
+
+    def test_bind_skin_defaults_travel(self):
+        conn = FakeConn(responses={"bind_skin": {
+            "mesh": "|m", "root": "|r", "skin_cluster": "mSkin",
+            "influences": ["|r"], "unweighted_vertices": 0,
+            "max_influences_exceeded": 0,
+            "per_joint": [{"joint": "|r", "vertices": 8, "mean_weight": 1.0}],
+            "warnings": []}})
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_bind_skin", {"mesh": "m", "root": "r"}))
+        params = conn.calls[0]["params"]
+        assert params["max_influences"] == 4
+        assert params["method"] == "closestDistance"
+
+    def test_pose_and_reset_round_trip(self):
+        conn = FakeConn(responses={
+            "pose_skeleton": {"applied": 1, "joints": [],
+                              "max_displacement": 0.5,
+                              "displaced_vertices": 12, "warnings": []},
+            "reset_pose": {"reset": True, "max_displacement": 0.5,
+                           "warnings": []}})
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_pose_skeleton", {
+            "root": "r", "rotations": {"a": [0, 0, 10]}}))
+        run(mcp.call_tool("maya_reset_pose", {"root": "r"}))
+        assert [c["cmd"] for c in conn.calls] == ["pose_skeleton", "reset_pose"]

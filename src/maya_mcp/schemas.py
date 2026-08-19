@@ -665,3 +665,86 @@ class ExportFbxResult(BaseModel):
             "None when the bounds were measured."
         ),
     )
+
+
+class SkeletonJoint(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str = Field(description="Canonical long name of the created joint.")
+    position: List[float] = Field(
+        description="MEASURED world position after creation, scene units.")
+    parent: Optional[str] = None
+    orient: List[float] = Field(
+        description=(
+            "The jointOrient that actually landed, in DEGREES - the default "
+            "aims X at the first child, and orientation is where every rig "
+            "surprise lives, so it is always reported."))
+
+
+class CreateSkeletonResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    root: str
+    joints: List[SkeletonJoint]
+    warnings: List[str] = Field(default_factory=list)
+
+
+class SkinJointStats(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    joint: str
+    vertices: int = Field(description="Vertices this joint meaningfully holds.")
+    mean_weight: float
+
+
+class BindSkinResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    mesh: str
+    root: str
+    skin_cluster: str
+    influences: List[str]
+    unweighted_vertices: int = Field(
+        description=(
+            "Vertices NO joint owns. Must be 0 for a gate to pass: an "
+            "unweighted vertex stays behind when the creature moves, and "
+            "nothing looks wrong at bind time."))
+    max_influences_exceeded: int
+    per_joint: List[SkinJointStats] = Field(
+        description=(
+            "How to SEE a bind without a viewport: a joint owning zero "
+            "vertices, or one joint owning everything, is a legible failure "
+            "in these numbers."))
+    warnings: List[str] = Field(default_factory=list)
+
+
+class PosedJoint(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    world_position: List[float]
+
+
+class PoseSkeletonResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    applied: int
+    joints: List[PosedJoint] = Field(
+        description="Every joint under the root with its ACHIEVED world position.")
+    max_displacement: float = Field(
+        description=(
+            "How far the furthest skinned vertex actually moved, measured "
+            "before/after from vertices (never bounding boxes). Near zero "
+            "against the mesh's size means the pose did nothing and warnings "
+            "says why."))
+    displaced_vertices: int
+    warnings: List[str] = Field(default_factory=list)
+
+
+class ResetPoseResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    reset: bool
+    max_displacement: float = Field(
+        description="How far the mesh moved coming back to the bind pose.")
+    warnings: List[str] = Field(default_factory=list)
