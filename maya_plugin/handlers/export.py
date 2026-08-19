@@ -67,7 +67,9 @@ FBX_SCENE_CONTENT_MEL: Tuple[str, ...] = (
 # carries the skinCluster deformer, one cluster per joint and the BindPose,
 # PROVIDED the selection lists the skeleton root alongside the mesh: with
 # nodes=[mesh, root], all four of {both flags, skins only, input connections
-# only, neither} wrote byte-identical 48192-byte files. So the extra
+# only, neither} wrote byte-identical 48192-byte files (that figure is this
+# measurement's mayapy A/B scene; the committed fixture is a different,
+# whole-scene export, so its 48208 bytes do not contradict it). So the extra
 # `FBXExportInputConnections -v true` this was first written with buys nothing
 # for the documented call and is deliberately NOT here - turning it on makes a
 # SELECTED export silently drag in every input-connected node (materials,

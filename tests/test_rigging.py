@@ -278,6 +278,15 @@ class TestPoseValidation:
         assert wrote
         assert out["applied"] == 1
 
+    def test_two_spellings_of_the_same_joint_are_refused(self, fake):
+        fake.objects += ["|r", "|r|arm"]
+        fake.parents["|r|arm"] = "|r"
+        with pytest.raises(HandlerError, match="twice") as err:
+            rigging.pose_skeleton({
+                "root": "r",
+                "rotations": {"arm": [0, 0, 10], "|r|arm": [0, 0, 20]}})
+        assert "|r|arm" in str(err.value)
+
     def test_an_ambiguous_short_name_is_refused_with_the_long_name_fix(self, fake):
         fake.objects += ["|r", "|r|a", "|r|b", "|r|a|tip", "|r|b|tip"]
         fake.parents.update({

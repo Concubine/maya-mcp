@@ -178,6 +178,15 @@ def bind_skin(params: Dict[str, Any]) -> Dict[str, Any]:
     stats = rigmath.weight_stats(influences, weights, num_verts, max_influences)
 
     warnings: List[str] = []
+    hierarchy = set(_hierarchy_joints(cmds, root_long))
+    outside = [inf for inf in influences if inf not in hierarchy]
+    if outside:
+        warnings.append(
+            "%d influence(s) sit OUTSIDE the hierarchy under %s: %s - "
+            "skinCluster binds the whole skeleton the root belongs to; pass "
+            "the true root to silence this"
+            % (len(outside), _short(root_long),
+               ", ".join(_short(j) for j in outside[:8])))
     empty = [p["joint"] for p in stats["per_joint"] if p["vertices"] == 0]
     if empty:
         warnings.append(
@@ -260,24 +269,35 @@ def _resolve_rotations(cmds, joints: List[str], rotations) -> Dict[str, List[flo
     for j in joints:
         by_short.setdefault(_short(j), []).append(j)
     resolved: Dict[str, List[float]] = {}
+    resolved_via: Dict[str, str] = {}  # target long name -> the spelling that named it
     for name, value in rotations.items():
         triple = rigmath.vec3(value, "rotations[%r]" % name)
         if triple is None:
             raise HandlerError("rotations[%r] must be [rx, ry, rz]" % name)
         if name in joints:
-            resolved[name] = triple
-            continue
-        matches = by_short.get(_short(name), [])
-        if not matches:
+            target = name
+        else:
+            matches = by_short.get(_short(name), [])
+            if not matches:
+                raise HandlerError(
+                    "rotations names %r, which is not a joint under this root" % name,
+                    hint="joints here: %s"
+                         % ", ".join(_short(j) for j in joints[:12]))
+            if len(matches) > 1:
+                raise HandlerError(
+                    "%r is ambiguous under this root (%d matches)" % (name, len(matches)),
+                    hint="use the long name, e.g. %s" % matches[0])
+            target = matches[0]
+        if target in resolved_via:
+            # Two spellings of the same joint (e.g. "arm" and "|r|arm") would
+            # otherwise collapse last-write-wins and `applied` would
+            # under-report - refuse instead of guessing which one wins.
             raise HandlerError(
-                "rotations names %r, which is not a joint under this root" % name,
-                hint="joints here: %s"
-                     % ", ".join(_short(j) for j in joints[:12]))
-        if len(matches) > 1:
-            raise HandlerError(
-                "%r is ambiguous under this root (%d matches)" % (name, len(matches)),
-                hint="use the long name, e.g. %s" % matches[0])
-        resolved[matches[0]] = triple
+                "rotations names %s twice: %r and %r"
+                % (target, resolved_via[target], name),
+                hint="use one spelling per joint - both resolve to %s" % target)
+        resolved[target] = triple
+        resolved_via[target] = name
     return resolved
 
 

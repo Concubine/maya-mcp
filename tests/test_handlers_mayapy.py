@@ -2274,6 +2274,32 @@ class TestBindSkinInMaya:
                                  "max_influences": 2})
         assert out["max_influences_exceeded"] == 0
 
+    def test_binding_a_mid_chain_root_warns_about_joints_above_it(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import rigging
+
+        mesh = _serpent_cylinder(cmds, name="tube4")
+        skel = self._chain(rigging, n=4)
+        joints = [j["name"] for j in skel["joints"]]
+        true_root, mid_root = joints[0], joints[1]
+
+        out = rigging.bind_skin({"mesh": mesh, "root": mid_root})
+        assert out["unweighted_vertices"] >= 0  # bind succeeded, not asserting shape
+        assert any(
+            "OUTSIDE the hierarchy" in w and rigging._short(true_root) in w
+            for w in out["warnings"])
+
+    def test_binding_the_true_root_stays_warning_free(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import rigging
+
+        mesh = _serpent_cylinder(cmds, name="tube5")
+        skel = self._chain(rigging, n=4)
+        out = rigging.bind_skin({"mesh": mesh, "root": skel["root"]})
+        assert not any("OUTSIDE the hierarchy" in w for w in out["warnings"])
+
 
 class TestPoseSkeletonInMaya:
     def _bound_serpent(self, cmds, rigging, name="ptube", n=4, height=4.0):
