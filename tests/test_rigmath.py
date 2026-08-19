@@ -217,3 +217,54 @@ class TestWeightReportStats:
         out = rigmath.weight_report_stats(["a", "b"], table, 10, 4, sample=3)
         assert out["unweighted_vertices"] == 10
         assert out["unweighted_sample"] == [0, 1, 2]
+
+
+class TestMirrorPairs:
+    # 4 verts: +X pair, -X pair, on-plane, +X orphan
+    POS = [1.0, 0.0, 0.0,   -1.0, 0.0, 0.0,
+           0.0, 5.0, 0.0,    2.0, 9.0, 0.0]
+
+    def test_pairs_source_positive_by_default(self):
+        pairs, on_plane, unpaired = rigmath.mirror_pairs(self.POS, 0, 1e-3)
+        assert pairs == [(0, 1)]
+        assert on_plane == [2]
+        assert unpaired == [3]
+
+    def test_direction_reverses_source_and_destination(self):
+        pairs, _, unpaired = rigmath.mirror_pairs(
+            self.POS, 0, 1e-3, source_positive=False)
+        assert pairs == [(1, 0)]
+        assert unpaired == []          # vert 3 sits on the +X side now
+
+    def test_tolerance_is_the_match_radius(self):
+        pos = [1.0, 0.0, 0.0,   -1.0, 0.05, 0.0]
+        assert rigmath.mirror_pairs(pos, 0, 1e-3)[0] == []
+        assert rigmath.mirror_pairs(pos, 0, 0.1)[0] == [(0, 1)]
+
+    def test_other_axes_reflect_their_own_coordinate(self):
+        pos = [0.0, 1.0, 0.0,   0.0, -1.0, 0.0]
+        assert rigmath.mirror_pairs(pos, 1, 1e-3)[0] == [(0, 1)]
+
+
+class TestMirrorInfluenceMap:
+    def test_bilateral_joints_pair_and_center_maps_to_self(self):
+        joints = [[0.0, 1.0, 0.0], [0.5, 1.0, 0.0], [-0.5, 1.0, 0.0]]
+        mapping, unmatched = rigmath.mirror_influence_map(joints, 0, 1e-3)
+        assert mapping == [0, 2, 1]
+        assert unmatched == []
+
+    def test_an_off_plane_joint_without_a_partner_is_named(self):
+        joints = [[0.0, 1.0, 0.0], [0.5, 1.0, 0.0]]
+        mapping, unmatched = rigmath.mirror_influence_map(joints, 0, 1e-3)
+        assert mapping == [0, 1]
+        assert unmatched == [1]
+
+
+class TestMirrorWeightTable:
+    def test_source_weights_land_on_swapped_columns(self):
+        # 2 verts x 3 joints (center, L, R): v0 is the +X source
+        weights = [0.2, 0.8, 0.0,   1.0, 0.0, 0.0]
+        out = rigmath.mirror_weight_table(
+            weights, 3, [(0, 1)], [0, 2, 1])
+        assert out[3:] == [0.2, 0.0, 0.8]
+        assert out[:3] == [0.2, 0.8, 0.0]       # source untouched

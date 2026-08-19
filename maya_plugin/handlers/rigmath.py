@@ -7,6 +7,7 @@ module is orchestration only.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Optional
 
 from ..dispatcher import HandlerError
@@ -291,4 +292,104 @@ def weight_report_stats(influences: List[str], weights: List[float],
     out["max_weight_sum_error"] = max_err
     out["histogram"] = [{"influences": k, "vertices": histogram[k]}
                         for k in sorted(histogram)]
+    return out
+
+
+def _cell(x: float, y: float, z: float, size: float):
+    return (int(math.floor(x / size)), int(math.floor(y / size)),
+            int(math.floor(z / size)))
+
+
+def _nearest_within(positions: List[float], candidates_by_cell, target,
+                    tolerance: float):
+    """Index of the position nearest `target` within `tolerance`, else None.
+    Grid-hash lookup: O(27) cells, not O(n) - the humanoid has ~15k verts."""
+    base = _cell(target[0], target[1], target[2], tolerance)
+    best, best_d2 = None, tolerance * tolerance
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            for dz in (-1, 0, 1):
+                for i in candidates_by_cell.get(
+                        (base[0] + dx, base[1] + dy, base[2] + dz), ()):
+                    px, py, pz = positions[3 * i:3 * i + 3]
+                    d2 = ((px - target[0]) ** 2 + (py - target[1]) ** 2
+                          + (pz - target[2]) ** 2)
+                    if d2 <= best_d2:
+                        best, best_d2 = i, d2
+    return best
+
+
+def mirror_pairs(positions: List[float], axis_index: int, tolerance: float,
+                 source_positive: bool = True):
+    """(source, destination) vertex pairs across the mirror plane, by
+    reflected position. On-plane vertices are neither; a source vertex whose
+    reflection lands on no vertex is unpaired - an asymmetric mesh, reported
+    not guessed."""
+    n = len(positions) // 3
+    by_cell: Dict[Any, List[int]] = {}
+    for i in range(n):
+        by_cell.setdefault(
+            _cell(positions[3 * i], positions[3 * i + 1],
+                  positions[3 * i + 2], tolerance), []).append(i)
+    pairs, on_plane, unpaired = [], [], []
+    for i in range(n):
+        c = positions[3 * i + axis_index]
+        if abs(c) <= tolerance:
+            on_plane.append(i)
+            continue
+        if (c > 0) != source_positive:
+            continue
+        target = list(positions[3 * i:3 * i + 3])
+        target[axis_index] = -target[axis_index]
+        partner = _nearest_within(positions, by_cell, target, tolerance)
+        if partner is None:
+            unpaired.append(i)
+        else:
+            pairs.append((i, partner))
+    return pairs, on_plane, unpaired
+
+
+def mirror_influence_map(influence_positions: List[List[float]],
+                         axis_index: int, tolerance: float):
+    """Column j of the source side writes column mapping[j] on the mirrored
+    side: the influence nearest j's reflected position. On-plane influences
+    (spine, head) map to themselves; an off-plane influence with no partner
+    maps to itself AND is returned in unmatched - the handler refuses on it,
+    because copying left-arm weights onto left-arm joints for right-side
+    vertices is exactly the silent wrong answer this surface never gives."""
+    flat: List[float] = []
+    for p in influence_positions:
+        flat.extend(p)
+    n = len(influence_positions)
+    by_cell: Dict[Any, List[int]] = {}
+    for i in range(n):
+        by_cell.setdefault(
+            _cell(flat[3 * i], flat[3 * i + 1], flat[3 * i + 2], tolerance),
+            []).append(i)
+    mapping, unmatched = [], []
+    for i in range(n):
+        c = flat[3 * i + axis_index]
+        if abs(c) <= tolerance:
+            mapping.append(i)
+            continue
+        target = list(flat[3 * i:3 * i + 3])
+        target[axis_index] = -target[axis_index]
+        partner = _nearest_within(flat, by_cell, target, tolerance)
+        if partner is None or partner == i:
+            mapping.append(i)
+            unmatched.append(i)
+        else:
+            mapping.append(partner)
+    return mapping, unmatched
+
+
+def mirror_weight_table(weights: List[float], ncols: int, pairs,
+                        mapping: List[int]) -> List[float]:
+    """Write each source row onto its partner through the influence map.
+    A mirrored row is a permutation of a normalized row, so normalization
+    survives by construction."""
+    out = list(weights)
+    for src, dst in pairs:
+        for j in range(ncols):
+            out[dst * ncols + mapping[j]] = weights[src * ncols + j]
     return out
