@@ -22,6 +22,11 @@ class FakeCmds:
         self.selection = []
         self.node_types = {}   # explicit overrides; unset defaults to "joint"
         self.skin_history = []  # set by tests: skinClusters in the mesh's history
+        self.skin_clusters = []  # set by tests: all skinClusters in the scene,
+                                  # what cmds.ls(type="skinCluster") returns
+        self.skin_influences = {}  # sc name -> [joint long names]
+        self.skin_geometry = {}    # sc name -> [shape long names]
+        self.bind_poses = []    # set by tests: dagPose(query=True, bindPose=True)
 
     # --- names
     def objExists(self, name):
@@ -29,6 +34,10 @@ class FakeCmds:
 
     def ls(self, pattern=None, long=False, type=None, **kw):
         if type == "skinCluster":
+            if pattern is None:
+                # cmds.ls(type="skinCluster"): every skinCluster in the scene,
+                # for _bound_meshes to scan.
+                return list(self.skin_clusters)
             # mirrors cmds.ls(history_nodes, type="skinCluster"): the fake's
             # listHistory already returns only skinClusters, so the input
             # list IS the filtered result - present only when a bind exists.
@@ -36,8 +45,13 @@ class FakeCmds:
             return list(nodes) if self.skin_history else []
         if pattern is None:
             return list(self.objects)
-        return [o for o in self.objects
-                if o == pattern or o.split("|")[-1] == pattern]
+        names = pattern if isinstance(pattern, list) else [pattern]
+        out = []
+        for n in names:
+            matches = [o for o in self.objects
+                      if o == n or o.split("|")[-1] == n]
+            out.extend(matches or [n])
+        return out
 
     def nodeType(self, node):
         if node in self.node_types:
@@ -104,7 +118,22 @@ class FakeCmds:
 
     def skinCluster(self, *args, **kw):
         self.calls.append(("skinCluster", args, kw))
+        if kw.get("query"):
+            sc = args[0] if args else None
+            if kw.get("influence"):
+                return list(self.skin_influences.get(sc, []))
+            if kw.get("geometry"):
+                return list(self.skin_geometry.get(sc, []))
+            return None
         return ["fakeSkin1"]
+
+    # --- posing
+    def dagPose(self, *args, query=False, bindPose=False, restore=False, **kw):
+        self.calls.append(("dagPose", args,
+                          dict(kw, query=query, bindPose=bindPose, restore=restore)))
+        if query and bindPose:
+            return list(self.bind_poses)
+        return None
 
 
 @pytest.fixture
@@ -201,3 +230,53 @@ class TestBindSkinValidation:
         with pytest.raises(HandlerError, match="already bound") as err:
             rigging.bind_skin({"mesh": "serpent", "root": "root_j"})
         assert "unbind" in err.value.hint
+
+
+class TestPoseValidation:
+    def _skeleton(self, fake):
+        fake.objects += ["|r", "|r|a"]
+        fake.parents = {"|r|a": "|r"}
+
+    def test_space_other_than_local_is_refused(self, fake):
+        self._skeleton(fake)
+        with pytest.raises(HandlerError, match="space"):
+            rigging.pose_skeleton({"root": "r", "space": "world",
+                                   "rotations": {"a": [0, 0, 10]}})
+
+    def test_empty_rotations_refused(self, fake):
+        self._skeleton(fake)
+        with pytest.raises(HandlerError, match="rotations"):
+            rigging.pose_skeleton({"root": "r", "rotations": {}})
+
+    def test_a_joint_outside_the_root_is_refused_by_name(self, fake):
+        self._skeleton(fake)
+        with pytest.raises(HandlerError, match="stranger"):
+            rigging.pose_skeleton({"root": "r",
+                                   "rotations": {"stranger": [0, 0, 10]}})
+
+    def test_rotations_reach_maya_in_scene_units(self, fake):
+        import math
+        fake._angle_unit = "rad"
+        self._skeleton(fake)
+        rigging.pose_skeleton({"root": "r", "rotations": {"a": [0, 0, 90]}})
+        wrote = [c for c in fake.calls
+                 if c[0] == "setAttr" and c[1] == "|r|a.rotate"]
+        assert wrote[0][2][2] == pytest.approx(math.pi / 2)
+
+    def test_no_bound_mesh_is_a_warning_not_silence(self, fake):
+        self._skeleton(fake)
+        out = rigging.pose_skeleton({"root": "r", "rotations": {"a": [0, 0, 10]}})
+        assert any("no skinned mesh" in w for w in out["warnings"])
+        assert out["max_displacement"] == 0.0
+
+
+class TestResetPose:
+    def test_unbound_skeleton_zeroes_rotations_with_a_warning(self, fake):
+        fake.objects += ["|r", "|r|a"]
+        fake.parents = {"|r|a": "|r"}
+        out = rigging.reset_pose({"root": "r"})
+        assert out["reset"] is True
+        assert any("no bind pose" in w for w in out["warnings"])
+        zeroed = [c for c in fake.calls
+                  if c[0] == "setAttr" and c[1].endswith(".rotate")]
+        assert len(zeroed) == 2

@@ -203,3 +203,165 @@ def bind_skin(params: Dict[str, Any]) -> Dict[str, Any]:
         "per_joint": stats["per_joint"],
         "warnings": warnings,
     }
+
+
+# Below this fraction of the bound mesh's own bbox diagonal, a pose is the
+# "reported success, moved nothing" failure (#636) and warns loudly. Same
+# constant and rationale as sculpt.NOOP_DISPLACEMENT_RATIO.
+NOOP_POSE_RATIO = 1e-2
+
+
+def _hierarchy_joints(cmds, root_long: str) -> List[str]:
+    """root_long, then every descendant joint, each parent before its children.
+
+    NOT `listRelatives(allDescendents=True)`: measured against a real Maya
+    (mayapy probe while pinning this test), that flag returns joints
+    leaf-first (bottom of the hierarchy first), so for a straight 4-joint
+    chain `joints[-1]` was the SECOND joint, not the tip - and
+    TestPoseSkeletonInMaya.test_a_bend_actually_moves_the_mesh, which reads
+    `out["joints"][-1]` as the tip, would silently check the wrong joint. A
+    breadth-first walk over direct children guarantees a parent is placed
+    before its children, so a single unbranched chain always ends with its
+    leaf last.
+    """
+    order = [root_long]
+    frontier = [root_long]
+    while frontier:
+        node = frontier.pop(0)
+        children = cmds.listRelatives(
+            node, children=True, type="joint", fullPath=True) or []
+        order.extend(children)
+        frontier.extend(children)
+    return order
+
+
+def _bound_meshes(cmds, joint_set) -> List[str]:
+    """Transforms of every mesh whose skinCluster any of these joints drives."""
+    out: List[str] = []
+    for sc in cmds.ls(type="skinCluster") or []:
+        influences = cmds.skinCluster(sc, query=True, influence=True) or []
+        influences = set(cmds.ls(influences, long=True) or [])
+        if not influences & joint_set:
+            continue
+        for shape in cmds.skinCluster(sc, query=True, geometry=True) or []:
+            transform = cmds.listRelatives(shape, parent=True, fullPath=True)
+            if transform and transform[0] not in out:
+                out.append(transform[0])
+    return out
+
+
+def _resolve_rotations(cmds, joints: List[str], rotations) -> Dict[str, List[float]]:
+    if not isinstance(rotations, dict) or not rotations:
+        raise HandlerError(
+            "rotations must be a non-empty map of joint name to [rx, ry, rz] "
+            "in DEGREES",
+            hint='e.g. rotations={"spine_03": [0, 0, 8.2]}')
+    by_short: Dict[str, List[str]] = {}
+    for j in joints:
+        by_short.setdefault(_short(j), []).append(j)
+    resolved: Dict[str, List[float]] = {}
+    for name, value in rotations.items():
+        triple = rigmath.vec3(value, "rotations[%r]" % name)
+        if triple is None:
+            raise HandlerError("rotations[%r] must be [rx, ry, rz]" % name)
+        if name in joints:
+            resolved[name] = triple
+            continue
+        matches = by_short.get(_short(name), [])
+        if not matches:
+            raise HandlerError(
+                "rotations names %r, which is not a joint under this root" % name,
+                hint="joints here: %s"
+                     % ", ".join(_short(j) for j in joints[:12]))
+        if len(matches) > 1:
+            raise HandlerError(
+                "%r is ambiguous under this root (%d matches)" % (name, len(matches)),
+                hint="use the long name, e.g. %s" % matches[0])
+        resolved[matches[0]] = triple
+    return resolved
+
+
+def pose_skeleton(params: Dict[str, Any]) -> Dict[str, Any]:
+    cmds = _cmds()
+    root_long = _require_joint(cmds, params.get("root"))
+    space = params.get("space", "local")
+    if space != "local":
+        raise HandlerError(
+            "space %r is not supported" % (space,),
+            hint="a pose is per-joint LOCAL euler rotations in degrees - the "
+                 "same currency a phase-6 clip keys. Reaching a world-space "
+                 "target is phase 3's pose_ik")
+    joints = _hierarchy_joints(cmds, root_long)
+    resolved = _resolve_rotations(cmds, joints, params.get("rotations"))
+
+    session.auto_checkpoint("pose_skeleton")
+    meshes = _bound_meshes(cmds, set(joints))
+    before = {m: sculpt.vertex_positions(cmds, m) for m in meshes}
+
+    for joint, triple in resolved.items():
+        cmds.setAttr(joint + ".rotate",
+                     units.degrees_to_ui(cmds, triple[0]),
+                     units.degrees_to_ui(cmds, triple[1]),
+                     units.degrees_to_ui(cmds, triple[2]))
+
+    joints_out = [{
+        "name": j,
+        "world_position": [float(v) for v in cmds.xform(
+            j, query=True, worldSpace=True, translation=True)],
+    } for j in joints]
+
+    max_disp = 0.0
+    displaced = 0
+    for mesh in meshes:
+        after = sculpt.vertex_positions(cmds, mesh)
+        max_disp = max(max_disp,
+                       sculpt_math.max_displacement(before[mesh], after))
+        displaced += rigmath.displaced_count(before[mesh], after)
+
+    warnings: List[str] = []
+    if not meshes:
+        warnings.append(
+            "no skinned mesh is bound to this skeleton - the pose moved bare "
+            "joints only; bind_skin first if deformation was the point")
+    else:
+        extent = max(sculpt_math.bbox_extent(before[m]) for m in meshes)
+        if extent > 0 and max_disp < extent * NOOP_POSE_RATIO:
+            warnings.append(
+                "the pose moved the mesh by %.4g against a size of %.4g - "
+                "near-zero deformation usually means the rotations landed on "
+                "joints that own no vertices" % (max_disp, extent))
+
+    return {"applied": len(resolved), "joints": joints_out,
+            "max_displacement": max_disp, "displaced_vertices": displaced,
+            "warnings": warnings}
+
+
+def reset_pose(params: Dict[str, Any]) -> Dict[str, Any]:
+    cmds = _cmds()
+    root_long = _require_joint(cmds, params.get("root"))
+    joints = _hierarchy_joints(cmds, root_long)
+
+    session.auto_checkpoint("reset_pose")
+    meshes = _bound_meshes(cmds, set(joints))
+    before = {m: sculpt.vertex_positions(cmds, m) for m in meshes}
+
+    warnings: List[str] = []
+    poses = cmds.dagPose(root_long, query=True, bindPose=True) or []
+    if poses:
+        cmds.dagPose(poses[0], restore=True, g=True)
+        if len(poses) > 1:
+            warnings.append("%d bind poses exist; restored %s"
+                            % (len(poses), poses[0]))
+    else:
+        for joint in joints:
+            cmds.setAttr(joint + ".rotate", 0.0, 0.0, 0.0)
+        warnings.append(
+            "no bind pose exists (nothing is bound); rotations zeroed, which "
+            "is the create_skeleton rest pose")
+
+    max_disp = 0.0
+    for mesh in meshes:
+        after = sculpt.vertex_positions(cmds, mesh)
+        max_disp = max(max_disp,
+                       sculpt_math.max_displacement(before[mesh], after))
+    return {"reset": True, "max_displacement": max_disp, "warnings": warnings}

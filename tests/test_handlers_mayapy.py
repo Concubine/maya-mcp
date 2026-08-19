@@ -2273,3 +2273,85 @@ class TestBindSkinInMaya:
         out = rigging.bind_skin({"mesh": mesh, "root": skel["root"],
                                  "max_influences": 2})
         assert out["max_influences_exceeded"] == 0
+
+
+class TestPoseSkeletonInMaya:
+    def _bound_serpent(self, cmds, rigging, name="ptube", n=4, height=4.0):
+        mesh = _serpent_cylinder(cmds, name=name, height=height)
+        step = height / (n - 1)
+        skel = rigging.create_skeleton({
+            "chain": [[0, i * step, 0] for i in range(n)],
+            "chain_prefix": name + "_j"})
+        rigging.bind_skin({"mesh": mesh, "root": skel["root"]})
+        return mesh, skel
+
+    def test_a_bend_actually_moves_the_mesh(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import rigging
+
+        mesh, skel = self._bound_serpent(cmds, rigging)
+        mid = skel["joints"][1]["name"]
+        out = rigging.pose_skeleton({"root": skel["root"],
+                                     "rotations": {mid: [0, 0, 90]}})
+        # Everything above the mid joint (~2/3 of a 4-unit tube) swings a
+        # quarter turn; the tip alone travels ~sqrt(2)*2.67/... - pin loosely,
+        # the exact arc is the live gate's job.
+        assert out["max_displacement"] > 1.0
+        assert out["displaced_vertices"] > 0
+        assert out["warnings"] == []
+        # Joint world positions are reported for every joint, measured.
+        tip = out["joints"][-1]["world_position"]
+        assert tip[0] != pytest.approx(0.0, abs=1e-3)  # swung off the axis
+
+    def test_rotations_mean_degrees_whatever_the_scene_unit_says(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import rigging
+
+        mesh, skel = self._bound_serpent(cmds, rigging, name="rtube")
+        mid = skel["joints"][1]["name"]
+        cmds.currentUnit(angle="rad")
+        try:
+            out = rigging.pose_skeleton({"root": skel["root"],
+                                         "rotations": {mid: [0, 0, 90]}})
+        finally:
+            cmds.currentUnit(angle="deg")
+        rz = cmds.getAttr(mid + ".rotateZ")  # queried in deg now
+        assert rz == pytest.approx(90.0, abs=1e-4)
+        assert out["max_displacement"] > 1.0
+
+    def test_reset_pose_returns_to_bind_within_tolerance(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import rigging, sculpt
+
+        mesh, skel = self._bound_serpent(cmds, rigging, name="ztube")
+        bind_positions = sculpt.vertex_positions(cmds, mesh)
+        mid = skel["joints"][1]["name"]
+        rigging.pose_skeleton({"root": skel["root"],
+                               "rotations": {mid: [0, 0, 90]}})
+        out = rigging.reset_pose({"root": skel["root"]})
+        assert out["max_displacement"] > 1.0  # it undid a real pose
+        from maya_plugin.handlers import sculpt_math
+        assert sculpt_math.max_displacement(
+            bind_positions, sculpt.vertex_positions(cmds, mesh)) < 1e-4
+
+    def test_a_pose_on_an_empty_joint_warns_of_near_zero_motion(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import rigging
+
+        # Root joint far below the tube: bind gives it ~nothing.
+        mesh = _serpent_cylinder(cmds, name="wtube")
+        skel = rigging.create_skeleton({
+            "chain": [[0, -50, 0], [0, -49, 0], [0, 2, 0], [0, 4, 0]],
+            "chain_prefix": "w_j"})
+        rigging.bind_skin({"mesh": mesh, "root": skel["root"]})
+        out = rigging.pose_skeleton({
+            "root": skel["root"],
+            "rotations": {skel["joints"][0]["name"]: [0, 0, 1]}})
+        # Whatever it measured is reported; if it moved almost nothing the
+        # warning names the cause.
+        if out["max_displacement"] < 0.05:
+            assert any("near-zero" in w for w in out["warnings"])
