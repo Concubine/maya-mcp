@@ -20,6 +20,8 @@ class FakeCmds:
         self.parents = {}       # child long -> parent long
         self._angle_unit = angle_unit
         self.selection = []
+        self.node_types = {}   # explicit overrides; unset defaults to "joint"
+        self.skin_history = []  # set by tests: skinClusters in the mesh's history
 
     # --- names
     def objExists(self, name):
@@ -27,14 +29,23 @@ class FakeCmds:
 
     def ls(self, pattern=None, long=False, type=None, **kw):
         if type == "skinCluster":
-            return []
+            # mirrors cmds.ls(history_nodes, type="skinCluster"): the fake's
+            # listHistory already returns only skinClusters, so the input
+            # list IS the filtered result - present only when a bind exists.
+            nodes = pattern if isinstance(pattern, list) else ([pattern] if pattern else [])
+            return list(nodes) if self.skin_history else []
         if pattern is None:
             return list(self.objects)
         return [o for o in self.objects
                 if o == pattern or o.split("|")[-1] == pattern]
 
     def nodeType(self, node):
-        return "joint" if "joint" in self.calls_kinds.get(node, "joint") else "transform"
+        if node in self.node_types:
+            return self.node_types[node]
+        # a shape node (by naming convention, "...Shape") is a mesh unless a
+        # test says otherwise; anything else defaults to "joint" - the fake
+        # never has to know about "transform" until a test asks for one.
+        return "mesh" if "Shape" in node.split("|")[-1] else "joint"
 
     # --- creation
     def select(self, *args, **kw):
@@ -86,7 +97,14 @@ class FakeCmds:
     def currentUnit(self, query=False, angle=False, linear=False, **kw):
         return self._angle_unit if angle else "cm"
 
-FakeCmds.calls_kinds = {}
+    # --- binding
+    def listHistory(self, node, pruneDagObjects=False, **kw):
+        self.calls.append(("listHistory", node))
+        return list(self.skin_history)
+
+    def skinCluster(self, *args, **kw):
+        self.calls.append(("skinCluster", args, kw))
+        return ["fakeSkin1"]
 
 
 @pytest.fixture
@@ -143,3 +161,43 @@ class TestCreateSkeleton:
         with pytest.raises(HandlerError):
             rigging.create_skeleton({"chain": [[0, 0, 0]]})
         assert fake.objects == []
+
+
+class TestBindSkinValidation:
+    def _mesh(self, fake):
+        fake.objects.append("|serpent")
+        fake.shapes = {"|serpent": "|serpent|serpentShape"}
+        def listRelatives(node, shapes=False, **kw):
+            if shapes:
+                return [fake.shapes.get(node)]
+            return FakeCmds.listRelatives(fake, node, **kw)
+        fake.listRelatives = listRelatives
+
+    def test_root_must_be_a_joint(self, fake):
+        self._mesh(fake)
+        fake.objects.append("|not_a_joint")
+        fake.node_types = {"|not_a_joint": "transform"}
+        with pytest.raises(HandlerError, match="not a joint"):
+            rigging.bind_skin({"mesh": "serpent", "root": "not_a_joint"})
+
+    def test_unknown_method_lists_the_valid_ones(self, fake):
+        self._mesh(fake)
+        fake.objects.append("|root_j")
+        with pytest.raises(HandlerError, match="closestDistance"):
+            rigging.bind_skin({"mesh": "serpent", "root": "root_j",
+                               "method": "psychic"})
+
+    def test_max_influences_bounds(self, fake):
+        self._mesh(fake)
+        fake.objects.append("|root_j")
+        with pytest.raises(HandlerError, match="max_influences"):
+            rigging.bind_skin({"mesh": "serpent", "root": "root_j",
+                               "max_influences": 0})
+
+    def test_rebind_is_refused_with_the_unbind_hint(self, fake):
+        self._mesh(fake)
+        fake.objects.append("|root_j")
+        fake.skin_history = ["oldSkin"]
+        with pytest.raises(HandlerError, match="already bound") as err:
+            rigging.bind_skin({"mesh": "serpent", "root": "root_j"})
+        assert "unbind" in err.value.hint

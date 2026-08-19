@@ -2172,6 +2172,14 @@ class TestBboxSeesHiddenChildren:
         assert visible_max[0] == pytest.approx(0.5, abs=1e-4)
 
 
+def _serpent_cylinder(cmds, name="tube", height=4.0, sections=12):
+    """A cylinder standing on Y with enough length subdivisions to bend."""
+    node = cmds.polyCylinder(name=name, radius=0.3, height=height,
+                             subdivisionsY=sections, ch=False)[0]
+    cmds.xform(node, worldSpace=True, translation=[0, height / 2.0, 0])
+    return (cmds.ls(node, long=True) or [node])[0]
+
+
 class TestCreateSkeletonInMaya:
     def test_chain_builds_parented_joints_at_the_positions(self):
         import maya.cmds as cmds
@@ -2220,3 +2228,48 @@ class TestCreateSkeletonInMaya:
             {"name": "lone", "position": [1, 2, 3]}]})
         assert out["root"] == "|lone"
         assert out["joints"][0]["position"] == pytest.approx([1.0, 2.0, 3.0])
+
+
+class TestBindSkinInMaya:
+    def _chain(self, rigging, n=4, height=4.0):
+        step = height / (n - 1)
+        return rigging.create_skeleton({
+            "chain": [[0, i * step, 0] for i in range(n)],
+            "chain_prefix": "bj"})
+
+    def test_bind_owns_every_vertex(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import rigging
+
+        mesh = _serpent_cylinder(cmds)
+        skel = self._chain(rigging)
+        out = rigging.bind_skin({"mesh": mesh, "root": skel["root"]})
+        assert out["unweighted_vertices"] == 0
+        assert len(out["influences"]) == 4
+        assert all(p["vertices"] > 0 for p in out["per_joint"])
+        total_verts = cmds.polyEvaluate(mesh, vertex=True)
+        assert sum(p["vertices"] for p in out["per_joint"]) >= total_verts
+
+    def test_rebind_is_refused_against_a_real_skincluster(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import rigging
+
+        mesh = _serpent_cylinder(cmds, name="tube2")
+        skel = self._chain(rigging)
+        rigging.bind_skin({"mesh": mesh, "root": skel["root"]})
+        with pytest.raises(HandlerError, match="already bound"):
+            rigging.bind_skin({"mesh": mesh, "root": skel["root"]})
+
+    def test_max_influences_is_obeyed_in_the_weights(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import rigging
+
+        mesh = _serpent_cylinder(cmds, name="tube3")
+        skel = self._chain(rigging, n=6)
+        out = rigging.bind_skin({"mesh": mesh, "root": skel["root"],
+                                 "max_influences": 2})
+        assert out["max_influences_exceeded"] == 0
