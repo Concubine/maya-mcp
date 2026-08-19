@@ -421,7 +421,10 @@ def smooth_weight_table(weights: List[float], ncols: int,
                 continue
             row = []
             for j in range(ncols):
-                mean = (sum(nxt[n * ncols + j] for n in neighbours)
+                # Jacobi on purpose: read in-progress results (Gauss-Seidel) would
+                # make smoothing depend on vertex order and break L/R symmetry after
+                # a mirror operation.
+                mean = (sum(current[n * ncols + j] for n in neighbours)
                         / len(neighbours))
                 row.append((1.0 - alpha) * current[v * ncols + j]
                            + alpha * mean)

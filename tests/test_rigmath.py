@@ -302,7 +302,12 @@ class TestSmoothWeightTable:
         out = rigmath.smooth_weight_table([1.0, 0.0], 2, [[]], 3, 4)
         assert out == [1.0, 0.0]
 
-    def test_more_iterations_move_further(self):
+    def test_more_iterations_propagate_further(self):
+        # Under Jacobi, v1 is at this config's fixed point after one pass
+        # (its neighbours average to its own value), so depth shows at v0:
+        # one pass leaves v0 untouched (its neighbour was still hard), three
+        # passes erode it through the propagated smooth.
         one = rigmath.smooth_weight_table(self.TABLE, 2, self.ADJ, 1, 4)
         three = rigmath.smooth_weight_table(self.TABLE, 2, self.ADJ, 3, 4)
-        assert three[2] < one[2]          # v1's j0 share keeps eroding
+        assert one[0] == pytest.approx(1.0)
+        assert three[0] < one[0]
