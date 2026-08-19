@@ -220,3 +220,38 @@ def displaced_count(before: List[float], after: List[float],
         if dx * dx + dy * dy + dz * dz > tol * tol:
             moved += 1
     return moved
+
+
+def normalize_row(row: List[float]) -> List[float]:
+    """One vertex's weights scaled to sum 1. An all-zero row has nothing to
+    scale and stays zero - the caller counts it as unweighted, not an error."""
+    total = sum(row)
+    if total <= 0.0:
+        return list(row)
+    return [w / total for w in row]
+
+
+def prune_row(row: List[float], max_influences: int) -> List[float]:
+    """Keep the max_influences largest weights, zero the rest, renormalize.
+    Smoothing bleeds weight onto every neighbouring influence; without this
+    every smooth pass would grow influence counts past what bind_skin promised
+    the exporter."""
+    keep = set(sorted(range(len(row)), key=lambda j: row[j], reverse=True)
+               [:max_influences])
+    return normalize_row([row[j] if j in keep else 0.0
+                          for j in range(len(row))])
+
+
+def changed_rows(before: List[float], after: List[float], ncols: int,
+                 tol: float = WEIGHT_TOL) -> int:
+    """How many vertices' weight rows actually differ - the measured 'what did
+    this op do' number every weight mutator reports."""
+    if len(before) != len(after) or (ncols and len(before) % ncols):
+        raise ValueError(
+            "weight tables are %d and %d entries - not the same table"
+            % (len(before), len(after)))
+    changed = 0
+    for v in range(0, len(before), ncols):
+        if any(abs(after[v + j] - before[v + j]) > tol for j in range(ncols)):
+            changed += 1
+    return changed

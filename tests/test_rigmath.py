@@ -154,3 +154,30 @@ class TestDisplacedCount:
     def test_a_non_triple_length_is_an_internal_error(self):
         with pytest.raises(ValueError):
             rigmath.displaced_count([0.0, 0.0], [0.0, 0.0])
+
+
+class TestRowPrimitives:
+    def test_normalize_row_sums_to_one(self):
+        assert rigmath.normalize_row([1.0, 3.0]) == [0.25, 0.75]
+
+    def test_normalize_all_zero_row_stays_zero(self):
+        assert rigmath.normalize_row([0.0, 0.0]) == [0.0, 0.0]
+
+    def test_prune_keeps_the_largest_and_renormalizes(self):
+        out = rigmath.prune_row([0.5, 0.3, 0.15, 0.05], 2)
+        assert out == pytest.approx([0.625, 0.375, 0.0, 0.0])
+
+    def test_prune_with_room_changes_nothing(self):
+        assert rigmath.prune_row([0.6, 0.4, 0.0], 4) == pytest.approx([0.6, 0.4, 0.0])
+
+    def test_changed_rows_counts_rows_not_cells(self):
+        before = [1.0, 0.0, 0.5, 0.5]
+        after = [0.0, 1.0, 0.5, 0.5]          # row 0: both cells moved
+        assert rigmath.changed_rows(before, after, 2) == 1
+
+    def test_changed_rows_ignores_float_dust(self):
+        assert rigmath.changed_rows([1.0, 0.0], [1.0 - 1e-6, 1e-6], 2) == 0
+
+    def test_changed_rows_refuses_mismatched_tables(self):
+        with pytest.raises(ValueError, match="not the same"):
+            rigmath.changed_rows([1.0], [1.0, 0.0], 2)
