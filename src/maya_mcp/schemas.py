@@ -835,3 +835,21 @@ class SmoothWeightsResult(BaseModel):
     unweighted_vertices: int
     max_influences_exceeded: int
     warnings: List[str] = Field(default_factory=list)
+
+
+class SetRegionWeightsResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    mesh: str
+    skin_cluster: str
+    joint: str
+    vertices_in_region: int
+    changed_vertices: int = Field(
+        description="MEASURED after re-reading the table.")
+    sole_owner_vertices: int = Field(
+        description=(
+            "Vertices the joint solely owns: a weight below 1.0 has no other "
+            "influence to hand the remainder to, so they stay fully owned "
+            "(warned, never silent)."))
+    unweighted_vertices: int
+    warnings: List[str] = Field(default_factory=list)

@@ -205,6 +205,7 @@ def _build_handlers() -> Dict[str, Any]:
         "weight_report": rigging.weight_report,
         "mirror_weights": rigging.mirror_weights,
         "smooth_weights": rigging.smooth_weights,
+        "set_region_weights": rigging.set_region_weights,
     }
 
 

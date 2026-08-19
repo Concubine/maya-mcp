@@ -99,6 +99,7 @@ class TestRegistration:
             "maya_weight_report",
             "maya_mirror_weights",
             "maya_smooth_weights",
+            "maya_set_region_weights",
         }
 
     def test_annotations_declare_read_only_vs_destructive(self):
@@ -1680,3 +1681,33 @@ class TestRiggingTools:
         assert conn.calls[0]["cmd"] == "smooth_weights"
         assert conn.calls[0]["params"] == {
             "mesh": "|h", "iterations": 2, "joints": ["|r|hip"]}
+
+    def test_set_region_weights_marshals_radius_mode_params(self):
+        conn = FakeConn(responses={"set_region_weights": {
+            "mesh": "|h", "skin_cluster": "hSkin", "joint": "|r|a",
+            "vertices_in_region": 5, "changed_vertices": 5,
+            "sole_owner_vertices": 0, "unweighted_vertices": 0,
+            "warnings": []}})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_set_region_weights", {
+            "mesh": "|h", "joint": "a", "weight": 1.0,
+            "within_radius_of": [0, 4, 0], "radius": 1.0,
+            "falloff": "none"}))
+        assert conn.calls[0]["cmd"] == "set_region_weights"
+        assert conn.calls[0]["params"] == {
+            "mesh": "|h", "joint": "a", "weight": 1.0,
+            "within_radius_of": [0, 4, 0], "radius": 1.0, "falloff": "none"}
+        assert result.structured_content["vertices_in_region"] == 5
+
+    def test_set_region_weights_omits_optional_params_when_unset(self):
+        conn = FakeConn(responses={"set_region_weights": {
+            "mesh": "|h", "skin_cluster": "hSkin", "joint": "|r|b",
+            "vertices_in_region": 2, "changed_vertices": 2,
+            "sole_owner_vertices": 0, "unweighted_vertices": 0,
+            "warnings": []}})
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_set_region_weights", {
+            "mesh": "|h", "joint": "b", "weight": 1.0, "faces": [0, 1]}))
+        assert conn.calls[0]["cmd"] == "set_region_weights"
+        assert conn.calls[0]["params"] == {
+            "mesh": "|h", "joint": "b", "weight": 1.0, "faces": [0, 1]}

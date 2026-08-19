@@ -65,6 +65,7 @@ from .schemas import (
     UndoResult,
     ViewportState,
     MirrorWeightsResult,
+    SetRegionWeightsResult,
     SmoothWeightsResult,
     WeightReportResult,
 )
@@ -2172,6 +2173,57 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             params["joints"] = joints
         return SmoothWeightsResult.model_validate(
             maya.request("smooth_weights", params, timeout_s=BOOL_TIMEOUT_S)
+        )
+
+    @mcp.tool(
+        title="Set region skin weights",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=True
+        ),
+    )
+    def maya_set_region_weights(
+        mesh: Annotated[str, Field(description="A bound mesh (long name).")],
+        joint: Annotated[str, Field(description=(
+            "The influence to weight - long name, or a unique short name."
+        ))],
+        weight: Annotated[float, Field(ge=0.0, le=1.0, description=(
+            "Target weight at the region's strongest point. Other influences "
+            "share the remainder in their existing proportions."
+        ))],
+        faces: Annotated[Optional[List[int]], Field(description=(
+            "Face ids naming the region - a hard assignment (no falloff). "
+            "Pass either faces or within_radius_of, never both."
+        ))] = None,
+        within_radius_of: Annotated[Optional[List[float]], Field(description=(
+            "World [x,y,z] center of a spherical region; requires radius."
+        ))] = None,
+        radius: Annotated[Optional[float], Field(description=(
+            "Region radius, scene units."
+        ))] = None,
+        falloff: Annotated[Optional[Literal["linear", "none"]], Field(
+            description=(
+                "Radius mode only: linear fades the blend toward the edge; "
+                "none applies weight flat across the region."
+            ))] = None,
+    ) -> SetRegionWeightsResult:
+        """Explicitly assign a joint's weight over a region - the fix for
+        where the bind guessed wrong.
+
+        weight_report's unweighted_sample and per_joint say where to aim.
+        Reports measured changed_vertices and post-op integrity; an empty
+        region refuses rather than silently doing nothing."""
+        params = {"mesh": mesh, "joint": joint, "weight": weight}
+        if faces is not None:
+            params["faces"] = faces
+        if within_radius_of is not None:
+            params["within_radius_of"] = within_radius_of
+        if radius is not None:
+            params["radius"] = radius
+        if falloff is not None:
+            params["falloff"] = falloff
+        return SetRegionWeightsResult.model_validate(
+            maya.request("set_region_weights", params,
+                         timeout_s=BOOL_TIMEOUT_S)
         )
 
     return mcp

@@ -487,3 +487,97 @@ class TestSmoothWeights:
             rigging.smooth_weights({"mesh": "hum", "iterations": 0})
         with pytest.raises(HandlerError, match="iterations"):
             rigging.smooth_weights({"mesh": "hum", "iterations": 999})
+
+
+class TestSetRegionWeights:
+    def _bound(self, fake, monkeypatch,
+               positions=(0.0, 0.0, 0.0,  1.0, 0.0, 0.0),
+               weights=(0.5, 0.5, 0.5, 0.5),
+               joints=("|r|a", "|r|b")):
+        fake.objects.append("|hum")
+        fake.shapes = {"|hum": "|hum|humShape"}
+        def listRelatives(node, shapes=False, **kw):
+            if shapes:
+                return [fake.shapes.get(node)]
+            return FakeCmds.listRelatives(fake, node, **kw)
+        fake.listRelatives = listRelatives
+        fake.skin_history = ["skin1"]
+        fake.attrs["skin1.maxInfluences"] = 4
+        for j in joints:
+            fake.attrs[j + ".rotate"] = [(0.0, 0.0, 0.0)]
+        state = {"weights": list(weights)}
+        monkeypatch.setattr(
+            rigging, "_skin_weights",
+            lambda sc, shape: (list(joints), list(state["weights"]),
+                               len(positions) // 3))
+        def set_weights(sc, shape, ncols, table):
+            state["weights"] = list(table)
+        monkeypatch.setattr(rigging, "_set_skin_weights", set_weights)
+        from maya_plugin.handlers import sculpt
+        monkeypatch.setattr(sculpt, "vertex_positions",
+                            lambda cmds, mesh: list(positions))
+        fake.face_count = 4
+        def polyEvaluate(mesh, face=False, vertex=False, **kw):
+            return fake.face_count if face else len(positions) // 3
+        fake.polyEvaluate = polyEvaluate
+        def plcc(*comps, fromFace=False, toVertex=False, **kw):
+            return ["|hum.vtx[0]"]
+        fake.polyListComponentConversion = plcc
+        return state
+
+    def test_radius_mode_blends_and_reports(self, fake, monkeypatch):
+        state = self._bound(fake, monkeypatch)
+        out = rigging.set_region_weights({
+            "mesh": "hum", "joint": "a", "within_radius_of": [0, 0, 0],
+            "radius": 0.5, "weight": 1.0})
+        assert out["vertices_in_region"] == 1
+        assert out["changed_vertices"] == 1
+        assert state["weights"][:2] == pytest.approx([1.0, 0.0])
+        assert state["weights"][2:] == pytest.approx([0.5, 0.5])
+
+    def test_faces_mode_converts_and_assigns_hard(self, fake, monkeypatch):
+        state = self._bound(fake, monkeypatch)
+        out = rigging.set_region_weights({
+            "mesh": "hum", "joint": "b", "faces": [0], "weight": 1.0})
+        assert out["vertices_in_region"] == 1
+        assert state["weights"][:2] == pytest.approx([0.0, 1.0])
+
+    def test_exactly_one_region_form(self, fake, monkeypatch):
+        self._bound(fake, monkeypatch)
+        with pytest.raises(HandlerError, match="exactly one"):
+            rigging.set_region_weights({"mesh": "hum", "joint": "a",
+                                        "weight": 1.0})
+        with pytest.raises(HandlerError, match="exactly one"):
+            rigging.set_region_weights({
+                "mesh": "hum", "joint": "a", "faces": [0],
+                "within_radius_of": [0, 0, 0], "radius": 1, "weight": 1.0})
+
+    def test_weight_bounds_and_radius_requirements(self, fake, monkeypatch):
+        self._bound(fake, monkeypatch)
+        with pytest.raises(HandlerError, match="weight"):
+            rigging.set_region_weights({"mesh": "hum", "joint": "a",
+                                        "faces": [0], "weight": 1.5})
+        with pytest.raises(HandlerError, match="radius"):
+            rigging.set_region_weights({
+                "mesh": "hum", "joint": "a", "within_radius_of": [0, 0, 0],
+                "weight": 1.0})
+
+    def test_falloff_is_a_radius_mode_concept(self, fake, monkeypatch):
+        self._bound(fake, monkeypatch)
+        with pytest.raises(HandlerError, match="falloff"):
+            rigging.set_region_weights({
+                "mesh": "hum", "joint": "a", "faces": [0], "weight": 1.0,
+                "falloff": "linear"})
+
+    def test_an_empty_region_is_refused_not_a_noop(self, fake, monkeypatch):
+        self._bound(fake, monkeypatch)
+        with pytest.raises(HandlerError, match="no vertices"):
+            rigging.set_region_weights({
+                "mesh": "hum", "joint": "a", "within_radius_of": [99, 99, 99],
+                "radius": 0.1, "weight": 1.0})
+
+    def test_out_of_range_face_is_refused(self, fake, monkeypatch):
+        self._bound(fake, monkeypatch)
+        with pytest.raises(HandlerError, match="face"):
+            rigging.set_region_weights({"mesh": "hum", "joint": "a",
+                                        "faces": [99], "weight": 1.0})

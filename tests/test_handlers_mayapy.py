@@ -2521,6 +2521,51 @@ class TestSmoothWeightsInMaya:
         assert out["smoothed_vertices"] < before["vertices"]
 
 
+class TestSetRegionWeightsInMaya:
+    def test_radius_region_hands_vertices_to_the_joint(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import rigging
+
+        mesh = _serpent_cylinder(cmds, name="rg_tube")
+        skel = rigging.create_skeleton({
+            "chain": [[0, 0, 0], [0, 2, 0], [0, 4, 0]], "chain_prefix": "rg_j"})
+        rigging.bind_skin({"mesh": mesh, "root": skel["root"]})
+        out = rigging.set_region_weights({
+            "mesh": mesh, "joint": "rg_j_03", "within_radius_of": [0, 4, 0],
+            "radius": 1.0, "weight": 1.0, "falloff": "none"})
+        assert out["vertices_in_region"] > 0
+        assert out["changed_vertices"] > 0
+        assert out["unweighted_vertices"] == 0
+        sc = out["skin_cluster"]
+        # The vertex nearest the tip is fully the tip joint's now.
+        n = cmds.polyEvaluate(mesh, vertex=True)
+        best, best_d = None, 1e9
+        for i in range(n):
+            p = cmds.xform("%s.vtx[%d]" % (mesh, i), query=True,
+                           worldSpace=True, translation=True)
+            d = (p[0] ** 2 + (p[1] - 4.0) ** 2 + p[2] ** 2) ** 0.5
+            if d < best_d:
+                best, best_d = i, d
+        weights = cmds.skinPercent(sc, "%s.vtx[%d]" % (mesh, best),
+                                   query=True, value=True)
+        assert max(weights) == pytest.approx(1.0, abs=1e-6)
+
+    def test_faces_region_converts_to_vertices(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import rigging
+
+        mesh = _serpent_cylinder(cmds, name="rg_tube2")
+        skel = rigging.create_skeleton({
+            "chain": [[0, 0, 0], [0, 2, 0], [0, 4, 0]], "chain_prefix": "rf_j"})
+        rigging.bind_skin({"mesh": mesh, "root": skel["root"]})
+        out = rigging.set_region_weights({
+            "mesh": mesh, "joint": "rf_j_01", "faces": [0, 1], "weight": 1.0})
+        assert out["vertices_in_region"] >= 4
+        assert out["changed_vertices"] >= 0
+
+
 class TestExportSkinsInMaya:
     def _bound(self, cmds, rigging, name):
         mesh = _serpent_cylinder(cmds, name=name, height=2.0, sections=6)

@@ -642,3 +642,114 @@ def smooth_weights(params: Dict[str, Any]) -> Dict[str, Any]:
         "max_influences_exceeded": stats["max_influences_exceeded"],
         "warnings": warnings,
     }
+
+
+REGION_FALLOFFS = ("linear", "none")
+
+
+def _region_vertex_ids_from_faces(cmds, mesh_long: str, faces) -> List[int]:
+    if (not isinstance(faces, list) or not faces or not all(
+            isinstance(f, int) and not isinstance(f, bool) and f >= 0
+            for f in faces)):
+        raise HandlerError("faces must be a non-empty list of face ids")
+    face_count = cmds.polyEvaluate(mesh_long, face=True)
+    bad = [f for f in faces if f >= face_count]
+    if bad:
+        raise HandlerError(
+            "face id(s) out of range: %s (mesh has %d faces)"
+            % (", ".join(str(f) for f in bad[:8]), face_count))
+    comps = ["%s.f[%d]" % (mesh_long, f) for f in faces]
+    verts = cmds.polyListComponentConversion(
+        *comps, fromFace=True, toVertex=True) or []
+    ids: List[int] = []
+    for comp in cmds.ls(verts, flatten=True) or []:
+        ids.append(int(comp[comp.rindex("[") + 1:-1]))
+    return sorted(set(ids))
+
+
+def set_region_weights(params: Dict[str, Any]) -> Dict[str, Any]:
+    cmds = _cmds()
+    mesh_long, mesh_shape = naming.require_mesh(cmds, str(params.get("mesh") or ""))
+    weight = params.get("weight")
+    if (not isinstance(weight, (int, float)) or isinstance(weight, bool)
+            or not 0.0 <= float(weight) <= 1.0):
+        raise HandlerError("weight must be a number in 0..1",
+                           hint="1.0 hands the region fully to the joint")
+    weight = float(weight)
+    faces = params.get("faces")
+    center = params.get("within_radius_of")
+    if (faces is None) == (center is None):
+        raise HandlerError(
+            "pass exactly one of 'faces' or 'within_radius_of'",
+            hint="faces=[ids] for a picked patch; within_radius_of=[x,y,z] "
+                 "with radius for a spherical region")
+    falloff = params.get("falloff")
+    if faces is not None and falloff is not None:
+        raise HandlerError(
+            "falloff only applies to within_radius_of - faces are a hard "
+            "assignment",
+            hint="drop falloff, or switch to within_radius_of")
+    falloff = "linear" if falloff is None else falloff
+    if falloff not in REGION_FALLOFFS:
+        raise HandlerError("unknown falloff %r; one of: %s"
+                           % (falloff, ", ".join(REGION_FALLOFFS)))
+    radius = params.get("radius")
+    if center is not None:
+        center = rigmath.vec3(center, "within_radius_of")
+        if (not isinstance(radius, (int, float)) or isinstance(radius, bool)
+                or float(radius) <= 0.0):
+            raise HandlerError("within_radius_of needs a radius > 0",
+                               hint="scene units, like every position here")
+        radius = float(radius)
+    elif radius is not None:
+        raise HandlerError("radius only applies to within_radius_of")
+
+    sc = _skin_cluster_for(cmds, mesh_long, mesh_shape)
+    influences, weights, num_verts = _skin_weights(sc, mesh_shape)
+    joint_col = _resolve_influences(influences, [params.get("joint")])[0]
+
+    if faces is not None:
+        factors = {v: 1.0
+                   for v in _region_vertex_ids_from_faces(cmds, mesh_long,
+                                                          faces)}
+    else:
+        positions = sculpt.vertex_positions(cmds, mesh_long)
+        factors = rigmath.radius_factors(positions, center, radius, falloff)
+    if not factors:
+        raise HandlerError(
+            "the region holds no vertices",
+            hint="within_radius_of/radius missed the mesh entirely - "
+                 "get_object_info reports where the mesh actually is")
+
+    warnings: List[str] = []
+    posed = _pose_warning(cmds, influences)
+    if posed:
+        warnings.append(posed)
+
+    session.auto_checkpoint("set_region_weights")
+    new_table, sole_owner = rigmath.apply_region_weights(
+        weights, len(influences), joint_col, factors, weight)
+    _set_skin_weights(sc, mesh_shape, len(influences), new_table)
+
+    _, after, _ = _skin_weights(sc, mesh_shape)
+    stats = rigmath.weight_stats(influences, after, num_verts,
+                                 int(cmds.getAttr(sc + ".maxInfluences")))
+    if sole_owner:
+        warnings.append(
+            "%d vertices are solely owned by %s - a weight below 1.0 has no "
+            "other influence to give the remainder to, so they stay fully "
+            "owned" % (sole_owner, _short(influences[joint_col])))
+    if stats["unweighted_vertices"]:
+        warnings.append("%d vertices belong to NO joint after the edit"
+                        % stats["unweighted_vertices"])
+    return {
+        "mesh": mesh_long,
+        "skin_cluster": sc,
+        "joint": influences[joint_col],
+        "vertices_in_region": len(factors),
+        "changed_vertices": rigmath.changed_rows(weights, after,
+                                                 len(influences)),
+        "sole_owner_vertices": sole_owner,
+        "unweighted_vertices": stats["unweighted_vertices"],
+        "warnings": warnings,
+    }
