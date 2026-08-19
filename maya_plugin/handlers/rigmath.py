@@ -161,3 +161,57 @@ def resolve_joints(params: Dict[str, Any]) -> List[Dict[str, Any]]:
             hint="every joint must chain up to the root",
         )
     return order
+
+
+def weight_stats(influences: List[str], weights: List[float], num_verts: int,
+                 max_influences: int) -> Dict[str, Any]:
+    """Per-joint ownership from one flat vertex-major weight table.
+
+    `weights[v * len(influences) + j]` is joint j's hold on vertex v - the
+    layout MFnSkinCluster.getWeights returns. This is the whole of how an
+    agent SEES a bind without a viewport: a joint owning zero vertices, or
+    one joint owning everything, is a legible failure in these numbers.
+    """
+    ncols = len(influences)
+    if num_verts * ncols != len(weights):
+        raise ValueError(
+            "weight table is %d entries, expected %d verts x %d influences"
+            % (len(weights), num_verts, ncols))
+    unweighted = 0
+    exceeded = 0
+    counts = [0] * ncols
+    sums = [0.0] * ncols
+    for v in range(num_verts):
+        held = 0
+        for j in range(ncols):
+            w = weights[v * ncols + j]
+            if w > WEIGHT_TOL:
+                held += 1
+                counts[j] += 1
+                sums[j] += w
+        if held == 0:
+            unweighted += 1
+        if held > max_influences:
+            exceeded += 1
+    return {
+        "unweighted_vertices": unweighted,
+        "max_influences_exceeded": exceeded,
+        "per_joint": [
+            {"joint": influences[j], "vertices": counts[j],
+             "mean_weight": (sums[j] / counts[j]) if counts[j] else 0.0}
+            for j in range(ncols)
+        ],
+    }
+
+
+def displaced_count(before: List[float], after: List[float],
+                    tol: float = 1e-5) -> int:
+    """How many vertices moved more than `tol` between two flat xyz lists."""
+    moved = 0
+    for i in range(0, min(len(before), len(after)), 3):
+        dx = after[i] - before[i]
+        dy = after[i + 1] - before[i + 1]
+        dz = after[i + 2] - before[i + 2]
+        if dx * dx + dy * dy + dz * dz > tol * tol:
+            moved += 1
+    return moved

@@ -98,3 +98,50 @@ class TestResolveJointsExplicit:
                   for i in range(rigmath.MAX_JOINTS + 1)]
         with pytest.raises(HandlerError, match=str(rigmath.MAX_JOINTS)):
             rigmath.resolve_joints({"joints": joints})
+
+
+class TestWeightStats:
+    def test_per_joint_ownership_and_means(self):
+        # 3 verts x 2 joints, vertex-major.
+        out = rigmath.weight_stats(
+            ["|a", "|b"], [1.0, 0.0, 0.5, 0.5, 0.0, 1.0], 3, max_influences=4)
+        a, b = out["per_joint"]
+        assert (a["joint"], a["vertices"]) == ("|a", 2)
+        assert a["mean_weight"] == pytest.approx(0.75)
+        assert (b["joint"], b["vertices"]) == ("|b", 2)
+        assert out["unweighted_vertices"] == 0
+        assert out["max_influences_exceeded"] == 0
+
+    def test_a_vertex_no_joint_owns_is_counted(self):
+        out = rigmath.weight_stats(["|a"], [1.0, 0.0], 2, max_influences=4)
+        assert out["unweighted_vertices"] == 1
+
+    def test_float_dust_is_not_an_influence(self):
+        out = rigmath.weight_stats(
+            ["|a", "|b"], [1.0, rigmath.WEIGHT_TOL / 10], 1, max_influences=1)
+        assert out["max_influences_exceeded"] == 0
+        assert out["per_joint"][1]["vertices"] == 0
+
+    def test_over_budget_vertices_are_counted(self):
+        out = rigmath.weight_stats(
+            ["|a", "|b", "|c"], [0.4, 0.3, 0.3], 1, max_influences=2)
+        assert out["max_influences_exceeded"] == 1
+
+    def test_a_joint_owning_nothing_reports_zero_mean_not_nan(self):
+        out = rigmath.weight_stats(["|a", "|b"], [1.0, 0.0], 1, max_influences=4)
+        assert out["per_joint"][1] == {
+            "joint": "|b", "vertices": 0, "mean_weight": 0.0}
+
+    def test_a_shape_mismatch_is_an_internal_error(self):
+        with pytest.raises(ValueError):
+            rigmath.weight_stats(["|a"], [1.0, 1.0, 1.0], 2, max_influences=4)
+
+
+class TestDisplacedCount:
+    def test_counts_only_vertices_that_moved(self):
+        before = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+        after = [0.0, 0.0, 0.0, 1.0, 2.0, 0.0]
+        assert rigmath.displaced_count(before, after) == 1
+
+    def test_motion_below_tol_is_rest(self):
+        assert rigmath.displaced_count([0.0, 0.0, 0.0], [0.0, 1e-7, 0.0]) == 0
