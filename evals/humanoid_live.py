@@ -58,6 +58,14 @@ EDGE_STRETCH_MAX = 1.8
 # actually GREW by a centimetre or more; the unfiltered worst ratio is still
 # printed every pose, so the noise floor stays visible instead of hidden.
 TEAR_GROWTH_MIN = 0.01   # metres
+# A loose backstop on the UNFILTERED ratio, so the floor above can never mask a
+# return to real short-edge tearing. Measured today: the worst unfiltered ratio
+# across the five poses is 2.03 (extend, edge 735) and the craft pass is what
+# brought it there - before the torso was handed back to the chest it was 5.31
+# (crouch) and 5.47 (extend). 3.0 sits clear of today's 2.03 and well under
+# what the pre-craft bind produced, so a regression to that class of tearing
+# fails here even though every one of those edges grew less than a centimetre.
+EDGE_STRETCH_BACKSTOP = 3.0
 PIECES = 12              # torso, head, 2 shoulder + 2 hip balls, 2 arms,
                          # 2 legs, 2 feet -> shells
 
@@ -188,6 +196,7 @@ if %(store)s:
     HUMANOID_BIND_EDGES = list(_lengths)
 _worst = 0.0
 _worst_i = -1
+_worst_grew = 0.0
 _seen = 0.0
 _seen_i = -1
 _seen_grew = 0.0
@@ -199,6 +208,7 @@ for _i in range(len(_lengths)):
     if _ratio > _worst:
         _worst = _ratio
         _worst_i = _i
+        _worst_grew = _lengths[_i] - _b0
     if _lengths[_i] - _b0 >= %(grow)r and _ratio > _seen:
         _seen = _ratio
         _seen_i = _i
@@ -208,6 +218,7 @@ for _i in range(len(_lengths)):
  'vertices': len(_flat) // 3,
  'max_edge_ratio': round(_worst, 6),
  'worst_edge': _worst_i,
+ 'worst_growth': round(_worst_grew, 6),
  'max_visible_ratio': round(_seen, 6),
  'worst_visible_edge': _seen_i,
  'worst_visible_growth': round(_seen_grew, 6)}
@@ -428,15 +439,24 @@ def main():
             for a, b in lr
             if abs(by_joint.get(a, 0) - by_joint.get(b, 0))
             > 0.02 * max(by_joint.get(a, 0), by_joint.get(b, 1))}
-    check("left and right ownership are symmetric within 2%", not asym,
-          json.dumps(asym) if asym else
-          "; ".join("%s=%d/%d" % (a, by_joint.get(a, 0), by_joint.get(b, 0))
-                    for a, b in lr))
+    # Symmetry alone is vacuous: 0 == 0 is perfectly symmetric, so a mirror
+    # that wrote NOTHING - or a joint that ends up owning no vertex at all -
+    # would pass the ratio test silently. Every paired joint must also OWN
+    # something, and any that does not is named.
+    empty = [j for pair in lr for j in pair if by_joint.get(j, 0) <= 0]
+    check("left and right ownership are symmetric within 2%, both non-empty",
+          not asym and not empty,
+          "; ".join(filter(None, [
+              ("asymmetric: %s" % json.dumps(asym)) if asym else "",
+              ("OWN NOTHING: %s" % ", ".join(empty)) if empty else "",
+              "; ".join("%s=%d/%d" % (a, by_joint.get(a, 0), by_joint.get(b, 0))
+                        for a, b in lr)])))
 
     # ---- 3+4. the five poses, measured and rendered
     ok("setup_lighting", {"preset": "three_point"})
     render("bind")
     baseline_poses = {}
+    worst_unfiltered = (0.0, "none", -1, 0.0)   # ratio, pose, edge, growth
     for pose_name in ("rest", "crouch", "extend", "air", "absorb"):
         rotations = biped_pose(golem_poses[pose_name]["joints_deg"])
         posed = ok("pose_skeleton", {"root": root, "rotations": rotations})
@@ -446,14 +466,18 @@ def main():
               "max_disp=%.4f displaced=%d"
               % (posed["max_displacement"], posed["displaced_vertices"]))
         probe = edge_probe(store=False, what="%s edge probe" % pose_name)
+        worst_unfiltered = max(worst_unfiltered,
+                               (probe["max_edge_ratio"], pose_name,
+                                probe["worst_edge"], probe["worst_growth"]))
         check("%s: no edge grew %dmm+ AND past %.1fx ITS OWN bind length"
               % (pose_name, TEAR_GROWTH_MIN * 1000, EDGE_STRETCH_MAX),
               probe["max_visible_ratio"] <= EDGE_STRETCH_MAX,
               "visible=%.3f (edge %d, +%.1fmm); unfiltered worst=%.3f "
-              "(edge %d)"
+              "(edge %d, +%.1fmm)"
               % (probe["max_visible_ratio"], probe["worst_visible_edge"],
                  probe["worst_visible_growth"] * 1000,
-                 probe["max_edge_ratio"], probe["worst_edge"]))
+                 probe["max_edge_ratio"], probe["worst_edge"],
+                 probe["worst_growth"] * 1000))
         check("%s: topology unchanged" % pose_name,
               probe["shells"] == PIECES
               and probe["edges"] == at_bind["edges"],
@@ -471,6 +495,16 @@ def main():
               back["max_edge_ratio"] <= 1.0 + 1e-6,
               "max_edge_ratio=%.6f after reset (tool reported max_disp=%.4f)"
               % (back["max_edge_ratio"], reset["max_displacement"]))
+
+    # One aggregate backstop over all five poses: the 10 mm floor above is a
+    # noise filter, and a filter that can never fail is a filter that hides a
+    # regression. This one ignores the floor entirely.
+    check("no pose tore past the unfiltered %.1fx backstop"
+          % EDGE_STRETCH_BACKSTOP,
+          worst_unfiltered[0] <= EDGE_STRETCH_BACKSTOP,
+          "worst unfiltered %.3f at %s (edge %d, +%.1fmm)"
+          % (worst_unfiltered[0], worst_unfiltered[1], worst_unfiltered[2],
+             worst_unfiltered[3] * 1000))
 
     print("\n" + "=" * 72)
     print("JUDGE: each posed render must read as ONE CONTINUOUS BODY.")
@@ -511,6 +545,12 @@ def main():
               len(limbs) == JOINT_COUNT, "LimbNodes=%d" % len(limbs))
         check("an independent byte read agrees with the tool",
               fbxbytes.skin_facts(facts) == skin)
+        # #629/#634: the scene is innocent, the EXPORTER writes the unit, so
+        # only the bytes can say what the consumer will read. The serpent gate
+        # asserts this and this one did not.
+        check("the file declares metres",
+              facts.unit_scale_factor == fbxbytes.DECLARES_METRES,
+              "UnitScaleFactor=%r" % facts.unit_scale_factor)
         with open(out("baseline.json"), "w") as fh:
             json.dump({
                 "fbx": "humanoid.fbx",
