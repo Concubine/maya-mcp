@@ -764,7 +764,12 @@ class TestKitTaperTrap:
         # kit_brick_facade_c's string course does, and is grandfathered: it
         # is pre-existing and brick is on #677's do-not-touch list. Pinning
         # the known set is what stops a SECOND one appearing unnoticed.
-        known = {"kit_brick_facade_c"}
+        # Revision 4 fixed the one grandfathered offender: brick was reopened
+        # for the course re-pitch, which is exactly the condition revision 3
+        # named for fixing it. The set is now EMPTY, and an empty known set is
+        # a stronger gate than a populated one - any taper reaching a meeting
+        # face is now a failure with no precedent to point at.
+        known = set()
         caught = set()
         for name, boxes in kit.PIECES().items():
             for b in boxes:
@@ -1101,3 +1106,55 @@ class TestTriangleHeadroom:
                 boxes = st.chunk_boxes(c, occupied, b.storeys, b.palette)
                 out = st.chunk_outset(boxes, c.sx, c.sy, c.sz)
                 assert out <= st.MAX_OUTSET + 1e-9, "%s/%s oversails %.4f" % (name, c.name, out)
+
+
+# ============================================ revision 4: the see-through slot
+
+class TestKitWallBodyContinuity:
+    """A wall-context piece must have no horizontal band you can see through.
+
+    Revision 4 built its first crowns as a STACK - wall segment, cornice,
+    parapet segment, coping - and left the bands between them un-modelled.
+    Three of the four had a slot straight through the cell, and the brick
+    crown's dentils ended up silhouetted against the sky with daylight between
+    them. Nothing else could have caught it: every piece was inside its
+    triangle budget, inside the envelope, inside the oversail band, UV-clean
+    and rendered 0 blank tiles. It took looking at a picture.
+
+    The rule the kit already followed everywhere else is `slab(front=BACK)`
+    plus bands from BACK to FACE - one continuous body with relief in front of
+    it. This asserts it, so the next crown cannot forget.
+    """
+
+    # contexts that are a WALL. Roofs, soffits, terraces, beams and bases are
+    # all legitimately air for part of their cell, so they are not asked.
+    WALL_CONTEXTS = {"facade", "crown", "lobby", "interior", "corner", "endcap"}
+
+    # kit_steel_lobby_a is an I-section column wearing a hazard band, not a
+    # wall - you are MEANT to see between its flanges, and that is the whole
+    # read of an open ground storey. Named rather than pattern-matched so a
+    # second one cannot appear behind the same excuse.
+    OPEN_BY_DESIGN = {"kit_steel_lobby_a"}
+
+    def test_no_wall_piece_has_a_gap_in_its_body(self):
+        offenders = {}
+        for name, boxes in sorted(kit.PIECES().items()):
+            if kit.parse_name(name)[1] not in self.WALL_CONTEXTS:
+                continue
+            if name in self.OPEN_BY_DESIGN:
+                continue
+            spans = sorted(
+                (b["pos"][1] - b["dim"][1] / 2.0, b["pos"][1] + b["dim"][1] / 2.0)
+                for b in boxes if b["dim"][0] >= 2.0     # body-width boxes only
+            )
+            gaps, reach = [], -kit.H
+            for lo, hi in spans:
+                if lo > reach + 1e-6:
+                    gaps.append((round(reach, 4), round(lo, 4)))
+                reach = max(reach, hi)
+            if reach < kit.H - 1e-6:
+                gaps.append((round(reach, 4), round(kit.H, 4)))
+            if gaps:
+                offenders[name] = gaps
+        assert not offenders, (
+            "wall pieces with a see-through band: %s" % offenders)

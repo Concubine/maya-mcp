@@ -39,3 +39,12 @@ evals/export_scene_live/
 # PreRotation / ScalingPivot is rebuilt on every run
 evals/fbx_probe_live/
 evals/image_tools_live/
+
+# Scratch for the #652 brick-pitch look-check: the variant atlases and raw
+# shots are all regenerable from evals/brick_check/make_atlases.py, and the
+# evidence that matters is committed under docs/deliveries/.
+evals/brick_check/atlas_*/
+evals/brick_check/shots/
+evals/brick_check/_locate.png
+evals/brick_check/brick_*.png
+probe*.png

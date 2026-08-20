@@ -1,25 +1,94 @@
-# Demigol — kit of parts (family 1, **revision 3**)
+# Demigol — kit of parts (family 1, **revision 4**)
 
-**64 one-cell pieces, 4,980 triangles.** Not buildings.
+**70 one-cell pieces, 5,544 triangles.** Not buildings.
 The generator already decides per cell what material sits where and which faces are
 exposed; this is the vocabulary it draws with, so it dresses all ~50 buildings and
 anything generated later comes dressed for free.
 
-Revision 3 answers Demigol **#677**: the missing steel pieces, and damage states.
+Revision 4 answers Demigol **#654** — the crown the massing has been faking, and the
+setback terrace lip — and re-pitches brick against a render rather than a prediction
+(**#652**). Revision 3 answered #677: the missing steel pieces, and damage states.
 Regenerate with `evals/demigol_kit.py`.
 
 | file | what |
 |---|---|
-| `demigol_kit.fbx` | all 64 pieces, each at the origin with its pivot at the cell centre |
-| `kit_albedo.png` | 4096² albedo atlas, 4 × 4 patches — **byte-identical to revision 2** |
-| `kit_normal.png` | tangent-space normal, same layout — **byte-identical** |
-| `kit_mask.png` | R = metallic, G = smoothness, **A = smoothness** — **byte-identical** |
+| `demigol_kit.fbx` | all 70 pieces, each at the origin with its pivot at the cell centre |
+| `kit_albedo.png` | 4096² albedo atlas, 4 × 4 patches — **brick re-pitched, revision 4** |
+| `kit_normal.png` | tangent-space normal, same layout — **brick re-pitched, revision 4** |
+| `kit_mask.png` | R = metallic, G = smoothness, **A = smoothness** — unchanged |
 | `contact_sheet.png` | every piece, individually framed |
 | `tiling_proof.png` | the revision-2 wall, regenerated unchanged, as the baseline |
 | `tiling_proof_steel.png` | **new** — a 5 × 5 wall of revision 3's own pieces |
-| `soffit_underside.png` | **new** — the deck soffit from the one side it is for |
+| `tiling_proof_skyline.png` | **new in revision 4** — a 6 × 4 wall, all six new pieces in the top row under open sky |
+| `soffit_underside.png` | the deck soffit from the one side it is for |
 | `damage_detail.png` | **new** — the six damage states, each beside its `fractured` twin |
 | `manifest.json` | per piece: role, context, variant, triangles, budget, **utilisation %**, **measured outset** |
+
+## What revision 4 changed
+
+### 1. `crown` — the cap the massing has been faking
+
+Demigol #654 measured it. The massing gives Towers two setbacks and Slabs one, and caps each
+with a perimeter ring of **Infill** — so the top of every building in the city is a curtain
+panel one storey taller than the one below it. No coping, no cornice, no change of
+silhouette, which is why the roofline reads as *the wall kept going* rather than as a
+building ending.
+
+`kit_concrete_roof_b`, `kit_brick_roof_b` and `kit_steel_roof_c` already cap a **deck**, and
+none of them is what a wall ring needs: a deck piece spends its cell on the horizontal
+surface, and a crown cell has no horizontal surface at all. It is wall, all the way up,
+ending in the sky.
+
+Four of them — `kit_infill_crown_a` (plain), `kit_infill_crown_b` (piered), `kit_brick_crown_a`
+(dentil course), `kit_concrete_crown_a` (civic, no ornament, one very deep coping). Each reads
+the same three moves, because that is what makes a skyline legible from across a district
+rather than merely detailed: a cornice with a real shadow under it, a parapet **tonally**
+separated from the wall below, and a coping that oversails.
+
+### 2. `terrace` — the setback lip
+
+The other half of #654. A setback leaves the storey below with a deck whose outer edge is
+three surfaces at once: the deck you can stand on, the street-facing fascia, and — because
+the lip oversails the wall beneath it — an **underside** visible from the pavement. No
+delivered piece does all three: a roof piece has no underside, a soffit has no top. The
+massing currently dresses the lip with soffit pieces not designed for it.
+
+`kit_concrete_terrace_a` and `kit_steel_terrace_a`. The steel one's underside is corrugation
+crossed by a downstand, matching `kit_steel_soffit_a` exactly; the concrete one is coffered,
+matching `kit_concrete_soffit_a`. A terrace and a soffit meet at every re-entrant corner,
+which is precisely where two undersides get compared.
+
+### 3. Both are CONTEXTS, not variant letters
+
+Same rule that made `endcap` and `damaged` contexts: the shell picks variants from a
+coordinate hash, and both of these are chosen by **position**. A hash must never be able to
+put a coping halfway up a building.
+
+### 4. Brick re-pitched, 6 → 9 courses/m
+
+Revision 3 coarsened brick to 6/m on a **prediction** that a faithful 13/m course would alias
+on Demigol's no-mipmap import path. Revision 4 rendered it: a 78 m brick wall at a grazing
+angle, unfiltered, at 6, 9 and 13 courses/m. **13 showed no moiré anywhere along the sweep** —
+and a 1-px checker positive control in the same patch, same camera, same filtering, tore into
+violent moiré, so the aliasing condition was genuinely reproduced and real brick survived it.
+
+What 6/m cost: a 167 mm course is twice a real brick, so at close and play distance the wall
+read as large-format blockwork, and the coarse courses stayed individually resolvable far
+enough out to read as horizontal striping rather than as material.
+
+**9 rather than 13** for a reason the render cannot settle: this test is Maya's rasteriser,
+Demigol's is Unity with **BC-compressed** textures, and block compression at a 1.4 px mortar
+bed is where a thin dark line smears. 9/m puts the bed at **2.0 px — on** the floor the
+generator tests pin, not under it. 13 remains available; the evidence is in
+`docs/deliveries/2026-08-21-brick-pitch/`.
+
+### 5. The grandfathered taper-trap offender is fixed
+
+Revision 3 found `kit_brick_facade_c`'s tapered string course, measured it, and left it alone
+for a stated reason — brick was on that delivery's do-not-touch list, and *"a gate that fails
+on a piece you are forbidden to fix is a gate that gets disabled."* Revision 4 reopens brick,
+so the reason has expired. The taper is now the same stepped pair the crowns use, and the
+gate's known-offender set is **empty**, which is a stronger gate than a populated one.
 
 ## What revision 3 changed
 

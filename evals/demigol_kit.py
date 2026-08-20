@@ -92,26 +92,49 @@ WORLD_SCALE = 9.0
 PATCH_PX = ATLAS_PX // ATLAS_COLS
 PX_PER_METRE = PATCH_PX / WORLD_SCALE
 
-# DELIBERATELY COARSER THAN REAL BRICK, and revision 3 walked this back on
-# purpose. Real brick runs ~13 courses/m, which revision 2 authored faithfully -
-# and it was the wrong target. At 113.8 px/m a course is 8.75 px and the mortar
-# bed, 0.16 of a course, is 1.4 px. Sub-2px detail does not read as mortar; it
-# reads as fine corduroy in the contact sheet, and the import path disables
-# mipmaps to protect the atlas patch margin, so at city distance it aliases.
+# REVISION 4 MOVED THIS 6 -> 9, AGAINST A RENDER RATHER THAN AN ARGUMENT.
 #
-# 6 courses/m puts a course at 18.9 px and the bed at 3.0 px, which survives
-# both. A 3 m face reads 18 courses instead of 39. Coarser than a real wall,
-# correct for one seen from 30 m by a camera that cannot mip.
+# The history is worth keeping, because the value has now been wrong in both
+# directions. Revision 1 drew 8 courses per PATCH - ~7 on a 3 m face, the
+# "5-6x oversize" the contract diagnosed. Revision 2 corrected it to a faithful
+# 13 courses/m. Revision 3 then walked that back to 6 on the following
+# reasoning: at 113.8 px/m a real course is 8.8 px and the mortar bed, 0.16 of
+# a course, is 1.4 px; sub-2px detail cannot read as mortar, and since the
+# Demigol import path disables mipmaps to protect the atlas patch margin, it
+# was predicted to alias at city distance.
 #
-# The other route - fix the margin so mips can be on - was rejected: a patch
+# THE PREDICTION WAS TESTED IN REVISION 4 AND DOES NOT HOLD. A 78 m brick wall
+# was rendered at a grazing angle - the worst case for moire - at 6, 9 and 13
+# courses/m, unfiltered, and 13 showed no moire anywhere along the sweep. That
+# the test COULD have shown it was proved with a positive control: a 1-px
+# checker in the same patch, same camera, same filtering, tore into violent
+# moire (high-frequency energy 93.6 near / 36-50 mid, against 1.2 with
+# filtering on). So the aliasing condition was genuinely reproduced and 13
+# courses/m survived it.
+#
+# What 6 courses/m DOES cost is visible in the same set: a 167 mm course is
+# twice a real brick, so at close and play distance the wall reads as
+# large-format blockwork rather than brick, and the coarse courses stay
+# individually resolvable far enough out that they read as horizontal
+# striping rather than as material.
+#
+# 9 is chosen over 13 for a reason the render cannot settle. This test is
+# Maya's rasteriser; Demigol's is Unity with BC-compressed textures, and block
+# compression at a 1.4 px mortar bed is exactly where a thin dark line smears.
+# 9 courses/m puts the bed at 2.0 px - ON the floor the generator tests pin,
+# not under it - doubles the perceived fineness against 6, and needs no
+# assumption about a codec nobody here has measured. 13 remains available and
+# the evidence for it is in docs/deliveries/; going there is the Demigol
+# side's call once the atlas is seen through Unity's own compressor.
+#
+# The other route - fix the margin so mips can be on - stays rejected: a patch
 # atlas and mipmapping are structurally incompatible, since by mip 5 a 1024
 # patch is 32 px and the 3% margin is 1 px. That needs a Texture2DArray and a
-# shader change on the Demigol side. Recorded in the revision 3 spec as the
-# option not taken.
+# shader change on the Demigol side.
 #
-# tests/test_demigol_generators.py pins the 2 px floor so this cannot silently
-# regress to a value that aliases again.
-COURSES_PER_METRE = 6.0
+# tests/test_demigol_generators.py pins the 2 px floor. 9 sits exactly on it,
+# so that gate still guards the direction it was written to guard.
+COURSES_PER_METRE = 9.0
 COURSES_PER_PATCH = COURSES_PER_METRE * WORLD_SCALE
 
 # index, albedo rgb, style, metallic, smoothness
@@ -920,7 +943,17 @@ def PIECES():
     p["kit_brick_facade_c"] = (
         [slab(front=BACK, patch="brick")]
         + mullions("brick_dark", (-1.0, 1.0), width=0.6)
-        + [cornice("concrete", 1.18, 0.3, project=0.22, taper=(1.0, 0.72)),
+        # THE ONE GRANDFATHERED TAPER-TRAP OFFENDER, fixed in revision 4.
+        # Revision 3 found it, measured it and left it alone for a stated
+        # reason: brick was on that delivery's do-not-touch list, and "a gate
+        # that fails on a piece you are forbidden to fix is a gate that gets
+        # disabled." Revision 4 re-pitches brick, so the reason has expired -
+        # and the manifest's own note said it costs one number whenever brick
+        # is next opened. It cost two: the tapered string course becomes the
+        # same stepped pair the new crowns use, so a run of facade_c no longer
+        # opens a notch every third metre.
+        + [cornice("concrete", 1.12, 0.18, project=0.22),
+           cornice("concrete", 1.28, 0.12, project=0.14),
            bracket("concrete", -1.0, 0.72), bracket("concrete", 1.0, 0.72)]
     )
     p["kit_brick_corner_a"] = (
@@ -1217,6 +1250,146 @@ def PIECES():
     # `steel` against a plate on `steel_dark` reads brighter than its
     # surround, same as the fracture library, at a lower absolute.
     # ======================================================================
+
+    # --- REVISION 4: `crown` - the cap the massing has been faking ---------
+    #
+    # Demigol #654 measured this one. Its massing gives Towers two setbacks and
+    # Slabs one, and caps each with a perimeter ring of INFILL - so the top of
+    # every building in the city is a curtain-wall panel one storey taller than
+    # the one below it. There is no coping, no cornice and no change of
+    # silhouette, which is why the roofline reads as "the wall kept going"
+    # rather than as a building ending.
+    #
+    # `kit_concrete_roof_b` and `kit_brick_roof_b` already cap a DECK, and
+    # `kit_steel_roof_c` caps a steel deck. None of them is what a wall ring
+    # needs: a deck piece spends its cell on the horizontal surface, and a
+    # crown cell has no horizontal surface at all - it is wall, all the way up,
+    # ending in the sky.
+    #
+    # CROWN IS A CONTEXT, NOT A VARIANT LETTER, for the reason `endcap` and
+    # `damaged` are: the shell picks variants from a coordinate hash, and a cap
+    # is chosen by POSITION. A hash must never be able to put a coping halfway
+    # up a building, exactly as it must never be able to make a cell damaged.
+    #
+    # Every crown reads the same three moves, because that is what makes a
+    # skyline legible from across the district rather than merely detailed:
+    # a cornice with a real shadow under it, a parapet that is TONALLY
+    # separated from the wall below, and a coping that oversails and is
+    # battered so the top edge catches light. All three oversail; none of them
+    # touches the lattice, which is the revision 2 rule doing its job.
+    p["kit_infill_crown_a"] = [
+        # ONE CONTINUOUS BODY, RELIEF IN FRONT OF IT. The first draft built the
+        # crown as a STACK - wall segment, cornice, parapet segment, coping -
+        # and left un-modelled bands between them, so three of the four crowns
+        # had a slot you could see the sky through. The render caught it: the
+        # brick crown's dentils were silhouetted against black with daylight
+        # between them. Every facade piece in this kit already knows the answer
+        # (`slab(front=BACK)` plus bands from BACK to FACE) and the crowns now
+        # follow it. A crown is a facade piece that happens to stop.
+        slab(front=BACK, patch="infill"),
+        cornice("trim", 0.32, 0.26, project=0.30, depth_in=0.50),
+        bracket("infill_dark", -0.95, 0.00, project=0.24, w=0.26, h=0.46),
+        bracket("infill_dark", 0.95, 0.00, project=0.24, w=0.26, h=0.46),
+        # the parapet is a TONAL band on the face, not a separate lump of wall
+        plate(-H, H, 0.46, 1.18, BACK, FACE, "infill_dark"),
+        # THE COPING IS STEPPED, NOT BATTERED, and the taper-trap gate is why.
+        # `taper` flares X and Z together, so a full-width box that tapers
+        # pulls its own ends in from the cell face and opens a notch between
+        # one crown and the next - and a roofline is precisely a run where that
+        # notch would repeat across the whole building. Two untapered bands of
+        # different projection give the same light-catching top edge for one
+        # box, and meet their neighbours exactly. The upper band tops out at
+        # H, because nothing is ever stacked on a crown.
+        cornice("trim", 1.28, 0.14, project=0.24, depth_in=0.45),
+        cornice("trim", 1.4225, 0.145, project=0.16, depth_in=0.38),
+    ]
+    # The piered variant: the same cap with a rhythm across it, so a long
+    # roofline does not read as one extruded band. The piers stand PROUD of the
+    # parapet band rather than replacing part of it - same rule as above.
+    p["kit_infill_crown_b"] = [
+        slab(front=BACK, patch="infill"),
+        cornice("trim", 0.32, 0.24, project=0.28, depth_in=0.50),
+        plate(-H, H, 0.44, 1.14, BACK, FACE, "infill_dark"),
+    ] + [
+        plate(x - 0.15, x + 0.15, 0.44, 1.20, FACE, CELL / 2.0 + 0.12, "trim")
+        for x in (-1.0, 0.0, 1.0)
+    ] + [
+        cornice("trim", 1.26, 0.14, project=0.26, depth_in=0.45),
+        cornice("trim", 1.4125, 0.165, project=0.17, depth_in=0.38),
+    ]
+    # Brick wears its cap heavier, and gets dentils - the one place in the kit
+    # where a repeated small box is worth its triangles, because a dentil
+    # course is what says "this building has a top" at 60 m. They project from
+    # the body, which is behind them at every height.
+    p["kit_brick_crown_a"] = [
+        slab(front=BACK, patch="brick"),
+        cornice("brick_dark", 0.26, 0.22, project=0.20, depth_in=0.45),
+    ] + [
+        plate(x - 0.11, x + 0.11, 0.40, 0.62, FACE - 0.05,
+              CELL / 2.0 + 0.26, "trim")
+        for x in (-1.05, -0.35, 0.35, 1.05)
+    ] + [
+        plate(-H, H, 0.66, 1.16, BACK, FACE, "brick"),
+        cornice("trim", 1.26, 0.16, project=0.30, depth_in=0.50),
+        cornice("trim", 1.4225, 0.145, project=0.20, depth_in=0.40),
+    ]
+    # Civic/brutalist: no ornament, one very deep coping. The silhouette does
+    # all of the work, which is the point of having a fourth crown at all.
+    p["kit_concrete_crown_a"] = [
+        slab(front=BACK, patch="concrete"),
+        plate(-H, H, 0.55, 1.05, BACK, FACE, "concrete_dark"),
+        cornice("concrete", 1.16, 0.26, project=0.44, depth_in=0.60),
+        cornice("concrete", 1.3975, 0.195, project=0.34, depth_in=0.52),
+        bracket("concrete_dark", -1.05, 0.72, project=0.30, w=0.30, h=0.60),
+        bracket("concrete_dark", 1.05, 0.72, project=0.30, w=0.30, h=0.60),
+    ]
+
+    # --- REVISION 4: `terrace` - the setback lip --------------------------
+    #
+    # The other half of #654. Where a Tower steps back, the storey below it is
+    # left with an outdoor deck whose OUTER EDGE is suddenly exposed, and that
+    # edge is three surfaces at once: the deck you can stand on, the fascia
+    # facing the street, and - because the lip oversails the wall beneath it -
+    # an UNDERSIDE that is visible from the pavement.
+    #
+    # No delivered piece does all three. A `roof` piece has no underside
+    # treatment, a `soffit` has no top, and the massing currently dresses the
+    # lip with soffit pieces designed for a deck that is not there. The
+    # captures show it reads acceptably at play distance, which is why #654
+    # files it as polish rather than as a defect - but it is dressed by
+    # accident, and one piece replaces that accident.
+    #
+    # THE DECK IS A SLAB WITH AIR UNDER IT, not a body filling the lower half
+    # of the cell. The first draft used `slab(top=...)`, which buried the
+    # fascia and the corrugation inside solid geometry - the underside is the
+    # whole reason this context exists, so it has to be a surface with nothing
+    # behind it. `kit_steel_soffit_a` already had the shape right and the
+    # steel twin below now matches it exactly, so a terrace and a soffit
+    # meeting at a corner do not read as two different buildings.
+    p["kit_concrete_terrace_a"] = [
+        plate(-H, H, -0.70, -0.30, -H, H, "concrete_dark"),
+        plate(-H, H, -0.30, -0.16, -H, H, "concrete"),
+        cornice("concrete_dark", -0.82, 0.24, project=0.32, depth_in=0.55),
+        # Two downstand ribs, because kit_concrete_soffit_a is COFFERED and a
+        # terrace lip meeting a soffit at a re-entrant corner is the exact
+        # place two undersides get compared. A flat slab beside a coffer reads
+        # as two buildings - the same argument the steel twin below is built
+        # on, applied to the material that had the mismatch.
+        plate(-H, H, -0.94, -0.70, -H, -H + 0.45, "concrete_dark"),
+        plate(-H, H, -0.94, -0.70, H - 0.45, H, "concrete_dark"),
+        plate(-H, H, -0.16, 0.66, BACK, FACE, "concrete"),
+        cornice("trim", 0.75, 0.18, project=0.26, depth_in=0.40),
+    ]
+    p["kit_steel_terrace_a"] = [
+        plate(-H, H, -0.66, -0.32, -H, H, "steel_dark"),
+        plate(-H, H, -0.32, -0.18, -H, H, "steel"),
+    ] + [
+        plate(-H, H, -0.90, -0.66, z - 0.17, z + 0.17, "steel_dark")
+        for z in (-1.2, -0.6, 0.0, 0.6, 1.2)
+    ] + [
+        plate(-H, H, -0.18, 0.60, BACK, FACE, "steel"),
+        plate(-H, H, 0.60, 0.78, BACK - 0.06, CELL / 2.0 + 0.22, "trim"),
+    ]
 
     # A sheared DECK plate, not a wall panel: the new steel roofs are about to
     # become the largest single surface in the city, and a roof is the surface
@@ -2073,6 +2246,40 @@ def main():
                                "kit_steel_roof_a"]):
         steel_wall.append({"piece": piece, "x": x, "y": 4, "ry": 0})
 
+    # THE THIRD WALL, new in revision 4, for the two contexts revision 4 adds.
+    #
+    # EVERY NEW PIECE SITS IN THE TOP ROW, and that is the whole design of this
+    # proof rather than an accident of layout. Both new contexts are DEFINED by
+    # having sky above them - a crown is a wall ending, a terrace lip is a deck
+    # the mass above has stepped back from - so either one with a cell stacked
+    # on top of it is being tested in a condition the game never puts it in.
+    # The first draft of this plan put a storey of facade above the terrace
+    # row, which depicts a Tower that does not step back, and would have
+    # rendered as a wall floating over a 0.6 m gap. The oversail gate caught
+    # the symptom (the wall measured 0.04 m short at the top); the cause was
+    # that the plan described a building that cannot exist.
+    #
+    # Three storeys of ordinary facade underneath, because a cap photographed
+    # away from the wall it caps proves nothing about capping. The four crowns
+    # sit side by side on purpose: they are meant to cap DIFFERENT buildings,
+    # and the question that matters is whether they read as four buildings
+    # ending or as one roofline with inconsistent trim.
+    skyline = []
+    for y, row in enumerate([
+        ["kit_brick_facade_a", "kit_infill_facade_a", "kit_brick_facade_c",
+         "kit_infill_facade_b", "kit_brick_facade_b", "kit_infill_facade_c"],
+        ["kit_infill_facade_c", "kit_brick_facade_a", "kit_infill_facade_a",
+         "kit_brick_facade_c", "kit_infill_facade_b", "kit_brick_facade_b"],
+        ["kit_brick_facade_b", "kit_infill_facade_b", "kit_brick_facade_a",
+         "kit_infill_facade_a", "kit_brick_facade_c", "kit_infill_facade_a"],
+    ]):
+        for x, piece in enumerate(row):
+            skyline.append({"piece": piece, "x": x, "y": y, "ry": 0})
+    for x, piece in enumerate(["kit_infill_crown_a", "kit_infill_crown_b",
+                               "kit_brick_crown_a", "kit_concrete_crown_a",
+                               "kit_concrete_terrace_a", "kit_steel_terrace_a"]):
+        skyline.append({"piece": piece, "x": x, "y": 3, "ry": 0})
+
     def build_wall(plan, group, cells_x, cells_y, out_png, angles, zoom=0.98):
         """One wall, its render, and the oversail band it has to sit inside.
 
@@ -2122,8 +2329,15 @@ def main():
     steel_tiling, steel_blank, steel_ok = build_wall(
         steel_wall, "kit_steel_wall", 5, 5, "tiling_proof_steel.png",
         ["three_quarter", "top"])
-    wall_blank = list(wall_blank) + list(steel_blank)
-    wall_ok = wall_ok and steel_ok
+    # A crown is seen from BELOW, from the street, and from level with it by an
+    # airborne golem - never from the front elevation a wall proof uses. So
+    # this one is shot three_quarter and front, and the front view is the one
+    # that shows whether the coping actually oversails or merely exists.
+    skyline_tiling, skyline_blank, skyline_ok = build_wall(
+        skyline, "kit_skyline", 6, 4, "tiling_proof_skyline.png",
+        ["three_quarter", "front"])
+    wall_blank = list(wall_blank) + list(steel_blank) + list(skyline_blank)
+    wall_ok = wall_ok and steel_ok and skyline_ok
 
     # ---- the soffit, from the one side it is for ---------------------------
     soffit_run = ast.literal_eval(
@@ -2445,7 +2659,71 @@ def main():
             "failures": check["fail_count"],
         },
         "pieces": entries,
-        "revision": 3,
+        "revision": 4,
+        "revision_4": {
+            "what_changed": "Six new pieces in two new contexts - `crown` "
+                            "(four) and `terrace` (two) - and one texture "
+                            "change: brick re-pitched from 6 to 9 courses per "
+                            "metre. %d pieces total. No existing MESH was "
+                            "touched, no patch colour moved, no new material "
+                            "and no new atlas patch: still one draw call."
+                            % len(entries),
+            "why_crown": "Demigol #654 measured it. The massing caps every "
+                         "Tower and Slab with a perimeter ring of INFILL, so "
+                         "the top of every building in the city is a curtain "
+                         "panel one storey taller than the one below it - no "
+                         "coping, no cornice, no change of silhouette. The "
+                         "existing roof_b pieces cap a DECK and spend their "
+                         "cell on a horizontal surface; a crown cell has no "
+                         "horizontal surface at all. It is wall, ending in "
+                         "the sky.",
+            "why_terrace": "The other half of #654. A setback leaves the "
+                           "storey below with a deck whose outer edge is "
+                           "three surfaces at once - the deck, the street-"
+                           "facing fascia, and an UNDERSIDE, because the lip "
+                           "oversails. No delivered piece does all three: a "
+                           "roof piece has no underside, a soffit has no top.",
+            "why_contexts_not_variants": "the shell picks variants from a "
+                                         "coordinate hash, and both of these "
+                                         "are chosen by POSITION. A hash must "
+                                         "never be able to put a coping "
+                                         "halfway up a building - the same "
+                                         "rule that made `endcap` and "
+                                         "`damaged` contexts.",
+            "brick_pitch": {
+                "from_courses_per_m": 6.0,
+                "to_courses_per_m": COURSES_PER_METRE,
+                "why": "revision 3 coarsened brick to 6/m on a PREDICTION "
+                       "that a real 13/m course would alias on Demigol's "
+                       "no-mipmap import path. Revision 4 rendered it: a 78 m "
+                       "brick wall at a grazing angle, unfiltered, at 6, 9 "
+                       "and 13 courses/m, and 13 showed no moire anywhere "
+                       "along the sweep. A 1-px checker positive control in "
+                       "the same patch, same camera, same filtering, tore "
+                       "into violent moire - so the aliasing condition was "
+                       "genuinely reproduced and real brick survived it.",
+                "why_9_and_not_13": "the test is Maya's rasteriser; Demigol's "
+                                    "is Unity with BC-compressed textures, "
+                                    "and block compression at a 1.4 px mortar "
+                                    "bed is exactly where a thin dark line "
+                                    "smears. 9/m puts the bed at 2.0 px - ON "
+                                    "the floor the generator tests pin, not "
+                                    "under it - and needs no assumption about "
+                                    "a codec nobody has measured. 13 remains "
+                                    "available and the evidence for it "
+                                    "ships.",
+                "what_6_cost": "a 167 mm course is twice a real brick, so at "
+                               "close and play distance the wall read as "
+                               "large-format blockwork rather than brick, and "
+                               "the coarse courses stayed individually "
+                               "resolvable far enough out to read as "
+                               "horizontal striping rather than as material.",
+            },
+            "not_extended": "no second family, no atlas change, no facade "
+                            "tier axis. The atlas is still full at 16 of 16 "
+                            "patches and that constraint is unchanged - see "
+                            "Demigol #653.",
+        },
         "revision_3": {
             "what_changed": "17 new pieces, 41 -> %d. Eleven steel and six "
                             "damage states. No existing piece was touched, no "
@@ -2616,10 +2894,33 @@ def main():
                               "from the front is a picture of the one surface "
                               "these pieces are not about.",
         }),
+        "tiling_proof_skyline": dict(skyline_tiling, **{
+            "what": "a 6 x 4 wall built to judge revision 4's two new "
+                    "contexts in the only arrangement they mean anything in: "
+                    "three storeys of ordinary facade, then all six new "
+                    "pieces side by side in the top row under open sky.",
+            "why_the_top_row": "both new contexts are DEFINED by having sky "
+                               "above them - a crown is a wall ending, a "
+                               "terrace lip is a deck the mass above stepped "
+                               "back from. Either one with a cell stacked on "
+                               "it is being tested in a condition the game "
+                               "never produces.",
+            "why_a_third_wall": "a crown's whole claim is that it ENDS the "
+                                "wall below it, so a proof that does not "
+                                "contain that wall cannot test the claim. The "
+                                "same is true of a terrace lip, which is only "
+                                "a lip relative to the storey it oversails.",
+            "why_the_crowns_are_adjacent": "they are meant to cap DIFFERENT "
+                                           "buildings. Side by side, the "
+                                           "question is whether they read as "
+                                           "three buildings ending or as one "
+                                           "roofline with inconsistent trim.",
+            "rendered_from": ["three_quarter", "front"],
+        }),
         "files": ["demigol_kit.fbx", "kit_albedo.png", "kit_normal.png",
                   "kit_mask.png", "contact_sheet.png", "tiling_proof.png",
-                  "tiling_proof_steel.png", "damage_detail.png",
-                  "soffit_underside.png"],
+                  "tiling_proof_steel.png", "tiling_proof_skyline.png",
+                  "damage_detail.png", "soffit_underside.png"],
     }
     with open(os.path.join(OUT_DIR, "manifest.json"), "w") as fh:
         json.dump(manifest, fh, indent=2)

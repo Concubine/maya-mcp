@@ -9,8 +9,8 @@
     "inset_note": "faces that meet a neighbouring cell inset 0.005 m - the z-fight fix",
     "max_outset_m": 0.5,
     "outset_note": "ornament may oversail the cell face by up to 0.5 m; declared per piece as outset_m. The lattice constrains which CELLS a piece occupies, never the render mesh, because collision is generated from the grid.",
-    "pieces_with_outset": 21,
-    "max_declared_outset_m": 0.34,
+    "pieces_with_outset": 27,
+    "max_declared_outset_m": 0.44,
     "outset_is": "MEASURED off the built mesh, revision 3 onward. It used to be derived from the box spec, which is the intent and not the delivery - a `taper` shrinks a box after the spec is written, and both concrete bases declared 0.15 m while delivering 0.024. Each piece also carries outset_from_spec_m so the gap is visible rather than implied."
   },
   "pivot": "cell centre (0,0,0) on every piece",
@@ -19,7 +19,7 @@
     "count": 2,
     "kit_material": {
       "shared": true,
-      "used_by": "all 64 pieces",
+      "used_by": "all 70 pieces",
       "maps": [
         "kit_albedo.png",
         "kit_normal.png",
@@ -219,11 +219,11 @@
     "world_scale_m_per_patch": 9.0,
     "how_it_is_achieved": "uv_atlas world_scale mode: UV scale is derived from real-world size, so a 0.5 m band and a 3 m slab carry identical pixels per metre. Family 1 normalised each box to fill its patch, so density varied ~6x between pieces and was not knowable from the manifest - that unknowability was the defect.",
     "why_not_170": "A box auto-projection lays a piece's six faces side by side: measured live, a cube's UV bbox spans 2.858 face-widths, not one. So a patch covers ~9 m of layout, not one 3 m face, and px/m is patch_px / world_scale. The contract's ~170 px/m assumed one patch per face; reaching it under box projection would need a 6144 atlas. 4096 gives 113.8 px/m.",
-    "brick_courses_per_metre": 6.0,
-    "brick_courses_per_3m_face": 18,
-    "brick_course_px": 18.96,
-    "brick_mortar_bed_px": 3.03,
-    "brick_note": "DELIBERATELY COARSER THAN REAL BRICK. 54 courses across the 9 m patch, so a 3 m face reads ~18 rather than the ~39 a real wall would. Revision 2 authored the real 13 courses/m and that was the wrong target: it put a course at 8.75 px and the mortar bed at 1.4 px, which reads as corduroy up close and aliases at distance because the import path disables mipmaps to protect the patch margin. At 3.0 px the bed survives both."
+    "brick_courses_per_metre": 9.0,
+    "brick_courses_per_3m_face": 27,
+    "brick_course_px": 12.64,
+    "brick_mortar_bed_px": 2.02,
+    "brick_note": "DELIBERATELY COARSER THAN REAL BRICK. 81 courses across the 9 m patch, so a 3 m face reads ~27 rather than the ~39 a real wall would. Revision 2 authored the real 13 courses/m and that was the wrong target: it put a course at 8.75 px and the mortar bed at 1.4 px, which reads as corduroy up close and aliases at distance because the import path disables mipmaps to protect the patch margin. At 2.0 px the bed survives both."
   },
   "budgets": {
     "interior": 20,
@@ -231,23 +231,24 @@
     "tris_per_box": 12
   },
   "totals": {
-    "pieces": 64,
-    "triangles": 4980,
-    "budget_triangles": 7480,
-    "budget_utilisation_pct": 66.6,
-    "utilisation_note": "REPORTED AS A PERCENTAGE, not as a pass mark. Revision 1 passed while spending 6% of its budget and the pass mark is what hid that. Revision 2 was 2364 tris of 4,720 (50.1%); revision 3 is 4980 of 7480 (66.6%), and all 17 new pieces sit at 9 boxes = 108 of 120 (90%).",
+    "pieces": 70,
+    "triangles": 5544,
+    "budget_triangles": 8200,
+    "budget_utilisation_pct": 67.6,
+    "utilisation_note": "REPORTED AS A PERCENTAGE, not as a pass mark. Revision 1 passed while spending 6% of its budget and the pass mark is what hid that. Revision 2 was 2364 tris of 4,720 (50.1%); revision 3 is 5544 of 8200 (67.6%), and all 17 new pieces sit at 9 boxes = 108 of 120 (90%).",
     "pieces_by_role": {
-      "brick": 12,
-      "concrete": 12,
+      "brick": 13,
+      "concrete": 14,
       "glass": 9,
-      "infill": 10,
-      "steel": 21
+      "infill": 12,
+      "steel": 22
     },
     "pieces_by_context": {
       "base": 2,
       "beam": 4,
       "column": 6,
       "corner": 6,
+      "crown": 4,
       "damaged": 6,
       "endcap": 5,
       "facade": 11,
@@ -255,13 +256,14 @@
       "interior": 2,
       "lobby": 3,
       "roof": 9,
-      "soffit": 4
+      "soffit": 4,
+      "terrace": 2
     },
     "shading_groups": [
       "kit_materialSG",
       "shard_fractureSG"
     ],
-    "widest_extent_m": 1.84,
+    "widest_extent_m": 1.94,
     "uv_range": [
       0.00789,
       0.99211
@@ -269,18 +271,7 @@
   },
   "taper_trap": {
     "what": "`taper` flares X and Z together, so a tapered box whose X or Z reach lands on a meeting face (1.495 inset, or the 1.5 cell face) does not actually meet its neighbour - the flare pulls its far end away and opens a notch in a run that is meant to be continuous.",
-    "offenders": [
-      {
-        "piece": "kit_brick_facade_c",
-        "box": 3,
-        "axis": "x",
-        "reach_m": 1.495,
-        "taper": [
-          1.0,
-          0.72
-        ]
-      }
-    ],
+    "offenders": [],
     "not_fixed_here": "the one offender is kit_brick_facade_c's string course. It is pre-existing, it is brick, and brick is on this delivery's do-not-touch list. Reported so it is a known finding rather than a silent one; it costs one number to fix whenever brick is next opened.",
     "why_it_prints_instead_of_failing": "a gate that fails on a piece you are forbidden to fix is a gate that gets disabled."
   },
@@ -552,10 +543,10 @@
       "role": "brick",
       "context": "facade",
       "variant": "c",
-      "triangles": 72,
-      "boxes": 6,
+      "triangles": 84,
+      "boxes": 7,
       "budget": 120,
-      "budget_utilisation_pct": 60.0,
+      "budget_utilisation_pct": 70.0,
       "outset_m": 0.22,
       "outset_from_spec_m": 0.22,
       "submeshes": [
@@ -1073,6 +1064,96 @@
       ]
     },
     {
+      "name": "kit_infill_crown_a",
+      "role": "infill",
+      "context": "crown",
+      "variant": "a",
+      "triangles": 84,
+      "boxes": 7,
+      "budget": 120,
+      "budget_utilisation_pct": 70.0,
+      "outset_m": 0.3,
+      "outset_from_spec_m": 0.3,
+      "submeshes": [
+        "kit_material"
+      ]
+    },
+    {
+      "name": "kit_infill_crown_b",
+      "role": "infill",
+      "context": "crown",
+      "variant": "b",
+      "triangles": 96,
+      "boxes": 8,
+      "budget": 120,
+      "budget_utilisation_pct": 80.0,
+      "outset_m": 0.28,
+      "outset_from_spec_m": 0.28,
+      "submeshes": [
+        "kit_material"
+      ]
+    },
+    {
+      "name": "kit_brick_crown_a",
+      "role": "brick",
+      "context": "crown",
+      "variant": "a",
+      "triangles": 108,
+      "boxes": 9,
+      "budget": 120,
+      "budget_utilisation_pct": 90.0,
+      "outset_m": 0.3,
+      "outset_from_spec_m": 0.3,
+      "submeshes": [
+        "kit_material"
+      ]
+    },
+    {
+      "name": "kit_concrete_crown_a",
+      "role": "concrete",
+      "context": "crown",
+      "variant": "a",
+      "triangles": 72,
+      "boxes": 6,
+      "budget": 120,
+      "budget_utilisation_pct": 60.0,
+      "outset_m": 0.44,
+      "outset_from_spec_m": 0.44,
+      "submeshes": [
+        "kit_material"
+      ]
+    },
+    {
+      "name": "kit_concrete_terrace_a",
+      "role": "concrete",
+      "context": "terrace",
+      "variant": "a",
+      "triangles": 84,
+      "boxes": 7,
+      "budget": 120,
+      "budget_utilisation_pct": 70.0,
+      "outset_m": 0.32,
+      "outset_from_spec_m": 0.32,
+      "submeshes": [
+        "kit_material"
+      ]
+    },
+    {
+      "name": "kit_steel_terrace_a",
+      "role": "steel",
+      "context": "terrace",
+      "variant": "a",
+      "triangles": 108,
+      "boxes": 9,
+      "budget": 120,
+      "budget_utilisation_pct": 90.0,
+      "outset_m": 0.22,
+      "outset_from_spec_m": 0.22,
+      "submeshes": [
+        "kit_material"
+      ]
+    },
+    {
       "name": "kit_steel_damaged_a",
       "role": "steel",
       "context": "damaged",
@@ -1259,13 +1340,27 @@
       ]
     }
   ],
-  "revision": 3,
+  "revision": 4,
+  "revision_4": {
+    "what_changed": "Six new pieces in two new contexts - `crown` (four) and `terrace` (two) - and one texture change: brick re-pitched from 6 to 9 courses per metre. 70 pieces total. No existing MESH was touched, no patch colour moved, no new material and no new atlas patch: still one draw call.",
+    "why_crown": "Demigol #654 measured it. The massing caps every Tower and Slab with a perimeter ring of INFILL, so the top of every building in the city is a curtain panel one storey taller than the one below it - no coping, no cornice, no change of silhouette. The existing roof_b pieces cap a DECK and spend their cell on a horizontal surface; a crown cell has no horizontal surface at all. It is wall, ending in the sky.",
+    "why_terrace": "The other half of #654. A setback leaves the storey below with a deck whose outer edge is three surfaces at once - the deck, the street-facing fascia, and an UNDERSIDE, because the lip oversails. No delivered piece does all three: a roof piece has no underside, a soffit has no top.",
+    "why_contexts_not_variants": "the shell picks variants from a coordinate hash, and both of these are chosen by POSITION. A hash must never be able to put a coping halfway up a building - the same rule that made `endcap` and `damaged` contexts.",
+    "brick_pitch": {
+      "from_courses_per_m": 6.0,
+      "to_courses_per_m": 9.0,
+      "why": "revision 3 coarsened brick to 6/m on a PREDICTION that a real 13/m course would alias on Demigol's no-mipmap import path. Revision 4 rendered it: a 78 m brick wall at a grazing angle, unfiltered, at 6, 9 and 13 courses/m, and 13 showed no moire anywhere along the sweep. A 1-px checker positive control in the same patch, same camera, same filtering, tore into violent moire - so the aliasing condition was genuinely reproduced and real brick survived it.",
+      "why_9_and_not_13": "the test is Maya's rasteriser; Demigol's is Unity with BC-compressed textures, and block compression at a 1.4 px mortar bed is exactly where a thin dark line smears. 9/m puts the bed at 2.0 px - ON the floor the generator tests pin, not under it - and needs no assumption about a codec nobody has measured. 13 remains available and the evidence for it ships.",
+      "what_6_cost": "a 167 mm course is twice a real brick, so at close and play distance the wall read as large-format blockwork rather than brick, and the coarse courses stayed individually resolvable far enough out to read as horizontal striping rather than as material."
+    },
+    "not_extended": "no second family, no atlas change, no facade tier axis. The atlas is still full at 16 of 16 patches and that constraint is unchanged - see Demigol #653."
+  },
   "revision_3": {
-    "what_changed": "17 new pieces, 41 -> 64. Eleven steel and six damage states. No existing piece was touched, no patch colour moved, no new material and no new atlas: every new mesh lands on the existing 16 patches, so the whole city is still one draw call.",
+    "what_changed": "17 new pieces, 41 -> 70. Eleven steel and six damage states. No existing piece was touched, no patch colour moved, no new material and no new atlas: every new mesh lands on the existing 16 patches, so the whole city is still one draw call.",
     "why_steel": "Steel is what the game is about - the pillar is 'cut the bones, not the skin', and steel is the only role the player aims at - and it had 6 pieces of 41. Worse, the kit shipped no steel roof piece at all, so #611's rule S3b dressed every steel deck as a concrete plate: 13,186 of 45,638 cells, ~28%% of all visible surface, resolving to one concrete family.",
     "why_three_roofs": "One new piece dressed across all 13,186 fallback cells replaces one monotony with another. The deck ships as a field piece, a plant piece and a perimeter crown.",
     "steel_pieces_before": 6,
-    "steel_pieces_after": 21,
+    "steel_pieces_after": 22,
     "not_extended": "brick (11 pieces), non-steel corner/endcap, non-steel soffit and concrete_beam were left exactly as delivered. They are idle for generator reasons, not art reasons, and building more of what is already idle is the failure mode this delivery was told to avoid. There is deliberately no brick damage state for the same reason.",
     "atlas_untouched": "kit_albedo.png, kit_normal.png and kit_mask.png are regenerated by the same deterministic code from the same 16-patch table. A new family is #653's business, not this delivery's."
   },
@@ -1714,6 +1809,47 @@
     ],
     "why_a_top_view": "roofs are looked at from above. A wall shot from the front is a picture of the one surface these pieces are not about."
   },
+  "tiling_proof_skyline": {
+    "group": "kit_skyline",
+    "pieces": 24,
+    "measured_bbox": [
+      -1.495,
+      -1.495,
+      -1.495,
+      16.495,
+      10.495,
+      1.94
+    ],
+    "lattice_bbox": [
+      -1.5,
+      -1.5,
+      -1.5,
+      16.5,
+      10.5,
+      1.5
+    ],
+    "oversail_per_face_m": [
+      -0.005,
+      -0.005,
+      -0.005,
+      -0.005,
+      -0.005,
+      0.44
+    ],
+    "allowance_m": [
+      -0.005,
+      0.5
+    ],
+    "within_allowance": true,
+    "what": "a 6 x 4 wall built to judge revision 4's two new contexts in the only arrangement they mean anything in: three storeys of ordinary facade, then all six new pieces side by side in the top row under open sky.",
+    "why_the_top_row": "both new contexts are DEFINED by having sky above them - a crown is a wall ending, a terrace lip is a deck the mass above stepped back from. Either one with a cell stacked on it is being tested in a condition the game never produces.",
+    "why_a_third_wall": "a crown's whole claim is that it ENDS the wall below it, so a proof that does not contain that wall cannot test the claim. The same is true of a terrace lip, which is only a lip relative to the storey it oversails.",
+    "why_the_crowns_are_adjacent": "they are meant to cap DIFFERENT buildings. Side by side, the question is whether they read as three buildings ending or as one roofline with inconsistent trim.",
+    "rendered_from": [
+      "three_quarter",
+      "front"
+    ]
+  },
   "files": [
     "demigol_kit.fbx",
     "kit_albedo.png",
@@ -1722,6 +1858,7 @@
     "contact_sheet.png",
     "tiling_proof.png",
     "tiling_proof_steel.png",
+    "tiling_proof_skyline.png",
     "damage_detail.png",
     "soffit_underside.png"
   ]
