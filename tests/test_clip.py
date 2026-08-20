@@ -463,3 +463,26 @@ class TestPreviewClip:
         clip.preview_clip({"root": "root", "name": "idle"})
         assert fake.time_unit_calls == ["ntsc"]
         assert fake.time_unit == "ntsc"
+
+    def test_a_refused_call_never_reasserts_the_time_unit(self, fake,
+                                                           monkeypatch):
+        """#695: the currentUnit(time=...) call moved to run only after
+        every validation passes, so a refused call must not have touched
+        the scene-global time unit at all - covers a validation refusal
+        (bad angle), a cap refusal (every_nth over the limit), and the
+        unbound-skeleton refusal, which is the check immediately before
+        the (moved) currentUnit call."""
+        self._wire(fake, monkeypatch, duration_s=2.0, fps=30)
+        fake.time_unit_calls = []
+        with pytest.raises(HandlerError, match="unknown angle"):
+            clip.preview_clip({"root": "root", "name": "idle",
+                               "angle": "dutch"})
+        assert fake.time_unit_calls == []
+        with pytest.raises(HandlerError, match="every_nth"):
+            clip.preview_clip({"root": "root", "name": "idle",
+                               "every_nth": 1})
+        assert fake.time_unit_calls == []
+        fake.bound = False
+        with pytest.raises(HandlerError, match="no skinned mesh"):
+            clip.preview_clip({"root": "root", "name": "idle"})
+        assert fake.time_unit_calls == []

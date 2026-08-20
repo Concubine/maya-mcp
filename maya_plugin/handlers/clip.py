@@ -441,11 +441,6 @@ def preview_clip(params: Dict[str, Any]) -> Dict[str, Any]:
             hint="pass the clip's own name - previewing a stale assumption "
                  "judges the wrong motion")
     fps = int(meta.get("fps", 30))
-    # Reassert the CLIP's own time unit (mirrors author_clip): another clip
-    # authored since - on this skeleton or any other - may have left the
-    # scene-global unit at a different fps, and the frame numbers below only
-    # mean what the reported time_s claims if the unit matches this clip.
-    cmds.currentUnit(time=clipmath.FPS_UNITS[fps])
     duration_frames = int(round(float(meta.get("duration_s", 0.0)) * fps))
     if duration_frames <= 0:
         raise HandlerError("the clip has zero duration",
@@ -491,6 +486,14 @@ def preview_clip(params: Dict[str, Any]) -> Dict[str, Any]:
             "no skinned mesh is bound to this skeleton - bare joints "
             "render nothing",
             hint="bind_skin first; the preview frames the bound meshes")
+
+    # Reassert the CLIP's own time unit (mirrors author_clip): another clip
+    # authored since - on this skeleton or any other - may have left the
+    # scene-global unit at a different fps, and the frame numbers below only
+    # mean what the reported time_s claims if the unit matches this clip.
+    # Done last, immediately before the shots that consume it: every check
+    # above must pass before this call is allowed to mutate the scene.
+    cmds.currentUnit(time=clipmath.FPS_UNITS[fps])
 
     render_params = {
         "renderer": params.get("renderer", "hw2"),
