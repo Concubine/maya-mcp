@@ -441,6 +441,11 @@ def preview_clip(params: Dict[str, Any]) -> Dict[str, Any]:
             hint="pass the clip's own name - previewing a stale assumption "
                  "judges the wrong motion")
     fps = int(meta.get("fps", 30))
+    # Reassert the CLIP's own time unit (mirrors author_clip): another clip
+    # authored since - on this skeleton or any other - may have left the
+    # scene-global unit at a different fps, and the frame numbers below only
+    # mean what the reported time_s claims if the unit matches this clip.
+    cmds.currentUnit(time=clipmath.FPS_UNITS[fps])
     duration_frames = int(round(float(meta.get("duration_s", 0.0)) * fps))
     if duration_frames <= 0:
         raise HandlerError("the clip has zero duration",
@@ -454,8 +459,17 @@ def preview_clip(params: Dict[str, Any]) -> Dict[str, Any]:
                                 % ", ".join(capture.VALID_ANGLES))
     every_nth = params.get("every_nth")
     if every_nth is None:
+        # Simulate the ACTUAL frame list per candidate stride, not just the
+        # unpadded range's length - the forced append of the last frame
+        # (below) can push a stride that "fits" by the naive formula over
+        # the cap when duration_frames isn't a multiple of the stride.
         every_nth = 1
-        while duration_frames // every_nth + 1 > MAX_PREVIEW_FRAMES:
+        while True:
+            candidate = list(range(0, duration_frames + 1, every_nth))
+            if candidate[-1] != duration_frames:
+                candidate.append(duration_frames)
+            if len(candidate) <= MAX_PREVIEW_FRAMES:
+                break
             every_nth += 1
     elif (isinstance(every_nth, bool) or not isinstance(every_nth, int)
             or every_nth < 1):

@@ -38,6 +38,7 @@ class FakeCmds:
         self.deleted = []
         self.checkpoints = []
         self.blend_aliases = ["blink"] if bound else []
+        self.time_unit_calls = []   # every currentUnit(time=...) issued
 
     # --- resolution ------------------------------------------------------
     def ls(self, pattern=None, long=False, type=None, **kw):
@@ -168,6 +169,7 @@ class FakeCmds:
         if query:
             return self.time_unit
         if time is not None:
+            self.time_unit_calls.append(time)
             self.time_unit = time
 
     def currentTime(self, value=None, query=False):
@@ -415,3 +417,49 @@ class TestPreviewClip:
         fake.bound = False
         with pytest.raises(HandlerError, match="no skinned mesh"):
             clip.preview_clip({"root": "root", "name": "idle"})
+
+    def test_default_stride_never_self_refuses_on_the_forced_last_frame(
+            self, fake, monkeypatch):
+        """Finding 1 (#695 review): the old auto search sized itself with
+        duration_frames // every_nth + 1, which is the length of the
+        unpadded stride - it never accounted for the unconditional append
+        of the last frame when the stride doesn't land on it exactly. That
+        undercount let the search accept a stride whose PADDED list still
+        overflows the cap, so a default (no every_nth) call could self-
+        refuse with a confusing "every_nth=N yields 17 frames" error.
+        duration_frames=31 (fps=30, duration_s=31/30) reproduces it: the
+        old search accepted every_nth=2 (31//2+1 == 16), but
+        range(0, 32, 2) ends at 30, forcing an append to 31 and landing at
+        17 frames - one over the cap."""
+        calls = self._wire(fake, monkeypatch, duration_s=31.0 / 30.0,
+                           fps=30)
+        out = clip.preview_clip({"root": "root", "name": "idle"})
+        frames = [f["frame"] for f in out["frames"]]
+        assert len(frames) <= clip.MAX_PREVIEW_FRAMES
+        assert frames[0] == 0
+        assert frames[-1] == 31
+        assert calls["shots"][-1]["time"] == 31
+
+    def test_explicit_stride_still_refuses_with_the_measured_count(
+            self, fake, monkeypatch):
+        """An explicitly-passed every_nth that overflows once the forced
+        last frame is counted must still refuse, carrying the MEASURED
+        frame count (17, not the old formula's 16)."""
+        self._wire(fake, monkeypatch, duration_s=31.0 / 30.0, fps=30)
+        with pytest.raises(HandlerError, match="every_nth=2 yields 17 "
+                           "frames"):
+            clip.preview_clip({"root": "root", "name": "idle",
+                               "every_nth": 2})
+
+    def test_reasserts_the_clips_own_time_unit(self, fake, monkeypatch):
+        """Finding 2 (#695 review): a different clip authored since (or a
+        scene opened after this clip's metadata was written) can leave the
+        scene-global time unit stale relative to THIS clip's fps. The
+        reported time_s values only mean what they claim if the unit
+        matches the clip's own fps at render time."""
+        self._wire(fake, monkeypatch, duration_s=2.0, fps=30)
+        fake.time_unit = "film"   # stale - as if a 24fps clip ran since
+        fake.time_unit_calls = []
+        clip.preview_clip({"root": "root", "name": "idle"})
+        assert fake.time_unit_calls == ["ntsc"]
+        assert fake.time_unit == "ntsc"
