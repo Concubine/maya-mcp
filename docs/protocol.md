@@ -379,6 +379,34 @@ existing proportions. An empty region refuses rather than silently doing
 nothing; a vertex the joint solely owns cannot shed weight (nobody to give it
 to) and is counted in `sole_owner_vertices`.
 
+## Commands (rigging phase 3 / #671)
+
+| cmd | params | result |
+|---|---|---|
+| `pose_ik` | `{ root, joint, target, pole?, start?, keep? }` | `{ achieved_position, residual, rotations, chain, pole_used, kept, max_displacement, displaced_vertices, per_mesh, warnings }` |
+
+`pose_ik` solves a joint chain to a world-space `target`, **bakes the result
+to plain FK rotations, and deletes the handle** — no persistent IK state
+ever exists in the scene. The `rotations` map (per-joint local euler
+degrees, long-name keys) is the phase-1 pose currency: feed it straight to
+`pose_skeleton`, key it in a phase-6 clip. `residual` is the measured miss
+distance — an unreachable target is a number, not a silent stretch, and the
+reach shortfall is spelled out in `warnings`.
+
+The chain runs `start..joint`; `start` defaults to two joints above
+`joint` — the classic 2-bone limb (hip for an ankle, shoulder for a
+wrist). `pole` is a world **position** the knee/elbow should face. When
+omitted, a bent chain keeps its own bend plane; a perfectly straight chain
+has no plane, so the fold direction is Maya's guess and a warning says so —
+pass `pole` to make it deterministic (a straight chain is quietly pre-bent
+a few degrees toward the pole so the RP solver can fold at all; the solve
+overwrites the nudge).
+
+`keep=false` solves, measures everything, then restores the pose the call
+found — a dry-run for "what would this pose take". `achieved_position` and
+all displacement numbers are re-read from the scene after the bake, never
+taken from the solver's claim.
+
 ## Delivery
 
 | cmd | params | result |
