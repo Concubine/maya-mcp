@@ -451,6 +451,37 @@ problem are warnings or refusals. Collider interpenetration at bind is
 deliberately NOT checked — adjacent destruction chunks legitimately
 interpenetrate at their shared joint, so that warning would always fire.
 
+## Commands (rigging phase 5 / #691)
+
+| cmd | params | result |
+|---|---|---|
+| `create_blendshape` | `{ mesh, targets: [{name, target_mesh}] }` | `{ mesh, blend_shape, targets: [{name, max_delta, vertex_count}], warnings }` |
+| `set_blendshape_weights` | `{ mesh, weights: {name: 0..1} }` | `{ mesh, blend_shape, weights, max_displacement, per_target, warnings }` |
+
+`create_blendshape` wires ordinary sculpted meshes as morph targets. The
+deformer evaluates **front-of-chain** (before any skinCluster): a shape
+models the neutral surface and the skin carries the shaped surface to the
+pose, which is what makes a muscle corrective correct at a bent joint.
+Targets must match the base's topology (refused with both vertex counts —
+no wrap fallback) and are **consumed** once wired: the deltas live in the
+deformer, and a stale editable copy invites sculpting a mesh that feeds
+nothing. Each target's `name` becomes the weight alias, the
+`set_blendshape_weights` key, and the exported Shape record's name.
+`max_delta` is measured through the real deformer at weight 1; a target
+measuring (near-)identical to the base warns. Creating again on the same
+mesh ADDS targets to its one blendShape node — stacking a second deformer
+is refused by construction.
+
+`set_blendshape_weights` drives the named weights (0..1, absolute), lands
+them sequentially in call order, and measures per step; the returned
+`weights` map is every target re-read from the node. All-zero weights IS
+the reset — the phase-1 pose-map currency is untouched.
+
+Export: shapes ride along automatically (`FBXExportShapes` pinned on —
+there is no parameter). The byte gate refuses an export whose scene
+declares a target the file does not carry, and the result's `shapes` block
+reports each channel's name and delta payload as read from the bytes.
+
 ## Delivery
 
 | cmd | params | result |
