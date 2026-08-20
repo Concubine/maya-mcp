@@ -1,0 +1,51 @@
+{
+  "bytes": 1131728,
+  "corrective_at_pose": {
+    "centroid": [
+      0.4549,
+      1.6051,
+      0.0
+    ],
+    "forearm_mid": [
+      0.45,
+      1.615,
+      0.0
+    ],
+    "max_disp": 0.024471
+  },
+  "fbx": "humanoid_shaped.fbx",
+  "shapes": {
+    "blend_deformers": 1,
+    "channels": 2,
+    "shapes": [
+      {
+        "indexes": 480,
+        "name": "L_elbow_bulge",
+        "points": 480
+      },
+      {
+        "indexes": 424,
+        "name": "brow_raise",
+        "points": 424
+      }
+    ],
+    "unavailable_reason": null
+  },
+  "skin": {
+    "bind_pose_present": true,
+    "clusters": 20,
+    "deformers": 1,
+    "influenced_models": 20,
+    "max_weight_sum_error": 0.001935678698777199,
+    "unavailable_reason": null,
+    "unweighted_file_vertices": 0
+  },
+  "sweep": {
+    "0.5": 0.028615,
+    "1.0": 0.05723
+  },
+  "targets": {
+    "L_elbow_bulge": 0.02447116259648513,
+    "brow_raise": 0.05723032776870067
+  }
+}
