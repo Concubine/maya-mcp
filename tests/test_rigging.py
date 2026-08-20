@@ -27,6 +27,8 @@ class FakeCmds:
         self.skin_influences = {}  # sc name -> [joint long names]
         self.skin_geometry = {}    # sc name -> [shape long names]
         self.bind_poses = []    # set by tests: dagPose(query=True, bindPose=True)
+        self.positions = {}    # node long name -> [x, y, z] for xform queries
+        self.matrices = {}     # node long name -> 16 floats for matrix queries
 
     # --- names
     def objExists(self, name):
@@ -82,8 +84,11 @@ class FakeCmds:
         self.calls.append(("joint", name, tuple(kw["position"]), parent))
         return name
 
-    def listRelatives(self, node, children=False, allDescendents=False,
-                      type=None, fullPath=False, **kw):
+    def listRelatives(self, node, children=False, parent=False,
+                      allDescendents=False, type=None, fullPath=False, **kw):
+        if parent:
+            p = self.parents.get(node)
+            return [p] if p else None
         kids = [o for o, p in self.parents.items() if p == node]
         if allDescendents:
             out = []
@@ -95,9 +100,17 @@ class FakeCmds:
             return out or None
         return kids or None
 
-    def xform(self, node, query=False, worldSpace=False, translation=False, **kw):
+    def xform(self, node, query=False, worldSpace=False, translation=False,
+              matrix=False, **kw):
+        if query and matrix:
+            self.calls.append(("xform_matrix", node))
+            return self.matrices.get(
+                node, [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])
+        if not query and not isinstance(translation, bool):
+            self.calls.append(("xform_set", node, tuple(translation)))
+            return None
         self.calls.append(("xform_query", node))
-        return [1.0, 2.0, 3.0]  # deliberately NOT the input - proves measurement
+        return list(self.positions.get(node, [1.0, 2.0, 3.0]))
 
     def setAttr(self, plug, *values, **kw):
         self.attrs[plug] = [tuple(values)] if len(values) == 3 else list(values)
@@ -126,6 +139,28 @@ class FakeCmds:
                 return list(self.skin_geometry.get(sc, []))
             return None
         return ["fakeSkin1"]
+
+    def ikHandle(self, startJoint=None, endEffector=None, solver=None,
+                 name=None, **kw):
+        handle, effector = "|" + name, "|" + name + "_eff"
+        self.objects.extend([handle, effector])
+        self.calls.append(("ikHandle", startJoint, endEffector, solver, name))
+        return [handle, effector]
+
+    def spaceLocator(self, name=None, **kw):
+        self.objects.append("|" + name)
+        self.calls.append(("spaceLocator", name))
+        return ["|" + name]
+
+    def poleVectorConstraint(self, locator, handle, **kw):
+        self.calls.append(("poleVectorConstraint", locator, handle))
+        return [handle + "_pvc"]
+
+    def delete(self, *names, **kw):
+        self.calls.append(("delete", names))
+        for n in names:
+            if n in self.objects:
+                self.objects.remove(n)
 
     # --- posing
     def dagPose(self, *args, query=False, bindPose=False, restore=False, **kw):
@@ -672,3 +707,125 @@ class TestSetRegionWeights:
             "mesh": "hum", "joint": "e", "faces": [0], "weight": 0.5})
         assert out["max_influences_exceeded"] == 1
         assert any("max_influences" in w for w in out["warnings"])
+
+
+class TestPoseIk:
+    def _rig(self, fake, bent=True):
+        fake.objects = ["|pelvis", "|pelvis|hip", "|pelvis|hip|knee",
+                        "|pelvis|hip|knee|ankle"]
+        fake.parents = {"|pelvis|hip": "|pelvis",
+                        "|pelvis|hip|knee": "|pelvis|hip",
+                        "|pelvis|hip|knee|ankle": "|pelvis|hip|knee"}
+        knee_z = 0.05 if bent else 0.0   # bent skips the prebend path
+        fake.positions = {"|pelvis": [0.0, 1.0, 0.0],
+                          "|pelvis|hip": [0.1, 0.95, 0.0],
+                          "|pelvis|hip|knee": [0.1, 0.5, knee_z],
+                          "|pelvis|hip|knee|ankle": [0.1, 0.08, 0.0]}
+
+    def test_default_start_is_two_joints_up(self, fake):
+        self._rig(fake)
+        out = rigging.pose_ik({"root": "pelvis", "joint": "ankle",
+                               "target": [0.1, 0.6, 0.2]})
+        assert out["chain"] == ["|pelvis|hip", "|pelvis|hip|knee",
+                                "|pelvis|hip|knee|ankle"]
+        made = [c for c in fake.calls if c[0] == "ikHandle"]
+        assert made == [("ikHandle", "|pelvis|hip", "|pelvis|hip|knee|ankle",
+                         rigging.IK_SOLVER, "ankle_ikh")]
+
+    def test_solve_bake_delete_order(self, fake):
+        self._rig(fake)
+        out = rigging.pose_ik({"root": "pelvis", "joint": "ankle",
+                               "target": [0.1, 0.6, 0.2]})
+        names = [c[0] for c in fake.calls]
+        # the handle is moved to the target, rotations are read, the IK
+        # nodes die, and ONLY THEN the rotations are re-applied as plain FK
+        target_set = names.index("xform_set")
+        deleted = names.index("delete")
+        assert target_set < deleted
+        rebakes = [i for i, c in enumerate(fake.calls)
+                   if c[0] == "setAttr" and c[1].endswith(".rotate")
+                   and i > deleted]
+        assert len(rebakes) == 3          # one per chain joint
+        # nothing IK-shaped survives
+        assert not any("ikh" in o for o in fake.objects)
+        assert out["kept"] is True
+        assert set(out["rotations"]) == set(out["chain"])
+
+    def test_default_pole_rides_the_bent_knee(self, fake):
+        self._rig(fake, bent=True)
+        out = rigging.pose_ik({"root": "pelvis", "joint": "ankle",
+                               "target": [0.1, 0.6, 0.2]})
+        assert out["pole_used"] is not None
+        assert out["pole_used"][2] > 0            # knee bends +Z
+        assert any(c[0] == "poleVectorConstraint" for c in fake.calls)
+
+    def test_straight_chain_without_pole_warns_and_uses_no_constraint(self, fake):
+        self._rig(fake, bent=False)
+        out = rigging.pose_ik({"root": "pelvis", "joint": "ankle",
+                               "target": [0.1, 0.6, 0.2]})
+        assert out["pole_used"] is None
+        assert not any(c[0] == "poleVectorConstraint" for c in fake.calls)
+        assert any("STRAIGHT" in w for w in out["warnings"])
+
+    def test_straight_chain_with_pole_prebends_the_knee(self, fake):
+        self._rig(fake, bent=False)
+        rigging.pose_ik({"root": "pelvis", "joint": "ankle",
+                         "target": [0.1, 0.6, 0.2], "pole": [0.1, 0.5, 0.5]})
+        handle_at = [i for i, c in enumerate(fake.calls)
+                     if c[0] == "ikHandle"][0]
+        prebends = [i for i, c in enumerate(fake.calls)
+                    if c[0] == "setAttr" and c[1] == "|pelvis|hip|knee.rotate"
+                    and i < handle_at]
+        assert prebends, "the interior joint must be nudged BEFORE the handle exists"
+
+    def test_out_of_reach_target_warns_with_the_reach(self, fake):
+        self._rig(fake)
+        out = rigging.pose_ik({"root": "pelvis", "joint": "ankle",
+                               "target": [5.0, 5.0, 5.0]})
+        assert any("reaches only" in w for w in out["warnings"])
+
+    def test_keep_false_restores_and_says_so(self, fake):
+        self._rig(fake)
+        fake.attrs["|pelvis|hip|knee.rotate"] = [(0.0, 7.0, 0.0)]
+        out = rigging.pose_ik({"root": "pelvis", "joint": "ankle",
+                               "target": [0.1, 0.6, 0.2], "keep": False})
+        assert out["kept"] is False
+        assert fake.attrs["|pelvis|hip|knee.rotate"] == [(0.0, 7.0, 0.0)]
+        assert any("keep=false" in w for w in out["warnings"])
+
+    def test_one_checkpoint_after_validation(self, fake, monkeypatch):
+        self._rig(fake)
+        events = []
+        monkeypatch.setattr(session, "auto_checkpoint",
+                            lambda reason: events.append(reason) or
+                            {"checkpoint_id": "001_" + reason, "path": "x.ma"})
+        with pytest.raises(HandlerError):
+            rigging.pose_ik({"root": "pelvis", "joint": "ankle",
+                             "target": "not-a-vec"})
+        assert events == []
+        rigging.pose_ik({"root": "pelvis", "joint": "ankle",
+                         "target": [0.1, 0.6, 0.2]})
+        assert events == ["pose_ik"]
+
+    def test_refusals(self, fake):
+        self._rig(fake)
+        with pytest.raises(HandlerError, match="BELOW the root"):
+            rigging.pose_ik({"root": "pelvis", "joint": "pelvis",
+                             "target": [0, 0, 0]})
+        with pytest.raises(HandlerError, match="missing required param 'target'"):
+            rigging.pose_ik({"root": "pelvis", "joint": "ankle"})
+        with pytest.raises(HandlerError, match="keep must be"):
+            rigging.pose_ik({"root": "pelvis", "joint": "ankle",
+                             "target": [0, 0, 0], "keep": "yes"})
+        with pytest.raises(HandlerError, match="single bone"):
+            rigging.pose_ik({"root": "pelvis", "joint": "ankle",
+                             "target": [0, 0, 0], "start": "knee"})
+        with pytest.raises(HandlerError, match="not an ancestor"):
+            rigging.pose_ik({"root": "pelvis", "joint": "knee",
+                             "target": [0, 0, 0], "start": "ankle"})
+        with pytest.raises(HandlerError, match="no default chain"):
+            rigging.pose_ik({"root": "pelvis", "joint": "hip",
+                             "target": [0, 0, 0]})
+        with pytest.raises(HandlerError, match="not a joint under this root"):
+            rigging.pose_ik({"root": "pelvis", "joint": "elbow",
+                             "target": [0, 0, 0]})

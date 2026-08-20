@@ -786,3 +786,227 @@ def set_region_weights(params: Dict[str, Any]) -> Dict[str, Any]:
         "max_influences_exceeded": stats["max_influences_exceeded"],
         "warnings": warnings,
     }
+
+
+# --- phase 3 (#671): pose_ik -------------------------------------------------
+
+# A chain whose interior joints deviate by less than this fraction of its
+# reach is "straight": Maya's RP solver cannot fold a collinear chain on its
+# own (zero preferred angle), so pose_ik pre-bends it PREBEND_DEG toward the
+# pole to break the tie. The solve overwrites the nudge; residual reports
+# whatever the solver actually achieved.
+COLLINEAR_RATIO = 0.01
+PREBEND_DEG = 5.0
+IK_SOLVER = "ikRPsolver"
+# Above this miss (scene units) a solve that COULD have reached warns; an
+# out-of-reach miss is explained by the reach warning instead.
+RESIDUAL_WARN = 1e-3
+
+
+def _resolve_joint(cmds, joints: List[str], name, what: str) -> str:
+    """One joint out of `joints`, by long or unique short name."""
+    if not isinstance(name, str) or not name.strip():
+        raise HandlerError("missing required param %r" % what,
+                           hint="a joint name from maya_create_skeleton")
+    if name in joints:
+        return name
+    matches = [j for j in joints if _short(j) == _short(name)]
+    if not matches:
+        raise HandlerError(
+            "%s %r is not a joint under this root" % (what, name),
+            hint="joints here: %s" % ", ".join(_short(j) for j in joints[:12]))
+    if len(matches) > 1:
+        raise HandlerError(
+            "%s %r is ambiguous under this root (%d matches)"
+            % (what, name, len(matches)),
+            hint="use the long name, e.g. %s" % matches[0])
+    return matches[0]
+
+
+def _chain_between(cmds, joints: List[str], start: str, end: str) -> List[str]:
+    """start..end inclusive, parents first; refuses a non-ancestor start."""
+    chain = [end]
+    node = end
+    while node != start:
+        parents = [p for p in (cmds.listRelatives(
+            node, parent=True, fullPath=True, type="joint") or [])
+            if p in joints]
+        if not parents:
+            raise HandlerError(
+                "%s is not an ancestor of %s" % (_short(start), _short(end)),
+                hint="start must sit above joint on the same chain")
+        node = parents[0]
+        chain.append(node)
+    chain.reverse()
+    return chain
+
+
+def pose_ik(params: Dict[str, Any]) -> Dict[str, Any]:
+    cmds = _cmds()
+    root_long = _require_joint(cmds, params.get("root"))
+    joints = _hierarchy_joints(cmds, root_long)
+    end = _resolve_joint(cmds, joints, params.get("joint"), "joint")
+    if end == root_long:
+        raise HandlerError(
+            "joint must sit BELOW the root - the root has no chain above it",
+            hint="e.g. root=pelvis, joint=L_ankle solves the left leg")
+    target = rigmath.vec3(params.get("target"), "target")
+    if target is None:
+        raise HandlerError(
+            "missing required param 'target'",
+            hint="world position [x, y, z] the joint should reach")
+    pole = rigmath.vec3(params.get("pole"), "pole")
+    keep = params.get("keep", True)
+    if not isinstance(keep, bool):
+        raise HandlerError(
+            "keep must be true or false",
+            hint="true bakes the solved pose; false measures it, then "
+                 "restores the pose the call found")
+
+    if params.get("start") is not None:
+        start = _resolve_joint(cmds, joints, params.get("start"), "start")
+    else:
+        # Default: two joints up - the classic 2-bone limb (hip for an
+        # ankle, shoulder for a wrist). Longer chains pass start explicitly.
+        path = _chain_between(cmds, joints, root_long, end)
+        if len(path) < 3:
+            raise HandlerError(
+                "%s hangs directly under the root - no default chain exists"
+                % _short(end),
+                hint="pass start explicitly, or aim single bones with "
+                     "pose_skeleton")
+        start = path[-3]
+    chain = _chain_between(cmds, joints, start, end)
+    if len(chain) < 3:
+        raise HandlerError(
+            "the chain %s..%s is a single bone - IK needs at least two"
+            % (_short(start), _short(end)),
+            hint="a single bone is an aim, not a solve: rotate it with "
+                 "pose_skeleton, or pass a higher start")
+
+    positions = [[float(v) for v in cmds.xform(
+        j, query=True, worldSpace=True, translation=True)] for j in chain]
+    reach = rigmath.chain_reach(positions)
+    distance = rigmath.dist(positions[0], target)
+    warnings: List[str] = []
+    if distance > reach:
+        warnings.append(
+            "the target sits %.4g from %s but the chain reaches only %.4g - "
+            "the solve will fall short and residual reports the miss"
+            % (distance, _short(start), reach))
+
+    pole_used = pole if pole is not None else rigmath.default_pole(
+        positions, COLLINEAR_RATIO)
+    straight = rigmath.chain_deviation(positions) < COLLINEAR_RATIO * reach
+    if straight and pole_used is None:
+        warnings.append(
+            "the chain is STRAIGHT and no pole was given - the solver has no "
+            "bend plane, so which way the limb folds is Maya's guess; pass "
+            "pole=[x,y,z], the world position the knee/elbow should face")
+
+    session.auto_checkpoint("pose_ik")
+    meshes = _bound_meshes(cmds, set(joints))
+    before = {m: sculpt.vertex_positions(cmds, m) for m in meshes}
+    prior = {j: tuple(cmds.getAttr(j + ".rotate")[0]) for j in chain}
+
+    if straight and pole_used is not None:
+        # A straight chain gives the solver no fold to amplify: nudge the
+        # interior joints a few degrees toward the pole. The solve
+        # overwrites the nudge; keep=false or the checkpoint undoes it.
+        matrices = {i: [float(v) for v in cmds.xform(
+            chain[i], query=True, worldSpace=True, matrix=True)]
+            for i in range(1, len(chain) - 1)}
+        for i, triple in rigmath.prebend_rotations(
+                positions, matrices, target, pole_used, PREBEND_DEG).items():
+            current = cmds.getAttr(chain[i] + ".rotate")[0]
+            cmds.setAttr(chain[i] + ".rotate",
+                         current[0] + units.degrees_to_ui(cmds, triple[0]),
+                         current[1] + units.degrees_to_ui(cmds, triple[1]),
+                         current[2] + units.degrees_to_ui(cmds, triple[2]))
+
+    handle, effector = cmds.ikHandle(
+        startJoint=start, endEffector=end, solver=IK_SOLVER,
+        name=naming.unique_name(cmds, _short(end) + "_ikh"))
+    locator = None
+    if pole_used is not None:
+        locator = cmds.spaceLocator(
+            name=naming.unique_name(cmds, _short(end) + "_pole"))[0]
+        cmds.xform(locator, worldSpace=True, translation=pole_used)
+        cmds.poleVectorConstraint(locator, handle)
+    cmds.xform(handle, worldSpace=True, translation=target)
+
+    # Reading the effector's world position pulls the IK evaluation; the
+    # solved joint rotations are then plain attribute reads, in degrees
+    # (#636's unit rule).
+    cmds.xform(end, query=True, worldSpace=True, translation=True)
+    baked: Dict[str, List[float]] = {}
+    for j in chain:
+        raw = cmds.getAttr(j + ".rotate")[0]
+        baked[j] = [round(units.ui_to_degrees(cmds, v), 6) for v in raw]
+
+    doomed = [n for n in (handle, effector, locator)
+              if n and cmds.objExists(n)]
+    if doomed:
+        cmds.delete(*doomed)
+    # The bake: deleting a handle can snap joints back, so the solved values
+    # are re-applied as plain FK - the same currency pose_skeleton speaks.
+    for j in chain:
+        cmds.setAttr(j + ".rotate",
+                     units.degrees_to_ui(cmds, baked[j][0]),
+                     units.degrees_to_ui(cmds, baked[j][1]),
+                     units.degrees_to_ui(cmds, baked[j][2]))
+
+    achieved = [float(v) for v in cmds.xform(
+        end, query=True, worldSpace=True, translation=True)]
+    residual = rigmath.dist(achieved, target)
+    if residual > RESIDUAL_WARN and distance <= reach:
+        warnings.append(
+            "the solve missed a REACHABLE target by %.4g - joint limits, a "
+            "degenerate pole, or a bend the pre-bend could not break can do "
+            "this; try a pole on the intended bend side" % residual)
+
+    max_disp = 0.0
+    displaced = 0
+    per_mesh: List[Dict[str, Any]] = []
+    for mesh in meshes:
+        after = sculpt.vertex_positions(cmds, mesh)
+        mesh_disp = sculpt_math.max_displacement(before[mesh], after)
+        mesh_count = rigmath.displaced_count(before[mesh], after)
+        per_mesh.append({"mesh": mesh, "max_displacement": mesh_disp,
+                         "displaced_vertices": mesh_count})
+        max_disp = max(max_disp, mesh_disp)
+        displaced += mesh_count
+    if not meshes:
+        warnings.append(
+            "no skinned mesh is bound to this skeleton - the solve moved "
+            "bare joints only; bind_skin first if deformation was the point")
+    else:
+        for entry in per_mesh:
+            extent = sculpt_math.bbox_extent(before[entry["mesh"]])
+            if extent > 0 and entry["max_displacement"] < extent * NOOP_POSE_RATIO:
+                warnings.append(
+                    "%s moved by %.4g against a size of %.4g - near-zero "
+                    "deformation usually means the chain owns none of its "
+                    "vertices"
+                    % (entry["mesh"], entry["max_displacement"], extent))
+
+    if not keep:
+        for j, rot in prior.items():
+            cmds.setAttr(j + ".rotate", rot[0], rot[1], rot[2])
+        warnings.append(
+            "keep=false: the solved pose was measured, then the pose the "
+            "call found was restored - apply rotations via pose_skeleton to "
+            "commit it")
+
+    return {
+        "achieved_position": achieved,
+        "residual": residual,
+        "rotations": baked,
+        "chain": chain,
+        "pole_used": pole_used,
+        "kept": keep,
+        "max_displacement": max_disp,
+        "displaced_vertices": displaced,
+        "per_mesh": per_mesh,
+        "warnings": warnings,
+    }
