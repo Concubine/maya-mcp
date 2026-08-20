@@ -2861,3 +2861,125 @@ class TestPoseIkInMaya:
         assert not cmds.ls(type="ikEffector")
         assert not cmds.ls(type="poleVectorConstraint")
         assert not cmds.ls("*_pole", type="transform")
+
+
+class TestAuthorPhysicsInMaya:
+    def _cube(self, name, size=1.0, translate=(0.0, 0.0, 0.0)):
+        import maya.cmds as cmds
+
+        node = cmds.polyCube(name=name, width=size, height=size,
+                             depth=size)[0]
+        cmds.xform(node, worldSpace=True, translation=list(translate))
+        return cmds.ls(node, long=True)[0]
+
+    def test_cube_volume_com_mass_measured(self):
+        from maya_plugin.handlers import physics
+
+        self._cube("phys_core", translate=(0.0, 1.0, 0.0))
+        out = physics.author_physics({"chunks": ["phys_core"]})
+        body = out["bodies"][0]
+        assert body["volume"] == pytest.approx(1.0, rel=1e-6)
+        assert body["mass"] == pytest.approx(1.0, rel=1e-6)
+        assert body["com"] == pytest.approx([0.0, 1.0, 0.0], abs=1e-6)
+        assert body["watertight"] is True
+        assert body["collider"]["kind"] == "box"
+        assert sorted(body["collider"]["size"]) == pytest.approx(
+            [1.0, 1.0, 1.0], abs=1e-6)
+        assert body["collider"]["max_escape"] == pytest.approx(0.0, abs=1e-9)
+        assert body["collider"]["volume_ratio"] == pytest.approx(1.0, rel=1e-6)
+
+    def test_volume_matches_the_array_reader(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import array, physics
+
+        cmds.polyCylinder(name="phys_xcheck", radius=0.3, height=2.0,
+                          subdivisionsAxis=20)
+        out = physics.author_physics({"chunks": ["phys_xcheck"]})
+        signed = array._mesh_signed_volume(cmds, "|phys_xcheck")
+        assert out["bodies"][0]["signed_volume"] == pytest.approx(
+            signed, rel=1e-9)
+
+    def test_sphere_is_a_sphere(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import physics
+
+        cmds.polySphere(name="phys_ball", radius=0.5,
+                        subdivisionsX=12, subdivisionsY=12)
+        out = physics.author_physics({"chunks": ["phys_ball"]})
+        col = out["bodies"][0]["collider"]
+        assert col["kind"] == "sphere", col
+        # poles sit at exactly the nominal radius
+        assert col["radius"] == pytest.approx(0.5, abs=1e-6)
+        assert col["max_escape"] == pytest.approx(0.0, abs=1e-9)
+        # the mesh is inscribed in the sphere: ratio slightly above 1
+        assert 1.0 < col["volume_ratio"] < 1.2
+
+    def test_cylinder_is_a_capsule_with_measured_escape(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import physics
+
+        cmds.polyCylinder(name="phys_limb", radius=0.3, height=2.0,
+                          subdivisionsAxis=20)
+        out = physics.author_physics({"chunks": ["phys_limb"]})
+        col = out["bodies"][0]["collider"]
+        assert col["kind"] == "capsule", col
+        assert col["radius"] == pytest.approx(0.3, abs=1e-6)
+        assert col["height"] == pytest.approx(1.4, abs=0.01)
+        assert abs(col["axis"][1]) == pytest.approx(1.0, abs=1e-6)
+        # rim corners poke past the caps: sqrt(r^2+r^2) - r = 0.124
+        assert 0.05 < col["max_escape"] < 0.2
+
+    def test_rotated_cylinder_recovers_its_frame(self):
+        import math
+
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import physics
+
+        node = cmds.polyCylinder(name="phys_tilt", radius=0.3, height=2.0,
+                                 subdivisionsAxis=20)[0]
+        cmds.setAttr(node + ".rotateZ", 30)
+        out = physics.author_physics({"chunks": ["phys_tilt"]})
+        col = out["bodies"][0]["collider"]
+        assert col["kind"] == "capsule"
+        # +Y rotated 30 deg about Z lands on (-sin30, cos30, 0)
+        expected = [-math.sin(math.radians(30)),
+                    math.cos(math.radians(30)), 0.0]
+        dot = sum(a * b for a, b in zip(col["axis"], expected))
+        assert abs(dot) == pytest.approx(1.0, abs=1e-6)
+
+    def test_open_plane_warns_and_reports_boundary_edges(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import physics
+
+        cmds.polyPlane(name="phys_sheet", width=1, height=1,
+                       subdivisionsX=2, subdivisionsY=2)
+        out = physics.author_physics({"chunks": ["phys_sheet"]})
+        body = out["bodies"][0]
+        assert body["watertight"] is False
+        assert body["open_edges"] > 0
+        assert any("boundary edge" in w for w in out["warnings"])
+        assert any("near-zero volume" in w for w in out["warnings"])
+
+    def test_dag_parents_and_default_joints_on_a_real_hierarchy(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import physics
+
+        root = self._cube("phys_pelvis", translate=(0.0, 1.0, 0.0))
+        child = self._cube("phys_thigh", size=0.5,
+                           translate=(0.3, 0.2, 0.0))
+        child = cmds.parent(child, root)[0]
+        out = physics.author_physics({"root": "phys_pelvis"})
+        by = {b["chunk"].split("|")[-1]: b for b in out["bodies"]}
+        assert by["phys_thigh"]["parent"] == "|phys_pelvis"
+        assert by["phys_pelvis"]["parent"] is None
+        assert by["phys_pelvis"]["joint"] is None
+        assert by["phys_thigh"]["joint"]["source"] == "default_locked"
+        assert any("LOCKED joint" in w for w in out["warnings"])
+        # the child's volume is measured in WORLD space under the parent
+        assert by["phys_thigh"]["volume"] == pytest.approx(0.125, rel=1e-6)
