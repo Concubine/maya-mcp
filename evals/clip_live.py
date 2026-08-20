@@ -31,9 +31,11 @@ curves, mirroring the mayapy test rather than the plan's stale literal.
 Measured checks (this script) + judged sheets (the acceptance):
     build humanoid + skeleton + bind + blink target -> author idle
     (loop) -> preview sheet -> export include_animation, byte-gated ->
-    author walk (replaces, warning asserted) -> preview sheet -> export ->
-    static-mutator refusal probed live -> delete_clip -> static export
-    carries ZERO curves -> baseline.json.
+    author walk (replaces, warning asserted) -> preview sheet -> the
+    stride's world-space PHASE measured (counter-swing and the half-cycle
+    mirror, because run 1 scored 28/28 with the arms in phase and only the
+    pixels caught it) -> export -> static-mutator refusal probed live ->
+    delete_clip -> static export carries ZERO curves -> baseline.json.
 
 DESTRUCTIVE: calls new_scene. Port 9878, the agent-launched Maya, per the
 two-Maya policy - never point this at the user's 9877.
@@ -45,9 +47,12 @@ Exit: 0 pass, 1 fail, 2 no connection.
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import sys
+
+from PIL import Image
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))
@@ -63,8 +68,10 @@ JOINT_COUNT = 20
 
 # Blink target sculpt: a soft brow-drop on the head sphere (front of the
 # head sits near (0, 1.80, 0.15) per the PARTS table). It only has to be
-# VISIBLE at 256 px - the P5 gate measured that too-subtle sculpts render
-# invisibly, so this uses the widened-literal lesson from day one.
+# VISIBLE in the preview cells this gate is judged from - the P5 gate
+# measured that too-subtle sculpts render invisibly, so this carries the
+# widened-literal lesson from day one. The framing those cells actually use
+# is PREVIEW_RESOLUTION/IDLE_ZOOM below, measured, not the 256 px default.
 #
 # MEASURED (this run, 2026-08-20) and widened once more. The plan's
 # [0, -.06, .02] wired a real 0.0441 m delta, but at the preview's default
@@ -87,6 +94,18 @@ BLINK_DELTA = [0.0, -0.09, 0.03]
 PREVIEW_RESOLUTION = 640
 IDLE_ZOOM = 1.6
 WALK_ZOOM = 1.5
+
+# Luminance band for the preview cells. Run 1 of this gate rendered cells
+# blown out to pure white and run 2 rendered the same scene, same lights,
+# same call at a mean lit luminance of 70/255 - and nothing in the numbered
+# checks noticed, because none of them look at a pixel. A sheet that is
+# black, or a silhouette with no shading, is not judgeable, so the band is
+# asserted. Deliberately wide: it catches "no figure" and "no shading", not
+# taste. Measured on the accepted run: 14,473 lit pixels and mean 70 (walk,
+# 640 px / zoom 1.5); the same at 320 px was 1,623 lit pixels.
+LIT_THRESHOLD = 18          # a pixel counts as figure above this
+FIGURE_PIXELS_MIN = 2000
+LUMINANCE_BAND = (30.0, 240.0)
 
 IDLE_KEYS = [
     {"time_s": 0.0,
@@ -220,6 +239,31 @@ def out(name):
     return os.path.join(OUT_DIR, name)
 
 
+def by_target(anim, label):
+    """{(target, property): fact}, but only after the duplicates agree.
+
+    anim_facts emits one row per (target, property) PER STACK, and an
+    animated export carries two stacks - so every row appears twice (the
+    idle's 26 curves are 13 x 2). Collapsing into a dict keeps whichever
+    row came last and says nothing, which would hide a disagreement
+    between the stacks at exactly the place the byte gate reads its
+    numbers. Assert they agree, then collapse.
+    """
+    by = {}
+    clashes = []
+    for row in anim["targets"]:
+        key = (row["target"], row["property"])
+        if key in by and by[key] != row:
+            clashes.append("%s: %s != %s" % (key, json.dumps(by[key]),
+                                             json.dumps(row)))
+        by[key] = row
+    check("%s: the duplicate per-stack target rows agree before collapsing"
+          % label, not clashes,
+          "; ".join(clashes[:2]) or "%d rows -> %d (target, property) pairs"
+          % (len(anim["targets"]), len(by)))
+    return by
+
+
 def take_named(anim, name):
     """The take this clip named, looked up by name (see the module
     docstring: Maya always writes its own 'Take 001' alongside it)."""
@@ -231,16 +275,41 @@ def take_named(anim, name):
     return None
 
 
+def lit_stats(png_bytes):
+    """(lit pixel count, mean luminance of those pixels) for one cell.
+
+    Via the histogram rather than a per-pixel walk: same numbers, and it
+    does not depend on Pillow's shifting getdata/get_flattened_data API.
+    """
+    hist = Image.open(io.BytesIO(png_bytes)).convert("L").histogram()
+    lit = sum(hist[LIT_THRESHOLD + 1:])
+    total = sum(i * hist[i] for i in range(LIT_THRESHOLD + 1, 256))
+    return lit, (total / lit if lit else 0.0)
+
+
 def save_preview(tag, result):
     saved = 0
+    counts = []
+    means = []
     for image in result.get("images", []):
+        png = base64.b64decode(image["png_b64"])
         path = out("%s_%s.png" % (tag, image["label"].replace("=", "")
                                   .replace(".", "_")))
         with open(path, "wb") as fh:
-            fh.write(base64.b64decode(image["png_b64"]))
+            fh.write(png)
         saved += 1
+        lit, mean = lit_stats(png)
+        counts.append(lit)
+        means.append(mean)
     check("preview %s rendered %d frames" % (tag, saved), saved >= 4,
           "frames=%s" % [f["frame"] for f in result.get("frames", [])])
+    lo, hi = LUMINANCE_BAND
+    check("preview %s: every cell shows a lit, shaded figure" % tag,
+          bool(counts) and min(counts) >= FIGURE_PIXELS_MIN
+          and all(lo <= m <= hi for m in means),
+          "lit_px %d..%d (min %d), mean luminance %.1f..%.1f (band %.0f..%.0f)"
+          % (min(counts or [0]), max(counts or [0]), FIGURE_PIXELS_MIN,
+             min(means or [0]), max(means or [0]), lo, hi))
 
 
 def main():
@@ -319,10 +388,13 @@ def main():
     save_preview("idle", preview)
 
     # ---- 4. static mutators refuse while the clip exists
+    # The needle is the measured message fragment, not the word "clip": that
+    # word appears in half the refusals this tool can raise (and in the clip
+    # NAME), so it would pass on a refusal for an entirely different reason.
     expect_refusal("pose_skeleton",
                    {"root": root, "rotations": {"chest": [0, 0, 10]}},
-                   "clip", "pose_skeleton refuses while the clip owns the "
-                   "channels")
+                   "animation curves drive",
+                   "pose_skeleton refuses while the clip owns the channels")
     expect_refusal("set_blendshape_weights",
                    {"mesh": "|" + MESH, "weights": {"blink": 0.5}},
                    "animation curves",
@@ -346,7 +418,7 @@ def main():
           idle_take is not None
           and abs(idle_take["duration_s"] - 2.0) <= 1.0 / 30,
           "duration_s=%s" % (idle_take or {}).get("duration_s"))
-    by = {(t["target"], t["property"]): t for t in anim["targets"]}
+    by = by_target(anim, "idle")
     idle_joints = ("spine_01", "chest", "L_shoulder", "R_shoulder")
     check("idle: every keyed joint bakes 61-key rotation curves",
           all(by.get((j, "Lcl Rotation"), {}).get("key_count") == 61
@@ -386,21 +458,50 @@ def main():
                                   "zoom": WALK_ZOOM},
                  timeout_s=900.0)
     save_preview("walk", preview)
-    # the pelvis bob, measured off the evaluated scene at contact/passing
-    bob = py(
+    # World-space limb phase and the pelvis bob, measured off the EVALUATED
+    # scene at contact (f0), passing (f9) and the half cycle (f18).
+    #
+    # The phase checks below exist because run 1 of this gate scored 28/28
+    # with the hips inverted: the legs alternated, every duration, key count
+    # and loop closure was right, and only the rendered sheet showed each arm
+    # swinging with the leg on its OWN side. A stride is a claim about world
+    # positions, so it is asserted in world positions here - eyes stay the
+    # acceptance, but they are no longer the only thing standing between a
+    # sign error and a green run. Forward is +Z (the toe joints sit at
+    # z=+0.14); the thresholds sit far off zero and well inside the measured
+    # +-0.40 m ankle travel, so they pin the SIGN without pinning the style.
+    phase = py(
         "import maya.cmds as cmds\n"
+        "_out = {}\n"
+        "for _f in (0, 9, 18):\n"
+        "    cmds.currentTime(_f)\n"
+        "    _row = {}\n"
+        "    for _j in ('L_ankle', 'R_ankle', 'L_wrist', 'R_wrist', %(r)r):\n"
+        "        _p = cmds.xform(_j, query=True, worldSpace=True,\n"
+        "                        translation=True)\n"
+        "        _row[_j.split('|')[-1]] = [round(_v, 4) for _v in _p]\n"
+        "    _out[_f] = _row\n"
         "cmds.currentTime(0)\n"
-        "_lo = cmds.xform(%(r)r, query=True, worldSpace=True,\n"
-        "                 translation=True)[1]\n"
-        "cmds.currentTime(9)\n"
-        "_hi = cmds.xform(%(r)r, query=True, worldSpace=True,\n"
-        "                 translation=True)[1]\n"
-        "cmds.currentTime(0)\n"
-        "{'contact_y': round(_lo, 4), 'passing_y': round(_hi, 4)}"
-        % {"r": root}, "pelvis bob")
+        "_out" % {"r": root}, "walk phase probe")
+    contact, passing, half = phase[0], phase[9], phase[18]
+    bob = {"contact_y": contact["pelvis"][1], "passing_y": passing["pelvis"][1]}
     check("walk: the pelvis bobs (contact %.3f -> passing %.3f)"
           % (bob["contact_y"], bob["passing_y"]),
           bob["passing_y"] - bob["contact_y"] > 0.02)
+    check("walk: at contact the legs are split fore/aft and each arm "
+          "counter-swings the leg on its own side",
+          contact["L_ankle"][2] > 0.2 and contact["L_wrist"][2] < 0.0
+          and contact["R_ankle"][2] < -0.2 and contact["R_wrist"][2] > 0.0,
+          "L_ankle_z=%.4f L_wrist_z=%.4f | R_ankle_z=%.4f R_wrist_z=%.4f"
+          % (contact["L_ankle"][2], contact["L_wrist"][2],
+             contact["R_ankle"][2], contact["R_wrist"][2]))
+    check("walk: the half cycle mirrors the contact (f18 L == f0 R, "
+          "f18 R == f0 L)",
+          abs(half["L_ankle"][2] - contact["R_ankle"][2]) < 1e-3
+          and abs(half["R_ankle"][2] - contact["L_ankle"][2]) < 1e-3,
+          "f18 L=%.4f vs f0 R=%.4f | f18 R=%.4f vs f0 L=%.4f"
+          % (half["L_ankle"][2], contact["R_ankle"][2],
+             half["R_ankle"][2], contact["L_ankle"][2]))
 
     walk_fbx = out("walk.fbx")
     if os.path.exists(walk_fbx):
@@ -410,7 +511,7 @@ def main():
                                "include_skins": True,
                                "include_animation": True}, timeout_s=900.0)
     anim_w = result["animation"]
-    by_w = {(t["target"], t["property"]): t for t in anim_w["targets"]}
+    by_w = by_target(anim_w, "walk")
     walk_take = take_named(anim_w, "walk")
     check("walk: a take named 'walk', 37-key joint curves",
           walk_take is not None
@@ -460,6 +561,8 @@ def main():
                      "frames": walk["frames"],
                      "per_key": walk["per_key"],
                      "pelvis_bob": bob,
+                     "phase_world_positions": {str(f): row
+                                               for f, row in phase.items()},
                      "animation": anim_w},
         }, fh, indent=2, sort_keys=True)
     print("  baseline: %s" % out("baseline.json"))
