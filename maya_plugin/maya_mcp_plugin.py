@@ -28,6 +28,7 @@ from .handlers import (
     assemble,
     blendshape,
     capture,
+    clip,
     code_exec,
     combine,
     etch,
@@ -212,6 +213,8 @@ def _build_handlers() -> Dict[str, Any]:
         "author_physics": physics.author_physics,
         "create_blendshape": blendshape.create_blendshape,
         "set_blendshape_weights": blendshape.set_blendshape_weights,
+        "author_clip": clip.author_clip,
+        "delete_clip": clip.delete_clip,
     }
 
 
