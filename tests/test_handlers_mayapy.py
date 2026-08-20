@@ -2983,3 +2983,224 @@ class TestAuthorPhysicsInMaya:
         assert any("LOCKED joint" in w for w in out["warnings"])
         # the child's volume is measured in WORLD space under the parent
         assert by["phys_thigh"]["volume"] == pytest.approx(0.125, rel=1e-6)
+
+
+class TestBlendshapeInMaya:
+    def _base_and_target(self, cmds, bump=0.3, axis=(0.0, 1.0, 0.0)):
+        base = cmds.polyCube(name="bs_base", width=1, height=1, depth=1)[0]
+        target = cmds.duplicate(base, name="bs_target")[0]
+        cmds.move(bump * axis[0], bump * axis[1], bump * axis[2],
+                  target + ".vtx[0]", relative=True)
+        base_long = cmds.ls(base, long=True)[0]
+        target_long = cmds.ls(target, long=True)[0]
+        return base_long, target_long
+
+    def test_create_measures_the_real_delta_and_consumes(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import blendshape
+
+        base, target = self._base_and_target(cmds, bump=0.3)
+        out = blendshape.create_blendshape({
+            "mesh": base,
+            "targets": [{"name": "puff", "target_mesh": target}]})
+        assert out["targets"][0]["max_delta"] == pytest.approx(0.3, abs=1e-6)
+        assert out["targets"][0]["vertex_count"] == 8
+        assert not cmds.objExists(target)          # consumed
+        # deltas survive the consumption: weight 1 still moves the vertex
+        weighted = blendshape.set_blendshape_weights(
+            {"mesh": base, "weights": {"puff": 1.0}})
+        assert weighted["max_displacement"] == pytest.approx(0.3, abs=1e-6)
+        assert weighted["weights"] == {"puff": 1.0}
+
+    def test_half_weight_is_half_the_delta(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import blendshape
+
+        base, target = self._base_and_target(cmds, bump=0.4)
+        blendshape.create_blendshape({
+            "mesh": base,
+            "targets": [{"name": "puff", "target_mesh": target}]})
+        out = blendshape.set_blendshape_weights(
+            {"mesh": base, "weights": {"puff": 0.5}})
+        assert out["max_displacement"] == pytest.approx(0.2, abs=1e-6)
+
+    def test_a_translated_duplicate_contributes_no_false_delta(self):
+        # Deltas are object-space in the node: a copy moved aside for
+        # sculpting clarity is byte-identical as a target (design decision:
+        # measured here, relied on by the gate's authoring flow).
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import blendshape
+
+        base, target = self._base_and_target(cmds, bump=0.3)
+        cmds.setAttr(target + ".translateX", 5.0)
+        out = blendshape.create_blendshape({
+            "mesh": base,
+            "targets": [{"name": "puff", "target_mesh": target}]})
+        assert out["targets"][0]["max_delta"] == pytest.approx(0.3, abs=1e-6)
+
+    def test_topology_mismatch_refused(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import blendshape
+
+        base = cmds.ls(cmds.polyCube(name="bs_base8")[0], long=True)[0]
+        ball = cmds.ls(cmds.polySphere(name="bs_ball")[0], long=True)[0]
+        with pytest.raises(HandlerError, match="topology does not match"):
+            blendshape.create_blendshape({
+                "mesh": base,
+                "targets": [{"name": "bad", "target_mesh": ball}]})
+
+    def test_front_of_chain_under_a_skin(self):
+        """The phase's load-bearing ordering claim, measured two ways.
+
+        The cube is bound, the root rotated 90 about Z, THEN the shape is
+        wired (the risky order - frontOfChain has to reach past the
+        existing skinCluster). The target's delta is +X in object space;
+        front-of-chain means the skin ROTATES it, so at the posed joint the
+        vertex must move +Y in world. Wrong order would move it +X.
+        """
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import blendshape, rigging, sculpt
+
+        base, target = self._base_and_target(cmds, bump=0.3,
+                                             axis=(1.0, 0.0, 0.0))
+        # Test-authoring fix (not a Maya divergence): the brief's literal
+        # omitted "parent" on the second joint, which resolve_joints
+        # correctly refuses as two roots ("a skeleton has exactly one
+        # root"). Added parent="bs_j1" to make this the intended 2-joint
+        # chain - measured under mayapy.
+        skeleton = rigging.create_skeleton({"joints": [
+            {"name": "bs_j1", "position": [0.0, 0.0, 0.0]},
+            {"name": "bs_j2", "position": [1.0, 0.0, 0.0],
+             "parent": "bs_j1"}]})
+        rigging.bind_skin({"mesh": base, "root": skeleton["root"]})
+        rigging.pose_skeleton({"root": skeleton["root"],
+                               "rotations": {"bs_j1": [0, 0, 90]}})
+
+        out = blendshape.create_blendshape({
+            "mesh": base,
+            "targets": [{"name": "fix", "target_mesh": target}]})
+        assert out["targets"][0]["max_delta"] == pytest.approx(0.3, abs=1e-4)
+
+        # structural: the blendShape sits UPSTREAM of the skinCluster
+        shape = cmds.listRelatives(base, shapes=True, fullPath=True,
+                                   noIntermediate=True)[0]
+        history = cmds.listHistory(shape, pruneDagObjects=True)
+        sc = cmds.ls(history, type="skinCluster")[0]
+        bs = cmds.ls(history, type="blendShape")[0]
+        assert history.index(sc) < history.index(bs)
+
+        # behavioral: the object-space +X delta lands as world +Y
+        before = sculpt.vertex_positions(cmds, base)
+        blendshape.set_blendshape_weights({"mesh": base,
+                                           "weights": {"fix": 1.0}})
+        after = sculpt.vertex_positions(cmds, base)
+        moved = max(range(len(before) // 3),
+                    key=lambda i: sum((after[3 * i + k] - before[3 * i + k]) ** 2
+                                      for k in range(3)))
+        delta = [after[3 * moved + k] - before[3 * moved + k]
+                 for k in range(3)]
+        assert delta[1] == pytest.approx(0.3, abs=1e-4)   # +Y, rotated
+        assert abs(delta[0]) < 1e-4                        # not +X
+
+    def test_additive_create_and_alias_collision(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import blendshape
+
+        base, t1 = self._base_and_target(cmds, bump=0.2)
+        first = blendshape.create_blendshape({
+            "mesh": base, "targets": [{"name": "a", "target_mesh": t1}]})
+        t2 = cmds.ls(cmds.duplicate(base, name="bs_t2")[0], long=True)[0]
+        cmds.move(0, 0, 0.1, t2 + ".vtx[1]", relative=True)
+        second = blendshape.create_blendshape({
+            "mesh": base, "targets": [{"name": "b", "target_mesh": t2}]})
+        assert second["blend_shape"] == first["blend_shape"]
+        weighted = blendshape.set_blendshape_weights(
+            {"mesh": base, "weights": {"a": 1.0, "b": 1.0}})
+        assert set(weighted["weights"]) == {"a", "b"}
+        t3 = cmds.ls(cmds.duplicate(base, name="bs_t3")[0], long=True)[0]
+        with pytest.raises(HandlerError, match="already exists"):
+            blendshape.create_blendshape({
+                "mesh": base, "targets": [{"name": "a", "target_mesh": t3}]})
+
+
+class TestBlendshapeExportInMaya:
+    def test_shapes_ride_along_and_the_bytes_name_them(self, tmp_path):
+        """THE NAMING MEASUREMENT (#691 plan constraint): whatever Maya
+        writes as the channel name, shape_facts must clean it to the
+        authored alias. If this assertion fails, the fix belongs in
+        fbxbytes.shape_facts's name cleaning - record the measured raw
+        string in a comment here when adjusting."""
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import blendshape, export, fbxbytes
+
+        base = cmds.ls(cmds.polyCube(name="bs_exp")[0], long=True)[0]
+        target = cmds.ls(cmds.duplicate(base, name="bs_exp_t")[0],
+                         long=True)[0]
+        cmds.move(0, 0.3, 0, target + ".vtx[0]", relative=True)
+        blendshape.create_blendshape({
+            "mesh": base,
+            "targets": [{"name": "puff", "target_mesh": target}]})
+
+        path = str(tmp_path / "shaped.fbx").replace("\\", "/")
+        result = export.export_fbx({"path": path, "metres_per_unit": 1.0})
+        shapes = result["shapes"]
+        # MEASURED: Maya writes the BlendShapeChannel's raw name as
+        # "bs_exp_shapes.puff" (blendShape node name + "." + the authored
+        # alias) - the deformer-qualified form fbxbytes.shape_facts's
+        # docstring already anticipated. No cleaning-logic change was needed;
+        # this run is what PROVES the existing .split(".")[-1] handles it.
+        assert shapes is not None and shapes["channels"] == 1
+        assert shapes["shapes"][0]["name"] == "puff"
+        assert shapes["shapes"][0]["points"] > 0
+        assert shapes["shapes"][0]["indexes"] == shapes["shapes"][0]["points"]
+        # Shape geometries must not inflate mesh facts
+        assert result["mesh_count"] == 1
+        # an independent read of the bytes agrees with the tool
+        assert fbxbytes.shape_facts(fbxbytes.read_fbx(path)) == shapes
+
+    def test_a_shapeless_scene_reports_no_shapes_block(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import export
+
+        cmds.polyCube(name="bs_plain")
+        path = str(tmp_path / "plain.fbx").replace("\\", "/")
+        result = export.export_fbx({"path": path, "metres_per_unit": 1.0})
+        assert result["shapes"] is None
+        assert result["mesh_count"] == 1
+
+    def test_skins_and_shapes_coexist_in_one_file(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import blendshape, export, rigging
+
+        base = cmds.ls(cmds.polyCube(name="bs_both")[0], long=True)[0]
+        target = cmds.ls(cmds.duplicate(base, name="bs_both_t")[0],
+                         long=True)[0]
+        cmds.move(0, 0.2, 0, target + ".vtx[0]", relative=True)
+        # Same test-authoring fix as test_front_of_chain_under_a_skin above:
+        # parent="bb_j1" added so this is one 2-joint skeleton, not two roots.
+        skeleton = rigging.create_skeleton({"joints": [
+            {"name": "bb_j1", "position": [0.0, 0.0, 0.0]},
+            {"name": "bb_j2", "position": [1.0, 0.0, 0.0],
+             "parent": "bb_j1"}]})
+        rigging.bind_skin({"mesh": base, "root": skeleton["root"]})
+        blendshape.create_blendshape({
+            "mesh": base,
+            "targets": [{"name": "fix", "target_mesh": target}]})
+        path = str(tmp_path / "both.fbx").replace("\\", "/")
+        result = export.export_fbx({"path": path, "metres_per_unit": 1.0,
+                                    "include_skins": True})
+        assert result["skin"]["deformers"] == 1
+        assert result["skin"]["clusters"] == 2
+        assert result["shapes"]["channels"] == 1
+        assert result["shapes"]["shapes"][0]["name"] == "fix"
