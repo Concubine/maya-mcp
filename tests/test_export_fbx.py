@@ -260,6 +260,31 @@ def test_a_deformer_with_no_clusters_names_the_missing_skeleton():
     assert "skeleton root" in out[0]
 
 
+def test_multi_deformer_totals_say_they_are_file_wide():
+    sfacts = {"deformers": 2, "clusters": 6, "influenced_models": 2,
+              "bind_pose_present": True, "unweighted_file_vertices": 3,
+              "max_weight_sum_error": None, "unavailable_reason": None}
+    out = export.skin_violations(sfacts)
+    assert any("file-wide" in v and "2 skin deformers" in v for v in out)
+
+
+def test_single_deformer_totals_stay_unqualified():
+    sfacts = {"deformers": 1, "clusters": 3, "influenced_models": 1,
+              "bind_pose_present": True, "unweighted_file_vertices": 3,
+              "max_weight_sum_error": None, "unavailable_reason": None}
+    out = export.skin_violations(sfacts)
+    assert not any("file-wide" in v for v in out)
+
+
+def test_no_cluster_message_reports_before_it_diagnoses():
+    sfacts = {"deformers": 1, "clusters": 0, "influenced_models": 0,
+              "bind_pose_present": True, "unweighted_file_vertices": 0,
+              "max_weight_sum_error": None, "unavailable_reason": None}
+    out = export.skin_violations(sfacts)
+    assert any("links no joints" in v and "one measured cause" in v
+               for v in out)
+
+
 def test_the_tolerance_clears_the_exporters_own_weight_pruning():
     # Maya's FBX exporter drops every weight below 1e-3 without renormalising,
     # so a vertex loses up to (influences - 1) x 1e-3 - one measured at

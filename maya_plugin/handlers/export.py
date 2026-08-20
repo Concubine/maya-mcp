@@ -193,24 +193,26 @@ def skin_violations(sfacts) -> List[str]:
             "nothing exported is bound")
         return out
     if sfacts["clusters"] == 0 or sfacts["influenced_models"] == 0:
-        # Measured: a selected export listing the mesh WITHOUT the skeleton
-        # root writes a deformer record with no clusters at all. Named
-        # separately because the symptom it produces downstream - every vertex
-        # unweighted - reads like a bad bind rather than a short selection.
+        # Reports the measurement first; the diagnosis is offered as the one
+        # cause this project has MEASURED (a selected export listing the mesh
+        # without the skeleton root), not asserted as the only one (#668
+        # review item b).
         out.append(
             "the file's skin deformer links no joints (%d clusters, %d "
-            "influenced models) - a selected export must list the skeleton "
-            "root alongside the mesh"
+            "influenced models); the one measured cause is a selected export "
+            "that lists the mesh without the skeleton root"
             % (sfacts["clusters"], sfacts["influenced_models"]))
         return out
     if not sfacts["bind_pose_present"]:
         out.append("the file holds no BindPose record")
+    scope = (" (across %d skin deformers - the count is file-wide, not per "
+             "mesh)" % sfacts["deformers"]) if sfacts["deformers"] > 1 else ""
     if sfacts["unweighted_file_vertices"]:
-        out.append("%d file vertices carry no weight"
-                   % sfacts["unweighted_file_vertices"])
+        out.append("%d file vertices carry no weight%s"
+                   % (sfacts["unweighted_file_vertices"], scope))
     err = sfacts["max_weight_sum_error"]
     if err is not None and err > WEIGHT_SUM_TOL:
-        out.append("per-vertex weight sums are off by up to %g" % err)
+        out.append("per-vertex weight sums are off by up to %g%s" % (err, scope))
     if sfacts["unavailable_reason"]:
         out.append("skin records unreadable: %s" % sfacts["unavailable_reason"])
     return out
