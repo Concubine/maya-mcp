@@ -819,7 +819,7 @@ def test_a_shape_less_export_reports_shapes_none(monkeypatch, tmp_path):
     facts.meshes = [(0.0, 0.0, 0.0, 1.0, 4.02173, 1.0)]
     facts.geometries = {7: facts.meshes[0]}
     cmds = FakeCmds()
-    mel = _install(monkeypatch, cmds, facts)
+    _install(monkeypatch, cmds, facts)
     # Default monkeypatch has empty shapes block (no channels, no shapes)
     monkeypatch.setattr(export.fbxbytes, "shape_facts",
                         lambda _f: {"blend_deformers": 0, "channels": 0,
@@ -840,7 +840,7 @@ def test_a_shaped_export_with_matching_alias_reports_the_block(
     facts.meshes = [(0.0, 0.0, 0.0, 1.0, 2.0, 1.0)]
     facts.geometries = {7: facts.meshes[0]}
     cmds = FakeCmds()
-    mel = _install(monkeypatch, cmds, facts)
+    _install(monkeypatch, cmds, facts)
     # Override FakeCmds to return a blendShape + alias for this test
     block = _good_shapes_block(["brow_raise"])
     monkeypatch.setattr(export.fbxbytes, "shape_facts", lambda _f: block)

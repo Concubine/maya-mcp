@@ -227,8 +227,8 @@ def main():
     check("weight 1 reproduces the wiring-time delta",
           abs(sweep[1.0] - deltas["brow_raise"]) < 1e-3,
           "sweep=%.4f wired=%.4f" % (sweep[1.0], deltas["brow_raise"]))
-    reset = ok("set_blendshape_weights",
-               {"mesh": "|" + MESH, "weights": {"brow_raise": 0.0}})
+    ok("set_blendshape_weights",
+       {"mesh": "|" + MESH, "weights": {"brow_raise": 0.0}})
     back = probe(store=False, what="after weight reset")
     check("all-zero weights IS the reset",
           back["max_disp"] < 1e-6, "residual=%.3g" % back["max_disp"])
@@ -252,12 +252,17 @@ def main():
     def dist(a, b):
         return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
 
-    bind_site = dist(at_pose["centroid"], BULGE_CENTER)
-    posed_site = dist(at_pose["centroid"], forearm_mid)
-    check("front-of-chain: the bulge rides the POSED forearm",
-          at_pose["centroid"] is not None and posed_site < bind_site,
-          "centroid=%s d(posed)=%.3f d(bind)=%.3f"
-          % (at_pose["centroid"], posed_site, bind_site))
+    centroid = at_pose["centroid"]
+    if centroid is None:
+        check("front-of-chain: the bulge rides the POSED forearm", False,
+              "centroid=None")
+    else:
+        bind_site = dist(centroid, BULGE_CENTER)
+        posed_site = dist(centroid, forearm_mid)
+        check("front-of-chain: the bulge rides the POSED forearm",
+              posed_site < bind_site,
+              "centroid=%s d(posed)=%.3f d(bind)=%.3f"
+              % (centroid, posed_site, bind_site))
 
     # ---- 5. reset BOTH currencies, then export skins + shapes together
     ok("set_blendshape_weights",
