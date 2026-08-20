@@ -407,6 +407,50 @@ found — a dry-run for "what would this pose take". `achieved_position` and
 all displacement numbers are re-read from the scene after the bake, never
 taken from the solver's claim.
 
+## Commands (rigging phase 4 / #676)
+
+| cmd | params | result |
+|---|---|---|
+| `author_physics` | `{ root | chunks, density?, overrides?, exclude? }` | `{ bodies: [{chunk, parent, mass, volume, signed_volume, com, watertight, open_edges, verts, tris, collider, joint}], density, total_volume, warnings }` |
+
+`author_physics` is **read-only** — no checkpoint, nothing in the scene
+changes. It MEASURES per-chunk physics-body data: `volume` is the
+tetra-summed closed-mesh volume (|signed|; a negative `signed_volume`
+means inward winding and warns), `com` is the tetra-weighted SOLID centre
+of mass — the sculpt's, never a bbox centre or a vertex average — and
+`mass = |volume| × density`, where `density` defaults to 1.0 so mass
+numerically equals volume (deliberate: the handoff ships volumes, masses
+are abstract, the engine owns the real constant). Non-watertight meshes
+are detected by boundary-edge count (`open_edges`) and warned: the volume
+reading is then unreliable, and it says so instead of guessing.
+
+`collider` is ONE primitive per body — `box`, `sphere` or `capsule`,
+chosen by extent ratios in the mesh's own principal frame (fits are
+rotated; `rotation_deg` is the frame's XYZ euler) — with honesty
+MEASURED: `volume_ratio` (primitive/|mesh|) and `max_escape` (furthest
+vertex outside). Thresholds for the poor-fit warnings are derived from
+the delivered golem's own worst fits (2.35 / 9.13% of bbox diagonal). A
+bad fit is a warning with numbers, never a second primitive.
+
+`joint` is the motion handoff's swing/twist cone. Limits are DESIGN
+INTENT — never scene-measurable — and arrive via
+`overrides = {chunk: {hinge_axis, hinge_range_deg, twist_range_deg?,
+parent?}}`. Conversion is the knee rule verbatim: axis along the hinge,
+`swing2 = 0`, `swing1 = (hi−lo)/2` covering the flex arc, twist locked
+near zero (default `[0, 0]`), and `swing_centre_deg = (lo+hi)/2` placing
+the arc so a one-sided range puts neutral at the extreme —
+no-hyperextension as the range's own asymmetry. A parented chunk without
+an override gets an explicit LOCKED joint plus a warning; a parentless
+chunk gets `joint: null`. `parent` defaults to the nearest mesh-bearing
+ancestor in the chunk set; flat-sibling destruction rigs supply it via
+overrides, because there parenthood is design intent too.
+
+Validation is ANALYTIC, not simulated (#675): degenerate volumes,
+rest-pose-excluding ranges, multiple parentless bodies and every override
+problem are warnings or refusals. Collider interpenetration at bind is
+deliberately NOT checked — adjacent destruction chunks legitimately
+interpenetrate at their shared joint, so that warning would always fire.
+
 ## Delivery
 
 | cmd | params | result |
