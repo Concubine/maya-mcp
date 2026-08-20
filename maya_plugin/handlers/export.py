@@ -27,6 +27,7 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..dispatcher import HandlerError
+from . import clip as clip_mod
 from . import fbxbytes
 
 # The five statements, in order, with FBXResetExport first so no setting from a
@@ -94,6 +95,20 @@ FBX_SKINS_MEL = {
 # shapes. Both states are never composed because there is no false state -
 # the determinism argument collapses to one line.
 FBX_SHAPES_MEL: Tuple[str, ...] = ("FBXExportShapes -v true",)
+
+# Animation export, both states explicit so FBXResetExport's defaults never
+# decide it. OFF is pinned as hard as ON (#695 design decision): a scene
+# CARRYING curves exported with include_animation=false must be
+# byte-equivalent to a static export - the byte gate asserts zero curve
+# records in that case, the symmetric assertion. The bake range (start/end)
+# and take naming are per-call values, composed in export_fbx.
+FBX_ANIM_MEL = {
+    True: ('FBXProperty "Export|IncludeGrp|Animation" -v true',
+           "FBXExportBakeComplexAnimation -v true",
+           "FBXExportBakeComplexStep -v 1"),
+    False: ('FBXProperty "Export|IncludeGrp|Animation" -v false',
+            "FBXExportBakeComplexAnimation -v false"),
+}
 
 # A file-side weight sum further than this from 1.0 was not normalised and will
 # deform differently in every consumer.
@@ -274,7 +289,94 @@ def shape_violations(sfacts, declared: List[str]) -> List[str]:
     return out
 
 
-def _validate(params: Dict[str, Any]) -> Tuple[str, Optional[List[str]], bool]:
+def _scene_clip(cmds):
+    """The clip metadata maya_author_clip stamped, or None. More than one
+    clip-carrying root refuses: one clip at a time is per-skeleton, and one
+    FILE is one take - exporting two at once has no honest take name."""
+    roots = [j for j in cmds.ls(type="joint", long=True) or []
+             if cmds.attributeQuery(clip_mod.CLIP_ATTR, node=j, exists=True)]
+    if not roots:
+        return None
+    if len(roots) > 1:
+        raise HandlerError(
+            "%d skeletons carry a clip (%s) - one file is one take"
+            % (len(roots), ", ".join(r.split("|")[-1] for r in roots)),
+            hint="delete_clip the skeletons not being exported")
+    meta = clip_mod.clip_meta(cmds, roots[0]) or {}
+    meta["root"] = roots[0].split("|")[-1]
+    return meta
+
+
+def anim_violations(afacts, declared) -> List[str]:
+    """Ways the animation records break the include_animation contract.
+
+    declared=None means include_animation was FALSE: the file must carry
+    ZERO curve records even when the scene is animated - the symmetric
+    assertion that keeps static exports of animated scenes byte-honest.
+    Extra targets are NOT violations (the shape_violations precedent);
+    missing declared ones are.
+    """
+    out: List[str] = []
+    if declared is None:
+        if afacts["curves"] or afacts["curve_nodes"]:
+            out.append(
+                "the file carries %d animation curves without "
+                "include_animation - the animation pin failed"
+                % afacts["curves"])
+        return out
+    if afacts["unavailable_reason"]:
+        out.append("animation records unreadable: %s"
+                   % afacts["unavailable_reason"])
+    if len(afacts["takes"]) != 1:
+        out.append("the file carries %d takes, expected exactly 1"
+                   % len(afacts["takes"]))
+    else:
+        take = afacts["takes"][0]
+        if take["name"] != declared["name"]:
+            out.append("the take is named %r, the clip is %r"
+                       % (take["name"], declared["name"]))
+        tol = 1.0 / declared["fps"]
+        if (take["duration_s"] is None
+                or abs(take["duration_s"] - declared["duration_s"]) > tol):
+            out.append(
+                "the take's duration is %s s, the clip declares %g s"
+                % (take["duration_s"], declared["duration_s"]))
+    expected = int(round(declared["duration_s"] * declared["fps"])) + 1
+    by = {}
+    for t in afacts["targets"]:
+        by.setdefault((t["target"], t["property"]), t)
+    for joint in declared["joints"]:
+        t = by.get((joint, "Lcl Rotation"))
+        if t is None:
+            out.append("joint %r has no rotation curves in the file" % joint)
+            continue
+        if t["curves"] != 3:
+            out.append("joint %r carries %d curve(s), expected 3 (X, Y, Z)"
+                       % (joint, t["curves"]))
+        if t["key_count"] != expected:
+            out.append("joint %r bakes %s keys, expected %d"
+                       % (joint, t["key_count"], expected))
+    if declared.get("root_position_used"):
+        t = by.get((declared["root"], "Lcl Translation"))
+        if t is None:
+            out.append("the clip keys the root's position but the file "
+                       "carries no root translation curves")
+        elif t["key_count"] != expected:
+            out.append("root translation bakes %s keys, expected %d"
+                       % (t["key_count"], expected))
+    for alias in declared.get("weight_channels", []):
+        t = by.get((alias, "DeformPercent"))
+        if t is None:
+            out.append("weight channel %r has no curves in the file" % alias)
+        elif (t["key_count"] or 0) < 2:
+            out.append("weight channel %r carries %s key(s), expected at "
+                       "least 2" % (alias, t["key_count"]))
+    return out
+
+
+def _validate(
+    params: Dict[str, Any],
+) -> Tuple[str, Optional[List[str]], bool, bool]:
     """Check every parameter before touching Maya. A bad call must cost nothing."""
     path = params.get("path")
     if not isinstance(path, str) or not path.strip():
@@ -328,6 +430,14 @@ def _validate(params: Dict[str, Any]) -> Tuple[str, Optional[List[str]], bool]:
             hint="true exports skinCluster deformers and the BindPose "
                  "alongside the mesh")
 
+    include_animation = params.get("include_animation", False)
+    if not isinstance(include_animation, bool):
+        raise HandlerError(
+            "include_animation must be true or false, got %r"
+            % (include_animation,),
+            hint="true bakes the authored clip to per-frame curves and "
+                 "names the take after it")
+
     nodes = params.get("nodes")
     if nodes is not None:
         if not isinstance(nodes, list) or not all(isinstance(n, str) for n in nodes):
@@ -339,7 +449,7 @@ def _validate(params: Dict[str, Any]) -> Tuple[str, Optional[List[str]], bool]:
             raise HandlerError(
                 "nodes is an empty list, which would export nothing",
                 hint="omit nodes entirely to export the whole scene")
-    return path, nodes, include_skins
+    return path, nodes, include_skins, include_animation
 
 
 def _cmds():
@@ -376,7 +486,7 @@ def _bounds(facts):
 
 
 def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
-    path, nodes, include_skins = _validate(params)
+    path, nodes, include_skins, include_animation = _validate(params)
     cmds = _cmds()
     mel = _mel()
 
@@ -389,11 +499,30 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
                      "the scene actually contains")
 
     declared_shapes = _scene_shape_aliases(cmds, nodes)
+    declared_clip = _scene_clip(cmds) if include_animation else None
+    if include_animation and declared_clip is None:
+        raise HandlerError(
+            "include_animation=true but no clip exists",
+            hint="author_clip keys the motion first; a static export needs "
+                 "no flag at all")
 
     cmds.loadPlugin("fbxmaya", quiet=True)
     for statement in (FBX_PREAMBLE_MEL + FBX_SCENE_CONTENT_MEL
-                      + FBX_SHAPES_MEL + FBX_SKINS_MEL[include_skins]):
+                      + FBX_SHAPES_MEL + FBX_SKINS_MEL[include_skins]
+                      + FBX_ANIM_MEL[include_animation]):
         mel.eval(statement)
+    if include_animation:
+        end_frame = int(round(declared_clip["duration_s"]
+                              * declared_clip["fps"]))
+        mel.eval("FBXExportBakeComplexStart -v 0")
+        mel.eval("FBXExportBakeComplexEnd -v %d" % end_frame)
+        # The take is NAMED AFTER THE CLIP. Maya's default take name is its
+        # own; SplitAnimationIntoTakes overrides it - MEASURED under mayapy
+        # (TestClipExportInMaya). If that measurement finds a different
+        # mechanism, fix it there and record the measured behavior.
+        mel.eval("FBXExportSplitAnimationIntoTakes -clear")
+        mel.eval('FBXExportSplitAnimationIntoTakes -v "%s" 0 %d'
+                 % (declared_clip["name"], end_frame))
     # A bare float. The `-v` form raises, and both delivery generators used to
     # swallow that inside `except Exception: pass`.
     mel.eval("FBXExportScaleFactor %g" % EXPORT_SCALE_FACTOR)
@@ -459,6 +588,14 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
         "shaped mesh itself - shapes travel with their mesh, and a "
         "selection that lists only other nodes leaves them behind."
         if shape_bad else "")
+    anim_block = fbxbytes.anim_facts(facts)
+    anim_bad = anim_violations(anim_block,
+                               declared_clip if include_animation else None)
+    violations += anim_bad
+    anim_hint = (
+        " For animation violations: the clip must exist (maya_author_clip) "
+        "and a selected export ('nodes') must include the skeleton root - "
+        "curves travel with their joints." if anim_bad else "")
     if violations:
         try:
             os.unlink(tmp_path)
@@ -477,7 +614,7 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
                      "unit means one metre (linear_unit 'cm' in this repo's "
                      "convention). Deletion itself failed - remove %s by hand "
                      "before it reaches a delivery" % tmp_path
-                     + skin_hint + shape_hint) from unlink_exc
+                     + skin_hint + shape_hint + anim_hint) from unlink_exc
         raise HandlerError(
             "the exported FBX failed the unit gate and was never written to "
             "%s - the temp file was deleted, and any pre-existing file at "
@@ -488,7 +625,7 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
                  "means one metre (linear_unit 'cm' in this repo's convention). "
                  "Nothing reaches %s until it passes - a wrong file on disk is "
                  "how maya-mcp #629 reached three deliveries" % path
-                 + skin_hint + shape_hint)
+                 + skin_hint + shape_hint + anim_hint)
 
     # Only now, with the gate passed, does the real path get touched.
     os.replace(tmp_path, path)
@@ -510,4 +647,5 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
         "skin": skin_block,
         "shapes": (shapes_block
                    if declared_shapes or shapes_block["channels"] else None),
+        "animation": anim_block if include_animation else None,
     }

@@ -341,11 +341,13 @@ def _params(tmp_path, **over):
 
 
 def test_a_good_call_normalises_the_path(tmp_path):
-    path, nodes, include_skins = export._validate(_params(tmp_path))
+    path, nodes, include_skins, include_animation = export._validate(
+        _params(tmp_path))
     assert path.endswith("/out.fbx")
     assert "\\" not in path
     assert nodes is None
     assert include_skins is False
+    assert include_animation is False
 
 
 def test_metres_per_unit_has_no_default(tmp_path):
@@ -399,7 +401,7 @@ def test_an_empty_node_list_is_refused(tmp_path):
 
 
 def test_a_node_list_survives_validation(tmp_path):
-    _path, nodes, _skins = export._validate(
+    _path, nodes, _skins, _anim = export._validate(
         _params(tmp_path, nodes=["golem_C_pelvis"]))
     assert nodes == ["golem_C_pelvis"]
 
@@ -498,6 +500,7 @@ def test_a_clean_export_reports_the_file_not_the_scene(monkeypatch, tmp_path):
                              + list(export.FBX_SCENE_CONTENT_MEL)
                              + list(export.FBX_SHAPES_MEL)
                              + list(export.FBX_SKINS_MEL[False])
+                             + list(export.FBX_ANIM_MEL[False])
                              + ["FBXExportScaleFactor 1"])
     # The unit declaration must actually be patched, on the exact file just
     # written - which is the TEMP file, not the final path: the write and
@@ -896,3 +899,112 @@ def test_the_tool_is_exposed():
     # Named for the format it writes. #640 is open about naming papercuts and a
     # bare maya_export would promise OBJ and USD this tool does not have.
     assert "def maya_export(" not in source
+
+
+class TestAnimViolations:
+    """#695: the include_animation contract, judged from the BYTES against
+    what the SCENE's clip metadata declared."""
+
+    def _declared(self):
+        return {"name": "walk", "fps": 30, "duration_s": 1.0,
+                "root": "pelvis", "joints": ["L_hip"],
+                "weight_channels": ["blink"], "root_position_used": True}
+
+    def _clean(self):
+        return {"stacks": 1, "layers": 1, "curves": 7, "curve_nodes": 3,
+                "takes": [{"name": "walk", "duration_s": 1.0}],
+                "targets": [
+                    {"target": "L_hip", "property": "Lcl Rotation",
+                     "curves": 3, "key_count": 31, "duration_s": 1.0},
+                    {"target": "pelvis", "property": "Lcl Translation",
+                     "curves": 3, "key_count": 31, "duration_s": 1.0},
+                    {"target": "blink", "property": "DeformPercent",
+                     "curves": 1, "key_count": 5, "duration_s": 1.0},
+                ],
+                "unavailable_reason": None}
+
+    def test_a_matching_file_passes(self):
+        assert export.anim_violations(self._clean(), self._declared()) == []
+
+    def test_include_animation_false_asserts_zero_curves(self):
+        empty = {"stacks": 0, "layers": 0, "curves": 0, "curve_nodes": 0,
+                 "takes": [], "targets": [], "unavailable_reason": None}
+        assert export.anim_violations(empty, None) == []
+        out = export.anim_violations(self._clean(), None)
+        assert any("include_animation" in v for v in out)
+
+    def test_take_name_and_duration_gate(self):
+        afacts = self._clean()
+        afacts["takes"] = [{"name": "Take 001", "duration_s": 1.0}]
+        out = export.anim_violations(afacts, self._declared())
+        assert any("Take 001" in v and "'walk'" in v for v in out)
+        afacts = self._clean()
+        afacts["takes"][0]["duration_s"] = 0.5
+        out = export.anim_violations(afacts, self._declared())
+        assert any("duration" in v for v in out)
+        afacts = self._clean()
+        afacts["takes"] = []
+        out = export.anim_violations(afacts, self._declared())
+        assert any("0 takes" in v for v in out)
+
+    def test_missing_and_miscounted_joint_curves_fail(self):
+        afacts = self._clean()
+        afacts["targets"] = [t for t in afacts["targets"]
+                             if t["target"] != "L_hip"]
+        out = export.anim_violations(afacts, self._declared())
+        assert any("L_hip" in v and "no rotation curves" in v for v in out)
+        afacts = self._clean()
+        afacts["targets"][0]["key_count"] = 30
+        out = export.anim_violations(afacts, self._declared())
+        assert any("L_hip" in v and "31" in v and "30" in v for v in out)
+        afacts = self._clean()
+        afacts["targets"][0]["curves"] = 2
+        out = export.anim_violations(afacts, self._declared())
+        assert any("L_hip" in v and "2 curve" in v for v in out)
+
+    def test_root_translation_gates_only_when_used(self):
+        afacts = self._clean()
+        afacts["targets"] = [t for t in afacts["targets"]
+                             if t["property"] != "Lcl Translation"]
+        out = export.anim_violations(afacts, self._declared())
+        assert any("root" in v and "translation" in v for v in out)
+        declared = dict(self._declared(), root_position_used=False)
+        assert export.anim_violations(afacts, declared) == []
+
+    def test_weight_channels_gate_presence_not_count(self):
+        # Whether Maya bakes DeformPercent curves or carries them as
+        # authored is a mayapy measurement (contract decision 10) - so the
+        # gate is presence + >=2 keys, never a full frame count.
+        afacts = self._clean()
+        afacts["targets"] = [t for t in afacts["targets"]
+                             if t["property"] != "DeformPercent"]
+        out = export.anim_violations(afacts, self._declared())
+        assert any("blink" in v for v in out)
+        afacts = self._clean()
+        afacts["targets"][2]["key_count"] = 1
+        out = export.anim_violations(afacts, self._declared())
+        assert any("blink" in v and "1 key" in v for v in out)
+
+    def test_extra_targets_are_not_violations(self):
+        afacts = self._clean()
+        afacts["targets"].append(
+            {"target": "hand_keyed", "property": "Lcl Rotation",
+             "curves": 3, "key_count": 31, "duration_s": 1.0})
+        assert export.anim_violations(afacts, self._declared()) == []
+
+    def test_unreadable_records_fail(self):
+        afacts = self._clean()
+        afacts["unavailable_reason"] = "curve node 'T' drives nothing"
+        out = export.anim_violations(afacts, self._declared())
+        assert any("unreadable" in v for v in out)
+
+    def test_the_anim_preamble_is_pinned_both_ways(self):
+        assert export.FBX_ANIM_MEL[False] == (
+            'FBXProperty "Export|IncludeGrp|Animation" -v false',
+            "FBXExportBakeComplexAnimation -v false",
+        )
+        assert export.FBX_ANIM_MEL[True] == (
+            'FBXProperty "Export|IncludeGrp|Animation" -v true',
+            "FBXExportBakeComplexAnimation -v true",
+            "FBXExportBakeComplexStep -v 1",
+        )
