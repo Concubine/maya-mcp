@@ -87,6 +87,14 @@ FBX_SKINS_MEL = {
     False: ("FBXExportSkins -v false",),
 }
 
+# Shape export pinned ON, always, with no caller-facing knob (#691 design
+# decision): morph targets simply ride along whenever a blendShape exists. A
+# scene without one writes no Shape records either way (pinned under mayapy),
+# so the only scenes the pin affects are the ones whose authors want their
+# shapes. Both states are never composed because there is no false state -
+# the determinism argument collapses to one line.
+FBX_SHAPES_MEL: Tuple[str, ...] = ("FBXExportShapes -v true",)
+
 # A file-side weight sum further than this from 1.0 was not normalised and will
 # deform differently in every consumer.
 #
@@ -218,6 +226,54 @@ def skin_violations(sfacts) -> List[str]:
     return out
 
 
+def _scene_shape_aliases(cmds, nodes) -> List[str]:
+    """Weight aliases of every blendShape reachable from the exported
+    meshes - what the FILE must now carry. A selected export walks its own
+    `nodes` (DAG-expanded, so a group export finds its children); a
+    whole-scene export walks every non-intermediate mesh shape."""
+    if nodes:
+        shapes = cmds.ls(nodes, dagObjects=True, type="mesh",
+                         long=True, noIntermediate=True) or []
+    else:
+        shapes = cmds.ls(type="mesh", long=True, noIntermediate=True) or []
+    aliases: List[str] = []
+    for shape in shapes:
+        for bs in cmds.ls(cmds.listHistory(shape, pruneDagObjects=True)
+                          or [], type="blendShape") or []:
+            for alias in cmds.listAttr(bs + ".w", multi=True) or []:
+                if alias not in aliases:
+                    aliases.append(alias)
+    return aliases
+
+
+def shape_violations(sfacts, declared: List[str]) -> List[str]:
+    """Ways the file's Shape records break the shapes-ride-along contract.
+
+    `declared` is what the scene authored (the weight aliases); the file
+    must carry each as a channel with a non-empty, self-consistent delta
+    payload. Extra channels the scene did not declare are NOT a violation -
+    a hand-built blendShape made outside this tool still deserves to
+    export."""
+    out: List[str] = []
+    names = [s["name"] for s in sfacts["shapes"]]
+    missing = [a for a in declared if a not in names]
+    if missing:
+        out.append(
+            "the scene's blendShape target(s) %s are absent from the file "
+            "(it carries: %s)"
+            % (", ".join(missing), ", ".join(names) or "none"))
+    for s in sfacts["shapes"]:
+        if s["points"] == 0:
+            out.append("shape %r carries no delta vertices" % s["name"])
+        elif s["indexes"] != s["points"]:
+            out.append("shape %r holds %d indexes but %d delta points"
+                       % (s["name"], s["indexes"], s["points"]))
+    if sfacts["unavailable_reason"]:
+        out.append("shape records unreadable: %s"
+                   % sfacts["unavailable_reason"])
+    return out
+
+
 def _validate(params: Dict[str, Any]) -> Tuple[str, Optional[List[str]], bool]:
     """Check every parameter before touching Maya. A bad call must cost nothing."""
     path = params.get("path")
@@ -332,9 +388,11 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
                 hint="names are case-sensitive; maya_get_scene_graph lists what "
                      "the scene actually contains")
 
+    declared_shapes = _scene_shape_aliases(cmds, nodes)
+
     cmds.loadPlugin("fbxmaya", quiet=True)
     for statement in (FBX_PREAMBLE_MEL + FBX_SCENE_CONTENT_MEL
-                      + FBX_SKINS_MEL[include_skins]):
+                      + FBX_SHAPES_MEL + FBX_SKINS_MEL[include_skins]):
         mel.eval(statement)
     # A bare float. The `-v` form raises, and both delivery generators used to
     # swallow that inside `except Exception: pass`.
@@ -393,6 +451,14 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
         " For skin violations: the mesh must be bound (maya_bind_skin reported "
         "unweighted_vertices=0) and a selected export ('nodes') must list the "
         "skeleton root alongside the mesh." if skin_bad else "")
+    shapes_block = fbxbytes.shape_facts(facts)
+    shape_bad = shape_violations(shapes_block, declared_shapes)
+    violations += shape_bad
+    shape_hint = (
+        " For shape violations: the exported selection must include the "
+        "shaped mesh itself - shapes travel with their mesh, and a "
+        "selection that lists only other nodes leaves them behind."
+        if shape_bad else "")
     if violations:
         try:
             os.unlink(tmp_path)
@@ -411,7 +477,7 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
                      "unit means one metre (linear_unit 'cm' in this repo's "
                      "convention). Deletion itself failed - remove %s by hand "
                      "before it reaches a delivery" % tmp_path
-                     + skin_hint) from unlink_exc
+                     + skin_hint + shape_hint) from unlink_exc
         raise HandlerError(
             "the exported FBX failed the unit gate and was never written to "
             "%s - the temp file was deleted, and any pre-existing file at "
@@ -422,7 +488,7 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
                  "means one metre (linear_unit 'cm' in this repo's convention). "
                  "Nothing reaches %s until it passes - a wrong file on disk is "
                  "how maya-mcp #629 reached three deliveries" % path
-                 + skin_hint)
+                 + skin_hint + shape_hint)
 
     # Only now, with the gate passed, does the real path get touched.
     os.replace(tmp_path, path)
@@ -442,4 +508,6 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
         "height_m": height,
         "bounds_unavailable_reason": bounds_unavailable_reason,
         "skin": skin_block,
+        "shapes": (shapes_block
+                   if declared_shapes or shapes_block["channels"] else None),
     }

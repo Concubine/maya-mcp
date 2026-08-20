@@ -430,6 +430,20 @@ class FakeCmds:
         with open(path, "wb") as fh:
             fh.write(b"not really an fbx")
 
+    def ls(self, nodes=None, **kw):
+        """Stub for listing objects. For shape-less test scenes, return empty."""
+        # The fake cmds needs to support ls calls for _scene_shape_aliases.
+        # By default, return empty list (no shapes/blendShapes in test scenes).
+        return []
+
+    def listHistory(self, node, **kw):
+        """Stub for listHistory. For shape-less test scenes, return empty."""
+        return []
+
+    def listAttr(self, attr, **kw):
+        """Stub for listAttr. For shape-less test scenes, return empty."""
+        return []
+
 
 class FakeMel:
     def __init__(self):
@@ -482,6 +496,7 @@ def test_a_clean_export_reports_the_file_not_the_scene(monkeypatch, tmp_path):
     # the factor last.
     assert mel.evaluated == (list(export.FBX_PREAMBLE_MEL)
                              + list(export.FBX_SCENE_CONTENT_MEL)
+                             + list(export.FBX_SHAPES_MEL)
                              + list(export.FBX_SKINS_MEL[False])
                              + ["FBXExportScaleFactor 1"])
     # The unit declaration must actually be patched, on the exact file just
@@ -740,6 +755,53 @@ def test_the_result_model_tolerates_a_geometryless_export():
         "unit_scale_factor": 100.0, "metres_per_unit": 1.0,
     })
     assert result.height_m is None
+
+
+class TestShapeViolations:
+    """#691: the shapes-ride-along contract, judged from the BYTES against
+    what the SCENE declared."""
+
+    def _clean(self, names=("brow_raise",)):
+        return {"blend_deformers": 1, "channels": len(names),
+                "shapes": [{"name": n, "points": 6, "indexes": 6}
+                           for n in names],
+                "unavailable_reason": None}
+
+    def test_a_matching_file_passes(self):
+        assert export.shape_violations(self._clean(), ["brow_raise"]) == []
+
+    def test_nothing_declared_nothing_carried_passes(self):
+        empty = {"blend_deformers": 0, "channels": 0, "shapes": [],
+                 "unavailable_reason": None}
+        assert export.shape_violations(empty, []) == []
+
+    def test_a_declared_target_missing_from_the_file_fails(self):
+        out = export.shape_violations(self._clean(), ["brow_raise",
+                                                      "bulge_up"])
+        assert any("bulge_up" in v and "absent" in v for v in out)
+
+    def test_an_empty_delta_payload_fails(self):
+        sfacts = self._clean()
+        sfacts["shapes"][0]["points"] = 0
+        out = export.shape_violations(sfacts, ["brow_raise"])
+        assert any("no delta vertices" in v for v in out)
+
+    def test_an_index_point_mismatch_fails(self):
+        sfacts = self._clean()
+        sfacts["shapes"][0]["indexes"] = 4
+        out = export.shape_violations(sfacts, ["brow_raise"])
+        assert any("6" in v and "4" in v for v in out)
+
+    def test_unreadable_records_fail(self):
+        sfacts = self._clean()
+        sfacts["unavailable_reason"] = "channel 'x' links no shape geometry"
+        out = export.shape_violations(sfacts, ["brow_raise"])
+        assert any("unreadable" in v for v in out)
+
+    def test_the_preamble_now_pins_shapes_on(self):
+        assert export.FBX_SHAPES_MEL == ("FBXExportShapes -v true",)
+        # ...and the delivery generators' composed preamble is untouched:
+        # FBX_PREAMBLE_MEL is pinned byte-for-byte elsewhere in this file.
 
 
 def test_the_tool_is_exposed():
