@@ -2822,3 +2822,42 @@ class TestPoseIkInMaya:
                                "target": self.TARGET, "pole": self.POLE})
         assert out["max_displacement"] > 0.05
         assert out["per_mesh"] and out["per_mesh"][0]["displaced_vertices"] > 0
+
+    # regression (#671 final review): every other test in this class solves a
+    # 3-joint chain (one interior joint). `start` exists precisely so a
+    # caller can reach past the default two-joints-up and solve a longer
+    # run - a serpent spine segment - so one test has to actually build a
+    # chain with more than one interior joint and pass `start` explicitly.
+    SPINE = [
+        {"name": "sp_root", "position": [0.10, 0.95, 0.0]},
+        {"name": "sp_1", "position": [0.10, 0.80, 0.0], "parent": "sp_root"},
+        {"name": "sp_2", "position": [0.10, 0.65, 0.0], "parent": "sp_1"},
+        {"name": "sp_3", "position": [0.10, 0.50, 0.0], "parent": "sp_2"},
+        {"name": "sp_4", "position": [0.10, 0.35, 0.0], "parent": "sp_3"},
+        {"name": "sp_5", "position": [0.10, 0.20, 0.0], "parent": "sp_4"},
+    ]
+    SPINE_TARGET = [0.10, 0.50, 0.35]   # reachable: 0.461 of a 0.60 reach
+    SPINE_POLE = [0.10, 0.50, 1.0]      # spine folds toward world +Z
+
+    def test_long_chain_with_explicit_start_solves_past_two_joints_up(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import rigging
+
+        spine_root = rigging.create_skeleton({"joints": self.SPINE})["root"]
+        out = rigging.pose_ik({"root": spine_root, "start": "sp_1",
+                               "joint": "sp_5", "target": self.SPINE_TARGET,
+                               "pole": self.SPINE_POLE})
+        assert out["chain"] == [
+            "|sp_root|sp_1", "|sp_root|sp_1|sp_2", "|sp_root|sp_1|sp_2|sp_3",
+            "|sp_root|sp_1|sp_2|sp_3|sp_4",
+            "|sp_root|sp_1|sp_2|sp_3|sp_4|sp_5"], out["chain"]
+        assert out["residual"] < 1e-3, out
+        for axis in range(3):
+            assert abs(out["achieved_position"][axis]
+                       - self.SPINE_TARGET[axis]) < 2e-3
+        # no persistent IK state, same purity bar as the short-chain solve
+        assert not cmds.ls(type="ikHandle")
+        assert not cmds.ls(type="ikEffector")
+        assert not cmds.ls(type="poleVectorConstraint")
+        assert not cmds.ls("*_pole", type="transform")

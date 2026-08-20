@@ -942,33 +942,42 @@ def pose_ik(params: Dict[str, Any]) -> Dict[str, Any]:
                          units.degrees_to_ui(cmds, triple[1]),
                          units.degrees_to_ui(cmds, triple[2]))
 
-    handle, effector = cmds.ikHandle(
-        startJoint=start, endEffector=end, solver=IK_SOLVER,
-        name=naming.unique_name(cmds, _short(end) + "_ikh"))
-    locator = None
-    if pole_used is not None:
-        locator = cmds.spaceLocator(
-            name=naming.unique_name(cmds, _short(end) + "_pole"))[0]
-        cmds.xform(locator, worldSpace=True, translation=pole_used)
-        cmds.poleVectorConstraint(locator, handle)
-    cmds.xform(handle, worldSpace=True, translation=target)
-
-    # Reading the effector's world position pulls the IK evaluation; the
-    # solved joint rotations are then plain attribute reads, in degrees
-    # (#636's unit rule).
-    cmds.xform(end, query=True, worldSpace=True, translation=True)
+    # #671 final review: the transient IK window (handle, effector, pole
+    # locator, plus the seeded .preferredAngle) must never survive an
+    # exception, or the "no persistent IK state ever exists" promise breaks
+    # on the error path. try/finally guarantees the restore and the delete
+    # run even if a Maya call in between raises; the finally re-checks
+    # objExists per node exactly like the success path always has, so a
+    # partially-built window (e.g. the handle failed before the locator was
+    # made) cleans up only what actually exists and never raises itself,
+    # which would mask the original exception.
+    handle = effector = locator = None
     baked: Dict[str, List[float]] = {}
-    for j in chain:
-        raw = cmds.getAttr(j + ".rotate")[0]
-        baked[j] = [round(units.ui_to_degrees(cmds, v), 6) for v in raw]
+    try:
+        handle, effector = cmds.ikHandle(
+            startJoint=start, endEffector=end, solver=IK_SOLVER,
+            name=naming.unique_name(cmds, _short(end) + "_ikh"))
+        if pole_used is not None:
+            locator = cmds.spaceLocator(
+                name=naming.unique_name(cmds, _short(end) + "_pole"))[0]
+            cmds.xform(locator, worldSpace=True, translation=pole_used)
+            cmds.poleVectorConstraint(locator, handle)
+        cmds.xform(handle, worldSpace=True, translation=target)
 
-    for j, angle in prior_preferred.items():
-        cmds.setAttr(j + ".preferredAngle", angle[0], angle[1], angle[2])
-
-    doomed = [n for n in (handle, effector, locator)
-              if n and cmds.objExists(n)]
-    if doomed:
-        cmds.delete(*doomed)
+        # Reading the effector's world position pulls the IK evaluation;
+        # the solved joint rotations are then plain attribute reads, in
+        # degrees (#636's unit rule).
+        cmds.xform(end, query=True, worldSpace=True, translation=True)
+        for j in chain:
+            raw = cmds.getAttr(j + ".rotate")[0]
+            baked[j] = [round(units.ui_to_degrees(cmds, v), 6) for v in raw]
+    finally:
+        for j, angle in prior_preferred.items():
+            cmds.setAttr(j + ".preferredAngle", angle[0], angle[1], angle[2])
+        doomed = [n for n in (handle, effector, locator)
+                  if n and cmds.objExists(n)]
+        if doomed:
+            cmds.delete(*doomed)
     # The bake: deleting a handle can snap joints back, so the solved values
     # are re-applied as plain FK - the same currency pose_skeleton speaks.
     for j in chain:

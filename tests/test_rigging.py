@@ -785,6 +785,25 @@ class TestPoseIk:
         assert fake.attrs["|pelvis|hip|knee.preferredAngle"] == [(0.0, 0.0, 0.0)], (
             "the final preferredAngle must restore to the prior value")
 
+    def test_error_inside_the_solve_window_still_cleans_up(self, fake, monkeypatch):
+        # regression (#671 final review): a RuntimeError anywhere between
+        # ikHandle creation and the doomed-node delete must not leave the
+        # handle, effector, pole locator, or a seeded .preferredAngle behind
+        # - "no persistent IK state ever exists" has to hold on the error
+        # path too, not just the success path.
+        self._rig(fake, bent=False)   # prebend path also seeds preferredAngle
+        def boom(*a, **kw):
+            raise RuntimeError("maya blew up mid-solve")
+        monkeypatch.setattr(fake, "poleVectorConstraint", boom)
+        with pytest.raises(RuntimeError, match="maya blew up mid-solve"):
+            rigging.pose_ik({"root": "pelvis", "joint": "ankle",
+                             "target": [0.1, 0.6, 0.2], "pole": [0.1, 0.5, 0.5]})
+        assert not any("ikh" in o or "pole" in o for o in fake.objects), (
+            "the handle, effector, or pole locator survived the exception")
+        assert fake.attrs["|pelvis|hip|knee.preferredAngle"] == [(0.0, 0.0, 0.0)], (
+            "the preferredAngle seed must be restored even when the solve "
+            "never finished")
+
     def test_out_of_reach_target_warns_with_the_reach(self, fake):
         self._rig(fake)
         out = rigging.pose_ik({"root": "pelvis", "joint": "ankle",
