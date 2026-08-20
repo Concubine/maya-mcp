@@ -20,17 +20,37 @@ import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # --- classification constants ------------------------------------------------
-# Kind selection runs: capsule (elongated, round cross-section) first, then
-# box-by-fill, then sphere, else box. The fill landmarks are geometric, not
-# tuned: a solid box fills 1.0 of its principal box, an axis-aligned
-# cylinder pi/4 ~ 0.785 (but capsules are claimed before fill is consulted),
-# a ball pi/6 ~ 0.524. BOX_FILL_MIN sits between ball and cylinder. Task 3
-# re-measures these against real Maya tessellations and the live gate
-# against the delivered golem; any adjustment lands with the measured
-# extents recorded in the SDD findings.
+# Kind selection runs: capsule (elongated, round cross-section, NOT
+# box-filling) first, then box-by-fill, then sphere, else box. The fill
+# landmarks are geometric, not tuned: a solid box fills 1.0 of its
+# principal box, an axis-aligned cylinder pi/4 ~ 0.785, a ball pi/6 ~
+# 0.524. BOX_FILL_MIN sits between ball and cylinder. CAPSULE_FILL_MAX
+# gates the capsule branch separately, just above the plain-cylinder
+# landmark (a real capsule's rounded caps can only fill LESS than a
+# flat-ended cylinder, so nothing genuinely capsule-shaped clears ~0.785)
+# - #676 Task 6's live gate measured a shape that clears BOTH landmarks on
+# golem_C_chest_girdle: a/b=1.69, b/c=1.30 pass the old capsule test, but
+# fill=0.934 is a box wearing a capsule's aspect ratio; forcing the
+# capsule fit anyway gave volume_ratio 1.13 vs the delivered box's 1.07 -
+# worse on both axes. CAPSULE_FILL_MAX=0.85 keeps every real cylinder (the
+# unit-test fixture measures fill=0.781, just under the 0.785 landmark)
+# while rejecting chest_girdle's 0.934.
+#
+# CAPSULE_MIN_ELONG measured the same way: the old 1.6 misclassified
+# golem_L/R_thigh (a/b 1.38-1.39) and golem_L/R_shin (a/b 1.32) as spheres
+# (their a/c 1.32-1.39 sits just under SPHERE_MAX_ANISO), wasting
+# volume_ratio 2.9-3.3x where the delivered capsule sits near parity
+# (~0.95-1.04x, confirmed by force-fitting a capsule to the same vertices).
+# 1.1 sits with comfortable margin below every genuine sphere in the
+# delivery (golem_C_head a/b=1.024, golem_L/R_shoulder a/b=1.026) and at
+# or below every genuine capsule (thigh/shin above, plus
+# golem_C_belly/golem_C_pelvis at 1.19-1.32, both already capsule-shaped
+# by fill and roundness) - verified against all 33 delivered chunks, see
+# docs/superpowers/plans task-6 report.
 SPHERE_MAX_ANISO = 1.4      # a/c at most this to read as "round all over"
-CAPSULE_MIN_ELONG = 1.6     # a/b at least this to read as "long"
+CAPSULE_MIN_ELONG = 1.1     # a/b at least this to read as "long"
 CAPSULE_MAX_ROUND = 1.5     # b/c at most this to read as "round section"
+CAPSULE_FILL_MAX = 0.85     # |mesh| / principal-box volume, capsule ceiling
 BOX_FILL_MIN = 0.72         # |mesh| / principal-box volume
 
 
@@ -191,7 +211,8 @@ def classify(half_extents: Sequence[float], fill: float) -> str:
     a, b, c = half_extents
     b = max(b, 1e-9)
     c = max(c, 1e-9)
-    if a >= CAPSULE_MIN_ELONG * b and b <= CAPSULE_MAX_ROUND * c:
+    if (a >= CAPSULE_MIN_ELONG * b and b <= CAPSULE_MAX_ROUND * c
+            and fill < CAPSULE_FILL_MAX):
         return "capsule"
     if fill >= BOX_FILL_MIN:
         return "box"

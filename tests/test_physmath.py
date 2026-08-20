@@ -230,6 +230,30 @@ class TestFitCollider:
         out = physmath.fit_collider(flatten(CUBE_POINTS), 0.0)
         assert out["volume_ratio"] is None
 
+    def test_a_box_wearing_capsule_proportions_still_reads_as_a_box(self):
+        # #676 Task 6's live gate caught this on golem_C_chest_girdle: an
+        # anisotropic BOX (corners fill their bounding box exactly, fill
+        # 1.0) can still pass the old capsule test on aspect ratio alone
+        # (a/b=1.2, b/c=1.11 both clear the thresholds). A real capsule's
+        # rounded caps can never reach that fill - CAPSULE_FILL_MAX is the
+        # guard that keeps a box a box regardless of its proportions.
+        half = (1.2, 1.0, 0.9)
+        corners = [(sx * half[0], sy * half[1], sz * half[2])
+                   for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)]
+        box_vol = 8.0 * half[0] * half[1] * half[2]
+        out = physmath.fit_collider(flatten(corners), box_vol)
+        assert out["kind"] == "box"
+
+    def test_a_moderately_elongated_round_limb_reads_as_a_capsule(self):
+        # #676 Task 6's live gate caught this on golem_L/R_thigh and
+        # golem_L/R_shin: a round-cross-section limb only 1.2x longer than
+        # it is wide (well short of the old 1.6 elongation floor) is still
+        # closer to a capsule than a sphere - forcing the old sphere fit
+        # wasted 2.9-3.3x volume where a capsule sits near parity.
+        flat = self._cylinder_cloud(radius=0.5, half=0.6)  # a/b = 1.2
+        out = physmath.fit_collider(flat, 0.6)  # fill = 0.5, well under
+        assert out["kind"] == "capsule"
+
 
 class TestConeFromHinge:
     def test_the_knee_rule_verbatim(self):
