@@ -658,3 +658,17 @@ class TestSetRegionWeights:
             "radius": 0.5, "weight": 1.0})
         assert out2["sole_owner_vertices"] == 0
         assert not any("solely owned" in w for w in out2["warnings"])
+
+    def test_max_influences_exceeded_is_reported_after_blend(
+            self, fake, monkeypatch):
+        # Vertex 0 already holds 4 other joints at maxInfluences=4; blending
+        # in a 5th adds an influence rather than dropping one - nothing
+        # prunes a region blend the way smooth_weights prunes. That must be
+        # surfaced, not silently left for the exporter to discover.
+        joints = ("|r|a", "|r|b", "|r|c", "|r|d", "|r|e")
+        self._bound(fake, monkeypatch, positions=(0.0, 0.0, 0.0),
+                    weights=(0.25, 0.25, 0.25, 0.25, 0.0), joints=joints)
+        out = rigging.set_region_weights({
+            "mesh": "hum", "joint": "e", "faces": [0], "weight": 0.5})
+        assert out["max_influences_exceeded"] == 1
+        assert any("max_influences" in w for w in out["warnings"])

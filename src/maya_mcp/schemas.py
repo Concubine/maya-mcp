@@ -865,4 +865,9 @@ class SetRegionWeightsResult(BaseModel):
             "influence to hand the remainder to, so they stay fully owned "
             "(warned, never silent)."))
     unweighted_vertices: int
+    max_influences_exceeded: int = Field(
+        description=(
+            "Vertices now holding more joints than the cluster's "
+            "max_influences: a region blend can ADD an influence (nothing "
+            "is dropped to make room), so this is how you see it."))
     warnings: List[str] = Field(default_factory=list)

@@ -1687,6 +1687,7 @@ class TestRiggingTools:
             "mesh": "|h", "skin_cluster": "hSkin", "joint": "|r|a",
             "vertices_in_region": 5, "changed_vertices": 5,
             "sole_owner_vertices": 0, "unweighted_vertices": 0,
+            "max_influences_exceeded": 0,
             "warnings": []}})
         mcp = server_mod.create_server(conn)
         result = run(mcp.call_tool("maya_set_region_weights", {
@@ -1704,6 +1705,7 @@ class TestRiggingTools:
             "mesh": "|h", "skin_cluster": "hSkin", "joint": "|r|b",
             "vertices_in_region": 2, "changed_vertices": 2,
             "sole_owner_vertices": 0, "unweighted_vertices": 0,
+            "max_influences_exceeded": 0,
             "warnings": []}})
         mcp = server_mod.create_server(conn)
         run(mcp.call_tool("maya_set_region_weights", {

@@ -769,6 +769,12 @@ def set_region_weights(params: Dict[str, Any]) -> Dict[str, Any]:
     if stats["unweighted_vertices"]:
         warnings.append("%d vertices belong to NO joint after the edit"
                         % stats["unweighted_vertices"])
+    if stats["max_influences_exceeded"]:
+        warnings.append(
+            "%d vertices carry more than the cluster's max_influences=%d "
+            "after the edit"
+            % (stats["max_influences_exceeded"],
+               int(cmds.getAttr(sc + ".maxInfluences"))))
     return {
         "mesh": mesh_long,
         "skin_cluster": sc,
@@ -777,5 +783,6 @@ def set_region_weights(params: Dict[str, Any]) -> Dict[str, Any]:
         "changed_vertices": rigmath.changed_rows(weights, after, ncols),
         "sole_owner_vertices": sole_owner,
         "unweighted_vertices": stats["unweighted_vertices"],
+        "max_influences_exceeded": stats["max_influences_exceeded"],
         "warnings": warnings,
     }

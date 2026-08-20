@@ -2100,7 +2100,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
 
     @mcp.tool(
         title="Report skin weights",
-        annotations=ToolAnnotations(read_only_hint=True),
+        annotations=ToolAnnotations(
+            read_only_hint=True, destructive_hint=False, idempotent_hint=True
+        ),
     )
     def maya_weight_report(
         mesh: Annotated[str, Field(description="A bound mesh (long name).")],
