@@ -804,6 +804,92 @@ class TestShapeViolations:
         # FBX_PREAMBLE_MEL is pinned byte-for-byte elsewhere in this file.
 
 
+def _good_shapes_block(names=("brow_raise",)):
+    """A shapes_block with matching channels and shapes."""
+    return {"blend_deformers": 1, "channels": len(names),
+            "shapes": [{"name": n, "points": 6, "indexes": 6}
+                       for n in names],
+            "unavailable_reason": None}
+
+
+def test_a_shape_less_export_reports_shapes_none(monkeypatch, tmp_path):
+    """A shape-less scene exports with shapes: None in the result."""
+    node = fbxbytes.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1, geometry=7)
+    facts = _facts([node])
+    facts.meshes = [(0.0, 0.0, 0.0, 1.0, 4.02173, 1.0)]
+    facts.geometries = {7: facts.meshes[0]}
+    cmds = FakeCmds()
+    mel = _install(monkeypatch, cmds, facts)
+    # Default monkeypatch has empty shapes block (no channels, no shapes)
+    monkeypatch.setattr(export.fbxbytes, "shape_facts",
+                        lambda _f: {"blend_deformers": 0, "channels": 0,
+                                    "shapes": [], "unavailable_reason": None})
+
+    out = export.export_fbx({"path": str(tmp_path / "shapeless.fbx"),
+                             "metres_per_unit": 1.0})
+
+    assert out["shapes"] is None
+
+
+def test_a_shaped_export_with_matching_alias_reports_the_block(
+        monkeypatch, tmp_path):
+    """An export where the file's channels match declared aliases reports
+    the shapes block with channels and shapes populated."""
+    node = fbxbytes.FbxNode(name="tube", kind="Mesh", uid=1, geometry=7)
+    facts = _facts([node])
+    facts.meshes = [(0.0, 0.0, 0.0, 1.0, 2.0, 1.0)]
+    facts.geometries = {7: facts.meshes[0]}
+    cmds = FakeCmds()
+    mel = _install(monkeypatch, cmds, facts)
+    # Override FakeCmds to return a blendShape + alias for this test
+    block = _good_shapes_block(["brow_raise"])
+    monkeypatch.setattr(export.fbxbytes, "shape_facts", lambda _f: block)
+    # Make FakeCmds.listHistory return a blendShape, and listAttr return the alias
+    cmds.listHistory = lambda node, **kw: ["brow_raiseBlendShape"]
+    cmds.listAttr = lambda attr, **kw: ["brow_raise"]
+    cmds.ls = lambda nodes=None, **kw: [node.name]  # ls with type="mesh" returns the mesh
+
+    out = export.export_fbx({"path": str(tmp_path / "shaped.fbx"),
+                             "metres_per_unit": 1.0})
+
+    assert out["shapes"] == block
+    assert out["shapes"]["channels"] == 1
+    assert len(out["shapes"]["shapes"]) == 1
+    assert out["shapes"]["shapes"][0]["name"] == "brow_raise"
+
+
+def test_a_shape_violation_in_export_raises_with_hint_and_deletes_tmp(
+        monkeypatch, tmp_path):
+    """An export where the scene declares an alias the file doesn't carry
+    raises with shape hint and cleans up the temp file."""
+    node = fbxbytes.FbxNode(name="tube", kind="Mesh", uid=1, geometry=7)
+    facts = _facts([node])
+    facts.meshes = [(0.0, 0.0, 0.0, 1.0, 2.0, 1.0)]
+    facts.geometries = {7: facts.meshes[0]}
+    cmds = FakeCmds()
+    _install(monkeypatch, cmds, facts)
+    # File carries brow_raise, but scene declares both brow_raise and bulge_up
+    file_block = _good_shapes_block(["brow_raise"])
+    monkeypatch.setattr(export.fbxbytes, "shape_facts", lambda _f: file_block)
+    # Scene declares two aliases but file only carries one
+    cmds.listHistory = lambda node, **kw: ["brow_raiseBlendShape"]
+    cmds.listAttr = lambda attr, **kw: ["brow_raise", "bulge_up"]
+    cmds.ls = lambda nodes=None, **kw: [node.name]
+
+    path = tmp_path / "shape_violation.fbx"
+    with pytest.raises(HandlerError) as exc:
+        export.export_fbx({"path": str(path), "metres_per_unit": 1.0})
+
+    # The violation message must name the missing shape
+    assert "bulge_up" in str(exc.value)
+    assert "absent" in str(exc.value)
+    # The shape hint must be in the error
+    assert "shaped mesh itself" in (exc.value.hint or "")
+    # The temp file must be cleaned up
+    assert not path.exists()
+    assert not (tmp_path / "shape_violation.fbx.part.fbx").exists()
+
+
 def test_the_tool_is_exposed():
     source = (REPO / "src" / "maya_mcp" / "server.py").read_text(encoding="utf-8")
     assert "def maya_export_fbx(" in source
