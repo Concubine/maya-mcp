@@ -46,13 +46,23 @@ def _points(mesh_long: str) -> List[float]:
     return sculpt.vertex_positions(_cmds(), mesh_long)
 
 
-def _blend_node_for(cmds, mesh_shape: str) -> Optional[str]:
+def _blend_node_for(cmds, mesh_shape: str,
+                    warnings: List[str]) -> Optional[str]:
     """The mesh's ONE blendShape node, or None. One is all there can be:
     create_blendshape ADDS targets to an existing node instead of stacking a
     second deformer - stacked blendShapes are stacked skinClusters'
-    weights-unexplainable failure with a different node type."""
+    weights-unexplainable failure with a different node type. If the mesh
+    already carries more than one (hand-stacked outside this tool), silence
+    is never an answer: name every ignored node in `warnings` rather than
+    quietly picking one."""
     nodes = cmds.ls(cmds.listHistory(mesh_shape, pruneDagObjects=True) or [],
                     type="blendShape") or []
+    if len(nodes) > 1:
+        warnings.append(
+            "%s carries %d blendShape nodes (%s) - only one is expected; "
+            "using %r and ignoring %s" % (
+                mesh_shape, len(nodes), ", ".join(nodes), nodes[0],
+                ", ".join(nodes[1:])))
     return nodes[0] if nodes else None
 
 
@@ -79,7 +89,7 @@ def _validated_targets(cmds, mesh_long: str, targets,
             raise HandlerError("targets[%d] must be {name, target_mesh}" % i)
         name = entry.get("name")
         if (not isinstance(name, str) or not name
-                or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name)):
+                or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)):
             raise HandlerError(
                 "targets[%d].name %r must be a plain identifier (letters, "
                 "digits, underscore; not starting with a digit)" % (i, name),
@@ -115,7 +125,8 @@ def create_blendshape(params: Dict[str, Any]) -> Dict[str, Any]:
     cmds = _cmds()
     mesh_long, mesh_shape = naming.require_mesh(
         cmds, str(params.get("mesh") or ""))
-    node = _blend_node_for(cmds, mesh_shape)
+    warnings: List[str] = []
+    node = _blend_node_for(cmds, mesh_shape, warnings)
     existing = _aliases(cmds, node) if node else []
     resolved = _validated_targets(cmds, mesh_long, params.get("targets"),
                                   existing)
@@ -141,7 +152,13 @@ def create_blendshape(params: Dict[str, Any]) -> Dict[str, Any]:
             name=naming.unique_name(cmds, _short(mesh_long) + "_shapes"))[0]
         new_indices = list(range(len(resolved)))
     else:
-        start = len(existing)
+        # NOT len(existing): the alias list is dense, but the node's weight
+        # multi need not be - a target removed outside this tool (Shape
+        # Editor, blendShape -e -rm) leaves a hole, and len(existing) then
+        # names an OCCUPIED index. Landing the edit there doesn't error -
+        # aliasAttr just silently renames whatever alias already sat on it.
+        occupied = cmds.getAttr(node + ".w", multiIndices=True) or []
+        start = max(occupied) + 1 if occupied else 0
         new_indices = []
         for offset, (_name, t_long) in enumerate(resolved):
             cmds.blendShape(node, edit=True,
@@ -154,7 +171,6 @@ def create_blendshape(params: Dict[str, Any]) -> Dict[str, Any]:
     # re-read the BASE mesh through the real deformer. Pre-existing targets
     # keep whatever weights they held - constant on both sides of the
     # comparison, so they cancel.
-    warnings: List[str] = []
     baseline = _points(mesh_long)
     extent = sculpt_math.bbox_extent(baseline)
     targets_out: List[Dict[str, Any]] = []
@@ -187,7 +203,8 @@ def set_blendshape_weights(params: Dict[str, Any]) -> Dict[str, Any]:
     cmds = _cmds()
     mesh_long, mesh_shape = naming.require_mesh(
         cmds, str(params.get("mesh") or ""))
-    node = _blend_node_for(cmds, mesh_shape)
+    warnings: List[str] = []
+    node = _blend_node_for(cmds, mesh_shape, warnings)
     if node is None:
         raise HandlerError(
             "%s has no blendShape" % mesh_long,
@@ -234,7 +251,6 @@ def set_blendshape_weights(params: Dict[str, Any]) -> Dict[str, Any]:
         if abs(achieved - old) > 1e-9:
             changed = True
 
-    warnings: List[str] = []
     if not changed:
         warnings.append(
             "every requested weight already held its value - nothing moved")

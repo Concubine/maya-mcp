@@ -3130,6 +3130,57 @@ class TestBlendshapeInMaya:
             blendshape.create_blendshape({
                 "mesh": base, "targets": [{"name": "a", "target_mesh": t3}]})
 
+    def test_additive_create_after_a_sparse_removal_does_not_clobber(self):
+        """A target removed outside this tool (Shape Editor / `blendShape
+        -e -rm`) leaves a HOLE in the node's weight multi, not a shrink from
+        the end. MEASURED: `cmds.blendShape(edit=True, remove=True,
+        target=(...))` refuses once the tool has consumed the original
+        target mesh ('Found 0 matches') - the practical removal path here is
+        the attribute-level one Shape Editor itself uses,
+        `cmds.removeMultiInstance` on both `.w[i]` and
+        `.inputTarget[0].inputTargetGroup[i]`. Before the fix, additive
+        create used len(existing) (=1, since only "b" is aliased) as the
+        next index, landed on b's OCCUPIED index 1, and aliasAttr silently
+        renamed "b" to "c" in place - this test measured that clobber live
+        (final indices=[1], aliases=["c"], "b" gone) before asserting the
+        fixed behavior below."""
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import blendshape
+
+        base, t1 = self._base_and_target(cmds, bump=0.1)
+        t2 = cmds.ls(cmds.duplicate(base, name="bs_sparse_t2")[0],
+                    long=True)[0]
+        cmds.move(0, 0.2, 0, t2 + ".vtx[0]", relative=True)
+        first = blendshape.create_blendshape({
+            "mesh": base, "targets": [{"name": "a", "target_mesh": t1},
+                                      {"name": "b", "target_mesh": t2}]})
+        node = first["blend_shape"]
+        assert cmds.getAttr(node + ".w", multiIndices=True) == [0, 1]
+
+        # Remove index 0's target at the attribute level (both the weight
+        # multi and its inputTarget group), leaving a hole at 0 with "b"
+        # still occupying 1 - the sparse state a live artist leaves behind.
+        cmds.removeMultiInstance(node + ".w[0]", b=True)
+        cmds.removeMultiInstance(node + ".inputTarget[0].inputTargetGroup[0]",
+                                 b=True)
+        assert cmds.getAttr(node + ".w", multiIndices=True) == [1]
+        assert cmds.listAttr(node + ".w", multi=True) == ["b"]
+
+        t3 = cmds.ls(cmds.duplicate(base, name="bs_sparse_t3")[0],
+                    long=True)[0]
+        cmds.move(0, 0.3, 0, t3 + ".vtx[0]", relative=True)
+        second = blendshape.create_blendshape({
+            "mesh": base, "targets": [{"name": "c", "target_mesh": t3}]})
+        assert second["blend_shape"] == node
+        # "b" must survive untouched, at its original index, with its
+        # original weight - not clobbered by "c" landing on it.
+        assert cmds.listAttr(node + ".w", multi=True) == ["b", "c"]
+        assert cmds.getAttr(node + ".w", multiIndices=True) == [1, 2]
+        assert cmds.getAttr(node + ".b") == pytest.approx(0.0)
+        assert second["targets"][0]["max_delta"] == pytest.approx(
+            0.3, abs=1e-6)
+
 
 class TestBlendshapeExportInMaya:
     def test_shapes_ride_along_and_the_bytes_name_them(self, tmp_path):

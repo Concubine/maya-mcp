@@ -17,9 +17,11 @@ from maya_plugin.handlers import blendshape
 class FakeCmds:
     """Transforms in `objects` (long names), shapes in `shapes`, per-shape
     history in `history`. blendShape nodes live in `blend_nodes` with their
-    aliases in `aliases[node]` (index order); weights in `weights[(node,
-    alias)]`. setAttr/getAttr accept both the `node.w[i]` plug form the
-    handler uses during create and the `node.alias` form set_weights uses."""
+    aliases in `aliases[node]` ({weight index -> alias}, NOT necessarily
+    dense - a test can pop an entry to simulate a target removed outside
+    this tool, leaving a hole); weights in `weights[(node, alias)]`.
+    setAttr/getAttr accept both the `node.w[i]` plug form the handler uses
+    during create and the `node.alias` form set_weights uses."""
 
     def __init__(self):
         self.objects = []
@@ -27,7 +29,7 @@ class FakeCmds:
         self.history = {}         # shape long -> [node names]
         self.vertex_counts = {}   # transform long -> int
         self.blend_nodes = set()
-        self.aliases = {}         # node -> [alias, ...]
+        self.aliases = {}         # node -> {index: alias}
         self.weights = {}         # (node, alias) -> float
         self.deleted = []
         self.created = []         # blendShape() create-call records
@@ -73,13 +75,13 @@ class FakeCmds:
             base, index, target, _w = kw["target"]
             self.edited.append({"node": node, "index": index,
                                 "target": target})
-            self.aliases[node].append("w[%d]" % index)  # unaliased until aliasAttr
+            self.aliases[node][index] = "w[%d]" % index  # unaliased until aliasAttr
             return [node]
         *targets, base = args
         node = kw["name"]
         assert kw.get("frontOfChain") is True
         self.blend_nodes.add(node)
-        self.aliases[node] = ["w[%d]" % i for i in range(len(targets))]
+        self.aliases[node] = {i: "w[%d]" % i for i in range(len(targets))}
         self.created.append({"node": node, "base": base,
                              "targets": list(targets)})
         self.history.setdefault(self.shapes[base], []).append(node)
@@ -93,7 +95,10 @@ class FakeCmds:
 
     def listAttr(self, plug, multi=False):
         node = plug.split(".")[0]
-        return list(self.aliases.get(node, [])) or None
+        aliases = self.aliases.get(node)
+        if not aliases:
+            return None
+        return [aliases[i] for i in sorted(aliases)]
 
     def _resolve_weight_key(self, key):
         node, attr = key.split(".", 1)
@@ -105,7 +110,11 @@ class FakeCmds:
         node, alias = self._resolve_weight_key(key)
         self.weights[(node, alias)] = float(value)
 
-    def getAttr(self, key):
+    def getAttr(self, key, multiIndices=False):
+        if multiIndices:
+            node, attr = key.split(".", 1)
+            assert attr == "w"
+            return sorted(self.aliases.get(node, {}))
         node, alias = self._resolve_weight_key(key)
         return self.weights[(node, alias)]
 
@@ -131,7 +140,7 @@ def fake(monkeypatch):
         lift = sum(fake.weights.get((node, alias), 0.0)
                    * fake.deltas.get(alias, 0.0)
                    for node in fake.aliases
-                   for alias in fake.aliases[node])
+                   for alias in fake.aliases[node].values())
         return [0.0, lift, 0.0, 1.0, 0.0, 0.0]
 
     monkeypatch.setattr(blendshape, "_points", points)
@@ -164,6 +173,11 @@ class TestCreateValidation:
             _create(fake, [{"name": "has space", "target_mesh": "brow"}])
         with pytest.raises(HandlerError, match="plain identifier"):
             _create(fake, [{"name": "brow_é", "target_mesh": "brow"}])
+        with pytest.raises(HandlerError, match="plain identifier"):
+            # re.match's $ matches before a trailing newline - a name like
+            # this must be refused, not silently accepted then blow up in
+            # aliasAttr after the checkpoint already ran.
+            _create(fake, [{"name": "brow\n", "target_mesh": "brow"}])
         with pytest.raises(HandlerError, match="appears twice"):
             _create(fake, [{"name": "a", "target_mesh": "brow"},
                            {"name": "a", "target_mesh": "bulge"}])
@@ -195,7 +209,7 @@ class TestCreate:
             {"name": "bulge_up", "target_mesh": "bulge"}])
         assert out["mesh"] == "|humanoid"
         node = out["blend_shape"]
-        assert fake.aliases[node] == ["brow_raise", "bulge_up"]
+        assert fake.listAttr(node + ".w") == ["brow_raise", "bulge_up"]
         by = {t["name"]: t for t in out["targets"]}
         assert by["brow_raise"]["max_delta"] == pytest.approx(0.25)
         assert by["bulge_up"]["max_delta"] == pytest.approx(0.1)
@@ -220,8 +234,33 @@ class TestCreate:
         first = _create(fake, [{"name": "a", "target_mesh": "brow"}])
         out = _create(fake, [{"name": "b", "target_mesh": "bulge"}])
         assert out["blend_shape"] == first["blend_shape"]
-        assert fake.aliases[out["blend_shape"]] == ["a", "b"]
+        assert fake.listAttr(out["blend_shape"] + ".w") == ["a", "b"]
         assert fake.edited and fake.edited[0]["index"] == 1
+
+    def test_additive_create_skips_a_hole_left_by_external_removal(self, fake):
+        """A node whose targets were touched outside this tool (Shape
+        Editor, `blendShape -e -rm`) can have sparse weight indices. The
+        next additive index must come from the actual multi
+        (getAttr(node+".w", multiIndices=True)), not from len(existing) -
+        landing on an OCCUPIED index makes aliasAttr silently rename the
+        survivor instead of naming a fresh one."""
+        _scene(fake)
+        fake.objects.append("|chin")
+        fake.shapes["|chin"] = "|chin|chinShape"
+        fake.vertex_counts["|chin"] = 2
+        fake.deltas = {"a": 0.2, "b": 0.3, "c": 0.4}
+        first = _create(fake, [{"name": "a", "target_mesh": "brow"},
+                               {"name": "b", "target_mesh": "bulge"}])
+        node = first["blend_shape"]
+        # Simulate an external removal of index 0's target: index 0 is
+        # gone, "b" survives at index 1 - a HOLE at the front, not a
+        # shrink from the end. len(existing) would (wrongly) say 1.
+        del fake.aliases[node][0]
+        out = _create(fake, [{"name": "c", "target_mesh": "chin"}])
+        assert out["blend_shape"] == node
+        # "b" must be untouched - not clobbered by "c" landing on its index.
+        assert fake.listAttr(node + ".w") == ["b", "c"]
+        assert fake.edited[-1]["index"] == 2
 
     def test_alias_collision_with_existing_target_refused(self, fake):
         _scene(fake)
@@ -229,6 +268,39 @@ class TestCreate:
         _create(fake, [{"name": "a", "target_mesh": "brow"}])
         with pytest.raises(HandlerError, match="already exists"):
             _create(fake, [{"name": "a", "target_mesh": "bulge"}])
+
+
+class TestBlendNodeWarning:
+    """_blend_node_for silently returned nodes[0] when a mesh carried more
+    than one blendShape node (hand-stacked outside this tool) - a silent
+    pick violates 'silence is never an answer'. It must still pick the
+    first (unchanged, load-bearing precedent), but now it must SAY so."""
+
+    def test_multiple_blend_nodes_warns_naming_the_ignored_one(self, fake):
+        _scene(fake)
+        fake.deltas = {"a": 0.2}
+        first = _create(fake, [{"name": "a", "target_mesh": "brow"}])
+        real_node = first["blend_shape"]
+        shape = fake.shapes["|humanoid"]
+        # A second blendShape node stacked on the mesh outside this tool,
+        # sitting AHEAD of the tool's node in history.
+        stacked = "stackedBlendShape"
+        fake.blend_nodes.add(stacked)
+        fake.aliases[stacked] = {}
+        fake.history[shape].insert(0, stacked)
+
+        fake.deltas["b"] = 0.3
+        out = _create(fake, [{"name": "b", "target_mesh": "bulge"}])
+
+        assert out["blend_shape"] == stacked  # still picks the first
+        assert any(stacked in w and real_node in w and "blendShape nodes" in w
+                  for w in out["warnings"])
+
+    def test_a_single_blend_node_warns_nothing(self, fake):
+        _scene(fake)
+        fake.deltas = {"a": 0.2}
+        out = _create(fake, [{"name": "a", "target_mesh": "brow"}])
+        assert out["warnings"] == []
 
 
 class TestSetWeights:
