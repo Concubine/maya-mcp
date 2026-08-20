@@ -786,6 +786,37 @@ class ResetPoseResult(BaseModel):
     warnings: List[str] = Field(default_factory=list)
 
 
+class PoseIkResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    achieved_position: List[float] = Field(
+        description=(
+            "Where the joint actually ENDED, measured from the scene after "
+            "the bake - never the solver's claim."))
+    residual: float = Field(
+        description=(
+            "Measured miss distance to the target. An unreachable target is "
+            "a number here, not a silent stretch."))
+    rotations: Dict[str, List[float]] = Field(
+        description=(
+            "The solve BAKED to plain FK: per-joint local euler DEGREES, "
+            "keyed by long name - feed it straight to maya_pose_skeleton. "
+            "No IK state survives in the scene."))
+    chain: List[str] = Field(
+        description="The joints that were solved, start..joint.")
+    pole_used: Optional[List[float]] = Field(
+        default=None,
+        description=(
+            "The pole world position the solve actually used: yours, or one "
+            "derived from the chain's own bend plane, or null (straight "
+            "chain, no pole - the fold direction was Maya's guess)."))
+    kept: bool
+    max_displacement: float
+    displaced_vertices: int
+    per_mesh: List[MeshDisplacement] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+
+
 class InfluenceBucket(BaseModel):
     model_config = ConfigDict(extra="ignore")
 

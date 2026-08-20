@@ -100,6 +100,7 @@ class TestRegistration:
             "maya_mirror_weights",
             "maya_smooth_weights",
             "maya_set_region_weights",
+            "maya_pose_ik",
         }
 
     def test_annotations_declare_read_only_vs_destructive(self):
@@ -1713,3 +1714,37 @@ class TestRiggingTools:
         assert conn.calls[0]["cmd"] == "set_region_weights"
         assert conn.calls[0]["params"] == {
             "mesh": "|h", "joint": "b", "weight": 1.0, "faces": [0, 1]}
+
+    def test_pose_ik_marshals_and_omits_optionals(self):
+        conn = FakeConn(responses={"pose_ik": {
+            "achieved_position": [0.1, 0.6, 0.2], "residual": 0.0004,
+            "rotations": {"|p|h": [0.0, 41.0, 0.0]},
+            "chain": ["|p|h", "|p|h|k", "|p|h|k|a"],
+            "pole_used": [0.1, 0.5, 0.5], "kept": True,
+            "max_displacement": 0.31, "displaced_vertices": 140,
+            "per_mesh": [{"mesh": "|m", "max_displacement": 0.31,
+                          "displaced_vertices": 140}],
+            "warnings": []}})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_pose_ik", {
+            "root": "p", "joint": "a", "target": [0.1, 0.6, 0.2]}))
+        assert conn.calls[0]["cmd"] == "pose_ik"
+        assert conn.calls[0]["params"] == {
+            "root": "p", "joint": "a", "target": [0.1, 0.6, 0.2],
+            "keep": True}
+        assert result.structured_content["residual"] == 0.0004
+
+    def test_pose_ik_forwards_pole_start_keep(self):
+        conn = FakeConn(responses={"pose_ik": {
+            "achieved_position": [0, 0, 0], "residual": 0.9,
+            "rotations": {}, "chain": [], "pole_used": None, "kept": False,
+            "max_displacement": 0.0, "displaced_vertices": 0,
+            "per_mesh": [], "warnings": ["keep=false: restored"]}})
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_pose_ik", {
+            "root": "p", "joint": "a", "target": [0, 0, 0],
+            "pole": [0, 0, 1], "start": "hip", "keep": False}))
+        params = conn.calls[0]["params"]
+        assert params["pole"] == [0, 0, 1]
+        assert params["start"] == "hip"
+        assert params["keep"] is False

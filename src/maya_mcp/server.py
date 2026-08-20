@@ -49,6 +49,7 @@ from .schemas import (
     ObjectInfoResult,
     OpenSceneResult,
     PbrResult,
+    PoseIkResult,
     PoseSkeletonResult,
     ReferenceResult,
     RemeshResult,
@@ -2096,6 +2097,53 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         create_skeleton rest pose) and a warning says so."""
         return ResetPoseResult.model_validate(
             maya.request("reset_pose", {"root": root}, timeout_s=BOOL_TIMEOUT_S)
+        )
+
+    @mcp.tool(
+        title="Pose a limb to a world target (IK, baked to FK)",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=True
+        ),
+    )
+    def maya_pose_ik(
+        root: Annotated[str, Field(description="Skeleton root joint.")],
+        joint: Annotated[str, Field(description=(
+            "End of the chain to place - the ankle, the wrist."
+        ))],
+        target: Annotated[List[float], Field(description=(
+            "World position [x, y, z] the joint should reach."
+        ))],
+        pole: Annotated[Optional[List[float]], Field(description=(
+            "World position the knee/elbow should face. Default: the "
+            "chain's own bend plane when it has one; a STRAIGHT chain "
+            "without a pole leaves the fold direction to Maya and warns."
+        ))] = None,
+        start: Annotated[Optional[str], Field(description=(
+            "Chain start joint. Default: two joints above `joint` - the "
+            "classic 2-bone limb (hip for an ankle, shoulder for a wrist). "
+            "Pass explicitly for longer chains."
+        ))] = None,
+        keep: Annotated[bool, Field(description=(
+            "true bakes the solved pose; false measures it (residual, "
+            "rotations, displacement), then restores the pose it found."
+        ))] = True,
+    ) -> PoseIkResult:
+        """Solve a chain to a world target, bake to FK, delete the handle.
+
+        No persistent IK state ever exists in the scene: the result's
+        rotations map is the same currency maya_pose_skeleton speaks, so
+        export, clips, and the pose contract are untouched. residual is
+        the MEASURED miss - an unreachable target is a number, not a
+        silent stretch. IK here is an authoring convenience: aim the ankle
+        at a point instead of deriving per-joint local bend axes."""
+        params = {"root": root, "joint": joint, "target": target,
+                  "keep": keep}
+        if pole is not None:
+            params["pole"] = pole
+        if start is not None:
+            params["start"] = start
+        return PoseIkResult.model_validate(
+            maya.request("pose_ik", params, timeout_s=BOOL_TIMEOUT_S)
         )
 
     @mcp.tool(
