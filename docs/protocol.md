@@ -482,11 +482,55 @@ there is no parameter). The byte gate refuses an export whose scene
 declares a target the file does not carry, and the result's `shapes` block
 reports each channel's name and delta payload as read from the bytes.
 
+## Commands (rigging phase 6 / clips / #695)
+
+| cmd | params | result |
+|---|---|---|
+| `author_clip` | `{ root, name, fps=30, keys: [{time_s, rotations?, blend_weights?, root_position?}], interpolation, loop }` | `{ root, clip, fps, duration_s, frames, keyed_joints, keyed_weight_channels, root_position_keyed, interpolation, loop, replaced, per_key, warnings }` |
+| `preview_clip` | `{ root, name, angle?, every_nth?, resolution?, renderer? }` | `{ clip, fps, frames, images, ... }` |
+| `delete_clip` | `{ root }` | `{ root, clip, deleted_curves, max_displacement, warnings }` |
+
+`author_clip` keys the phase-1 pose map over time. **One clip exists per
+skeleton at a time**: authoring under a new name replaces the previous clip
+(warning naming it); there is no clip library and no persistent solver
+state beyond the curves themselves plus one metadata attr on the root. Keys
+may also carry blendshape weights (resolved across the meshes bound to the
+skeleton) and a world `root_position` for the root joint — the pelvis bob a
+walk needs. `loop=true` refuses a clip whose last key does not close onto
+its first, with the measured per-channel difference. Every key's
+displacement is MEASURED by driving the scene time to that frame;
+`duration_s` is re-read from the curves.
+
+**While a clip exists, static pose mutators refuse** (`pose_skeleton`,
+`pose_ik`, `reset_pose`, `set_blendshape_weights`): curves own the
+channels, and a static write would be silently overridden on the next frame
+change. `delete_clip` removes the curves, zeroes keyed weight channels,
+restores the bind pose, and reports the measured displacement.
+
+`preview_clip` renders every-nth frame through the render pipeline into one
+contact sheet (camera placed at frame 0 and held). Export: pass
+`include_animation=true` to `export_fbx` — the clip bakes to per-frame
+curves (`FBXExportBakeComplexAnimation`) in one take named after the clip,
+and the byte gate asserts rotation curves per keyed joint at
+`round(duration*fps)+1` keys, root translation curves when root_position
+was used, DeformPercent curves per keyed weight channel, and the take's
+name and duration. With `include_animation=false` (the default) the gate
+asserts the file carries ZERO curve records even when the scene is
+animated. The result gains `animation`.
+
+**MEASURED (not in the plan): the file also carries a second take.**
+`FBXExportSplitAnimationIntoTakes` writes the named take *alongside* the
+exporter's own always-present default take (`"Take 001"`), so a correctly
+exported clip legitimately carries **two** takes, not exactly one.
+`anim_violations` looks the declared clip up **by name** among the file's
+takes and ignores the rest — an extra take is not a violation, the same
+rule `shape_violations` applies to undeclared shape channels.
+
 ## Delivery
 
 | cmd | params | result |
 |---|---|---|
-| `export_fbx` | `{ path, metres_per_unit, nodes?, include_skins? }` | `{ path, bytes, fbx_version, node_count, mesh_count, root_nodes, unit_scale_factor, metres_per_unit, world_bounds_min, world_bounds_max, height_m, bounds_unavailable_reason, skin, shapes }` |
+| `export_fbx` | `{ path, metres_per_unit, nodes?, include_skins?, include_animation? }` | `{ path, bytes, fbx_version, node_count, mesh_count, root_nodes, unit_scale_factor, metres_per_unit, world_bounds_min, world_bounds_max, height_m, bounds_unavailable_reason, skin, shapes, animation }` |
 
 Every field of the result is read back **out of the written file**, never from the Maya scene — the unit defect this tool guards (#629) is produced by the exporter and is absent from the scene, so a scene-derived report would be confidently wrong in exactly the case that matters. The file is written to a sibling temp path and only reaches `path` once it passes; a refused export leaves whatever was already there untouched.
 

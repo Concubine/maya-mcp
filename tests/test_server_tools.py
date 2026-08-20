@@ -104,6 +104,9 @@ class TestRegistration:
             "maya_author_physics",
             "maya_create_blendshape",
             "maya_set_blendshape_weights",
+            "maya_author_clip",
+            "maya_delete_clip",
+            "maya_preview_clip",
         }
 
     def test_annotations_declare_read_only_vs_destructive(self):
@@ -389,7 +392,7 @@ class TestSessionTools:
         assert conn.calls[0]["cmd"] == "export_fbx"
         assert conn.calls[0]["params"] == {
             "path": "x.fbx", "metres_per_unit": 1.0, "nodes": ["golem_arm"],
-            "include_skins": False,
+            "include_skins": False, "include_animation": False,
         }
         assert result.structured_content["fbx_version"] == 7700
         assert result.structured_content["skin"] is None
@@ -411,7 +414,7 @@ class TestSessionTools:
         assert conn.calls[0]["cmd"] == "export_fbx"
         assert conn.calls[0]["params"] == {
             "path": "x.fbx", "metres_per_unit": 1.0, "nodes": None,
-            "include_skins": False,
+            "include_skins": False, "include_animation": False,
         }
 
     def test_maya_export_fbx_forwards_include_skins_and_surfaces_the_block(self):
@@ -1840,3 +1843,94 @@ class TestBlendshapeTools:
         weigh = by_name["maya_set_blendshape_weights"].annotations
         assert (weigh.read_only_hint, weigh.destructive_hint,
                 weigh.idempotent_hint) == (False, True, True)
+
+
+def _export_result_stub():
+    return {
+        "path": "x.fbx", "bytes": 1234, "fbx_version": 7700,
+        "node_count": 3, "mesh_count": 1, "root_nodes": ["|golem_arm"],
+        "unit_scale_factor": 100.0, "metres_per_unit": 1.0,
+    }
+
+
+class TestClipTools:
+    def _author_result(self):
+        return {"root": "|pelvis", "clip": "walk", "fps": 30,
+                "duration_s": 1.2, "frames": 37, "keyed_joints": 8,
+                "keyed_weight_channels": ["blink"],
+                "root_position_keyed": True, "interpolation": "smooth",
+                "loop": True, "replaced": "idle",
+                "per_key": [{"time_s": 0.0, "max_displacement": 0.0},
+                            {"time_s": 1.2, "max_displacement": 0.31}],
+                "warnings": []}
+
+    def test_author_marshals_keys_and_returns_measured(self):
+        conn = FakeConn(responses={"author_clip": self._author_result()})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_author_clip", {
+            "root": "|pelvis", "name": "walk", "fps": 30, "loop": True,
+            "interpolation": "smooth",
+            "keys": [
+                {"time_s": 0.0, "rotations": {"L_hip": [0, -25, 0]},
+                 "root_position": [0, 0.97, 0],
+                 "blend_weights": {"blink": 0.0}},
+                {"time_s": 1.2, "rotations": {"L_hip": [0, -25, 0]},
+                 "root_position": [0, 0.97, 0],
+                 "blend_weights": {"blink": 0.0}},
+            ]}))
+        params = conn.calls[0]["params"]
+        assert conn.calls[0]["cmd"] == "author_clip"
+        assert params["keys"][0]["rotations"] == {"L_hip": [0, -25, 0]}
+        assert params["keys"][0]["root_position"] == [0, 0.97, 0]
+        assert result.structured_content["per_key"][1]["max_displacement"] == 0.31
+
+    def test_delete_marshals(self):
+        conn = FakeConn(responses={"delete_clip": {
+            "root": "|pelvis", "clip": "walk", "deleted_curves": 27,
+            "max_displacement": 0.31, "warnings": []}})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_delete_clip", {"root": "|pelvis"}))
+        assert conn.calls[0]["cmd"] == "delete_clip"
+        assert result.structured_content["deleted_curves"] == 27
+
+    def test_preview_composites_one_sheet(self):
+        png = png_b64(32, 32)
+        conn = FakeConn(responses={"preview_clip": {
+            "clip": "walk", "fps": 30,
+            "frames": [{"frame": 0, "time_s": 0.0},
+                       {"frame": 36, "time_s": 1.2}],
+            "images": [{"label": "t=0.00s", "angle": "side", "png_b64": png},
+                       {"label": "t=1.20s", "angle": "side",
+                        "png_b64": png}],
+            "renderer": "hw2", "samples": 1, "fallback_light": False,
+            "zoom": 1.0, "relit_lights": 0}})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_preview_clip", {
+            "root": "|pelvis", "name": "walk", "angle": "side"}))
+        assert conn.calls[0]["params"]["name"] == "walk"
+        # first content item is ONE image (the sheet), then the frame times
+        assert len([c for c in result.content if c.type == "image"]) == 1
+        text = " ".join(c.text for c in result.content if c.type == "text")
+        assert "t=1.20s" in text
+
+    def test_export_gains_include_animation(self):
+        conn = FakeConn(responses={"export_fbx": dict(
+            _export_result_stub(), animation=None)})
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_export_fbx", {
+            "path": "D:/x/clip.fbx", "metres_per_unit": 1.0,
+            "include_animation": True}))
+        assert conn.calls[0]["params"]["include_animation"] is True
+
+    def test_annotations(self):
+        mcp = server_mod.create_server(FakeConn())
+        by_name = {t.name: t for t in run(mcp.list_tools())}
+        author = by_name["maya_author_clip"].annotations
+        assert (author.read_only_hint, author.destructive_hint,
+                author.idempotent_hint) == (False, True, False)
+        delete = by_name["maya_delete_clip"].annotations
+        assert (delete.read_only_hint, delete.destructive_hint,
+                delete.idempotent_hint) == (False, True, True)
+        preview = by_name["maya_preview_clip"].annotations
+        assert (preview.read_only_hint, preview.destructive_hint,
+                preview.idempotent_hint) == (True, False, True)

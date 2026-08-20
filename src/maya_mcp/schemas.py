@@ -703,6 +703,100 @@ class ShapeFacts(BaseModel):
     unavailable_reason: Optional[str] = None
 
 
+class ClipKeySpec(BaseModel):
+    """One key of a clip: the phase-1 pose map at a moment in time."""
+
+    time_s: float = Field(description=(
+        "Seconds from the clip start. The first key must be at 0.0; times "
+        "must be strictly increasing and should land on frames at the "
+        "clip's fps."))
+    rotations: Optional[Dict[str, List[float]]] = Field(
+        default=None, description=(
+            "Joint name -> [rx, ry, rz] DEGREES, local - exactly "
+            "pose_skeleton's currency."))
+    blend_weights: Optional[Dict[str, float]] = Field(
+        default=None, description=(
+            "Blendshape target name -> 0..1 - a blink in an idle, a bulge "
+            "synced to a step."))
+    root_position: Optional[List[float]] = Field(
+        default=None, description=(
+            "World position for the ROOT joint - the pelvis bob an honest "
+            "walk needs, or authored root motion. Root only; bones do not "
+            "translate."))
+
+
+class ClipKeyMeasure(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    time_s: float
+    max_displacement: float = Field(description=(
+        "MEASURED at this key's frame against the evaluated first key - "
+        "the scene's time was driven there and the vertices re-read."))
+
+
+class AuthorClipResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    root: str
+    clip: str
+    fps: int
+    duration_s: float = Field(description=(
+        "Re-read from the authored curves, never echoed."))
+    frames: int = Field(description="Baked frame count: round(d*fps)+1.")
+    keyed_joints: int
+    keyed_weight_channels: List[str]
+    root_position_keyed: bool
+    interpolation: str
+    loop: bool
+    replaced: Optional[str] = Field(
+        default=None, description=(
+            "The clip this call replaced - ONE clip exists at a time."))
+    per_key: List[ClipKeyMeasure]
+    warnings: List[str] = Field(default_factory=list)
+
+
+class DeleteClipResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    root: str
+    clip: Optional[str] = None
+    deleted_curves: int
+    max_displacement: float
+    warnings: List[str] = Field(default_factory=list)
+
+
+class TakeRecord(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    duration_s: Optional[float] = None
+
+
+class AnimCurveTarget(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    target: Optional[str] = Field(description=(
+        "The joint (Model) or blendshape channel the curves drive."))
+    property: str
+    curves: int
+    key_count: Optional[int] = None
+    duration_s: Optional[float] = None
+
+
+class AnimFacts(BaseModel):
+    """Animation records read back OUT OF THE FILE, never from the scene."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    stacks: int
+    layers: int
+    curves: int
+    curve_nodes: int
+    takes: List[TakeRecord]
+    targets: List[AnimCurveTarget]
+    unavailable_reason: Optional[str] = None
+
+
 class ExportFbxResult(BaseModel):
     """What maya_export_fbx actually wrote, read back out of the file.
 
@@ -775,6 +869,12 @@ class ExportFbxResult(BaseModel):
             "Blend-shape facts when the scene declares targets or the file "
             "carries channels; null for a shape-less export. Shapes ride "
             "along automatically - there is no parameter to enable them."))
+    animation: Optional[AnimFacts] = Field(
+        default=None,
+        description=(
+            "Animation facts when include_animation=true; null otherwise. "
+            "When false, the byte gate has asserted the file carries ZERO "
+            "curve records even if the scene is animated."))
 
 
 class SkeletonJoint(BaseModel):

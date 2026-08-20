@@ -30,10 +30,13 @@ from .connection import MayaConnection
 from .schemas import (
     ArrayResult,
     AssembleResult,
+    AuthorClipResult,
     AuthorPhysicsResult,
     BlendshapeTargetSpec,
+    ClipKeySpec,
     CombineResult,
     CreateBlendshapeResult,
+    DeleteClipResult,
     UvAtlasResult,
     BindSkinResult,
     BooleanResult,
@@ -921,6 +924,13 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "identity scale on every joint. For a selected export, list the "
             "skeleton root in nodes alongside the mesh."
         ))] = False,
+        include_animation: Annotated[bool, Field(description=(
+            "Bake the authored clip to per-frame curves and write it as one "
+            "take named after the clip. Refuses when no clip exists. False "
+            "(the default) pins animation export OFF - a static export of "
+            "an animated scene is byte-identical to an unanimated one, "
+            "asserted from the bytes."
+        ))] = False,
     ) -> ExportFbxResult:
         """Export FBX and gate the result on the BYTES it just wrote.
 
@@ -935,7 +945,8 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             maya.request(
                 "export_fbx",
                 {"path": path, "metres_per_unit": metres_per_unit,
-                 "nodes": nodes, "include_skins": include_skins},
+                 "nodes": nodes, "include_skins": include_skins,
+                 "include_animation": include_animation},
                 timeout_s=EXPORT_TIMEOUT_S,
             )
         )
@@ -2274,6 +2285,128 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 timeout_s=BOOL_TIMEOUT_S,
             )
         )
+
+    @mcp.tool(
+        title="Author animation clip",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_author_clip(
+        root: Annotated[str, Field(description="Skeleton root joint.")],
+        name: Annotated[str, Field(description=(
+            "Clip name - becomes the exported take name. Plain identifier."
+        ))],
+        keys: Annotated[List[ClipKeySpec], Field(min_length=2, description=(
+            "The keys, in time order from 0.0. Each carries any of "
+            "rotations / blend_weights / root_position; a channel keyed in "
+            "some keys only interpolates between its own keys."
+        ))],
+        fps: Annotated[int, Field(description=(
+            "One of 24, 25, 30, 48, 50, 60 - the scene's time unit is set "
+            "to match so keys land on frames."
+        ))] = 30,
+        interpolation: Annotated[Literal["linear", "smooth"], Field(
+            description="linear tangents, or Maya auto tangents.")] = "linear",
+        loop: Annotated[bool, Field(description=(
+            "Validate that the last key closes onto the first (rotations, "
+            "weights, root position) - a cycle that does not close pops on "
+            "repeat in-engine. Refusal carries the measured difference."
+        ))] = False,
+    ) -> AuthorClipResult:
+        """Key the pose map over time - ONE clip per skeleton, replacing any
+        previous clip with a warning.
+
+        The currency is exactly pose_skeleton's rotation map, plus optional
+        blendshape weights and a root position per key. While the clip
+        exists, static pose tools refuse (curves own the channels);
+        maya_delete_clip returns the skeleton to static posing. Every key's
+        displacement is MEASURED by evaluating the scene at that frame.
+        Export it with maya_export_fbx include_animation=true."""
+        return AuthorClipResult.model_validate(
+            maya.request(
+                "author_clip",
+                {"root": root, "name": name, "fps": fps,
+                 "keys": [k.model_dump(exclude_none=True) for k in keys],
+                 "interpolation": interpolation, "loop": loop},
+                timeout_s=BOOL_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Delete animation clip",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=True
+        ),
+    )
+    def maya_delete_clip(
+        root: Annotated[str, Field(description="Skeleton root joint.")],
+    ) -> DeleteClipResult:
+        """Remove the clip's curves, zero its weight channels, restore the
+        bind pose - the skeleton returns to static posing. Reports the
+        measured displacement of the return."""
+        return DeleteClipResult.model_validate(
+            maya.request("delete_clip", {"root": root},
+                         timeout_s=BOOL_TIMEOUT_S)
+        )
+
+    @mcp.tool(
+        title="Preview clip frames",
+        annotations=ToolAnnotations(
+            read_only_hint=True, destructive_hint=False, idempotent_hint=True
+        ),
+    )
+    def maya_preview_clip(
+        root: Annotated[str, Field(description="Skeleton root joint.")],
+        name: Annotated[str, Field(description=(
+            "The clip's name - refused if it is not the live clip, so a "
+            "stale assumption is never judged."
+        ))],
+        angle: Annotated[Angle, Field(description=(
+            "One angle for every frame. 'side' reads a walk; 'front' reads "
+            "a face. The camera is placed at frame 0 and HELD - motion is "
+            "judged against a fixed frame."
+        ))] = "three_quarter",
+        every_nth: Annotated[Optional[int], Field(ge=1, description=(
+            "Render every nth frame (first and last always included). Omit "
+            "for the densest sheet that fits 16 cells."
+        ))] = None,
+        resolution: Annotated[int, Field(ge=64, le=1024, description=(
+            "Per-cell resolution, before the sheet is downscaled."
+        ))] = 256,
+        renderer: Annotated[Literal["arnold", "hw2"], Field(description=(
+            "'hw2' (default here) - a preview is many frames and motion "
+            "does not need refraction."
+        ))] = "hw2",
+        timeout_s: Annotated[float, Field(ge=30.0, le=MAX_RENDER_TIMEOUT_S,
+                                          description=(
+            "Seconds for ALL frames; a timeout does not stop the render."
+        ))] = RENDER_TIMEOUT_S,
+    ) -> list:
+        """A contact sheet of the clip's frames - judge motion from pixels.
+
+        Row-major, first frame top-left, times labeled per cell."""
+        result = maya.request(
+            "preview_clip",
+            {"root": root, "name": name, "angle": angle,
+             "every_nth": every_nth, "resolution": resolution,
+             "renderer": renderer},
+            timeout_s=timeout_s,
+        )
+        shots = result.get("images", [])
+        cells = [images.decode_and_downscale(s["png_b64"],
+                                             max_px=resolution)
+                 for s in shots]
+        sheet = images.contact_sheet(cells)
+        content: List[Union[Image, str]] = [
+            Image(data=images.decode_and_downscale(
+                base64.b64encode(sheet).decode("ascii")), format="png"),
+            "clip %r at %d fps - cells (row-major): %s" % (
+                result.get("clip"), result.get("fps", 0),
+                json.dumps([s["label"] for s in shots])),
+            "frames: " + json.dumps(result.get("frames", [])),
+        ]
+        return content
 
     @mcp.tool(
         title="Report skin weights",
