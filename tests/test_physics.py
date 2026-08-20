@@ -156,6 +156,11 @@ class TestChunkCollection:
         with pytest.raises(HandlerError, match="density"):
             physics.author_physics({"root": "golem", "density": True})
 
+    def test_exclude_refused_in_chunks_mode(self, fake):
+        _scene(fake)
+        with pytest.raises(HandlerError, match="root-mode only"):
+            physics.author_physics({"chunks": ["pelvis"], "exclude": ["x"]})
+
     def test_duplicate_short_names_refused(self, fake):
         _scene(fake)
         fake.objects.append("|other|thigh")

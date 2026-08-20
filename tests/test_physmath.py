@@ -233,10 +233,10 @@ class TestFitCollider:
     def test_a_box_wearing_capsule_proportions_still_reads_as_a_box(self):
         # #676 Task 6's live gate caught this on golem_C_chest_girdle: an
         # anisotropic BOX (corners fill their bounding box exactly, fill
-        # 1.0) can still pass the old capsule test on aspect ratio alone
-        # (a/b=1.2, b/c=1.11 both clear the thresholds). A real capsule's
-        # rounded caps can never reach that fill - CAPSULE_FILL_MAX is the
-        # guard that keeps a box a box regardless of its proportions.
+        # 1.0) can still pass the aspect-ratio-only rule, without the
+        # fill guard (a/b=1.2, b/c=1.11 both clear the thresholds). A real
+        # capsule's rounded caps can never reach that fill - CAPSULE_FILL_MAX
+        # is the guard that keeps a box a box regardless of its proportions.
         half = (1.2, 1.0, 0.9)
         corners = [(sx * half[0], sy * half[1], sz * half[2])
                    for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)]

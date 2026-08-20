@@ -98,6 +98,11 @@ def _collect_chunks(cmds, params: Dict[str, Any],
             raise HandlerError(
                 "chunks must be a non-empty list of transform names",
                 hint="e.g. [\"golem_C_pelvis\", \"golem_C_belly\"]")
+        if params.get("exclude") is not None:
+            raise HandlerError(
+                "exclude is root-mode only",
+                hint="chunks mode already enumerates exactly what to "
+                     "measure; drop exclude or use root")
         out = []
         for name in chunks:
             long = naming.require_object(cmds, name)

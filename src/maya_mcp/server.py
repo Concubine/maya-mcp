@@ -2186,7 +2186,7 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         numbers from the scene instead of a packaging script.
 
         Read-only. Per body: mass/volume (tetra-measured, |closed-mesh|),
-        the sculpt's SOLID centre of mass, one primitive collider "
+        the sculpt's SOLID centre of mass, one primitive collider
         (box/sphere/capsule) fitted in the mesh's own principal frame with
         measured honesty (volume_ratio, max_escape), and the motion
         handoff's swing/twist cone converted from override hinge data -

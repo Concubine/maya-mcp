@@ -46,7 +46,24 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 # or below every genuine capsule (thigh/shin above, plus
 # golem_C_belly/golem_C_pelvis at 1.19-1.32, both already capsule-shaped
 # by fill and roundness) - verified against all 33 delivered chunks, see
-# docs/superpowers/plans task-6 report.
+# .superpowers/sdd/task-6-report.md and the plan
+# docs/superpowers/plans/2026-08-20-rigging-p4-author-physics.md.
+#
+# Why a LOW cutoff is the generically correct side to err on: at the
+# sphere/capsule boundary the two primitives CONVERGE. This fitter's
+# capsule takes radius = max radial distance and half_cyl = a - r, so as
+# a/b -> 1 the capsule degenerates to exactly the sphere the sphere
+# branch would emit (same volume_ratio, escape -> 0) - a borderline
+# classification is therefore nearly free. The costs are asymmetric the
+# other way: below the cutoff, a round-sectioned elongated shape gets a
+# bounding sphere whose wasted volume grows cubically with elongation
+# (measured 2.9-3.3x on the golem thighs at a/b 1.32-1.39). For
+# round-section clouds this capsule construction is contained in the
+# bounding sphere, so it weakly dominates on volume_ratio, losing only
+# marginally on max_escape (cap corners) - which the honesty metrics
+# report anyway. Hence 1.1 is a hysteresis margin ~7-8% above
+# genuinely-round measured chunks (a/b 1.024-1.026) on stable PCA extent
+# ratios.
 SPHERE_MAX_ANISO = 1.4      # a/c at most this to read as "round all over"
 CAPSULE_MIN_ELONG = 1.1     # a/b at least this to read as "long"
 CAPSULE_MAX_ROUND = 1.5     # b/c at most this to read as "round section"
@@ -130,8 +147,8 @@ def eigen_symmetric3(m: Sequence[Sequence[float]],
                      sweeps: int = 24) -> Tuple[List[float], List[List[float]]]:
     """Eigen-decomposition of a symmetric 3x3 by cyclic Jacobi rotations.
 
-    Returns (eigenvalues, eigenvectors as ROW vectors, value[i] belonging
-    to vector[i]). Pure Python on purpose - no numpy exists in the plugin
+    Returns (eigenvalues, eigenvectors as ROW vectors); value[i] belongs
+    to vector[i]. Pure Python on purpose - no numpy exists in the plugin
     environment, and 3x3 Jacobi converges in a handful of sweeps. An
     already-diagonal matrix (a cube's isotropic covariance) exits
     immediately with the identity basis - no rotation is ever invented.
