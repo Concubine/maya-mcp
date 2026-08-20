@@ -26,6 +26,7 @@ from .dispatcher import Dispatcher
 from .handlers import (
     array,
     assemble,
+    blendshape,
     capture,
     code_exec,
     combine,
@@ -209,6 +210,8 @@ def _build_handlers() -> Dict[str, Any]:
         "set_region_weights": rigging.set_region_weights,
         "pose_ik": rigging.pose_ik,
         "author_physics": physics.author_physics,
+        "create_blendshape": blendshape.create_blendshape,
+        "set_blendshape_weights": blendshape.set_blendshape_weights,
     }
 
 
