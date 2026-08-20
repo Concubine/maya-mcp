@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..dispatcher import HandlerError
-from . import naming, rigmath, sculpt, sculpt_math, session, units
+from . import clip, naming, rigmath, sculpt, sculpt_math, session, units
 
 
 def _cmds():
@@ -312,6 +312,7 @@ def pose_skeleton(params: Dict[str, Any]) -> Dict[str, Any]:
                  "same currency a phase-6 clip keys. Reaching a world-space "
                  "target is phase 3's pose_ik")
     joints = _hierarchy_joints(cmds, root_long)
+    clip.guard_static_pose(cmds, root_long, joints, "pose_skeleton")
     resolved = _resolve_rotations(cmds, joints, params.get("rotations"))
 
     session.auto_checkpoint("pose_skeleton")
@@ -368,6 +369,7 @@ def reset_pose(params: Dict[str, Any]) -> Dict[str, Any]:
     cmds = _cmds()
     root_long = _require_joint(cmds, params.get("root"))
     joints = _hierarchy_joints(cmds, root_long)
+    clip.guard_static_pose(cmds, root_long, joints, "reset_pose")
 
     session.auto_checkpoint("reset_pose")
     meshes = _bound_meshes(cmds, set(joints))
@@ -845,6 +847,7 @@ def pose_ik(params: Dict[str, Any]) -> Dict[str, Any]:
     cmds = _cmds()
     root_long = _require_joint(cmds, params.get("root"))
     joints = _hierarchy_joints(cmds, root_long)
+    clip.guard_static_pose(cmds, root_long, joints, "pose_ik")
     end = _resolve_joint(cmds, joints, params.get("joint"), "joint")
     if end == root_long:
         raise HandlerError(

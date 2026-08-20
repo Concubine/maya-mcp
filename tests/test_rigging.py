@@ -170,6 +170,18 @@ class FakeCmds:
             return list(self.bind_poses)
         return None
 
+    def attributeQuery(self, attr, node=None, exists=False):
+        # For clip metadata check - always return False (no mcp_clip attr)
+        if exists:
+            return False
+        return None
+
+    def listConnections(self, plug, source=False, destination=True,
+                        type=None):
+        if plug in getattr(self, "curve_plugs", ()):
+            return [plug.replace("|", "_").replace(".", "_") + "_crv"]
+        return None
+
 
 @pytest.fixture
 def fake(monkeypatch):
@@ -855,3 +867,41 @@ class TestPoseIk:
         with pytest.raises(HandlerError, match="not a joint under this root"):
             rigging.pose_ik({"root": "pelvis", "joint": "elbow",
                              "target": [0, 0, 0]})
+
+
+class TestClipGuard:
+    """#695: while animation curves drive the skeleton, static pose writes
+    refuse - a value a curve overrides on the next frame change is the
+    quietest way to lie about a pose."""
+
+    def test_pose_skeleton_refuses_on_a_driven_skeleton(self, fake):
+        fake.objects += ["|<root>", "|<root>|<child>"]
+        fake.parents = {"|<root>|<child>": "|<root>"}
+        fake.curve_plugs = {"|<root>|<child>.rotateZ"}
+        with pytest.raises(HandlerError, match="animation curves"):
+            rigging.pose_skeleton({"root": "<root>",
+                                   "rotations": {"<child>": [0, 0, 10]}})
+
+    def test_reset_pose_refuses_on_a_driven_skeleton(self, fake):
+        fake.objects += ["|<root>", "|<root>|<child>"]
+        fake.parents = {"|<root>|<child>": "|<root>"}
+        fake.curve_plugs = {"|<root>.rotateX"}
+        with pytest.raises(HandlerError, match="animation curves"):
+            rigging.reset_pose({"root": "<root>"})
+
+    def test_pose_ik_refuses_on_a_driven_skeleton(self, fake):
+        fake.objects += ["|<root>", "|<root>|<mid>", "|<root>|<mid>|<tip>"]
+        fake.parents = {"|<root>|<mid>": "|<root>",
+                       "|<root>|<mid>|<tip>": "|<root>|<mid>"}
+        fake.curve_plugs = {"|<root>|<mid>.rotateY"}
+        with pytest.raises(HandlerError, match="animation curves"):
+            rigging.pose_ik({"root": "<root>", "joint": "<tip>",
+                             "target": [1.0, 0.0, 0.0], "start": "<root>"})
+
+    def test_an_undriven_skeleton_poses_exactly_as_before(self, fake):
+        fake.objects += ["|<root>", "|<root>|<child>"]
+        fake.parents = {"|<root>|<child>": "|<root>"}
+        # no curve_plugs: the ordinary happy-path pose test body, unchanged
+        out = rigging.pose_skeleton({"root": "<root>",
+                                     "rotations": {"<child>": [0, 0, 10]}})
+        assert out["applied"] == 1

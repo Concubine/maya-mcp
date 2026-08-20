@@ -123,6 +123,18 @@ class FakeCmds:
             self.deleted.append(n)
             self.objects.remove(n)
 
+    def attributeQuery(self, attr, node=None, exists=False):
+        # For clip metadata check - always return False (no mcp_clip attr)
+        if exists:
+            return False
+        return None
+
+    def listConnections(self, plug, source=False, destination=True,
+                        type=None):
+        if plug in getattr(self, "curve_plugs", ()):
+            return [plug.replace("|", "_").replace(".", "_") + "_crv"]
+        return None
+
 
 @pytest.fixture
 def fake(monkeypatch):
@@ -366,3 +378,23 @@ class TestSetWeights:
         out = blendshape.set_blendshape_weights(
             {"mesh": "humanoid", "weights": {"brow_raise": 0.0}})
         assert any("nothing moved" in w for w in out["warnings"])
+
+
+class TestClipGuard:
+    def test_set_weights_refuses_on_a_keyed_channel(self, fake):
+        _scene(fake)
+        fake.deltas = {"blink": 0.2}
+        node = _create(fake, [{"name": "blink",
+                               "target_mesh": "brow"}])["blend_shape"]
+        fake.curve_plugs = {"%s.blink" % node}
+        with pytest.raises(HandlerError, match="animation curves"):
+            blendshape.set_blendshape_weights(
+                {"mesh": "humanoid", "weights": {"blink": 0.5}})
+
+    def test_unkeyed_channels_still_write(self, fake):
+        _scene(fake)
+        fake.deltas = {"blink": 0.2}
+        _create(fake, [{"name": "blink", "target_mesh": "brow"}])
+        out = blendshape.set_blendshape_weights(
+            {"mesh": "humanoid", "weights": {"blink": 0.5}})
+        assert out["weights"]["blink"] == 0.5

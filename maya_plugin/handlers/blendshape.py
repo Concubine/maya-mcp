@@ -18,7 +18,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..dispatcher import HandlerError
-from . import naming, sculpt, sculpt_math, session
+from . import clip, naming, sculpt, sculpt_math, session
 
 MAX_TARGETS = 20
 # Below this fraction of the base's bbox diagonal, a target's measured delta
@@ -210,6 +210,7 @@ def set_blendshape_weights(params: Dict[str, Any]) -> Dict[str, Any]:
             "%s has no blendShape" % mesh_long,
             hint="create_blendshape wires targets first")
     aliases = _aliases(cmds, node)
+    clip.guard_static_weights(cmds, node, aliases, "set_blendshape_weights")
     weights = params.get("weights")
     if not isinstance(weights, dict) or not weights:
         raise HandlerError(
