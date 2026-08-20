@@ -162,6 +162,8 @@ class TestCreateValidation:
             _create(fake, [{"name": "2bad", "target_mesh": "brow"}])
         with pytest.raises(HandlerError, match="plain identifier"):
             _create(fake, [{"name": "has space", "target_mesh": "brow"}])
+        with pytest.raises(HandlerError, match="plain identifier"):
+            _create(fake, [{"name": "brow_é", "target_mesh": "brow"}])
         with pytest.raises(HandlerError, match="appears twice"):
             _create(fake, [{"name": "a", "target_mesh": "brow"},
                            {"name": "a", "target_mesh": "bulge"}])

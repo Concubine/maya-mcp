@@ -14,6 +14,7 @@ like.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..dispatcher import HandlerError
@@ -78,8 +79,7 @@ def _validated_targets(cmds, mesh_long: str, targets,
             raise HandlerError("targets[%d] must be {name, target_mesh}" % i)
         name = entry.get("name")
         if (not isinstance(name, str) or not name
-                or not name.replace("_", "").isalnum()
-                or name[0].isdigit()):
+                or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name)):
             raise HandlerError(
                 "targets[%d].name %r must be a plain identifier (letters, "
                 "digits, underscore; not starting with a digit)" % (i, name),
@@ -163,7 +163,7 @@ def create_blendshape(params: Dict[str, Any]) -> Dict[str, Any]:
         cmds.setAttr(plug, 1.0)
         max_delta = sculpt_math.max_displacement(baseline, _points(mesh_long))
         cmds.setAttr(plug, 0.0)
-        if extent > 0 and max_delta < extent * ZERO_DELTA_RATIO:
+        if max_delta < max(extent, 1.0) * ZERO_DELTA_RATIO:
             warnings.append(
                 "target %r measured max_delta %.3g against a %.3g-wide "
                 "mesh - the target is (near-)identical to the base. It was "
