@@ -909,20 +909,38 @@ def pose_ik(params: Dict[str, Any]) -> Dict[str, Any]:
     before = {m: sculpt.vertex_positions(cmds, m) for m in meshes}
     prior = {j: tuple(cmds.getAttr(j + ".rotate")[0]) for j in chain}
 
+    # MEASURED (#671): ikRPsolver does NOT seed its fold direction from a
+    # joint's current .rotate at ikHandle-creation time - a same-sized nudge
+    # on .rotate alone left a collinear chain fully extended (effector
+    # landed at the chain's full reach, the interior joint solved back to
+    # 0,0,0). The solver reads the persistent .preferredAngle attribute
+    # instead; setting that (in addition to the visible .rotate nudge, so a
+    # mid-solve inspection still shows a bent chain) is what actually folds
+    # the knee. preferredAngle is a solver-seeding implementation detail,
+    # not part of the pose, so it is restored to whatever it held before
+    # this call once the solve is read, regardless of `keep`.
+    prior_preferred = {}
     if straight and pole_used is not None:
         # A straight chain gives the solver no fold to amplify: nudge the
         # interior joints a few degrees toward the pole. The solve
-        # overwrites the nudge; keep=false or the checkpoint undoes it.
+        # overwrites the .rotate nudge; keep=false or the checkpoint undoes
+        # it. .preferredAngle is restored explicitly below.
         matrices = {i: [float(v) for v in cmds.xform(
             chain[i], query=True, worldSpace=True, matrix=True)]
             for i in range(1, len(chain) - 1)}
         for i, triple in rigmath.prebend_rotations(
                 positions, matrices, target, pole_used, PREBEND_DEG).items():
+            prior_preferred[chain[i]] = tuple(
+                cmds.getAttr(chain[i] + ".preferredAngle")[0])
             current = cmds.getAttr(chain[i] + ".rotate")[0]
             cmds.setAttr(chain[i] + ".rotate",
                          current[0] + units.degrees_to_ui(cmds, triple[0]),
                          current[1] + units.degrees_to_ui(cmds, triple[1]),
                          current[2] + units.degrees_to_ui(cmds, triple[2]))
+            cmds.setAttr(chain[i] + ".preferredAngle",
+                         units.degrees_to_ui(cmds, triple[0]),
+                         units.degrees_to_ui(cmds, triple[1]),
+                         units.degrees_to_ui(cmds, triple[2]))
 
     handle, effector = cmds.ikHandle(
         startJoint=start, endEffector=end, solver=IK_SOLVER,
@@ -943,6 +961,9 @@ def pose_ik(params: Dict[str, Any]) -> Dict[str, Any]:
     for j in chain:
         raw = cmds.getAttr(j + ".rotate")[0]
         baked[j] = [round(units.ui_to_degrees(cmds, v), 6) for v in raw]
+
+    for j, angle in prior_preferred.items():
+        cmds.setAttr(j + ".preferredAngle", angle[0], angle[1], angle[2])
 
     doomed = [n for n in (handle, effector, locator)
               if n and cmds.objExists(n)]

@@ -2709,3 +2709,106 @@ class TestExportSkinsInMaya:
         # noise the exporter changed and the tolerance can be revisited.
         assert err > 1e-9, (
             "the exporter no longer prunes weights - remeasure WEIGHT_SUM_TOL")
+
+
+class TestPoseIkInMaya:
+    LEG = [
+        {"name": "ik_pelvis", "position": [0.0, 1.00, 0.0]},
+        {"name": "ik_hip", "position": [0.10, 0.95, 0.0], "parent": "ik_pelvis"},
+        {"name": "ik_knee", "position": [0.10, 0.50, 0.0], "parent": "ik_hip"},
+        {"name": "ik_ankle", "position": [0.10, 0.08, 0.0], "parent": "ik_knee"},
+    ]
+    TARGET = [0.10, 0.60, 0.20]       # forward+up, well inside the 0.87 reach
+    POLE = [0.10, 0.50, 0.50]         # knee faces world +Z
+
+    def _skeleton(self):
+        from maya_plugin.handlers import rigging
+
+        return rigging.create_skeleton({"joints": self.LEG})["root"]
+
+    def test_straight_leg_reaches_the_target_with_a_pole(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import rigging
+
+        root = self._skeleton()
+        out = rigging.pose_ik({"root": root, "joint": "ik_ankle",
+                               "target": self.TARGET, "pole": self.POLE})
+        # the bind-pose leg is perfectly straight - this asserts the
+        # pre-bend actually unlocked the RP solver
+        assert out["residual"] < 1e-3, out
+        for axis in range(3):
+            assert abs(out["achieved_position"][axis]
+                       - self.TARGET[axis]) < 2e-3
+        # the knee folded toward the pole, not away from it
+        knee = cmds.xform(out["chain"][1], query=True, worldSpace=True,
+                          translation=True)
+        assert knee[2] > 0.01, "knee went to z=%.4f, away from the pole" % knee[2]
+        # no persistent IK state, the spec's core promise
+        assert not cmds.ls(type="ikHandle")
+        assert not cmds.ls(type="ikEffector")
+        assert not cmds.ls(type="poleVectorConstraint")
+        assert not cmds.ls("*_pole", type="transform")
+
+    def test_bake_is_the_phase1_pose_currency(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import rigging
+
+        root = self._skeleton()
+        out = rigging.pose_ik({"root": root, "joint": "ik_ankle",
+                               "target": self.TARGET, "pole": self.POLE})
+        rigging.reset_pose({"root": root})
+        # re-apply the returned rotations as plain FK: same achieved position
+        rigging.pose_skeleton({"root": root, "rotations": out["rotations"]})
+        again = cmds.xform("|ik_pelvis|ik_hip|ik_knee|ik_ankle", query=True,
+                           worldSpace=True, translation=True)
+        for axis in range(3):
+            assert abs(again[axis] - out["achieved_position"][axis]) < 1e-4
+
+    def test_unreachable_target_reports_the_geometric_miss(self):
+        from maya_plugin.handlers import rigmath, rigging
+
+        root = self._skeleton()
+        target = [0.10, 0.95 - 2.0, 0.0]   # 2.0 below the hip, reach is 0.87
+        out = rigging.pose_ik({"root": root, "joint": "ik_ankle",
+                               "target": target, "pole": self.POLE})
+        expected_miss = 2.0 - rigmath.chain_reach(
+            [[0.10, 0.95, 0.0], [0.10, 0.50, 0.0], [0.10, 0.08, 0.0]])
+        assert abs(out["residual"] - expected_miss) < 0.05
+        assert any("reaches only" in w for w in out["warnings"])
+
+    def test_keep_false_measures_then_restores(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import rigging
+
+        root = self._skeleton()
+        ankle = "|ik_pelvis|ik_hip|ik_knee|ik_ankle"
+        before = cmds.xform(ankle, query=True, worldSpace=True,
+                            translation=True)
+        out = rigging.pose_ik({"root": root, "joint": "ik_ankle",
+                               "target": self.TARGET, "pole": self.POLE,
+                               "keep": False})
+        assert out["kept"] is False
+        assert out["residual"] < 1e-3          # the solve itself was measured
+        after = cmds.xform(ankle, query=True, worldSpace=True,
+                           translation=True)
+        for axis in range(3):
+            assert abs(after[axis] - before[axis]) < 1e-6
+
+    def test_deforms_a_bound_mesh_and_measures_it(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import rigging
+
+        root = self._skeleton()
+        cmds.polyCylinder(name="ik_leg_mesh", radius=0.06, height=0.9,
+                          subdivisionsHeight=8)
+        cmds.setAttr("|ik_leg_mesh.translate", 0.10, 0.5, 0.0)
+        cmds.makeIdentity("|ik_leg_mesh", apply=True, translate=True)
+        rigging.bind_skin({"mesh": "|ik_leg_mesh", "root": root})
+        out = rigging.pose_ik({"root": root, "joint": "ik_ankle",
+                               "target": self.TARGET, "pole": self.POLE})
+        assert out["max_displacement"] > 0.05
+        assert out["per_mesh"] and out["per_mesh"][0]["displaced_vertices"] > 0
