@@ -3255,3 +3255,275 @@ class TestBlendshapeExportInMaya:
         assert result["skin"]["clusters"] == 2
         assert result["shapes"]["channels"] == 1
         assert result["shapes"]["shapes"][0]["name"] == "fix"
+
+
+class TestClipInMaya:
+    # The mayapy session is ONE persistent Maya scene across tests: reused
+    # joint names would collide with unique_name and make short-name
+    # resolution ambiguous, so every test builds under its OWN prefix (the
+    # bs_base/bs_base8 precedent in the blendshape classes above).
+    def _rig(self, cmds, prefix, bound=True):
+        from maya_plugin.handlers import rigging
+
+        base = cmds.ls(cmds.polyCube(name=prefix + "_base", height=2,
+                                     subdivisionsHeight=4)[0], long=True)[0]
+        skeleton = rigging.create_skeleton({"joints": [
+            {"name": prefix + "_root", "position": [0.0, -1.0, 0.0]},
+            {"name": prefix + "_mid", "position": [0.0, 0.0, 0.0],
+             "parent": prefix + "_root"},
+            {"name": prefix + "_tip", "position": [0.0, 1.0, 0.0],
+             "parent": prefix + "_mid"}]})
+        if bound:
+            rigging.bind_skin({"mesh": base, "root": skeleton["root"]})
+        return base, skeleton["root"]
+
+    def test_author_measures_real_evaluated_motion(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import clip
+
+        base, root = self._rig(cmds, "ca")
+        out = clip.author_clip({
+            "root": root, "name": "bend", "fps": 30,
+            "keys": [
+                {"time_s": 0.0, "rotations": {"ca_mid": [0, 0, 0]}},
+                {"time_s": 1.0, "rotations": {"ca_mid": [0, 0, 90]}},
+            ]})
+        assert out["duration_s"] == pytest.approx(1.0)
+        assert out["frames"] == 31
+        # per-key displacement is EVALUATED: at key 1 the tip half of a
+        # 2-unit cube swings 90 degrees about the mid joint
+        assert out["per_key"][0]["max_displacement"] == 0.0
+        assert out["per_key"][1]["max_displacement"] > 0.5
+        # the curves really hold degrees: evaluate mid-clip
+        cmds.currentTime(15)
+        rz = cmds.getAttr(root + "|ca_mid.rotateZ")
+        assert 30.0 < rz < 60.0     # linear tangents, halfway-ish
+        cmds.currentTime(0)
+        # teardown: the mayapy scene persists, and a leftover clip would
+        # trip the export leg's one-clip-per-file scan
+        clip.delete_clip({"root": root})
+
+    def test_static_mutators_refuse_then_delete_clip_restores(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import clip, rigging, sculpt
+
+        base, root = self._rig(cmds, "cb")
+        rest = sculpt.vertex_positions(cmds, base)
+        clip.author_clip({
+            "root": root, "name": "bend", "fps": 30,
+            "keys": [
+                {"time_s": 0.0, "rotations": {"cb_mid": [0, 0, 0]}},
+                {"time_s": 0.5, "rotations": {"cb_mid": [0, 0, 45]}},
+            ]})
+        with pytest.raises(HandlerError, match="clip 'bend'"):
+            rigging.pose_skeleton({"root": root,
+                                   "rotations": {"cb_mid": [0, 0, 10]}})
+        with pytest.raises(HandlerError, match="animation curves"):
+            rigging.reset_pose({"root": root})
+        out = clip.delete_clip({"root": root})
+        assert out["clip"] == "bend" and out["deleted_curves"] >= 3
+        # static posing works again, and the mesh is back at bind
+        now = sculpt.vertex_positions(cmds, base)
+        worst = max(abs(a - b) for a, b in zip(rest, now))
+        assert worst < 1e-4
+        rigging.pose_skeleton({"root": root,
+                               "rotations": {"cb_mid": [0, 0, 10]}})
+
+    def test_loop_refusal_and_replace_are_real(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import clip
+
+        base, root = self._rig(cmds, "cc", bound=False)
+        with pytest.raises(HandlerError, match="does not close"):
+            clip.author_clip({
+                "root": root, "name": "bad", "fps": 30, "loop": True,
+                "keys": [
+                    {"time_s": 0.0, "rotations": {"cc_mid": [0, 0, 0]}},
+                    {"time_s": 1.0, "rotations": {"cc_mid": [0, 0, 45]}},
+                ]})
+        clip.author_clip({
+            "root": root, "name": "first", "fps": 30,
+            "keys": [
+                {"time_s": 0.0, "rotations": {"cc_mid": [0, 0, 0]}},
+                {"time_s": 1.0, "rotations": {"cc_mid": [0, 0, 45]}},
+            ]})
+        out = clip.author_clip({
+            "root": root, "name": "second", "fps": 30,
+            "keys": [
+                {"time_s": 0.0, "rotations": {"cc_tip": [0, 0, 0]}},
+                {"time_s": 1.0, "rotations": {"cc_tip": [0, 0, 20]}},
+            ]})
+        assert out["replaced"] == "first"
+        # the first clip's curves are GONE, not merged
+        assert not (cmds.listConnections(
+            root + "|cc_mid.rotateZ",
+            source=True, destination=False, type="animCurve") or [])
+        clip.delete_clip({"root": root})   # scene-persistence teardown
+
+
+class TestClipExportInMaya:
+    # Same persistent-scene rule as TestClipInMaya: one prefix per test.
+    def _clipped_scene(self, cmds, prefix, with_blink=True):
+        from maya_plugin.handlers import blendshape, clip, rigging
+
+        base = cmds.ls(cmds.polyCube(name=prefix + "_base", height=2,
+                                     subdivisionsHeight=4)[0], long=True)[0]
+        skeleton = rigging.create_skeleton({"joints": [
+            {"name": prefix + "_root", "position": [0.0, -1.0, 0.0]},
+            {"name": prefix + "_mid", "position": [0.0, 0.0, 0.0],
+             "parent": prefix + "_root"}]})
+        rigging.bind_skin({"mesh": base, "root": skeleton["root"]})
+        weights = {}
+        if with_blink:
+            target = cmds.ls(cmds.duplicate(base, name=prefix + "_t")[0],
+                             long=True)[0]
+            cmds.move(0, 0, 0.2, target + ".vtx[0]", relative=True)
+            blendshape.create_blendshape({
+                "mesh": base,
+                "targets": [{"name": prefix + "_blink",
+                             "target_mesh": target}]})
+            weights = {prefix + "_blink": 0.0}
+        keys = [
+            {"time_s": 0.0, "rotations": {prefix + "_mid": [0, 0, 0]},
+             "root_position": [0.0, -1.0, 0.0], "blend_weights": weights},
+            {"time_s": 0.5, "rotations": {prefix + "_mid": [0, 0, 30]},
+             "root_position": [0.0, -0.95, 0.0],
+             "blend_weights": ({prefix + "_blink": 1.0} if with_blink
+                               else {})},
+            {"time_s": 1.0, "rotations": {prefix + "_mid": [0, 0, 0]},
+             "root_position": [0.0, -1.0, 0.0], "blend_weights": weights},
+        ]
+        if not with_blink:
+            for k in keys:
+                k.pop("blend_weights")
+        clip.author_clip({"root": skeleton["root"], "name": "sway",
+                          "fps": 30, "loop": True, "keys": keys})
+        return base, skeleton["root"]
+
+    def test_the_measurements(self, tmp_path):
+        """THE MEASUREMENT BATTERY (#695 plan constraint). Every assertion
+        here pins a literal the byte gate rests on. On failure, read the
+        raw facts (facts.anim_nodes / facts.takes), fix the READER or the
+        VIOLATION to the measured truth, and record the measured value in
+        a comment here - never force the literal.
+        """
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import clip, export, fbxbytes
+
+        base, root = self._clipped_scene(cmds, "cd")
+        path = str(tmp_path / "sway.fbx").replace("\\", "/")
+        # SELECTED export (mesh + root): the persistent mayapy scene holds
+        # other tests' meshes, and a selected export keeps this file about
+        # this rig - same shape the skin-export contract documents.
+        result = export.export_fbx({"path": path, "metres_per_unit": 1.0,
+                                    "nodes": [base, root],
+                                    "include_skins": True,
+                                    "include_animation": True})
+        anim = result["animation"]
+        assert anim is not None
+        # (3) the take is named after the clip - MEASURED: Maya's exporter
+        # ALSO always writes its own default take ("Take 001", full bake
+        # range) alongside the one FBXExportSplitAnimationIntoTakes adds, so
+        # the file carries 2 takes, not 1 (see export.py's FBX_ANIM_MEL and
+        # anim_violations comments for what was tried and rejected). The
+        # clip-named take must be present; the extra one is not a defect.
+        assert "sway" in [t["name"] for t in anim["takes"]]
+        assert len(anim["takes"]) == 2
+        sway_take = next(t for t in anim["takes"] if t["name"] == "sway")
+        # (1) tick constant: a 1.0 s clip must measure 1.0 s in ticks
+        assert sway_take["duration_s"] == pytest.approx(1.0, abs=0.04)
+        by = {(t["target"], t["property"]): t for t in anim["targets"]}
+        # (2) property strings + (4) baked key count
+        mid = by[("cd_mid", "Lcl Rotation")]
+        assert mid["curves"] == 3
+        assert mid["key_count"] == 31          # round(1.0 * 30) + 1
+        root_t = by[("cd_root", "Lcl Translation")]
+        assert root_t["key_count"] == 31
+        # (5) DeformPercent: presence gated; RECORD the measured count here
+        blink = by[("cd_blink", "DeformPercent")]
+        assert blink["key_count"] >= 2
+        # an independent read of the bytes agrees with the tool
+        assert fbxbytes.anim_facts(fbxbytes.read_fbx(path)) == anim
+        # skins and shapes still green alongside animation
+        assert result["skin"]["deformers"] == 1
+        assert result["shapes"]["shapes"][0]["name"] == "cd_blink"
+        clip.delete_clip({"root": root})   # scene-persistence teardown
+
+    def test_animation_off_writes_zero_curves(self, tmp_path):
+        """(6) the symmetric assertion: an ANIMATED scene exported without
+        include_animation carries not one curve record."""
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import clip, export, fbxbytes
+
+        base, root = self._clipped_scene(cmds, "cf", with_blink=False)
+        path = str(tmp_path / "static.fbx").replace("\\", "/")
+        result = export.export_fbx({"path": path, "metres_per_unit": 1.0,
+                                    "nodes": [base, root],
+                                    "include_skins": True})
+        assert result["animation"] is None
+        facts = fbxbytes.read_fbx(path)
+        assert len(facts.anim_curves) == 0
+        assert len(facts.anim_nodes) == 0
+        clip.delete_clip({"root": root})   # scene-persistence teardown
+
+    def test_include_animation_without_a_clip_refuses(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import export
+
+        cmds.polyCube(name="ce_plain")
+        path = str(tmp_path / "none.fbx").replace("\\", "/")
+        with pytest.raises(HandlerError, match="no clip exists"):
+            export.export_fbx({"path": path, "metres_per_unit": 1.0,
+                               "include_animation": True})
+
+    def test_two_clip_carrying_roots_refuse_naming_the_take(self, tmp_path):
+        """CONTROLLER-ADDED SCOPE (Task 6 review gap): export._scene_clip
+        refuses to pick a take name when more than one skeleton root in the
+        exported selection carries an authored clip - one FBX file is one
+        take, and two roots have no honest single name. Untested anywhere
+        before this."""
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import clip, export, rigging
+
+        def _clipped_rig(prefix):
+            base = cmds.ls(cmds.polyCube(name=prefix + "_base", height=2,
+                                         subdivisionsHeight=4)[0],
+                          long=True)[0]
+            skeleton = rigging.create_skeleton({"joints": [
+                {"name": prefix + "_root", "position": [0.0, -1.0, 0.0]},
+                {"name": prefix + "_mid", "position": [0.0, 0.0, 0.0],
+                 "parent": prefix + "_root"}]})
+            rigging.bind_skin({"mesh": base, "root": skeleton["root"]})
+            clip.author_clip({
+                "root": skeleton["root"], "name": "move", "fps": 30,
+                "keys": [
+                    {"time_s": 0.0,
+                     "rotations": {prefix + "_mid": [0, 0, 0]}},
+                    {"time_s": 1.0,
+                     "rotations": {prefix + "_mid": [0, 0, 30]}},
+                ]})
+            return base, skeleton["root"]
+
+        base_a, root_a = _clipped_rig("cga")
+        base_b, root_b = _clipped_rig("cgb")
+        path = str(tmp_path / "two_roots.fbx").replace("\\", "/")
+        try:
+            with pytest.raises(HandlerError, match="one file is one take"):
+                export.export_fbx({
+                    "path": path, "metres_per_unit": 1.0,
+                    "nodes": [base_a, root_a, base_b, root_b],
+                    "include_animation": True})
+        finally:
+            clip.delete_clip({"root": root_a})
+            clip.delete_clip({"root": root_b})
