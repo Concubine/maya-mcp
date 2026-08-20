@@ -102,10 +102,24 @@ FBX_SHAPES_MEL: Tuple[str, ...] = ("FBXExportShapes -v true",)
 # byte-equivalent to a static export - the byte gate asserts zero curve
 # records in that case, the symmetric assertion. The bake range (start/end)
 # and take naming are per-call values, composed in export_fbx.
+#
+# FBXExportBakeResampleAnimation IS REQUIRED, and NOT documented as such -
+# MEASURED under mayapy (TestClipExportInMaya, the baked-key-count item of
+# the #695 battery). With FBXExportBakeComplexAnimation -v true alone (the
+# combination this was first written with), the exported curves kept the 3
+# RAW authored keyframes verbatim instead of resampling to one key per frame
+# over the bake range: a 1.0 s / 30 fps clip measured key_count=3, not the
+# expected round(1.0*30)+1=31. "Bake Complex Animation" on its own only
+# covers non-simple animation (constraints, expressions); a plain
+# setKeyframe curve like author_clip writes needs the exporter's separate
+# "Resample All" toggle to be forced onto the per-frame grid. Confirmed by
+# the flip: adding FBXExportBakeResampleAnimation -v true alone (bake step/
+# range unchanged) took every curve's key_count from 3 to 31.
 FBX_ANIM_MEL = {
     True: ('FBXProperty "Export|IncludeGrp|Animation" -v true',
            "FBXExportBakeComplexAnimation -v true",
-           "FBXExportBakeComplexStep -v 1"),
+           "FBXExportBakeComplexStep -v 1",
+           "FBXExportBakeResampleAnimation -v true"),
     False: ('FBXProperty "Export|IncludeGrp|Animation" -v false',
             "FBXExportBakeComplexAnimation -v false"),
 }
@@ -327,20 +341,28 @@ def anim_violations(afacts, declared) -> List[str]:
     if afacts["unavailable_reason"]:
         out.append("animation records unreadable: %s"
                    % afacts["unavailable_reason"])
-    if len(afacts["takes"]) != 1:
-        out.append("the file carries %d takes, expected exactly 1"
-                   % len(afacts["takes"]))
+    # MEASURED under mayapy (TestClipExportInMaya, see the FBX_ANIM_MEL
+    # comment above): FBXExportSplitAnimationIntoTakes adds the named take
+    # alongside the exporter's own always-present default take ("Take
+    # 001"), so a correct file legitimately carries 2+ takes, not exactly
+    # 1. Only the DECLARED one is required - extra takes are not a
+    # violation, the same rule shape_violations applies to undeclared
+    # blendShape channels.
+    named = [t for t in afacts["takes"] if t["name"] == declared["name"]]
+    if not named:
+        out.append(
+            "the file carries no take named %r (has: %s)"
+            % (declared["name"],
+               ", ".join(repr(t["name"]) for t in afacts["takes"]) or "none"))
     else:
-        take = afacts["takes"][0]
-        if take["name"] != declared["name"]:
-            out.append("the take is named %r, the clip is %r"
-                       % (take["name"], declared["name"]))
+        take = named[0]
         tol = 1.0 / declared["fps"]
         if (take["duration_s"] is None
                 or abs(take["duration_s"] - declared["duration_s"]) > tol):
             out.append(
-                "the take's duration is %s s, the clip declares %g s"
-                % (take["duration_s"], declared["duration_s"]))
+                "the take %r's duration is %s s, the clip declares %g s"
+                % (declared["name"], take["duration_s"],
+                   declared["duration_s"]))
     expected = int(round(declared["duration_s"] * declared["fps"])) + 1
     by = {}
     for t in afacts["targets"]:
@@ -506,6 +528,22 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
             hint="author_clip keys the motion first; a static export needs "
                  "no flag at all")
 
+    if include_animation and cmds.pluginInfo("fbxmaya", query=True, loaded=True):
+        # MEASURED under mayapy (TestClipExportInMaya, the baked-key-count
+        # item of the #695 battery): the bundled FBX plugin (2020.3.9) reads
+        # the scene's frame rate ONCE, at plugin LOAD time, and caches it for
+        # the rest of the process - FBXExportBakeComplexStep/-Start/-End are
+        # then baked at that CACHED rate, not whatever currentUnit(query=True,
+        # time=True) reports at export time, even though FBXResetExport runs
+        # before every export below. Reproduced directly: a 24 fps clip
+        # exported first, then a 30 fps clip exported second in the SAME
+        # mayapy process, baked the second clip's curves at 24 samples/s too
+        # (25 keys, not 31) - wrong and silent, no exception, no violation
+        # this reader could catch structurally since the file is internally
+        # consistent (duration_s still reads ~1.0 s). Unloading and
+        # reloading the plugin forces it to re-read the scene's current
+        # frame rate before every animated export.
+        cmds.unloadPlugin("fbxmaya", force=True)
     cmds.loadPlugin("fbxmaya", quiet=True)
     for statement in (FBX_PREAMBLE_MEL + FBX_SCENE_CONTENT_MEL
                       + FBX_SHAPES_MEL + FBX_SKINS_MEL[include_skins]
@@ -516,10 +554,22 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
                               * declared_clip["fps"]))
         mel.eval("FBXExportBakeComplexStart -v 0")
         mel.eval("FBXExportBakeComplexEnd -v %d" % end_frame)
-        # The take is NAMED AFTER THE CLIP. Maya's default take name is its
-        # own; SplitAnimationIntoTakes overrides it - MEASURED under mayapy
-        # (TestClipExportInMaya). If that measurement finds a different
-        # mechanism, fix it there and record the measured behavior.
+        # The take is NAMED AFTER THE CLIP - but MEASURED under mayapy
+        # (TestClipExportInMaya): FBXExportSplitAnimationIntoTakes ADDS the
+        # named take alongside the exporter's OWN always-present default
+        # take (written "Take 001", spanning the same bake range); it does
+        # not replace it. Tried and rejected: reordering split vs the bake
+        # flags (no effect), an empty split name (renames the ADDED take to
+        # '', default still present), a 4th call argument (MEL error - the
+        # command is fixed at name/start/end), and FBXExportUseSceneName
+        # (does rename the single default take to the Maya scene's own file
+        # name, but coupling a clip's take name to the working scene's file
+        # name is a far bigger, riskier change than this tool should make
+        # for one field). So a correct animated export legitimately carries
+        # 2+ takes; anim_violations below looks up the DECLARED name among
+        # them rather than requiring exactly one - the same "extra
+        # structure is not a violation" rule shape_violations already
+        # applies to blendShape channels the scene did not declare.
         mel.eval("FBXExportSplitAnimationIntoTakes -clear")
         mel.eval('FBXExportSplitAnimationIntoTakes -v "%s" 0 %d'
                  % (declared_clip["name"], end_frame))

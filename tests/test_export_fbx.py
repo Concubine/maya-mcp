@@ -945,7 +945,25 @@ class TestAnimViolations:
         afacts = self._clean()
         afacts["takes"] = []
         out = export.anim_violations(afacts, self._declared())
-        assert any("0 takes" in v for v in out)
+        # MEASURED under mayapy (TestClipExportInMaya, #695 battery item 3):
+        # FBXExportSplitAnimationIntoTakes ADDS the named take alongside the
+        # exporter's own always-present default take ("Take 001"); it never
+        # replaces it, so a correct file legitimately carries 2+ takes. The
+        # gate therefore looks up the DECLARED name among however many takes
+        # exist, rather than requiring exactly one - see export.py's
+        # FBX_ANIM_MEL and anim_violations comments for what was tried.
+        assert any("no take named 'walk'" in v and "has: none" in v
+                   for v in out)
+
+    def test_extra_takes_are_not_violations(self):
+        # MEASURED (see test_take_name_and_duration_gate above): Maya's own
+        # default take ("Take 001") rides along with every animated export
+        # this tool makes; it is not a defect and must not fail the gate as
+        # long as the declared clip's own take is present and correct.
+        afacts = self._clean()
+        afacts["takes"] = ([{"name": "Take 001", "duration_s": 1.0}]
+                           + afacts["takes"])
+        assert export.anim_violations(afacts, self._declared()) == []
 
     def test_missing_and_miscounted_joint_curves_fail(self):
         afacts = self._clean()
@@ -1007,4 +1025,11 @@ class TestAnimViolations:
             'FBXProperty "Export|IncludeGrp|Animation" -v true',
             "FBXExportBakeComplexAnimation -v true",
             "FBXExportBakeComplexStep -v 1",
+            # MEASURED under mayapy (TestClipExportInMaya, #695 battery item
+            # 4): without this, FBXExportBakeComplexAnimation alone left the
+            # 3 raw authored keyframes untouched instead of resampling to
+            # one key per frame - a 1.0 s/30 fps clip measured key_count=3,
+            # not the expected 31. Adding this flag alone (bake step/range
+            # unchanged) took every curve's key_count from 3 to 31.
+            "FBXExportBakeResampleAnimation -v true",
         )
