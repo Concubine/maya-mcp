@@ -102,6 +102,8 @@ class TestRegistration:
             "maya_set_region_weights",
             "maya_pose_ik",
             "maya_author_physics",
+            "maya_create_blendshape",
+            "maya_set_blendshape_weights",
         }
 
     def test_annotations_declare_read_only_vs_destructive(self):
@@ -1793,3 +1795,48 @@ class TestRiggingTools:
         assert params["overrides"] == {"b": {
             "parent": "a", "hinge_axis": [1.0, 0.0, 0.0],
             "hinge_range_deg": [0.0, 110.0]}}
+
+
+class TestBlendshapeTools:
+    def test_create_marshals_targets_and_returns_measured(self):
+        conn = FakeConn(responses={"create_blendshape": {
+            "mesh": "|humanoid", "blend_shape": "humanoid_shapes",
+            "targets": [{"name": "brow_raise", "max_delta": 0.05,
+                         "vertex_count": 33414}],
+            "warnings": []}})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_create_blendshape", {
+            "mesh": "|humanoid",
+            "targets": [{"name": "brow_raise",
+                         "target_mesh": "|humanoid_brow"}]}))
+        params = conn.calls[0]["params"]
+        assert conn.calls[0]["cmd"] == "create_blendshape"
+        assert params["targets"] == [{"name": "brow_raise",
+                                      "target_mesh": "|humanoid_brow"}]
+        payload = result.structured_content
+        assert payload["targets"][0]["max_delta"] == 0.05
+
+    def test_set_weights_marshals_and_returns_measured(self):
+        conn = FakeConn(responses={"set_blendshape_weights": {
+            "mesh": "|humanoid", "blend_shape": "humanoid_shapes",
+            "weights": {"brow_raise": 0.5},
+            "max_displacement": 0.024,
+            "per_target": [{"name": "brow_raise", "weight": 0.5,
+                            "max_displacement": 0.024}],
+            "warnings": []}})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_set_blendshape_weights", {
+            "mesh": "|humanoid", "weights": {"brow_raise": 0.5}}))
+        assert conn.calls[0]["params"] == {"mesh": "|humanoid",
+                                           "weights": {"brow_raise": 0.5}}
+        assert result.structured_content["max_displacement"] == 0.024
+
+    def test_annotations(self):
+        mcp = server_mod.create_server(FakeConn())
+        by_name = {t.name: t for t in run(mcp.list_tools())}
+        create = by_name["maya_create_blendshape"].annotations
+        assert (create.read_only_hint, create.destructive_hint,
+                create.idempotent_hint) == (False, True, False)
+        weigh = by_name["maya_set_blendshape_weights"].annotations
+        assert (weigh.read_only_hint, weigh.destructive_hint,
+                weigh.idempotent_hint) == (False, True, True)

@@ -31,7 +31,9 @@ from .schemas import (
     ArrayResult,
     AssembleResult,
     AuthorPhysicsResult,
+    BlendshapeTargetSpec,
     CombineResult,
+    CreateBlendshapeResult,
     UvAtlasResult,
     BindSkinResult,
     BooleanResult,
@@ -63,6 +65,7 @@ from .schemas import (
     SaveSceneResult,
     SceneGraphResult,
     SculptResult,
+    SetBlendshapeWeightsResult,
     TextureRecipeResult,
     TransformResult,
     UndoResult,
@@ -2207,6 +2210,69 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 for name, spec in overrides.items()}
         return AuthorPhysicsResult.model_validate(
             maya.request("author_physics", params, timeout_s=EXPORT_TIMEOUT_S)
+        )
+
+    @mcp.tool(
+        title="Wire blend-shape targets",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_create_blendshape(
+        mesh: Annotated[str, Field(description="Base mesh (long name).")],
+        targets: Annotated[List[BlendshapeTargetSpec], Field(description=(
+            "Targets to wire. Each is an ordinary mesh authored with the "
+            "existing modeling/sculpt tools - duplicate the base, sculpt "
+            "the change, pass it here. Same topology required."
+        ))],
+    ) -> CreateBlendshapeResult:
+        """Wire sculpted meshes as morph targets and MEASURE each delta.
+
+        The deformer goes FRONT-OF-CHAIN - before any skinCluster - so a
+        shape models the neutral surface and the skin carries it to the
+        pose; that ordering is what makes an elbow corrective correct at a
+        bent elbow. Target meshes are CONSUMED (the deltas live in the
+        deformer; a stale copy invites sculpting a mesh that feeds
+        nothing). Creating again on the same mesh ADDS targets to the one
+        node. max_delta is measured through the real deformer at weight 1,
+        and a near-zero delta warns - a duplicate that was never sculpted
+        looks exactly like success otherwise."""
+        return CreateBlendshapeResult.model_validate(
+            maya.request(
+                "create_blendshape",
+                {"mesh": mesh,
+                 "targets": [t.model_dump() for t in targets]},
+                timeout_s=BOOL_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Set blend-shape weights",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=True
+        ),
+    )
+    def maya_set_blendshape_weights(
+        mesh: Annotated[str, Field(description="The shaped mesh (long name).")],
+        weights: Annotated[Dict[str, float], Field(description=(
+            "Map of target name to weight 0..1 - absolute values, so "
+            "re-applying is idempotent. 0 for every target IS the reset; "
+            "the skeleton pose currency is untouched."
+        ))],
+    ) -> SetBlendshapeWeightsResult:
+        """Drive morph-target weights and MEASURE what moved.
+
+        Weights land sequentially in call order; per_target reports what
+        each landing moved, max_displacement the honest before/after of
+        the whole call, and the returned weights map is EVERY target
+        re-read from the node. Unknown names are refused with the list of
+        targets that exist."""
+        return SetBlendshapeWeightsResult.model_validate(
+            maya.request(
+                "set_blendshape_weights",
+                {"mesh": mesh, "weights": weights},
+                timeout_s=BOOL_TIMEOUT_S,
+            )
         )
 
     @mcp.tool(

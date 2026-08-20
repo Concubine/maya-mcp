@@ -622,6 +622,87 @@ class SkinFacts(BaseModel):
     unavailable_reason: Optional[str] = None
 
 
+class BlendshapeTargetSpec(BaseModel):
+    """One morph target to wire: an ordinary same-topology mesh."""
+
+    name: str = Field(description=(
+        "Weight name - becomes the attribute alias, the "
+        "set_blendshape_weights key, and the exported Shape record name. "
+        "Plain identifier."))
+    target_mesh: str = Field(description=(
+        "Same-topology copy of the base (maya_duplicate, then sculpt). "
+        "CONSUMED: deleted once its deltas are wired."))
+
+
+class TargetDelta(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    max_delta: float = Field(description=(
+        "MEASURED: the furthest any base vertex moves with this weight "
+        "driven to 1 through the real deformer - never read off the "
+        "target's own vertices. Near zero warns: the target is a duplicate "
+        "that was never sculpted."))
+    vertex_count: int
+
+
+class CreateBlendshapeResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    mesh: str
+    blend_shape: str = Field(description=(
+        "The deformer node. One per mesh: creating again ADDS targets to "
+        "it rather than stacking a second."))
+    targets: List[TargetDelta]
+    warnings: List[str] = Field(default_factory=list)
+
+
+class TargetDisplacement(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    weight: float = Field(description="Achieved weight, re-read after the write.")
+    max_displacement: float = Field(description=(
+        "What this weight landing moved, measured in call order against "
+        "the state the previous entries left."))
+
+
+class SetBlendshapeWeightsResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    mesh: str
+    blend_shape: str
+    weights: Dict[str, float] = Field(description=(
+        "EVERY target's weight re-read from the node - including targets "
+        "this call did not name."))
+    max_displacement: float = Field(description=(
+        "Overall before/after vertex move for the whole call - can be "
+        "smaller than a per-target step when shapes oppose."))
+    per_target: List[TargetDisplacement]
+    warnings: List[str] = Field(default_factory=list)
+
+
+class ShapeRecord(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str = Field(description=(
+        "The weight alias maya_create_blendshape authored, cleaned from "
+        "the file's channel name."))
+    points: int = Field(description="Delta vertices the Shape record carries.")
+    indexes: int = Field(description="Sparse vertex indexes alongside them.")
+
+
+class ShapeFacts(BaseModel):
+    """Blend-shape records read back OUT OF THE FILE, never from the scene."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    blend_deformers: int
+    channels: int
+    shapes: List[ShapeRecord]
+    unavailable_reason: Optional[str] = None
+
+
 class ExportFbxResult(BaseModel):
     """What maya_export_fbx actually wrote, read back out of the file.
 
@@ -688,6 +769,12 @@ class ExportFbxResult(BaseModel):
     skin: Optional[SkinFacts] = Field(
         default=None,
         description="Skin facts when include_skins=true; null otherwise.")
+    shapes: Optional["ShapeFacts"] = Field(
+        default=None,
+        description=(
+            "Blend-shape facts when the scene declares targets or the file "
+            "carries channels; null for a shape-less export. Shapes ride "
+            "along automatically - there is no parameter to enable them."))
 
 
 class SkeletonJoint(BaseModel):
