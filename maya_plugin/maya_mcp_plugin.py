@@ -36,6 +36,7 @@ from .handlers import (
     modeling,
     objinfo,
     pbr,
+    physics,
     render,
     rigging,
     scene,
@@ -207,6 +208,7 @@ def _build_handlers() -> Dict[str, Any]:
         "smooth_weights": rigging.smooth_weights,
         "set_region_weights": rigging.set_region_weights,
         "pose_ik": rigging.pose_ik,
+        "author_physics": physics.author_physics,
     }
 
 

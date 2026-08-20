@@ -12,7 +12,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
-from typing import Annotated, Dict, List, Literal, Optional, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Image
@@ -30,6 +30,7 @@ from .connection import MayaConnection
 from .schemas import (
     ArrayResult,
     AssembleResult,
+    AuthorPhysicsResult,
     CombineResult,
     UvAtlasResult,
     BindSkinResult,
@@ -49,6 +50,7 @@ from .schemas import (
     ObjectInfoResult,
     OpenSceneResult,
     PbrResult,
+    PhysicsOverride,
     PoseIkResult,
     PoseSkeletonResult,
     ReferenceResult,
@@ -2144,6 +2146,67 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             params["start"] = start
         return PoseIkResult.model_validate(
             maya.request("pose_ik", params, timeout_s=BOOL_TIMEOUT_S)
+        )
+
+    @mcp.tool(
+        title="Author physics-body data (measured, read-only)",
+        annotations=ToolAnnotations(
+            read_only_hint=True, destructive_hint=False, idempotent_hint=True
+        ),
+    )
+    def maya_author_physics(
+        root: Annotated[Optional[str], Field(description=(
+            "Walk this transform's mesh-bearing descendants as the chunk "
+            "set (plain groups are skipped). Exactly one of root/chunks."
+        ))] = None,
+        chunks: Annotated[Optional[List[str]], Field(description=(
+            "Explicit chunk transforms; each must bear a mesh. Exactly "
+            "one of root/chunks."
+        ))] = None,
+        density: Annotated[float, Field(gt=0, description=(
+            "mass = |measured volume| x density. Default 1.0 means mass "
+            "NUMERICALLY EQUALS volume - deliberate: the handoff ships "
+            "volumes, masses are abstract, the engine owns the constant."
+        ))] = 1.0,
+        overrides: Annotated[Optional[Dict[str, PhysicsOverride]],
+                             Field(description=(
+            "Per-chunk DESIGN INTENT the scene cannot state, keyed by "
+            "short name: joint limits (hinge_axis + hinge_range_deg, "
+            "optional twist_range_deg) and/or parent (for flat-sibling "
+            "chunk layouts). A parented chunk without one gets a LOCKED "
+            "joint and a warning."
+        ))] = None,
+        exclude: Annotated[Optional[List[str]], Field(description=(
+            "root mode only: drop chunks whose short name contains any "
+            "of these substrings (case-insensitive) - e.g. decorative "
+            "emitter bars. Every exclusion is warned by name."
+        ))] = None,
+    ) -> AuthorPhysicsResult:
+        """MEASURE physics-body data per chunk: the destruction manifest's
+        numbers from the scene instead of a packaging script.
+
+        Read-only. Per body: mass/volume (tetra-measured, |closed-mesh|),
+        the sculpt's SOLID centre of mass, one primitive collider "
+        (box/sphere/capsule) fitted in the mesh's own principal frame with
+        measured honesty (volume_ratio, max_escape), and the motion
+        handoff's swing/twist cone converted from override hinge data -
+        the knee rule (neutral at the extreme) built in. Open meshes,
+        inverted winding, degenerate chunks, poor fits and missing
+        overrides come back as warnings with numbers. Validation is
+        analytic - nothing simulates."""
+        params: Dict[str, Any] = {"density": density}
+        if root is not None:
+            params["root"] = root
+        if chunks is not None:
+            params["chunks"] = chunks
+        if exclude is not None:
+            params["exclude"] = exclude
+        if overrides is not None:
+            params["overrides"] = {
+                name: spec.model_dump(exclude_none=True)
+                for name, spec in overrides.items()}
+        return AuthorPhysicsResult.model_validate(
+            maya.request("author_physics", params, timeout_s=EXPORT_TIMEOUT_S)
         )
 
     @mcp.tool(

@@ -101,6 +101,7 @@ class TestRegistration:
             "maya_smooth_weights",
             "maya_set_region_weights",
             "maya_pose_ik",
+            "maya_author_physics",
         }
 
     def test_annotations_declare_read_only_vs_destructive(self):
@@ -1748,3 +1749,47 @@ class TestRiggingTools:
         assert params["pole"] == [0, 0, 1]
         assert params["start"] == "hip"
         assert params["keep"] is False
+
+    def test_author_physics_marshals_and_omits_optionals(self):
+        conn = FakeConn(responses={"author_physics": {
+            "bodies": [{
+                "chunk": "|golem|pelvis", "parent": None,
+                "mass": 0.372, "volume": 0.372, "signed_volume": 0.372,
+                "com": [0.0, 1.86, 0.03],
+                "watertight": True, "open_edges": 0,
+                "verts": 382, "tris": 760,
+                "collider": {"kind": "capsule", "centre": [0.0, 1.86, 0.0],
+                             "rotation_deg": [-26.3, 0.0, 180.0],
+                             "size": None, "radius": 0.47, "height": 1.16,
+                             "axis": [0.0, 1.0, 0.0],
+                             "volume_ratio": 1.72, "max_escape": 0.02},
+                "joint": None}],
+            "density": 1.0, "total_volume": 0.372, "warnings": []}})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_author_physics",
+                                   {"root": "golem"}))
+        assert conn.calls[0]["cmd"] == "author_physics"
+        assert conn.calls[0]["params"] == {"root": "golem", "density": 1.0}
+        body = result.structured_content["bodies"][0]
+        assert body["collider"]["kind"] == "capsule"
+        assert body["joint"] is None
+
+    def test_author_physics_forwards_chunks_overrides_exclude(self):
+        conn = FakeConn(responses={"author_physics": {
+            "bodies": [], "density": 2.0, "total_volume": 0.0,
+            "warnings": ["w"]}})
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_author_physics", {
+            "chunks": ["a", "b"], "density": 2.0,
+            "exclude": ["tracer"],
+            "overrides": {"b": {"parent": "a",
+                                "hinge_axis": [1, 0, 0],
+                                "hinge_range_deg": [0, 110]}}}))
+        params = conn.calls[0]["params"]
+        assert params["chunks"] == ["a", "b"]
+        assert params["density"] == 2.0
+        assert params["exclude"] == ["tracer"]
+        # PhysicsOverride round-trips with the None fields dropped
+        assert params["overrides"] == {"b": {
+            "parent": "a", "hinge_axis": [1.0, 0.0, 0.0],
+            "hinge_range_deg": [0.0, 110.0]}}

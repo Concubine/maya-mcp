@@ -902,3 +902,126 @@ class SetRegionWeightsResult(BaseModel):
             "max_influences: a region blend can ADD an influence (nothing "
             "is dropped to make room), so this is how you see it."))
     warnings: List[str] = Field(default_factory=list)
+
+
+class PhysicsOverride(BaseModel):
+    """Design intent author_physics cannot measure: hierarchy and limits.
+
+    extra='forbid' on purpose - a typo'd key here would otherwise silently
+    author a LOCKED joint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    parent: Optional[str] = Field(
+        default=None,
+        description=(
+            "Parent chunk (short name), for flat-sibling hierarchies where "
+            "the DAG cannot say. Must be another chunk in the same call."))
+    hinge_axis: Optional[List[float]] = Field(
+        default=None,
+        description=(
+            "Chunk-local hinge direction [x, y, z]; normalized by the "
+            "tool. Travels WITH hinge_range_deg."))
+    hinge_range_deg: Optional[List[float]] = Field(
+        default=None,
+        description=(
+            "[lo, hi] flex arc in DEGREES about hinge_axis, lo <= hi, "
+            "0 = the authored rest pose. A one-sided range (e.g. a knee's "
+            "[0, 110]) becomes a cone with neutral at the extreme."))
+    twist_range_deg: Optional[List[float]] = Field(
+        default=None,
+        description=(
+            "[lo, hi] twist DEGREES about the hinge. Default [0, 0] - "
+            "locked."))
+
+
+class ColliderFit(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    kind: str = Field(description="box | sphere | capsule - always ONE primitive.")
+    centre: List[float] = Field(
+        description="Primitive centre in WORLD scene units.")
+    rotation_deg: List[float] = Field(
+        description=(
+            "XYZ euler DEGREES of the mesh's principal frame - the fit is "
+            "rotated to the sculpt, never axis-aligned."))
+    size: Optional[List[float]] = Field(
+        default=None, description="box only: full extents, largest first.")
+    radius: Optional[float] = Field(
+        default=None, description="sphere/capsule radius.")
+    height: Optional[float] = Field(
+        default=None,
+        description="capsule only: cylinder segment EXCLUDING the two caps.")
+    axis: Optional[List[float]] = Field(
+        default=None, description="capsule only: world unit long axis.")
+    volume_ratio: Optional[float] = Field(
+        default=None,
+        description=(
+            "MEASURED primitive volume / |mesh volume|. Honesty metric: "
+            "the delivered golem's worst was 2.35; above 2.4 warns. None "
+            "when the mesh volume is unmeasurable."))
+    max_escape: float = Field(
+        description=(
+            "MEASURED furthest vertex outside the primitive, scene units. "
+            "Above 10% of the chunk's bbox diagonal warns."))
+
+
+class PhysicsJoint(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    axis: List[float] = Field(
+        description="Unit hinge axis - 'axis along the hinge' (the knee rule).")
+    swing_axis: List[float] = Field(
+        description="Deterministic unit perpendicular to axis.")
+    swing1: float = Field(
+        description="Symmetric half-arc DEGREES covering the flex range.")
+    swing2: float = Field(description="Always 0 for hinge-derived cones.")
+    twist_lo: float
+    twist_hi: float
+    swing_centre_deg: float = Field(
+        description=(
+            "Rotate the joint frame by this about `axis` and the "
+            "+-swing1 cone covers exactly the authored [lo, hi]; a "
+            "one-sided range puts neutral ON the cone edge - "
+            "no-hyperextension as the range's own asymmetry."))
+    source: str = Field(
+        description="'override' (design data) or 'default_locked' (warned).")
+
+
+class PhysicsBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    chunk: str
+    parent: Optional[str] = Field(
+        default=None,
+        description="Nearest mesh-bearing ancestor chunk, or the override's.")
+    mass: float = Field(
+        description=(
+            "|volume| x density. With the default density 1.0, mass "
+            "NUMERICALLY EQUALS volume - the handoff ships volumes and "
+            "the engine owns the real constant."))
+    volume: float = Field(description="MEASURED |closed-mesh volume|, scene units^3.")
+    signed_volume: float = Field(
+        description="Negative means inward winding (the mirror trap) - warned.")
+    com: List[float] = Field(
+        description=(
+            "Tetra-weighted SOLID centre of mass - the sculpt's, never a "
+            "bbox centre (#640) and never a vertex average."))
+    watertight: bool
+    open_edges: int = Field(
+        description="Boundary-edge count; non-zero makes volume unreliable (warned).")
+    verts: int
+    tris: int
+    collider: ColliderFit
+    joint: Optional[PhysicsJoint] = Field(
+        default=None, description="null for a parentless (root) body.")
+
+
+class AuthorPhysicsResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    bodies: List[PhysicsBody]
+    density: float
+    total_volume: float = Field(
+        description="Sum of measured |volume| over every body in this call.")
+    warnings: List[str] = Field(default_factory=list)
