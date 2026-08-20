@@ -215,6 +215,7 @@ def _build_handlers() -> Dict[str, Any]:
         "set_blendshape_weights": blendshape.set_blendshape_weights,
         "author_clip": clip.author_clip,
         "delete_clip": clip.delete_clip,
+        "preview_clip": clip.preview_clip,
     }
 
 

@@ -346,3 +346,72 @@ class TestGuards:
     def test_clean_scene_passes_both_guards(self, fake):
         clip.guard_static_pose(fake, "|root", ["|root"], "pose_skeleton")
         clip.guard_static_weights(fake, "body_shapes", ["blink"], "x")
+
+
+class TestPreviewClip:
+    """preview_clip picks frames and delegates to render._run_shots; the
+    render loop itself is render.py's tested code. The seam is monkeypatched
+    and its SHOTS are asserted - fixed camera, every-nth frames, first and
+    last always included."""
+
+    def _wire(self, fake, monkeypatch, duration_s=2.0, fps=30):
+        _author(fake, name="idle", fps=fps, keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": duration_s, "rotations": {"mid": [0, 0, 0]}}])
+        calls = {}
+
+        def run_shots(cmds, shots, params):
+            calls["shots"] = shots
+            calls["params"] = params
+            return {"images": [{"label": s["label"], "angle": s["angle"],
+                                "png_b64": "x"} for s in shots],
+                    "renderer": "hw2", "samples": 1, "fallback_light": False,
+                    "zoom": 1.0, "relit_lights": 0}
+
+        monkeypatch.setattr(clip.render, "_run_shots", run_shots)
+        return calls
+
+    def test_refusals(self, fake, monkeypatch):
+        with pytest.raises(HandlerError, match="no clip"):
+            clip.preview_clip({"root": "root", "name": "idle"})
+        self._wire(fake, monkeypatch)
+        with pytest.raises(HandlerError, match="live clip is 'idle'"):
+            clip.preview_clip({"root": "root", "name": "walk"})
+        with pytest.raises(HandlerError, match="unknown angle"):
+            clip.preview_clip({"root": "root", "name": "idle",
+                               "angle": "dutch"})
+        with pytest.raises(HandlerError, match="every_nth"):
+            clip.preview_clip({"root": "root", "name": "idle",
+                               "every_nth": 0})
+
+    def test_default_stride_fits_the_cap_and_keeps_the_ends(self, fake,
+                                                            monkeypatch):
+        calls = self._wire(fake, monkeypatch, duration_s=2.0, fps=30)
+        out = clip.preview_clip({"root": "root", "name": "idle"})
+        frames = [f["frame"] for f in out["frames"]]
+        assert frames[0] == 0 and frames[-1] == 60
+        assert len(frames) <= clip.MAX_PREVIEW_FRAMES
+        shots = calls["shots"]
+        assert shots[0]["time"] == 0 and shots[-1]["time"] == 60
+        assert not shots[0].get("reuse_camera")
+        assert all(s.get("reuse_camera") for s in shots[1:])
+        assert all(s["frame_on"] == ["|body"] for s in shots)
+
+    def test_explicit_stride_that_overflows_refuses(self, fake, monkeypatch):
+        self._wire(fake, monkeypatch, duration_s=2.0, fps=30)
+        with pytest.raises(HandlerError, match="%d frame"
+                           % clip.MAX_PREVIEW_FRAMES):
+            clip.preview_clip({"root": "root", "name": "idle",
+                               "every_nth": 1})
+
+    def test_current_time_is_restored(self, fake, monkeypatch):
+        self._wire(fake, monkeypatch)
+        fake.time = 7.0
+        clip.preview_clip({"root": "root", "name": "idle"})
+        assert fake.time == 7.0
+
+    def test_unbound_skeleton_refuses(self, fake, monkeypatch):
+        self._wire(fake, monkeypatch)
+        fake.bound = False
+        with pytest.raises(HandlerError, match="no skinned mesh"):
+            clip.preview_clip({"root": "root", "name": "idle"})

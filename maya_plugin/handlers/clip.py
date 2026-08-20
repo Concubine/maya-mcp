@@ -21,7 +21,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from ..dispatcher import HandlerError
-from . import clipmath, naming, sculpt, sculpt_math, session, units
+from . import capture, clipmath, naming, render, sculpt, sculpt_math, session, units
 
 CLIP_ATTR = "mcp_clip"
 NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -415,3 +415,92 @@ def delete_clip(params: Dict[str, Any]) -> Dict[str, Any]:
         "max_displacement": max_disp,
         "warnings": warnings,
     }
+
+
+def preview_clip(params: Dict[str, Any]) -> Dict[str, Any]:
+    """A contact sheet of the clip's frames - motion judged the way
+    everything here is judged, from pixels, with NO playblast dependency.
+
+    The camera is placed once, at frame 0's framing, and HELD: motion must
+    read against a fixed frame, and a camera chasing the subject would hide
+    root motion entirely. Perception: no checkpoint, current time restored.
+    """
+    cmds = _cmds()
+    from . import rigging  # noqa: PLC0415
+
+    root_long = rigging._require_joint(cmds, params.get("root"))
+    meta = clip_meta(cmds, root_long)
+    if meta is None or not meta.get("name"):
+        raise HandlerError(
+            "no clip exists on %s" % root_long,
+            hint="author_clip creates one; preview_clip renders it")
+    name = params.get("name")
+    if name != meta["name"]:
+        raise HandlerError(
+            "the live clip is %r, not %r" % (meta["name"], name),
+            hint="pass the clip's own name - previewing a stale assumption "
+                 "judges the wrong motion")
+    fps = int(meta.get("fps", 30))
+    duration_frames = int(round(float(meta.get("duration_s", 0.0)) * fps))
+    if duration_frames <= 0:
+        raise HandlerError("the clip has zero duration",
+                           hint="re-author it; this is a broken metadata "
+                                "state, not a render problem")
+
+    angle = params.get("angle") or "three_quarter"
+    if angle not in capture.VALID_ANGLES:
+        raise HandlerError("unknown angle %r" % angle,
+                           hint="valid angles: %s"
+                                % ", ".join(capture.VALID_ANGLES))
+    every_nth = params.get("every_nth")
+    if every_nth is None:
+        every_nth = 1
+        while duration_frames // every_nth + 1 > MAX_PREVIEW_FRAMES:
+            every_nth += 1
+    elif (isinstance(every_nth, bool) or not isinstance(every_nth, int)
+            or every_nth < 1):
+        raise HandlerError("every_nth must be an integer >= 1",
+                           hint="omit it for the densest sheet that fits")
+    frames = list(range(0, duration_frames + 1, every_nth))
+    if frames[-1] != duration_frames:
+        frames.append(duration_frames)   # the last frame always shows
+    if len(frames) > MAX_PREVIEW_FRAMES:
+        raise HandlerError(
+            "every_nth=%d yields %d frames; the cap is %d frames per sheet"
+            % (every_nth, len(frames), MAX_PREVIEW_FRAMES),
+            hint="raise every_nth, or omit it to auto-fit")
+
+    joints = rigging._hierarchy_joints(cmds, root_long)
+    meshes = rigging._bound_meshes(cmds, set(joints))
+    if not meshes:
+        raise HandlerError(
+            "no skinned mesh is bound to this skeleton - bare joints "
+            "render nothing",
+            hint="bind_skin first; the preview frames the bound meshes")
+
+    render_params = {
+        "renderer": params.get("renderer", "hw2"),
+        "resolution": params.get("resolution",
+                                 DEFAULT_PREVIEW_RESOLUTION),
+        "samples": params.get("samples", 1),
+        "zoom": params.get("zoom", 1.0),
+    }
+    shots = []
+    for i, frame in enumerate(frames):
+        shots.append({
+            "label": "t=%.2fs" % (frame / float(fps)),
+            "angle": angle,
+            "isolate": None,
+            "frame_on": meshes,
+            "time": frame,
+            "reuse_camera": i > 0,
+        })
+    result = render._run_shots(cmds, shots, render_params)
+    result["clip"] = meta["name"]
+    result["fps"] = fps
+    result["frames"] = [{"frame": f, "time_s": f / float(fps)}
+                        for f in frames]
+    return result
+
+
+preview_clip.no_undo_chunk = True

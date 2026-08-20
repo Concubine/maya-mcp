@@ -717,6 +717,8 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
     temp_light = None
     prev_undo = cmds.undoInfo(query=True, state=True)
     cmds.undoInfo(stateWithoutFlush=False)
+    prev_time = (cmds.currentTime(query=True)
+                 if any(s.get("time") is not None for s in shots) else None)
     try:
         # Every name in every shot, checked before a single frame is rendered:
         # a sheet that dies on cell 30 has spent thirty frames' worth of seconds
@@ -749,6 +751,8 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
         # (isolate, exclude) - the pair that decides what is visible.
         current_isolate: Optional[tuple] = None
         for index, shot in enumerate(shots):
+            if shot.get("time") is not None:
+                cmds.currentTime(shot["time"])
             angle = shot["angle"]
             # Re-hide only when the visible set actually changes: render_scene
             # holds one isolate set across all its angles, and re-walking every
@@ -769,31 +773,36 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
                 )
                 current_isolate = visible_key
 
-            bbox_min, bbox_max = capture._scene_bbox(
-                cmds, shot["frame_on"], visible_only=bool(shot.get("frame_visible_only"))
-            )
-            # "current" has no meaning without a panel to read a camera from;
-            # it degrades to the default judging angle rather than failing a
-            # render the caller could not have known was panel-dependent.
-            resolved_angle = "three_quarter" if angle == "current" else angle
-            position, rotation = capture.camera_placement(
-                resolved_angle, bbox_min, bbox_max
-            )
-            if zoom != 1.0:
-                position = zoomed_position(position, bbox_min, bbox_max, zoom)
-            if relight:
-                _orient_rig(cmds, rig, capture._ANGLE_DIRECTIONS[resolved_angle][0])
-            if temp_camera is None:
-                created = cmds.camera()[0]
-                temp_camera = cmds.rename(created, naming.unique_name(cmds, _TEMP_CAM))
-                # No panel means no viewFit to refine the framing, so the camera
-                # must really have the field of view the placement math assumes.
-                cmds.setAttr(
-                    temp_camera + ".focalLength",
-                    focal_length_for_fov(capture._FOV_DEG),
+            if not (shot.get("reuse_camera") and temp_camera is not None):
+                bbox_min, bbox_max = capture._scene_bbox(
+                    cmds, shot["frame_on"],
+                    visible_only=bool(shot.get("frame_visible_only"))
                 )
-            cmds.setAttr(temp_camera + ".translate", *position, type="double3")
-            cmds.setAttr(temp_camera + ".rotate", *rotation, type="double3")
+                # "current" has no meaning without a panel to read a camera
+                # from; it degrades to the default judging angle rather than
+                # failing a render the caller could not have known was
+                # panel-dependent.
+                resolved_angle = "three_quarter" if angle == "current" else angle
+                position, rotation = capture.camera_placement(
+                    resolved_angle, bbox_min, bbox_max
+                )
+                if zoom != 1.0:
+                    position = zoomed_position(position, bbox_min, bbox_max, zoom)
+                if relight:
+                    _orient_rig(cmds, rig,
+                               capture._ANGLE_DIRECTIONS[resolved_angle][0])
+                if temp_camera is None:
+                    created = cmds.camera()[0]
+                    temp_camera = cmds.rename(created, naming.unique_name(cmds, _TEMP_CAM))
+                    # No panel means no viewFit to refine the framing, so the
+                    # camera must really have the field of view the placement
+                    # math assumes.
+                    cmds.setAttr(
+                        temp_camera + ".focalLength",
+                        focal_length_for_fov(capture._FOV_DEG),
+                    )
+                cmds.setAttr(temp_camera + ".translate", *position, type="double3")
+                cmds.setAttr(temp_camera + ".rotate", *rotation, type="double3")
 
             path = _render_frame(
                 cmds, temp_camera, frame_prefix(call_id, index, angle),
@@ -847,6 +856,11 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
                     cmds.delete(temp)
                 except Exception:
                     pass
+        if prev_time is not None:
+            try:
+                cmds.currentTime(prev_time)
+            except Exception:
+                pass
         state.restore()
         try:
             cmds.undoInfo(stateWithoutFlush=prev_undo)
