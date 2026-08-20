@@ -351,3 +351,70 @@ class TestApplyRegionWeights:
             [1.0, 0.0, 0.0, 1.0], 2, 0, {1: 1.0}, 1.0)
         assert out[:2] == [1.0, 0.0]
         assert out[2:] == pytest.approx([1.0, 0.0])
+
+
+class TestPoseIkChainGeometry:
+    # A leg-like chain, deliberately in metre-magnitude scene numbers
+    # (#629/#634): hip -> knee -> ankle.
+    STRAIGHT = [[0.1, 0.95, 0.0], [0.1, 0.50, 0.0], [0.1, 0.08, 0.0]]
+    BENT = [[0.1, 0.95, 0.0], [0.1, 0.50, 0.10], [0.1, 0.08, 0.0]]
+
+    def test_dist_and_reach(self):
+        assert rigmath.dist([0, 0, 0], [3, 4, 0]) == pytest.approx(5.0)
+        assert rigmath.chain_reach(self.STRAIGHT) == pytest.approx(0.87)
+
+    def test_deviation_zero_on_a_straight_chain(self):
+        assert rigmath.chain_deviation(self.STRAIGHT) == pytest.approx(0.0)
+        assert rigmath.chain_deviation([[0, 0, 0], [1, 1, 1]]) == 0.0
+
+    def test_deviation_measures_the_bent_knee(self):
+        # knee sits 0.10 off the hip-ankle line, minus the tilt component
+        dev = rigmath.chain_deviation(self.BENT)
+        assert 0.05 < dev <= 0.10
+
+    def test_default_pole_none_when_straight(self):
+        assert rigmath.default_pole(self.STRAIGHT, 0.01) is None
+        assert rigmath.default_pole([[0, 0, 0], [1, 0, 0]], 0.01) is None
+
+    def test_default_pole_preserves_the_bend_plane(self):
+        pole = rigmath.default_pole(self.BENT, 0.01)
+        assert pole is not None
+        # the knee bends toward +Z, so the pole must sit +Z of the knee
+        assert pole[2] > self.BENT[1][2]
+        # ...at a comfortable distance (the chain's own reach)
+        assert rigmath.dist(pole, self.BENT[1]) == pytest.approx(
+            rigmath.chain_reach(self.BENT))
+
+    def test_plane_normal_is_unit_and_refuses_degenerate(self):
+        n = rigmath.plane_normal([0, 0, 0], [0, -2, 0], [0, -1, 1])
+        assert n == pytest.approx([-1.0, 0.0, 0.0])
+        assert rigmath.plane_normal([0, 0, 0], [0, -2, 0], [0, -1, 0]) is None
+
+    def test_local_components_identity_and_rotated(self):
+        identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+        assert rigmath.local_components([0, 0, 1], identity) == pytest.approx(
+            [0.0, 0.0, 1.0])
+        # a frame rotated +90 about Z: local X points at world +Y
+        rot_z90 = [0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+        assert rigmath.local_components([1, 0, 0], rot_z90) == pytest.approx(
+            [0.0, -1.0, 0.0])
+
+    def test_prebend_folds_the_knee_toward_the_pole(self):
+        # Straight 2-bone chain down -Y, target short of reach, pole at +Z
+        # (knee forward). Derivation pinned: fold the foot BACKWARD (-Z) so
+        # the solver's compensation at the hip pushes the knee FORWARD.
+        # With an identity local frame and plane normal -X, that is +5 deg
+        # about local X on the one interior joint.
+        positions = [[0, 0, 0], [0, -1, 0], [0, -2, 0]]
+        identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+        out = rigmath.prebend_rotations(
+            positions, {1: identity}, [0, -1.5, 0], [0, -1, 1], 5.0)
+        assert set(out) == {1}
+        assert out[1] == pytest.approx([5.0, 0.0, 0.0])
+
+    def test_prebend_empty_when_pole_sits_on_the_line(self):
+        positions = [[0, 0, 0], [0, -1, 0], [0, -2, 0]]
+        out = rigmath.prebend_rotations(
+            positions, {1: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]},
+            [0, -1.5, 0], [0, -3, 0], 5.0)
+        assert out == {}

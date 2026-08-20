@@ -477,3 +477,119 @@ def apply_region_weights(weights: List[float], ncols: int, joint_col: int,
             out[base + joint_col] = 1.0 if (old_j > 0.0 or new_j > 0.0) \
                 else 0.0
     return out, sole_owner
+
+
+# --- phase 3 (#671): IK chain geometry --------------------------------------
+
+
+def _sub(a, b):
+    return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+
+
+def _dot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def _cross(a, b):
+    return [a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0]]
+
+
+def dist(a: List[float], b: List[float]) -> float:
+    return math.sqrt(_dot(_sub(a, b), _sub(a, b)))
+
+
+def chain_reach(positions: List[List[float]]) -> float:
+    """Sum of bone lengths - the furthest the chain can straighten."""
+    return sum(dist(positions[i], positions[i + 1])
+               for i in range(len(positions) - 1))
+
+
+def _perp_offsets(positions):
+    """(interior point, its perpendicular offset from the start-end line)."""
+    axis = _sub(positions[-1], positions[0])
+    length = math.sqrt(_dot(axis, axis))
+    out = []
+    for mid in positions[1:-1]:
+        offset = _sub(mid, positions[0])
+        if length < 1e-12:
+            out.append((mid, offset))
+            continue
+        along = _dot(offset, axis) / (length * length)
+        out.append((mid, _sub(offset, [v * along for v in axis])))
+    return out
+
+
+def chain_deviation(positions: List[List[float]]) -> float:
+    """How far the most-bent interior joint sits off the start-end line.
+    Below ~1% of reach the RP solver sees a straight chain and cannot fold
+    it on its own - the pre-bend exists for exactly that case."""
+    if len(positions) < 3:
+        return 0.0
+    return max((math.sqrt(_dot(p, p)) for _, p in _perp_offsets(positions)),
+               default=0.0)
+
+
+def default_pole(positions, collinear_ratio: float) -> Optional[List[float]]:
+    """A pole that PRESERVES the chain's own bend plane - the least
+    surprising default: an already-bent knee keeps facing the way it faces.
+    None when the chain is too straight to have a plane of its own."""
+    if len(positions) < 3:
+        return None
+    reach = chain_reach(positions)
+    best_mid, best_perp, best_norm = None, None, 0.0
+    for mid, perp in _perp_offsets(positions):
+        norm = math.sqrt(_dot(perp, perp))
+        if norm > best_norm:
+            best_mid, best_perp, best_norm = mid, perp, norm
+    if best_mid is None or best_norm < collinear_ratio * max(reach, 1e-12):
+        return None
+    return [best_mid[k] + best_perp[k] / best_norm * reach for k in range(3)]
+
+
+def plane_normal(start, target, pole) -> Optional[List[float]]:
+    """Unit normal of the solve plane, or None when the pole sits on the
+    start-target line (no plane - the solver would have to guess)."""
+    n = _cross(_sub(target, start), _sub(pole, start))
+    length = math.sqrt(_dot(n, n))
+    if length < 1e-9:
+        return None
+    return [v / length for v in n]
+
+
+def local_components(vec, matrix16: List[float]) -> List[float]:
+    """A world vector expressed in a joint's local frame. Maya's xform
+    matrix is row-major with rows 0..2 = the local axes in world space;
+    joints in this project are identity-scale (the export gate's rule), so
+    projecting onto the normalized rows IS the inverse rotation."""
+    out = []
+    for row in range(3):
+        axis = matrix16[row * 4:row * 4 + 3]
+        length = math.sqrt(_dot(axis, axis)) or 1.0
+        out.append(_dot(vec, axis) / length)
+    return out
+
+
+def prebend_rotations(positions, matrices: Dict[int, List[float]], target,
+                      pole, angle_deg: float) -> Dict[int, List[float]]:
+    """Per-interior-joint local euler nudges (DEGREES) that fold a straight
+    chain so its bend lands on the pole's side of the solve plane.
+
+    Sign, derived and pinned by test_prebend_folds_the_knee_toward_the_pole:
+    folding a mid joint by +t about the plane normal moves the EFFECTOR
+    along cross(normal, child - mid); the solver's compensation at the
+    start joint then pushes the mid joint the OPPOSITE way - so bend
+    against that direction to end up pole-side.
+    """
+    normal = plane_normal(positions[0], target, pole)
+    if normal is None:
+        return {}
+    out: Dict[int, List[float]] = {}
+    for i in range(1, len(positions) - 1):
+        mid, child = positions[i], positions[i + 1]
+        swing = _cross(normal, _sub(child, mid))
+        sign = -1.0 if _dot(swing, _sub(pole, mid)) > 0 else 1.0
+        out[i] = [angle_deg * sign * c
+                  for c in local_components(normal, matrices[i])]
+    return out
