@@ -32,7 +32,8 @@ HEROES = ["tower", "block", "slab", "stump"]
 def test_reader_finds_every_kit_mesh():
     facts = fbx_probe.read_fbx(KIT)
     assert facts.version == 7700
-    assert len(facts.meshes) == 58          # revision 3: 41 + 11 steel + 6 damage
+    # revision 3: 41 + 11 steel + 6 damage states + their 6 `fractured` twins
+    assert len(facts.meshes) == 64
 
 
 def test_the_kit_manifest_agrees_with_the_fbx_node_names():

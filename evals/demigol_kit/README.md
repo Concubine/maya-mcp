@@ -1,6 +1,6 @@
 # Demigol — kit of parts (family 1, **revision 3**)
 
-**58 one-cell pieces, 4,236 triangles, ONE material, three maps.** Not buildings.
+**64 one-cell pieces, 4,980 triangles.** Not buildings.
 The generator already decides per cell what material sits where and which faces are
 exposed; this is the vocabulary it draws with, so it dresses all ~50 buildings and
 anything generated later comes dressed for free.
@@ -10,7 +10,7 @@ Regenerate with `evals/demigol_kit.py`.
 
 | file | what |
 |---|---|
-| `demigol_kit.fbx` | all 58 pieces, each at the origin with its pivot at the cell centre |
+| `demigol_kit.fbx` | all 64 pieces, each at the origin with its pivot at the cell centre |
 | `kit_albedo.png` | 4096² albedo atlas, 4 × 4 patches — **byte-identical to revision 2** |
 | `kit_normal.png` | tangent-space normal, same layout — **byte-identical** |
 | `kit_mask.png` | R = metallic, G = smoothness, **A = smoothness** — **byte-identical** |
@@ -18,15 +18,19 @@ Regenerate with `evals/demigol_kit.py`.
 | `tiling_proof.png` | the revision-2 wall, regenerated unchanged, as the baseline |
 | `tiling_proof_steel.png` | **new** — a 5 × 5 wall of revision 3's own pieces |
 | `soffit_underside.png` | **new** — the deck soffit from the one side it is for |
-| `damage_detail.png` | **new** — the six damage states, close |
+| `damage_detail.png` | **new** — the six damage states, each beside its `fractured` twin |
 | `manifest.json` | per piece: role, context, variant, triangles, budget, **utilisation %**, **measured outset** |
 
 ## What revision 3 changed
 
-**17 new pieces, 41 → 58. No existing piece was touched, no patch colour moved, no new
-material, no new atlas.** The three PNGs above are byte-identical to revision 2 — every
-new mesh lands on the existing 16 patches, so the whole city is still one draw call and
+**23 new pieces, 41 → 64. No existing piece was touched, no patch colour moved, and no
+new atlas.** The three PNGs above are byte-identical to revision 2 — every new mesh
+lands on the existing 16 patches, so the standing city is still one draw call and
 #653's new-family question is untouched.
+
+There is a **second material**, on six pieces only, and it is not this delivery's: the
+`fractured` context binds its broken surfaces to `demigol_shards`' own `shard_fracture`.
+See *the two damage sets* below.
 
 ### 1. Steel — eleven pieces, 6 → 17
 
@@ -51,7 +55,7 @@ trapezoidal flute spanning the full cell would pull its own ends away from the n
 it has to meet. Standing-seam deck rather than trapezoidal deck — decided by the deformer,
 not by taste. See *the taper trap* below.
 
-### 2. Damage states — six, in a `damaged` context
+### 2. Damage states — six, twice over
 
 Sheared plate, exposed rebar, shattered pane, cracked infill. Two each for steel and
 concrete, the roles this game looks at most.
@@ -71,6 +75,54 @@ idle — the one failure mode #677 named outright.
 `manifest.json → damage_states.substitutes` is the consumer's table: for a hurt cell whose
 *intact* classification is one of the listed `(role, context)` pairs, swap in the named
 piece and leave the mesh/scale/collider/material tuple otherwise alone.
+
+#### The two sets — pick one at wiring time
+
+| context | materials | needs |
+|---|---|---|
+| `damaged` | **one** — everything on the kit atlas | nothing. Drops in against `ChunkDresser` as it stands, which writes a single `sharedMaterial`. |
+| `fractured` | **two submeshes** — surviving skin on the kit atlas, broken surfaces on `demigol_shards`' own `shard_fracture` | `ChunkDresser` writing a two-element `sharedMaterials` for these cells. |
+
+**They are geometrically identical.** Both are generated from one authored box list: the
+broken boxes carry a `frac` tag, `fractured` honours it and `damaged` strips it. Two
+hand-written copies of six pieces would drift, and then a comparison between the sets
+would be measuring bookkeeping rather than material. A gate asserts the twins stay equal.
+
+**Why a context and not variant letters.** The shell picks variants from a coordinate
+hash, so `_c`/`_d` would let a hash hand a cell a two-material piece the consumer cannot
+render. Same reasoning that put chirality in `endcap` and damage in `damaged`.
+
+**Why not the same six names in a second FBX** — which would have been the tidiest swap:
+identical node names across two files inside one delivery re-arms the #596 trap exactly.
+That is how 626 hero catalog entries came to point at another building's mesh.
+
+**Submesh order is READ, not declared.** The exporter chooses it, so stating it from the
+builder would restate an intention. Each piece's `submeshes` array is read back out of
+the exported FBX, and the per-polygon material indices are checked against the box list.
+Note the unit: kit polygons are **quads**, so a box is 6 polygons and 12 triangles.
+
+**No copies of the fracture maps ship here.** `shard_fracture` is resolved from the
+`demigol_shards` delivery — the mirror of what that delivery already does with this
+kit's atlas, and for its reasons: a copy is a *second material*, so kit debris would not
+batch with the shards it broke out of, ~40 MB would be resident twice, and a shard
+re-author would leave the copy silently stale.
+
+**The fracture atlas is projected at 113.8 px/m here — the kit's own, not the shard
+library's 269–394.** `demigol_shards` projects broken faces locally about their own small
+centres; these are cell-scale boxes, and at a world scale tight enough for 341 px/m a
+full-cell slab's box projection spans ~8.5 m of layout against a 3 m patch. It would
+spill into the *neighbouring* patch while still measuring inside 0…1, so the UV gate
+would pass a piece sampling an unrelated material. Both materials on one mesh now carry
+identical pixels per metre, which is what matters where they meet. Colour matches
+exactly; feature scale is coarser than a shard's.
+
+**What the second material actually buys, judged from `damage_detail.png`.** The pairs
+differ only inside the damage — every exterior face is identical, by design and by gate.
+The gain is largest where the break surface is big and directly visible:
+`kit_steel_fractured_b`'s peeled flange reads as bright torn metal instead of a slightly
+lighter grey, and `kit_concrete_fractured_b` shows real aggregate in the blown corner.
+On `steel_a`, `concrete_a` and `glass_a` the difference is subtle at play distance,
+because those breaks are small or seen obliquely.
 
 ### 3. Continuity with `demigol_shards`, as a measurement
 
@@ -100,38 +152,38 @@ wears.
 never put concrete on a steel tear. It flatters the answer by comparing against whatever
 happens to be closest instead of against what the surface actually sits beside.
 
-**The option not taken**, recorded so it is a decision and not an omission: give the damage
-pieces a second submesh bound to `shard_fracture`. That is **zero new materials for the
-project** — #663 already ships it, so the batch count stays intact-kit plus
-everything-broken — and it would close the steel and glass gaps outright. It needs one
-consumer change: `ChunkDresser` writing a two-element `sharedMaterials` for `damaged` cells
-where it writes a single `sharedMaterial` today. Not taken here because a piece that
-arrives unusable until someone changes the consumer is worse than a piece that drops in and
-is 36/255 too dark on one surface. **Say the word and it is a re-run, not a re-model.**
+**This table describes the single-material `damaged` set only.** For `fractured` the
+continuity is exact by construction — those surfaces are on the shard library's own
+atlas, so there is no delta to measure. Two of its patches are ones the kit does not
+have at all: `rebar`, which the kit has to spend `rust` on, and `concrete_core`, a fresh
+bright core the kit can only approximate with a weathered dark.
 
 ## Utilisation, not a pass mark
 
 | | pieces | triangles | budget | utilisation |
 |---|---|---|---|---|
 | revision 2 | 41 | 2,364 | 4,720 | 50.1% |
-| **revision 3** | **58** | **4,236** | **6,760** | **62.7%** |
+| **revision 3** | **64** | **4,980** | **7,480** | **66.6%** |
 
-All 17 new pieces sit at 9 or 10 boxes — **108–120 of 120, i.e. 90–100%**. Revision 1
+All 23 new pieces sit at 9 or 10 boxes — **108–120 of 120, i.e. 90–100%**. Revision 1
 passed while spending 6% of its budget, and the pass mark is what hid that.
 
 ## Verification
 
 | check | result |
 |---|---|
-| geometry failures | **0** across 58 pieces |
-| shading groups | **1** (`kit_materialSG`) |
+| geometry failures | **0** across 64 pieces |
+| shading groups | **2** — `kit_materialSG` on all 64 pieces, `shard_fractureSG` on the 6 `fractured` ones only. The standing city is still one draw call. |
+| submesh order | read back from the FBX and matching the manifest on all 64; 58 single-material, 6 with two |
+| fracture faces | 144 polygons on the second material, every piece matching its box list |
+| skin rule | no box tagged as a break presents more than 0.25 m² of the cell's outer surface (largest actual: 0.042) |
 | UV range | 0.0079 … 0.9921, every piece inside its own patch |
-| contact-sheet tiles | 58 rendered, **0 blank** |
-| damage detail | 6 rendered, 0 blank |
+| contact-sheet tiles | 64 rendered, **0 blank** |
+| damage detail | 12 rendered as 6 pairs, 0 blank |
 | soffit underside | 3-cell run, 0 blank |
 | damage substitution | 6 states, every skin matched to an intact counterpart |
 | units | metre vertices, **zero** non-identity node scales, gated on the FBX **bytes** |
-| artifact vs manifest | 58 node names match exactly, triangles agree, declared outset ≥ delivered |
+| artifact vs manifest | 64 node names match exactly, triangles agree, declared outset ≥ delivered, no fracture-map copies shipped |
 
 **Tiling proof, revision 3's own pieces** — a 5 × 5 wall of all eleven steel pieces and all
 six damage states, roofs on top and soffits directly beneath them (the relationship a deck
@@ -190,8 +242,34 @@ catches an unlisted damage piece, a rule pointing at nothing, and a substitution
 intact piece provides. `tests/test_demigol_generators.py` carries a positive control that
 falsifies the skin and asserts the gate bites.
 
-Two more pieces were re-authored for the same class of reason, both found in the render and
-neither visible to any check:
+**It then happened twice more, and the second time it became a second gate.**
+
+`check_skin_rule`: a box that forms part of the cell's **outer surface** is skin and may
+never carry a break, because a break puts the shard library's atlas on its faces. Three
+`fractured` pieces tagged their whole body slab, so the fractured twin of a concrete deck
+came out a mottled boulder beside an intact grey plate — ~6 m² of fracture aggregate on
+the outside of the building. Every gate passed: the tag named a real patch, the counts
+matched, the submesh order verified, the UVs stayed in range. Found in the paired render.
+The limit is 0.25 m² and the largest legitimate contact is 0.042, so the gate is
+calibrated rather than nominal, and the suite pins that margin.
+
+### The combine does not carry per-face shading
+
+Assigning a shading group per box *before* `handlers/combine.combine` does not survive
+it: **all six two-material pieces came back wholly on one group, and in every case it was
+the group its first box carried.** Six for six is first-input-wins, not a coincidence.
+
+The split therefore happens after the combine, by face range — which depends on box order
+surviving into the face array. That dependence is **checked, not assumed**: every box was
+projected into a known atlas patch, so the patch a face's UVs land in is a fingerprint of
+which box it came from, and the run stops if face 6*i* does not belong to box *i*.
+
+Worth someone's attention on the tooling side: this is a real limitation of `combine`, and
+nothing in it warns. The handler is untouched here.
+
+### Two more pieces re-authored
+
+Both found in the render and neither visible to any check:
 
 - `kit_steel_corner_a` reused `corner_bands` the way brick does — three bands per cell, so
   nine horizontal lines over three stacked cells and no vertical at all. Right for a brick
@@ -220,7 +298,13 @@ across all 784 shards.
 - `damaged` is a context no classifier can derive from a cell's six neighbours — it is a
   state the consumer knows and the grid does not. The substitution table is in the manifest;
   wiring it is Demigol-side work.
-- The `shard_fracture` submesh option above, if the steel gap matters more than the drop-in.
+- **Which damage set to wire.** `damaged` needs nothing and is 36/255 too dark on torn
+  steel; `fractured` closes that exactly and needs `ChunkDresser` to write a two-element
+  `sharedMaterials`. Both ship, both are verified, and the second costs the project no
+  new material — `shard_fracture` is already resident for #663's debris, so the batch
+  count stays intact-kit plus everything-broken either way. Wiring `fractured` also means
+  the fracture atlas must be resolvable from the `demigol_shards` delivery, since this
+  package deliberately ships no copy of it.
 
 ## Not here
 

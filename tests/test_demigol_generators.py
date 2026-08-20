@@ -562,10 +562,12 @@ class TestKitDamageStates:
 
     def test_damage_is_a_context_and_never_a_variant(self):
         # The shell picks variants from a coordinate hash. A hash must never
-        # be able to decide a cell looks damaged.
+        # be able to decide a cell looks damaged - nor to hand it a
+        # two-material piece the consumer may not be able to render.
         for name in kit.PIECES():
             role, context, variant = kit.parse_name(name)
             assert "damag" not in variant, name
+            assert "fractur" not in variant, name
 
     def test_every_damage_state_is_substitutable_and_matches_its_neighbour(self):
         assert kit.check_damage_substitutions(kit.PIECES()) == []
@@ -606,7 +608,7 @@ class TestKitFractureContinuity:
 
     def test_every_broken_surface_patch_is_paired_to_the_fracture_atlas(self):
         used = {b["patch"] for n in kit.PIECES()
-                if kit.parse_name(n)[1] == "damaged"
+                if kit.parse_name(n)[1] in kit.DAMAGE_CONTEXTS
                 for b in kit.PIECES()[n]}
         # Everything not paired must be either surviving skin (a patch an
         # intact piece of the same role also uses) or the declared void.
@@ -636,11 +638,122 @@ class TestKitFractureContinuity:
 
     def test_no_pair_is_dead(self):
         used = {b["patch"] for n in kit.PIECES()
-                if kit.parse_name(n)[1] == "damaged"
+                if kit.parse_name(n)[1] in kit.DAMAGE_CONTEXTS
                 for b in kit.PIECES()[n]}
         assert set(kit.FRACTURE_ANALOGUE) <= used, (
             "FRACTURE_ANALOGUE pairs patches no damage piece uses: %s"
             % sorted(set(kit.FRACTURE_ANALOGUE) - used))
+
+
+class TestKitFracturedTwins:
+    """The `fractured` context: the same six states with their broken
+    surfaces on `shard_fracture`, so a hurt cell and the debris it is about
+    to become are the SAME material rather than two similar art styles."""
+
+    def test_every_damage_state_has_a_fractured_twin(self):
+        pieces = kit.PIECES()
+        damaged = {kit.parse_name(n)[0] + kit.parse_name(n)[2]
+                   for n in pieces if kit.parse_name(n)[1] == "damaged"}
+        fractured = {kit.parse_name(n)[0] + kit.parse_name(n)[2]
+                     for n in pieces if kit.parse_name(n)[1] == "fractured"}
+        assert damaged == fractured, sorted(damaged ^ fractured)
+        assert len(damaged) == 6
+
+    def test_the_twins_are_the_same_geometry(self):
+        # They are generated from ONE authored box list, so this is a check
+        # that the split still works - not a check that I kept two copies in
+        # step, which is exactly the job the split exists to remove.
+        pieces = kit.PIECES()
+        for name in [n for n in pieces if kit.parse_name(n)[1] == "damaged"]:
+            role, _, variant = kit.parse_name(name)
+            twin = pieces["kit_%s_fractured_%s" % (role, variant)]
+            assert [dict(b, frac=None) for b in twin] == [
+                dict(b, frac=None) for b in pieces[name]], name
+
+    def test_the_damaged_set_carries_no_fracture_material(self):
+        # If a tag survived the strip, a `damaged` piece would arrive needing
+        # two materials from a consumer that writes one - the exact failure
+        # shipping both sets exists to avoid.
+        for name, boxes in kit.PIECES().items():
+            if kit.parse_name(name)[1] == "damaged":
+                assert not any(b.get("frac") for b in boxes), name
+
+    def test_every_fractured_piece_actually_uses_the_second_material(self):
+        for name, boxes in kit.PIECES().items():
+            if kit.parse_name(name)[1] == "fractured":
+                assert any(b.get("frac") for b in boxes), name
+
+    def test_every_fractured_piece_keeps_kit_material_skin(self):
+        # A piece entirely on the fracture atlas would have no surviving skin
+        # to match its intact neighbour with, which is the seam defect again.
+        for name, boxes in kit.PIECES().items():
+            if kit.parse_name(name)[1] == "fractured":
+                assert any(not b.get("frac") for b in boxes), name
+
+    def test_every_frac_tag_names_a_patch_the_shard_delivery_has(self):
+        index = kit.fracture_patch_indices()
+        if index is None:
+            pytest.skip("demigol_shards is not delivered in this tree")
+        for name, boxes in kit.PIECES().items():
+            for b in boxes:
+                if b.get("frac"):
+                    assert b["frac"] in index, "%s -> %s" % (name, b["frac"])
+
+    def test_the_substitution_gate_catches_a_twin_that_drifted(self):
+        # THE POSITIVE CONTROL for the twin check.
+        pieces = dict(kit.PIECES())
+        pieces["kit_glass_fractured_a"] = pieces["kit_glass_fractured_a"][:-1]
+        fails = kit.check_damage_substitutions(pieces)
+        assert any("not the same geometry" in f for f in fails), fails
+
+    def test_the_substitution_gate_catches_a_twin_with_no_second_material(self):
+        pieces = dict(kit.PIECES())
+        pieces["kit_infill_fractured_a"] = [
+            {k: v for k, v in b.items() if k != "frac"}
+            for b in pieces["kit_infill_fractured_a"]]
+        fails = kit.check_damage_substitutions(pieces)
+        assert any("no box on the fracture material" in f for f in fails), fails
+
+
+class TestKitSkinRule:
+    """A box that forms part of the cell's outer surface is SKIN and may never
+    carry a break - otherwise the fracture atlas is painted on the outside of
+    the building."""
+
+    def test_no_break_is_painted_on_the_cell_skin(self):
+        assert kit.check_skin_rule(kit.PIECES()) == []
+
+    def test_the_largest_legitimate_contact_is_well_under_the_limit(self):
+        # A limit nothing comes near is a limit nobody has calibrated. This
+        # pins the margin so a future piece that creeps up on it is visible
+        # as a change here rather than as a silent approach to the cliff.
+        worst = 0.0
+        for boxes in kit.PIECES().values():
+            for b in boxes:
+                if not b.get("frac"):
+                    continue
+                for axis in range(3):
+                    lo = b["pos"][axis] - b["dim"][axis] / 2.0
+                    hi = b["pos"][axis] + b["dim"][axis] / 2.0
+                    if min(abs(lo + kit.H), abs(hi - kit.H)) > 1e-3:
+                        continue
+                    other = [d for k, d in enumerate(b["dim"]) if k != axis]
+                    worst = max(worst, other[0] * other[1])
+        assert worst < kit.SKIN_FACE_LIMIT_M2 / 4.0, (
+            "largest break-on-skin contact is %.4f m2 against a %.2f limit"
+            % (worst, kit.SKIN_FACE_LIMIT_M2))
+
+    def test_tagging_a_body_slab_as_a_break_is_caught(self):
+        # THE POSITIVE CONTROL, and it is the exact defect that shipped into
+        # the first two-material render: the body slab of a damage state
+        # tagged as a break, which puts fracture aggregate on all four sides
+        # of the cube.
+        pieces = dict(kit.PIECES())
+        boxes = [dict(b) for b in pieces["kit_concrete_fractured_a"]]
+        boxes[0]["frac"] = "concrete_core"          # box 0 is the body slab
+        pieces["kit_concrete_fractured_a"] = boxes
+        fails = kit.check_skin_rule(pieces)
+        assert any("outer surface" in f for f in fails), fails
 
 
 class TestKitTaperTrap:

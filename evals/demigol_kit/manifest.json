@@ -9,12 +9,33 @@
     "inset_note": "faces that meet a neighbouring cell inset 0.005 m - the z-fight fix",
     "max_outset_m": 0.5,
     "outset_note": "ornament may oversail the cell face by up to 0.5 m; declared per piece as outset_m. The lattice constrains which CELLS a piece occupies, never the render mesh, because collision is generated from the grid.",
-    "pieces_with_outset": 18,
+    "pieces_with_outset": 21,
     "max_declared_outset_m": 0.34,
     "outset_is": "MEASURED off the built mesh, revision 3 onward. It used to be derived from the box spec, which is the intent and not the delivery - a `taper` shrinks a box after the spec is written, and both concrete bases declared 0.15 m while delivering 0.024. Each piece also carries outset_from_spec_m so the gap is visible rather than implied."
   },
   "pivot": "cell centre (0,0,0) on every piece",
   "authored_facing": "+Z; the shell rotates in 90 degree steps. Corner pieces read from +Z AND +X.",
+  "materials": {
+    "count": 2,
+    "kit_material": {
+      "shared": true,
+      "used_by": "all 64 pieces",
+      "maps": [
+        "kit_albedo.png",
+        "kit_normal.png",
+        "kit_mask.png"
+      ],
+      "note": "still ONE material for every intact piece and for the surviving skin of every damaged one, which is what keeps the standing city in a single draw call."
+    },
+    "shard_fracture": {
+      "shared_with": "demigol_shards",
+      "used_by": "the 6 `fractured` pieces only, on their broken surfaces",
+      "maps": [],
+      "maps_note": "DELIBERATELY EMPTY. This delivery ships NO copy of the fracture atlas: resolve it from the demigol_shards delivery (fracture_albedo.png, fracture_normal.png, fracture_mask.png live there). A copy would be a SECOND material - kit debris would not batch with the shards it broke out of, ~40 MB of texture would be resident twice, and a shard re-author would leave the copy silently stale. The mirror of what demigol_shards already does with this kit's atlas.",
+      "texel_density_px_per_metre": 113.8,
+      "texel_density_note": "the KIT's density, not the shard library's 269-394. demigol_shards projects broken faces locally about their own small centres; these are cell-scale boxes, and at a world_scale tight enough for 341 px/m a full-cell slab's box projection spans ~8.5 m of layout against a 3 m patch - it would spill into the NEIGHBOURING patch while still measuring inside 0..1, so the UV gate would pass a piece sampling an unrelated material. Both materials on one mesh now carry identical pixels per metre, which is what matters where they meet. Colour matches exactly; feature scale is coarser than a shard's."
+    }
+  },
   "material": {
     "shared": true,
     "shader": "kit_material (standardSurface)",
@@ -210,17 +231,17 @@
     "tris_per_box": 12
   },
   "totals": {
-    "pieces": 58,
-    "triangles": 4236,
-    "budget_triangles": 6760,
-    "budget_utilisation_pct": 62.7,
-    "utilisation_note": "REPORTED AS A PERCENTAGE, not as a pass mark. Revision 1 passed while spending 6% of its budget and the pass mark is what hid that. Revision 2 was 2364 tris of 4,720 (50.1%); revision 3 is 4236 of 6760 (62.7%), and all 17 new pieces sit at 9 boxes = 108 of 120 (90%).",
+    "pieces": 64,
+    "triangles": 4980,
+    "budget_triangles": 7480,
+    "budget_utilisation_pct": 66.6,
+    "utilisation_note": "REPORTED AS A PERCENTAGE, not as a pass mark. Revision 1 passed while spending 6% of its budget and the pass mark is what hid that. Revision 2 was 2364 tris of 4,720 (50.1%); revision 3 is 4980 of 7480 (66.6%), and all 17 new pieces sit at 9 boxes = 108 of 120 (90%).",
     "pieces_by_role": {
       "brick": 12,
-      "concrete": 10,
-      "glass": 8,
-      "infill": 9,
-      "steel": 19
+      "concrete": 12,
+      "glass": 9,
+      "infill": 10,
+      "steel": 21
     },
     "pieces_by_context": {
       "base": 2,
@@ -230,13 +251,15 @@
       "damaged": 6,
       "endcap": 5,
       "facade": 11,
+      "fractured": 6,
       "interior": 2,
       "lobby": 3,
       "roof": 9,
       "soffit": 4
     },
     "shading_groups": [
-      "kit_materialSG"
+      "kit_materialSG",
+      "shard_fractureSG"
     ],
     "widest_extent_m": 1.84,
     "uv_range": [
@@ -279,7 +302,10 @@
       "budget": 20,
       "budget_utilisation_pct": 60.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_brick_interior_a",
@@ -291,7 +317,10 @@
       "budget": 20,
       "budget_utilisation_pct": 60.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_steel_column_a",
@@ -303,7 +332,10 @@
       "budget": 120,
       "budget_utilisation_pct": 30.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_steel_column_b",
@@ -315,7 +347,10 @@
       "budget": 120,
       "budget_utilisation_pct": 60.0,
       "outset_m": 0.24,
-      "outset_from_spec_m": 0.24
+      "outset_from_spec_m": 0.24,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_steel_column_c",
@@ -327,7 +362,10 @@
       "budget": 120,
       "budget_utilisation_pct": 40.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_steel_beam_a",
@@ -339,7 +377,10 @@
       "budget": 120,
       "budget_utilisation_pct": 30.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_steel_beam_b",
@@ -351,7 +392,10 @@
       "budget": 120,
       "budget_utilisation_pct": 50.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_steel_lobby_a",
@@ -363,7 +407,10 @@
       "budget": 120,
       "budget_utilisation_pct": 50.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_concrete_beam_a",
@@ -375,7 +422,10 @@
       "budget": 120,
       "budget_utilisation_pct": 20.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_concrete_beam_b",
@@ -387,7 +437,10 @@
       "budget": 120,
       "budget_utilisation_pct": 30.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_concrete_base_a",
@@ -399,7 +452,10 @@
       "budget": 120,
       "budget_utilisation_pct": 30.0,
       "outset_m": 0.024,
-      "outset_from_spec_m": 0.15
+      "outset_from_spec_m": 0.15,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_concrete_base_b",
@@ -411,7 +467,10 @@
       "budget": 120,
       "budget_utilisation_pct": 40.0,
       "outset_m": 0.024,
-      "outset_from_spec_m": 0.15
+      "outset_from_spec_m": 0.15,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_concrete_roof_a",
@@ -423,7 +482,10 @@
       "budget": 120,
       "budget_utilisation_pct": 20.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_concrete_roof_b",
@@ -435,7 +497,10 @@
       "budget": 120,
       "budget_utilisation_pct": 60.0,
       "outset_m": 0.34,
-      "outset_from_spec_m": 0.34
+      "outset_from_spec_m": 0.34,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_concrete_soffit_a",
@@ -447,7 +512,10 @@
       "budget": 120,
       "budget_utilisation_pct": 50.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_brick_facade_a",
@@ -459,7 +527,10 @@
       "budget": 120,
       "budget_utilisation_pct": 40.0,
       "outset_m": 0.16,
-      "outset_from_spec_m": 0.16
+      "outset_from_spec_m": 0.16,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_brick_facade_b",
@@ -471,7 +542,10 @@
       "budget": 120,
       "budget_utilisation_pct": 70.0,
       "outset_m": 0.14,
-      "outset_from_spec_m": 0.14
+      "outset_from_spec_m": 0.14,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_brick_facade_c",
@@ -483,7 +557,10 @@
       "budget": 120,
       "budget_utilisation_pct": 60.0,
       "outset_m": 0.22,
-      "outset_from_spec_m": 0.22
+      "outset_from_spec_m": 0.22,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_brick_corner_a",
@@ -495,7 +572,10 @@
       "budget": 120,
       "budget_utilisation_pct": 60.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_brick_corner_b",
@@ -507,7 +587,10 @@
       "budget": 120,
       "budget_utilisation_pct": 80.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_brick_roof_a",
@@ -519,7 +602,10 @@
       "budget": 120,
       "budget_utilisation_pct": 20.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_brick_roof_b",
@@ -531,7 +617,10 @@
       "budget": 120,
       "budget_utilisation_pct": 50.0,
       "outset_m": 0.3,
-      "outset_from_spec_m": 0.3
+      "outset_from_spec_m": 0.3,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_brick_soffit_a",
@@ -543,7 +632,10 @@
       "budget": 120,
       "budget_utilisation_pct": 50.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_brick_lobby_a",
@@ -555,7 +647,10 @@
       "budget": 120,
       "budget_utilisation_pct": 30.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_infill_facade_a",
@@ -567,7 +662,10 @@
       "budget": 120,
       "budget_utilisation_pct": 50.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_infill_facade_b",
@@ -579,7 +677,10 @@
       "budget": 120,
       "budget_utilisation_pct": 60.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_infill_facade_c",
@@ -591,7 +692,10 @@
       "budget": 120,
       "budget_utilisation_pct": 60.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_infill_corner_a",
@@ -603,7 +707,10 @@
       "budget": 120,
       "budget_utilisation_pct": 60.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_infill_corner_b",
@@ -615,7 +722,10 @@
       "budget": 120,
       "budget_utilisation_pct": 40.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_infill_roof_a",
@@ -627,7 +737,10 @@
       "budget": 120,
       "budget_utilisation_pct": 20.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_infill_soffit_a",
@@ -639,7 +752,10 @@
       "budget": 120,
       "budget_utilisation_pct": 50.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_glass_facade_a",
@@ -651,7 +767,10 @@
       "budget": 120,
       "budget_utilisation_pct": 70.0,
       "outset_m": 0.16,
-      "outset_from_spec_m": 0.16
+      "outset_from_spec_m": 0.16,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_glass_facade_b",
@@ -663,7 +782,10 @@
       "budget": 120,
       "budget_utilisation_pct": 70.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_glass_facade_c",
@@ -675,7 +797,10 @@
       "budget": 120,
       "budget_utilisation_pct": 80.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_glass_corner_a",
@@ -687,7 +812,10 @@
       "budget": 120,
       "budget_utilisation_pct": 60.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_glass_roof_a",
@@ -699,7 +827,10 @@
       "budget": 120,
       "budget_utilisation_pct": 30.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_brick_endcap_a",
@@ -711,7 +842,10 @@
       "budget": 120,
       "budget_utilisation_pct": 60.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_brick_endcap_b",
@@ -723,7 +857,10 @@
       "budget": 120,
       "budget_utilisation_pct": 80.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_infill_endcap_a",
@@ -735,7 +872,10 @@
       "budget": 120,
       "budget_utilisation_pct": 60.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_glass_endcap_a",
@@ -747,7 +887,10 @@
       "budget": 120,
       "budget_utilisation_pct": 60.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_glass_lobby_a",
@@ -759,7 +902,10 @@
       "budget": 120,
       "budget_utilisation_pct": 70.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_steel_roof_a",
@@ -771,7 +917,10 @@
       "budget": 120,
       "budget_utilisation_pct": 90.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_steel_roof_b",
@@ -783,7 +932,10 @@
       "budget": 120,
       "budget_utilisation_pct": 100.0,
       "outset_m": 0.2,
-      "outset_from_spec_m": 0.2
+      "outset_from_spec_m": 0.2,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_steel_roof_c",
@@ -795,7 +947,10 @@
       "budget": 120,
       "budget_utilisation_pct": 90.0,
       "outset_m": 0.28,
-      "outset_from_spec_m": 0.28
+      "outset_from_spec_m": 0.28,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_steel_soffit_a",
@@ -807,7 +962,10 @@
       "budget": 120,
       "budget_utilisation_pct": 90.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_steel_facade_a",
@@ -819,7 +977,10 @@
       "budget": 120,
       "budget_utilisation_pct": 90.0,
       "outset_m": 0.22,
-      "outset_from_spec_m": 0.22
+      "outset_from_spec_m": 0.22,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_steel_facade_b",
@@ -831,7 +992,10 @@
       "budget": 120,
       "budget_utilisation_pct": 90.0,
       "outset_m": 0.2,
-      "outset_from_spec_m": 0.2
+      "outset_from_spec_m": 0.2,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_steel_corner_a",
@@ -843,7 +1007,10 @@
       "budget": 120,
       "budget_utilisation_pct": 90.0,
       "outset_m": 0.1,
-      "outset_from_spec_m": 0.1
+      "outset_from_spec_m": 0.1,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_steel_endcap_a",
@@ -855,7 +1022,10 @@
       "budget": 120,
       "budget_utilisation_pct": 90.0,
       "outset_m": 0.1,
-      "outset_from_spec_m": 0.1
+      "outset_from_spec_m": 0.1,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_steel_column_d",
@@ -867,7 +1037,10 @@
       "budget": 120,
       "budget_utilisation_pct": 90.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_steel_column_e",
@@ -879,7 +1052,10 @@
       "budget": 120,
       "budget_utilisation_pct": 90.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_steel_column_f",
@@ -891,7 +1067,10 @@
       "budget": 120,
       "budget_utilisation_pct": 90.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_steel_damaged_a",
@@ -903,7 +1082,10 @@
       "budget": 120,
       "budget_utilisation_pct": 100.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_steel_damaged_b",
@@ -915,31 +1097,40 @@
       "budget": 120,
       "budget_utilisation_pct": 90.0,
       "outset_m": 0.12,
-      "outset_from_spec_m": 0.12
+      "outset_from_spec_m": 0.12,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_concrete_damaged_a",
       "role": "concrete",
       "context": "damaged",
       "variant": "a",
-      "triangles": 108,
-      "boxes": 9,
+      "triangles": 120,
+      "boxes": 10,
       "budget": 120,
-      "budget_utilisation_pct": 90.0,
+      "budget_utilisation_pct": 100.0,
       "outset_m": 0.13,
-      "outset_from_spec_m": 0.13
+      "outset_from_spec_m": 0.13,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_concrete_damaged_b",
       "role": "concrete",
       "context": "damaged",
       "variant": "b",
-      "triangles": 108,
-      "boxes": 9,
+      "triangles": 120,
+      "boxes": 10,
       "budget": 120,
-      "budget_utilisation_pct": 90.0,
+      "budget_utilisation_pct": 100.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.0
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_glass_damaged_a",
@@ -951,28 +1142,130 @@
       "budget": 120,
       "budget_utilisation_pct": 100.0,
       "outset_m": 0.0,
-      "outset_from_spec_m": 0.03
+      "outset_from_spec_m": 0.03,
+      "submeshes": [
+        "kit_material"
+      ]
     },
     {
       "name": "kit_infill_damaged_a",
       "role": "infill",
       "context": "damaged",
       "variant": "a",
+      "triangles": 120,
+      "boxes": 10,
+      "budget": 120,
+      "budget_utilisation_pct": 100.0,
+      "outset_m": 0.1792,
+      "outset_from_spec_m": 0.18,
+      "submeshes": [
+        "kit_material"
+      ]
+    },
+    {
+      "name": "kit_steel_fractured_a",
+      "role": "steel",
+      "context": "fractured",
+      "variant": "a",
+      "triangles": 120,
+      "boxes": 10,
+      "budget": 120,
+      "budget_utilisation_pct": 100.0,
+      "outset_m": 0.0,
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material",
+        "shard_fracture"
+      ]
+    },
+    {
+      "name": "kit_steel_fractured_b",
+      "role": "steel",
+      "context": "fractured",
+      "variant": "b",
       "triangles": 108,
       "boxes": 9,
       "budget": 120,
       "budget_utilisation_pct": 90.0,
+      "outset_m": 0.12,
+      "outset_from_spec_m": 0.12,
+      "submeshes": [
+        "kit_material",
+        "shard_fracture"
+      ]
+    },
+    {
+      "name": "kit_concrete_fractured_a",
+      "role": "concrete",
+      "context": "fractured",
+      "variant": "a",
+      "triangles": 120,
+      "boxes": 10,
+      "budget": 120,
+      "budget_utilisation_pct": 100.0,
+      "outset_m": 0.13,
+      "outset_from_spec_m": 0.13,
+      "submeshes": [
+        "kit_material",
+        "shard_fracture"
+      ]
+    },
+    {
+      "name": "kit_concrete_fractured_b",
+      "role": "concrete",
+      "context": "fractured",
+      "variant": "b",
+      "triangles": 120,
+      "boxes": 10,
+      "budget": 120,
+      "budget_utilisation_pct": 100.0,
+      "outset_m": 0.0,
+      "outset_from_spec_m": 0.0,
+      "submeshes": [
+        "kit_material",
+        "shard_fracture"
+      ]
+    },
+    {
+      "name": "kit_glass_fractured_a",
+      "role": "glass",
+      "context": "fractured",
+      "variant": "a",
+      "triangles": 120,
+      "boxes": 10,
+      "budget": 120,
+      "budget_utilisation_pct": 100.0,
+      "outset_m": 0.0,
+      "outset_from_spec_m": 0.03,
+      "submeshes": [
+        "kit_material",
+        "shard_fracture"
+      ]
+    },
+    {
+      "name": "kit_infill_fractured_a",
+      "role": "infill",
+      "context": "fractured",
+      "variant": "a",
+      "triangles": 120,
+      "boxes": 10,
+      "budget": 120,
+      "budget_utilisation_pct": 100.0,
       "outset_m": 0.1792,
-      "outset_from_spec_m": 0.18
+      "outset_from_spec_m": 0.18,
+      "submeshes": [
+        "kit_material",
+        "shard_fracture"
+      ]
     }
   ],
   "revision": 3,
   "revision_3": {
-    "what_changed": "17 new pieces, 41 -> 58. Eleven steel and six damage states. No existing piece was touched, no patch colour moved, no new material and no new atlas: every new mesh lands on the existing 16 patches, so the whole city is still one draw call.",
+    "what_changed": "17 new pieces, 41 -> 64. Eleven steel and six damage states. No existing piece was touched, no patch colour moved, no new material and no new atlas: every new mesh lands on the existing 16 patches, so the whole city is still one draw call.",
     "why_steel": "Steel is what the game is about - the pillar is 'cut the bones, not the skin', and steel is the only role the player aims at - and it had 6 pieces of 41. Worse, the kit shipped no steel roof piece at all, so #611's rule S3b dressed every steel deck as a concrete plate: 13,186 of 45,638 cells, ~28%% of all visible surface, resolving to one concrete family.",
     "why_three_roofs": "One new piece dressed across all 13,186 fallback cells replaces one monotony with another. The deck ships as a field piece, a plant piece and a perimeter crown.",
     "steel_pieces_before": 6,
-    "steel_pieces_after": 19,
+    "steel_pieces_after": 21,
     "not_extended": "brick (11 pieces), non-steel corner/endcap, non-steel soffit and concrete_beam were left exactly as delivered. They are idle for generator reasons, not art reasons, and building more of what is already idle is the failure mode this delivery was told to avoid. There is deliberately no brick damage state for the same reason.",
     "atlas_untouched": "kit_albedo.png, kit_normal.png and kit_mask.png are regenerated by the same deterministic code from the same 16-patch table. A new family is #653's business, not this delivery's."
   },
@@ -981,6 +1274,17 @@
     "context": "damaged",
     "why_a_context_and_not_a_variant_letter": "the shell picks variants from a coordinate hash. Damage is a STATE the consumer selects, so it can no more ride in the variant slot than chirality could - which is exactly why the `endcap` context exists. A hash must never be able to make a cell look damaged.",
     "no_brick_state": "the generator emits no Brick cells, so a brick damage state would ship idle.",
+    "two_sets": {
+      "damaged": "ONE material. Drops in against ChunkDresser as it stands today, which writes a single `sharedMaterial`. The broken surfaces are the closest the kit atlas can get - see the measured table below.",
+      "fractured": "TWO submeshes. Geometrically IDENTICAL to its `damaged` twin - both are generated from one authored box list, so they cannot drift - with the freshly-broken boxes bound to `shard_fracture`. Needs ChunkDresser to write a two-element `sharedMaterials`.",
+      "why_both_ship": "the choice between them is a CAPABILITY decision made once at wiring time, not a per-cell one. Shipping only the second would have left the delivery unusable until someone changed the consumer.",
+      "why_a_context_and_not_variant_letters": "the shell picks variants from a coordinate hash, so `_c`/`_d` would let a hash hand a cell a two-material piece the consumer cannot render.",
+      "why_not_the_same_names_in_a_second_fbx": "that would have been the tidiest swap, and it re-arms the #596 trap exactly: identical node names across two files inside one delivery is how 626 hero catalog entries came to point at another building's mesh.",
+      "submesh_order": {
+        "rule": "bind materials BY INDEX from each piece's own `submeshes` array. It is READ OUT OF THE EXPORTED FBX and not stated by the builder - the exporter chooses the order, so declaring it from the box list would only restate an intention.",
+        "verified": "connection order and per-polygon material indices both re-read from the delivered bytes; polygon counts per material checked against the box list. NOTE the unit: kit polygons are QUADS, so a box is 6 polygons and 12 triangles."
+      }
+    },
     "substitutes": {
       "kit_steel_damaged_a": {
         "skin_patch": "steel",
@@ -1091,9 +1395,126 @@
         ],
         "damaged_face": "+Z",
         "reads_as": "cracked curtain panel, one board hanging off, studs exposed behind"
+      },
+      "kit_steel_fractured_a": {
+        "skin_patch": "steel",
+        "for": [
+          [
+            "steel",
+            "roof"
+          ],
+          [
+            "steel",
+            "beam"
+          ]
+        ],
+        "damaged_face": "+Y",
+        "reads_as": "sheared deck plate, tear open to the structure below",
+        "fracture_submesh": true
+      },
+      "kit_steel_fractured_b": {
+        "skin_patch": "steel",
+        "for": [
+          [
+            "steel",
+            "column"
+          ],
+          [
+            "steel",
+            "corner"
+          ],
+          [
+            "steel",
+            "endcap"
+          ],
+          [
+            "steel",
+            "lobby"
+          ]
+        ],
+        "damaged_face": "+Z",
+        "reads_as": "buckled column, one flange snapped and bent out",
+        "fracture_submesh": true
+      },
+      "kit_concrete_fractured_a": {
+        "skin_patch": "concrete",
+        "for": [
+          [
+            "concrete",
+            "roof"
+          ]
+        ],
+        "damaged_face": "+Y",
+        "reads_as": "spalled deck, rebar mat exposed, one bar bent up out of the cell",
+        "fracture_submesh": true
+      },
+      "kit_concrete_fractured_b": {
+        "skin_patch": "concrete",
+        "for": [
+          [
+            "concrete",
+            "base"
+          ],
+          [
+            "concrete",
+            "beam"
+          ],
+          [
+            "concrete",
+            "soffit"
+          ]
+        ],
+        "damaged_face": "+Z",
+        "reads_as": "shear crack and a blown corner, rebar at the break",
+        "fracture_submesh": true
+      },
+      "kit_glass_fractured_a": {
+        "skin_patch": "steel_dark",
+        "for": [
+          [
+            "glass",
+            "facade"
+          ],
+          [
+            "glass",
+            "lobby"
+          ],
+          [
+            "glass",
+            "corner"
+          ],
+          [
+            "glass",
+            "endcap"
+          ]
+        ],
+        "damaged_face": "+Z",
+        "reads_as": "shattered pane, three shards left in a surviving frame",
+        "fracture_submesh": true
+      },
+      "kit_infill_fractured_a": {
+        "skin_patch": "infill",
+        "for": [
+          [
+            "infill",
+            "facade"
+          ],
+          [
+            "infill",
+            "corner"
+          ],
+          [
+            "infill",
+            "endcap"
+          ]
+        ],
+        "damaged_face": "+Z",
+        "reads_as": "cracked curtain panel, one board hanging off, studs exposed behind",
+        "fracture_submesh": true
       }
     },
     "continuity_with_demigol_shards": {
+      "for_the_fractured_set": "EXACT, by construction - those surfaces are on the shard library's own atlas, so there is no delta to measure. The table below is about the single-material `damaged` set.",
       "the_constraint": "ask 2 wants these continuous with the shard library's fracture material; the kit's hard constraint is ONE material. So they cannot BE that material, and the continuity is a MEASUREMENT rather than a claim.",
       "how_it_is_measured": "the pairing is AUTHORED (FRACTURE_ANALOGUE in the generator) and only the delta is measured, against the DELIVERED shard manifest. Pairing by nearest RGB was tried and is the wrong instrument: it matches `steel` to `concrete_core` at dRGB 24 and calls that a good result, when the shard library would never put concrete on a steel tear. A named fracture patch missing from the delivery fails the run rather than dropping a row.",
       "surviving_skin_is_not_in_this_table": "a damage piece's untorn surfaces use the same patch the INTACT piece would, because what they have to match is the neighbouring cell and not the fracture atlas. `shadow` is absent for a different reason: a crack void is the absence of a surface, not a material.",

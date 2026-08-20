@@ -266,14 +266,26 @@ def build_atlas_maps(out_dir):
 
 
 # ----------------------------------------------------------------- the pieces
-def box(cx, cy, cz, sx, sy, sz, patch, taper=None):
+def box(cx, cy, cz, sx, sy, sz, patch, taper=None, frac=None):
     """One 12-triangle box. `taper` is (bottom_scale, top_scale) in X and Z:
     a flare deformer on a 1-segment cube gives a clean linear frustum at the
     SAME 12 triangles (measured live), so a battered plinth or a tapered
-    bracket costs nothing against the budget."""
+    bracket costs nothing against the budget.
+
+    `frac` names a patch in the SHARD LIBRARY's fracture atlas and marks this
+    box as a FRESHLY BROKEN surface. It is what makes one authored damage
+    state produce two pieces: the `damaged` context strips these tags and puts
+    everything on the kit material, and the `fractured` context honours them
+    and binds those boxes to `shard_fracture`. Authoring once is the point -
+    two hand-kept copies of the same six pieces would drift, and then the
+    comparison between the two sets would be measuring my bookkeeping instead
+    of the material.
+    """
     b = {"pos": [cx, cy, cz], "dim": [sx, sy, sz], "patch": patch}
     if taper:
         b["taper"] = list(taper)
+    if frac:
+        b["frac"] = frac
     return b
 
 
@@ -305,21 +317,22 @@ def span(a, b):
     return ((a + b) / 2.0, b - a)
 
 
-def slab(front=None, right=None, top=None, bottom=None, patch="concrete"):
+def slab(front=None, right=None, top=None, bottom=None, patch="concrete",
+         frac=None):
     """The body of a piece: the full cell, pulled back from whichever faces
     carry relief so the detail boxes have somewhere to sit."""
     zc, zs = span(-H, front if front is not None else H)
     xc, xs = span(-H, right if right is not None else H)
     yc, ys = span(bottom if bottom is not None else -H,
                   top if top is not None else H)
-    return box(xc, yc, zc, xs, ys, zs, patch)
+    return box(xc, yc, zc, xs, ys, zs, patch, frac=frac)
 
 
 BACK = 1.19          # where a recessed body stops
 FACE = H             # the envelope face itself
 
 
-def plate(x0, x1, y0, y1, z0, z1, patch, taper=None):
+def plate(x0, x1, y0, y1, z0, z1, patch, taper=None, frac=None):
     """A box authored as its six EDGES rather than a centre and a size.
 
     Revision 3's damage states are mostly a statement about what is LEFT of a
@@ -331,7 +344,7 @@ def plate(x0, x1, y0, y1, z0, z1, patch, taper=None):
     xc, xs = span(x0, x1)
     yc, ys = span(y0, y1)
     zc, zs = span(z0, z1)
-    return box(xc, yc, zc, xs, ys, zs, patch, taper=taper)
+    return box(xc, yc, zc, xs, ys, zs, patch, taper=taper, frac=frac)
 
 
 def facade_bands(patch, ys, height=0.5, front=BACK):
@@ -442,7 +455,67 @@ def mirror_x(boxes):
     return out
 
 
-SHARDS_MANIFEST = os.path.join(_HERE, "demigol_shards", "manifest.json")
+SHARDS_DIR = os.path.join(_HERE, "demigol_shards")
+SHARDS_MANIFEST = os.path.join(SHARDS_DIR, "manifest.json")
+
+# THE SECOND MATERIAL, and it is not this delivery's to own.
+#
+# `shard_fracture` belongs to demigol_shards. The `fractured` context binds to
+# it so a hurt cell and the debris it is about to become are the SAME material
+# rather than two art styles that happen to be similar - which is what ask 2
+# asked for and what one atlas cannot give, since the kit's is 16/16 full.
+#
+# NO BYTE COPIES OF ITS MAPS SHIP HERE. That is the mirror of what
+# demigol_shards already does with the kit atlas, and for its reasons: a copy
+# is a SECOND MATERIAL, so kit debris would not batch with the shards it broke
+# out of, ~40 MB of texture would be resident twice, and a shard re-author
+# would leave the copies silently stale. The generator reads them from the
+# shard delivery to build and render; the manifest declares them as resolved
+# from there.
+FRACTURE_MATERIAL = "shard_fracture"
+FRACTURE_MAPS = {
+    "albedo": os.path.join(SHARDS_DIR, "fracture_albedo.png").replace("\\", "/"),
+    "normal": os.path.join(SHARDS_DIR, "fracture_normal.png").replace("\\", "/"),
+    "mask": os.path.join(SHARDS_DIR, "fracture_mask.png").replace("\\", "/"),
+}
+
+# THE DENSITY DECISION, and it is not the shard library's number.
+#
+# demigol_shards runs its interiors at 269-394 px/m because a broken face
+# projects LOCALLY about its own small centre. These are cell-scale BOXES, and
+# at the world_scale that would buy 341 px/m a full-cell slab's box projection
+# spans ~8.5 m of layout against a 3 m patch - it would spill into the
+# neighbouring patch WHILE STILL MEASURING INSIDE 0..1, so the UV gate would
+# pass it and the piece would sample an unrelated material.
+#
+# So the fracture atlas is projected at the kit's own 9.0, giving the kit's own
+# 113.8 px/m. Both materials on one piece therefore carry identical pixels per
+# metre, which is what matters where they meet. The colour matches the shard
+# library exactly; the feature scale is coarser than a shard's.
+FRACTURE_WORLD_SCALE = WORLD_SCALE
+
+# `damaged` is one material and drops in against the consumer as it stands
+# today; `fractured` is the same six states with their broken surfaces on
+# `shard_fracture`, and needs ChunkDresser to write a two-element
+# sharedMaterials. Both ship: the choice is a capability decision made once at
+# wiring time, which is precisely why it is a CONTEXT and not a variant letter
+# - a coordinate hash must never be able to hand a cell a piece the consumer
+# cannot render.
+DAMAGE_CONTEXTS = ("damaged", "fractured")
+
+
+def fracture_patch_indices():
+    """Patch name -> index, read from the DELIVERED shard manifest.
+
+    Not from demigol_shards.py's source table: what this delivery has to agree
+    with is the atlas that shipped, and the two can differ the moment someone
+    edits the generator without re-running it.
+    """
+    if not os.path.exists(SHARDS_MANIFEST):
+        return None
+    with open(SHARDS_MANIFEST) as fh:
+        patches = json.load(fh)["materials"]["fracture"]["patches"]
+    return {k: v["index"] for k, v in patches.items()}
 
 # WHICH INTACT CELL EACH DAMAGE STATE STANDS IN FOR. `damaged` is not a
 # context the classifier can derive from a cell's six neighbours - it is a
@@ -582,6 +655,124 @@ def fracture_continuity():
     return out
 
 
+# The `fractured` twins substitute for exactly what their `damaged` originals
+# do - same geometry, same surviving skin, same cells. Derived rather than
+# restated, so the two tables cannot drift apart.
+for _name, _entry in list(DAMAGE_SUBSTITUTES.items()):
+    _parts = _name.split("_")
+    DAMAGE_SUBSTITUTES["kit_%s_fractured_%s" % (_parts[1], _parts[3])] = dict(
+        _entry, fracture_submesh=True)
+
+
+def verify_kit_submeshes(path, entries):
+    """Read the material order and the per-POLYGON material indices out of the
+    exported FBX, and check them against the box lists.
+
+    Submesh order is what a consumer binds materials BY INDEX against, so
+    stating it from the builder would only restate an intention. It is read
+    here and the read value is what the manifest declares.
+
+    Reuses `demigol_shards._fbx_scan` rather than growing a second scanner:
+    the two deliveries now ship into the same consumer and have to agree about
+    what submesh order means. NOTE THE UNIT - the kit's polygons are QUADS
+    (a polyCube face is a quad), so a box is 6 polygons and 12 triangles, and
+    the expected run lengths here are boxes x 6.
+
+    Counts and not an exact sequence: the combine is free to reorder faces,
+    and the box list cannot predict the order it chooses. What it CAN predict
+    is how many polygons belong to each material, which is the thing that goes
+    wrong when an assignment is dropped.
+    """
+    import demigol_shards as _shards          # local: importing it is not free
+    materials, models, connections, poly_mats = _shards._fbx_scan(path)
+    per_model, geo_of = {}, {}
+    for child, parent in connections:
+        if child in materials and parent in models:
+            per_model.setdefault(parent, []).append(materials[child])
+        elif child in poly_mats and parent in models:
+            geo_of[parent] = child
+    by_name = {}
+    for uid, label in models.items():
+        by_name.setdefault(label, uid)
+
+    rows, fails = {}, []
+    for entry in entries:
+        uid = by_name.get(entry["name"])
+        if uid is None:
+            fails.append("%s: no Model in the FBX" % entry["name"])
+            continue
+        order = per_model.get(uid, [])
+        rows[entry["name"]] = order
+        want = entry["polygons_per_material"]      # material name -> polygons
+        if sorted(order) != sorted(want):
+            fails.append("%s: FBX carries materials %s, the boxes say %s"
+                         % (entry["name"], order, sorted(want)))
+            continue
+        indices = poly_mats.get(geo_of.get(uid), [])
+        if len(order) == 1:
+            # AllSame mapping: one material, and the reader gives one index
+            if len(indices) > 1 and len(set(indices)) > 1:
+                fails.append("%s: one material but %d distinct polygon indices"
+                             % (entry["name"], len(set(indices))))
+            continue
+        if len(indices) != sum(want.values()):
+            fails.append("%s: %d per-polygon indices, the boxes say %d polygons"
+                         % (entry["name"], len(indices), sum(want.values())))
+            continue
+        for slot, material in enumerate(order):
+            got = sum(1 for i in indices if i == slot)
+            if got != want[material]:
+                fails.append("%s: %d polygons on %s (submesh %d), the boxes "
+                             "say %d" % (entry["name"], got, material, slot,
+                                         want[material]))
+    return rows, fails
+
+
+# A box that forms part of the cell's OUTER SURFACE is skin: it sits against
+# the intact neighbour and has to wear what the neighbour wears. A box tagged
+# as a break puts the SHARD LIBRARY's atlas on its faces, so a tagged box with
+# a large face on the cell envelope paints fracture aggregate across the
+# outside of the building.
+#
+# Measured after the fix, the envelope-contacting face area of every tagged
+# box: the largest is 0.042 m2 (a torn board edge reaching the top of the
+# cell), the rest are rebar ends and a spall lip at 0.006-0.038. The three
+# bodies this gate was written for were about 6 m2 each. 0.25 sits twenty
+# times clear of what is legitimate and twenty times clear of what is not.
+SKIN_FACE_LIMIT_M2 = 0.25
+
+
+def check_skin_rule(pieces):
+    """Which boxes tagged as a break are actually part of the cell's skin.
+
+    This exists because the same mistake was made three times in three
+    disguises before a render caught it: a whole-cell body slab tagged as a
+    break, so the fractured twin of a concrete deck came out a mottled boulder
+    beside an intact grey plate. Nothing else could see it - the tag named a
+    real patch, the counts matched, the submesh order verified, the UVs stayed
+    in range.
+    """
+    fails = []
+    for name, boxes in sorted(pieces.items()):
+        for i, b in enumerate(boxes):
+            if not b.get("frac"):
+                continue
+            for axis in range(3):
+                lo = b["pos"][axis] - b["dim"][axis] / 2.0
+                hi = b["pos"][axis] + b["dim"][axis] / 2.0
+                if min(abs(lo + H), abs(hi - H)) > 1e-3:
+                    continue                     # does not reach the envelope
+                other = [d for k, d in enumerate(b["dim"]) if k != axis]
+                area = other[0] * other[1]
+                if area > SKIN_FACE_LIMIT_M2:
+                    fails.append(
+                        "%s box %d presents %.3f m2 of the cell's outer "
+                        "surface on axis %d and is tagged as a break (%s) - "
+                        "that paints the fracture atlas on the outside of the "
+                        "building" % (name, i, area, axis, b["frac"]))
+    return fails
+
+
 def check_damage_substitutions(pieces):
     """Every damage state must be substitutable, and must match what it
     replaces. Four separate ways this can be wrong, all of them silent:
@@ -600,12 +791,24 @@ def check_damage_substitutions(pieces):
     one run at a time.
     """
     fails = []
-    damaged = {n for n in pieces if parse_name(n)[1] == "damaged"}
+    damaged = {n for n in pieces if parse_name(n)[1] in DAMAGE_CONTEXTS}
     for name in sorted(damaged - set(DAMAGE_SUBSTITUTES)):
         fails.append("%s has no DAMAGE_SUBSTITUTES entry" % name)
     for name in sorted(set(DAMAGE_SUBSTITUTES) - damaged):
         fails.append("DAMAGE_SUBSTITUTES names %s, which is not a damage "
                      "piece in the kit" % name)
+    # A `damaged` piece with no `fractured` twin (or the reverse) means the two
+    # sets have drifted, which defeats the whole point of authoring them once.
+    for name in sorted(n for n in pieces if parse_name(n)[1] == "damaged"):
+        role, _, variant = parse_name(name)
+        twin = "kit_%s_fractured_%s" % (role, variant)
+        if twin not in pieces:
+            fails.append("%s has no `fractured` twin" % name)
+        elif [dict(b, frac=None) for b in pieces[twin]] != [
+                dict(b, frac=None) for b in pieces[name]]:
+            fails.append("%s and %s are not the same geometry" % (name, twin))
+        elif not any(b.get("frac") for b in pieces[twin]):
+            fails.append("%s has no box on the fracture material" % twin)
     by_role_context = {}
     for other in pieces:
         role, context, _ = parse_name(other)
@@ -1032,14 +1235,17 @@ def PIECES():
         plate(-H, -0.30, 0.45, 0.79, 0.15, H, "steel"),        # left of the tear
         plate(-0.30, H, 0.45, 0.79, 1.15, H, "steel"),         # far strip
         plate(-H, H, 0.79, 0.93, -1.00, -0.70, "steel_dark"),  # surviving rib
-        plate(-0.05, 0.25, 0.50, 0.70, 0.17, 1.13, "grime"),   # joist in the hole
-        plate(-0.30, 1.45, 0.72, 0.84, 0.13, 0.25, "steel_dark"),  # curled lip
+        plate(-0.05, 0.25, 0.50, 0.70, 0.17, 1.13, "grime",
+              frac="grime"),                                   # joist in the hole
+        plate(-0.30, 1.45, 0.72, 0.84, 0.13, 0.25, "steel_dark",
+              frac="steel_torn"),                              # curled lip
         # x stops at 1.45, NOT at the 1.5 cell face: this box is tapered, and
         # a tapered box that reaches a face it is meant to meet pulls away
         # from that neighbour as it rises (see the outset audit in main).
         plate(-0.10, 1.45, 0.725, 1.275, 0.14, 0.26, "steel",
-              taper=(1.0, 0.78)),                                  # peeled flap
-        plate(0.23, 0.47, 0.38, 0.73, 0.28, 1.23, "steel_dark"),  # bent rib stub
+              taper=(1.0, 0.78), frac="steel_torn"),               # peeled flap
+        plate(0.23, 0.47, 0.38, 0.73, 0.28, 1.23, "steel_dark",
+              frac="steel_dark"),                                 # bent rib stub
     ]
     # A buckled column: the thing the player actually aims at.
     # A COLUMN IS A VERTICAL, and the first version forgot it: a pile of
@@ -1053,43 +1259,67 @@ def PIECES():
         plate(-0.8, 0.8, -H, H, -0.95, -0.65, "steel"),          # flange, intact
         plate(-0.8, 0.8, -H, 0.05, 0.65, 0.95, "steel"),         # flange, below break
         plate(-0.8, 0.8, 0.75, H, 0.65, 0.95, "steel"),          # flange, above break
-        plate(-0.26, 0.26, 0.05, 0.75, 0.18, 0.62, "grime"),     # web behind the gap
-        plate(-0.8, 0.8, -0.05, 0.05, 0.62, 0.98, "steel_dark"),   # break edge
-        plate(-0.8, 0.8, 0.75, 0.85, 0.62, 0.98, "steel_dark"),    # break edge
+        plate(-0.26, 0.26, 0.05, 0.75, 0.18, 0.62, "grime",
+              frac="grime"),                                     # web behind the gap
+        plate(-0.8, 0.8, -0.05, 0.05, 0.62, 0.98, "steel_dark",
+              frac="steel_torn"),                                # break edge
+        plate(-0.8, 0.8, 0.75, 0.85, 0.62, 0.98, "steel_dark",
+              frac="steel_torn"),                                # break edge
         # Peeled UPRIGHT over the height of the break, not laid flat across
         # it: the flat version read as a shelf bolted to the column. Tapering
         # to 0.70 curls its top, and pushing it to 1.62 buys 0.12 m of
         # silhouette, which is what makes a broken column legible at 30 m.
         plate(-0.30, 0.30, 0.05, 0.78, 0.95, 1.62, "steel",
-              taper=(1.0, 0.70)),                              # peeled flange
-        plate(-0.45, 0.45, -0.42, 0.02, 0.90, 0.98, "rust"),     # rust from the break
+              taper=(1.0, 0.70), frac="steel_torn"),           # peeled flange
+        plate(-0.45, 0.45, -0.42, 0.02, 0.90, 0.98, "rust",
+              frac="rust"),                                    # rust from the break
     ]
     # Exposed rebar, on a DECK - concrete's biggest job in this city is the
     # S3b plate, and a spall authored on a vertical face would never be seen
     # on one. Damage on +Y; the bent bar leaves the cell, which is the whole
     # point of having an outset allowance.
     p["kit_concrete_damaged_a"] = [
-        slab(top=0.55, patch="concrete_dark"),                 # the exposed core
+        # The body is SKIN on all four sides, so it stays on the kit
+        # material. The fresh core is the tray below - confined to the hole,
+        # where the only thing that can see it is something looking into the
+        # spall.
+        slab(top=0.55, patch="concrete_dark"),
+        plate(-0.38, 1.45, 0.50, 0.62, 0.32, 1.03, "concrete_dark",
+              frac="concrete_core"),                           # the fresh core
         plate(-H, H, 0.55, 0.90, -H, 0.30, "concrete"),
         plate(-H, -0.40, 0.55, 0.90, 0.30, H, "concrete"),
         plate(-0.40, H, 0.55, 0.90, 1.05, H, "concrete"),
-        plate(-0.45, H, 0.68, 0.76, 0.46, 0.54, "rust"),       # rebar mat
-        plate(-0.45, H, 0.68, 0.76, 0.81, 0.89, "rust"),
-        plate(0.16, 0.24, 0.68, 0.76, 0.26, 1.10, "rust"),
-        plate(1.01, 1.09, 0.68, 1.63, 0.64, 0.72, "rust"),     # a bar bent UP
-        plate(-0.55, H, 0.52, 0.68, 0.08, 0.32, "concrete_dark"),  # spall lip
+        # `rebar` is a patch the kit does not have at all - it has to spend
+        # `rust` on both corrosion and reinforcement.
+        plate(-0.45, H, 0.68, 0.76, 0.46, 0.54, "rust", frac="rebar"),  # rebar mat
+        plate(-0.45, H, 0.68, 0.76, 0.81, 0.89, "rust", frac="rebar"),
+        plate(0.16, 0.24, 0.68, 0.76, 0.26, 1.10, "rust", frac="rebar"),
+        plate(1.01, 1.09, 0.68, 1.63, 0.64, 0.72, "rust",
+              frac="rebar"),                                   # a bar bent UP
+        plate(-0.55, H, 0.52, 0.68, 0.08, 0.32, "concrete_dark",
+              frac="concrete_coarse"),                         # spall lip
     ]
     # A shear crack and a blown corner, on a vertical face: bases, beams and
     # the plate cells that are seen edge-on.
     p["kit_concrete_damaged_b"] = [
         slab(front=0.90, patch="concrete_dark"),
+        plate(0.47, 1.45, -1.45, 0.13, 0.88, 1.00, "concrete_dark",
+              frac="concrete_core"),                    # core, in the blown corner
         plate(-H, 0.45, -H, H, 0.90, FACE, "concrete"),
         plate(0.45, H, 0.15, H, 0.90, FACE, "concrete"),
+        # the cracks stay on the KIT material in both variants: `shadow` is a
+        # void, and the fracture atlas has no counterpart to a hole
         plate(0.04, 0.16, -0.40, H, 1.09, FACE, "shadow"),     # crack
         plate(-1.25, 0.15, -0.35, -0.24, 1.09, FACE, "shadow"),
-        plate(0.91, 0.99, -1.25, 0.15, 0.86, 0.94, "rust"),    # rebar, blown corner
-        plate(0.45, 1.45, -0.59, -0.51, 0.86, 0.94, "rust"),
-        box(0.98, -1.25, 1.18, 0.95, 0.35, 0.50, "concrete_dark", taper=(0.7, 1.0)),
+        plate(0.91, 0.99, -1.25, 0.15, 0.86, 0.94, "rust",
+              frac="rebar"),                                   # rebar, blown corner
+        plate(0.45, 1.45, -0.59, -0.51, 0.86, 0.94, "rust", frac="rebar"),
+        box(0.98, -1.25, 1.18, 0.95, 0.35, 0.50, "concrete_dark",
+            taper=(0.7, 1.0), frac="concrete_coarse"),
+        # A soot wash on the OUTER face is a stain on surviving skin, not a
+        # broken surface. It stays on the kit atlas in both variants - and it
+        # was the largest remaining envelope contact on any tagged box
+        # (0.66 m2), which is what let the gate below be set with real margin.
         plate(-0.18, 0.37, -1.45, -0.25, 1.44, FACE, "grime"),
     ]
     # A shattered pane. The frame survives, the glass mostly does not, and
@@ -1101,24 +1331,43 @@ def PIECES():
            plate(-0.50, 1.10, -1.17, -0.87, 1.07, 1.13, "glass"),
            plate(0.62, 1.14, 0.05, 0.78, 1.07, 1.13, "glass"),
            box(0.45, 0.72, 1.10, 0.34, 0.85, 0.06, "glass_bright",
-               taper=(0.25, 1.0)),
+               taper=(0.25, 1.0), frac="glass_edge"),          # the fresh fang
            box(0.90, 1.24, 1.28, 1.10, 0.16, 0.50, "steel_dark",
-               taper=(1.0, 0.70))]                             # buckled transom
+               taper=(1.0, 0.70), frac="steel_torn")]          # buckled transom
     )
     # A cracked curtain panel with a board hanging off it. `trim` is the
     # exposed board core - the closest match in the whole atlas to the
     # fracture library's own `infill_core`, 2 of 255 apart.
     p["kit_infill_damaged_a"] = (
         [slab(front=1.05, patch="grime"),
+         plate(0.22, 1.45, -0.08, 1.45, 1.03, 1.13, "grime",
+               frac="grime"),                            # the cavity, behind
          plate(-H, 0.20, -H, H, 1.05, FACE, "infill"),
          plate(0.20, H, -H, -0.10, 1.05, FACE, "infill"),
          box(0.75, 0.55, 1.62, 1.35, 1.05, 0.12, "infill", taper=(1.0, 0.88)),
+         # the studs were always there - exposed, not broken - so they stay on
+         # the kit material in both variants
          plate(0.52, 0.68, -0.40, H, 1.07, 1.37, "steel_dark"),   # exposed stud
          plate(1.07, 1.23, -0.40, H, 1.07, 1.37, "steel_dark"),
-         plate(0.13, 0.27, -0.40, H, 1.15, 1.45, "trim"),         # torn board core
-         plate(0.20, 1.45, -0.17, -0.03, 1.15, 1.45, "trim")]
+         plate(0.13, 0.27, -0.40, H, 1.15, 1.45, "trim",
+               frac="infill_core"),                              # torn board core
+         plate(0.20, 1.45, -0.17, -0.03, 1.15, 1.45, "trim",
+               frac="infill_core")]
         + mullions("infill_dark", (-1.2,), width=0.25, front=1.05)
     )
+
+    # ---- the `fractured` twin of every damage state -----------------------
+    # AUTHORED ONCE, SPLIT HERE. `fractured` is the box list exactly as
+    # written above, with the `frac` tags honoured; `damaged` is the same list
+    # with them stripped. Two hand-written copies of six pieces would drift,
+    # and then a side-by-side comparison between the sets would be measuring
+    # my bookkeeping rather than the material.
+    damaged_names = [n for n in p if parse_name(n)[1] == "damaged"]
+    for name in damaged_names:
+        role, _, variant = parse_name(name)
+        p["kit_%s_fractured_%s" % (role, variant)] = [dict(b) for b in p[name]]
+    for name in damaged_names:
+        p[name] = [{k: v for k, v in b.items() if k != "frac"} for b in p[name]]
     return p
 
 
@@ -1212,7 +1461,40 @@ cmds.setAttr(bump + ".bumpInterp", 1)          # 1 = tangent-space normal map
 cmds.connectAttr(nrm + ".outAlpha", bump + ".bumpValue", force=True)
 cmds.connectAttr(bump + ".outNormal", shader + ".normalCamera", force=True)
 
+
+# THE SECOND MATERIAL, and it belongs to demigol_shards. Same three-map wiring
+# as the kit's, pointed at that delivery's atlas. Only the `fractured` pieces
+# touch it, and every one of them also carries kit-material skin - so the kit
+# is still ONE material for the 58 intact pieces and one draw call for the
+# whole standing city.
+frac_sg = None
+if spec.get("fracture"):
+    fname = spec["fracture"]["name"]
+    fshader = cmds.shadingNode("standardSurface", asShader=True, name=fname)
+    cmds.setAttr(fshader + ".base", 1.0)
+    frac_sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True,
+                        name=fname + "SG")
+    cmds.connectAttr(fshader + ".outColor", frac_sg + ".surfaceShader",
+                     force=True)
+    f_albedo = _file_node(spec["fracture"]["maps"]["albedo"], "frac_albedo")
+    cmds.connectAttr(f_albedo + ".outColor", fshader + ".baseColor", force=True)
+    f_mask = _file_node(spec["fracture"]["maps"]["mask"], "frac_mask", raw=True)
+    cmds.connectAttr(f_mask + ".outColorR", fshader + ".metalness", force=True)
+    f_inv = cmds.shadingNode("reverse", asUtility=True,
+                             name="frac_smooth_to_rough")
+    cmds.connectAttr(f_mask + ".outColorG", f_inv + ".inputX", force=True)
+    cmds.connectAttr(f_inv + ".outputX", fshader + ".specularRoughness",
+                     force=True)
+    f_nrm = _file_node(spec["fracture"]["maps"]["normal"], "frac_normal",
+                       raw=True)
+    f_bump = cmds.shadingNode("bump2d", asUtility=True, name="frac_bump")
+    cmds.setAttr(f_bump + ".bumpInterp", 1)
+    cmds.connectAttr(f_nrm + ".outAlpha", f_bump + ".bumpValue", force=True)
+    cmds.connectAttr(f_bump + ".outNormal", fshader + ".normalCamera",
+                     force=True)
+
 built = []
+order_fails = []
 for piece in spec["pieces"]:
     parts = []
     for i, b in enumerate(piece["boxes"]):
@@ -1242,6 +1524,8 @@ for piece in spec["pieces"]:
                            "world_scale": spec["world_scale"],
                            "uv_per_metre": UV_PER_METRE})
         parts.append(node)
+    two_materials = frac_sg is not None and any(b.get("sg")
+                                                for b in piece["boxes"])
     if len(parts) == 1:
         merged = parts[0]
         cmds.xform(merged, worldSpace=True, pivots=(0, 0, 0))
@@ -1253,11 +1537,84 @@ for piece in spec["pieces"]:
                                 "pivot": "origin", "freeze": True})
         merged, shells = out["name"], out["shells"]
     shape = cmds.listRelatives(merged, shapes=True, fullPath=True)[0]
-    cmds.sets(shape, edit=True, forceElement=sg)
+    if not two_materials:
+        # UNCHANGED for all 58 pieces that were green before this variant
+        # existed.
+        cmds.sets(shape, edit=True, forceElement=sg)
+    else:
+        # TWO MATERIALS, assigned AFTER the combine by face range.
+        #
+        # Per-box assignment BEFORE the combine was tried first and does not
+        # survive it: the merged shape comes out wholly on whichever group its
+        # FIRST input carried (measured, six pieces out of six). So the split
+        # has to be made here, on the merged shape, which means depending on
+        # the combine preserving box order in the face array.
+        #
+        # THAT DEPENDENCE IS CHECKED, NOT ASSUMED. Every box was projected
+        # into a known atlas patch, so the patch a face's UVs land in is a
+        # fingerprint of which box it came from. Reading it back is how this
+        # knows face 6i really belongs to box i, rather than hoping.
+        total = cmds.polyEvaluate(shape, face=True)
+        want_faces = len(piece["boxes"]) * 6
+        if total != want_faces:
+            order_fails.append(
+                "%s: %d faces, %d boxes should give %d"
+                % (piece["name"], total, len(piece["boxes"]), want_faces))
+        else:
+            for i, b in enumerate(piece["boxes"]):
+                uvs = cmds.polyListComponentConversion(
+                    "%s.f[%d]" % (shape, i * 6), toUV=True) or []
+                vals = cmds.polyEditUV(uvs, query=True) or []
+                if not vals:
+                    order_fails.append("%s: face %d has no UVs"
+                                       % (piece["name"], i * 6))
+                    break
+                n_uv = len(vals) // 2
+                u = sum(vals[0::2]) / n_uv
+                v = sum(vals[1::2]) / n_uv
+                # row-major FROM THE TOP-LEFT, uvmath's convention, so v is
+                # flipped
+                col = min(spec["cols"] - 1, max(0, int(u * spec["cols"])))
+                row = min(spec["rows"] - 1,
+                          max(0, int((1.0 - v) * spec["rows"])))
+                got_patch = row * spec["cols"] + col
+                if got_patch != b["patch"]:
+                    order_fails.append(
+                        "%s: face %d sits in patch %d, box %d was projected "
+                        "into patch %d - the combine reordered faces and the "
+                        "range split would put the wrong material on them"
+                        % (piece["name"], i * 6, got_patch, i, b["patch"]))
+                    break
+            else:
+                kit_faces, frac_faces_sel = [], []
+                for i, b in enumerate(piece["boxes"]):
+                    span_ = "%s.f[%d:%d]" % (shape, i * 6, i * 6 + 5)
+                    (frac_faces_sel if b.get("sg") else kit_faces).append(span_)
+                if kit_faces:
+                    cmds.sets(kit_faces, edit=True, forceElement=sg)
+                if frac_faces_sel:
+                    cmds.sets(frac_faces_sel, edit=True, forceElement=frac_sg)
     built.append({"name": merged, "shells": shells,
-                  "boxes": len(piece["boxes"])})
+                  "boxes": len(piece["boxes"]),
+                  "two_materials": bool(two_materials)})
 
-result = {"pieces": len(built), "built": built}
+# READ BACK what the fracture group actually holds, per shape. A combine that
+# silently dropped the per-box assignments would leave this empty while every
+# other check in the run stayed green, and the first anyone would know is a
+# city rendered with untextured tears.
+frac_faces = {}
+if frac_sg:
+    for member in cmds.ls(cmds.sets(frac_sg, query=True) or [], flatten=True):
+        node = member.split(".")[0]
+        if ".f[" in member:
+            frac_faces[node] = frac_faces.get(node, 0) + 1
+        else:
+            # a whole shape landed in the group rather than a face selection
+            frac_faces[node] = frac_faces.get(node, 0) + (
+                cmds.polyEvaluate(member, face=True) or 0)
+
+result = {"pieces": len(built), "built": built, "frac_faces": frac_faces,
+          "order_fails": order_fails}
 result
 '''
 
@@ -1446,6 +1803,29 @@ def main():
             print("OVER BUDGET %-26s %d tris > %d" % (name, tris, budget))
         sys.exit(1)
 
+    # THE SKIN RULE, and it is a gate because the same mistake has now been
+    # made three times in three different disguises.
+    #
+    # A box that forms part of the cell's OUTER SURFACE is skin: it sits
+    # against the intact neighbour and must wear what the neighbour wears. A
+    # box tagged as a break puts the SHARD LIBRARY's atlas on its faces, so a
+    # tagged box with a large face on the cell envelope paints fracture
+    # aggregate across the outside of the building.
+    #
+    # Measured, after the fix, the envelope-contacting face area of every
+    # tagged box: the largest is 0.042 m2 (a torn board edge reaching the top
+    # of the cell) and the rest are rebar ends at 0.006. The three bodies this
+    # gate was written for were 6 m2 each. 0.25 is two orders of magnitude
+    # clear of what is legitimate and twenty times clear of what is not.
+    skin_fails = check_skin_rule(pieces)
+    if skin_fails:
+        print("SKIN RULE VIOLATED - refusing to build:")
+        for why in skin_fails:
+            print("    " + why)
+        sys.exit(1)
+    print("skin rule: no box tagged as a break presents more than %.2f m2 of "
+          "the cell's outer surface" % SKIN_FACE_LIMIT_M2)
+
     # THE TAPER TRAP, audited rather than assumed. `taper` flares X and Z
     # together, so a tapered box whose X or Z reach lands exactly on a meeting
     # face (the 1.495 inset face, or the 1.5 cell face) does NOT meet its
@@ -1486,12 +1866,38 @@ def main():
                     for b in boxes for i in range(3))
         outset[name] = round(max(0.0, reach - CELL / 2.0), 4)
 
+    # The fracture atlas is demigol_shards' and this delivery ships no copy of
+    # it, so the `fractured` context cannot be built without that delivery
+    # present. Refuse loudly rather than emitting six pieces with the wrong
+    # material on them.
+    frac_index = fracture_patch_indices()
+    missing_maps = [k for k, v in FRACTURE_MAPS.items() if not os.path.exists(v)]
+    if frac_index is None or missing_maps:
+        print("CANNOT BUILD THE `fractured` CONTEXT: demigol_shards is not "
+              "delivered here (manifest %s, missing maps %s)"
+              % ("absent" if frac_index is None else "present", missing_maps))
+        sys.exit(1)
+    unknown = sorted({b["frac"] for boxes in pieces.values() for b in boxes
+                      if b.get("frac")} - set(frac_index))
+    if unknown:
+        print("frac tags naming patches the delivered fracture atlas does not "
+              "have: %s" % ", ".join(unknown))
+        sys.exit(1)
+
+    def spec_box(b):
+        """A box's atlas slot. `sg` 0 is the kit material, 1 the fracture one;
+        both atlases are 4x4 at the same world scale, so only the patch index
+        and the shading group differ."""
+        if b.get("frac"):
+            return dict(b, patch=frac_index[b["frac"]], sg=1)
+        return dict(b, patch=PATCH[b["patch"]][0], sg=0)
+
     spec = {
         "maps": maps, "cols": ATLAS_COLS, "rows": ATLAS_ROWS,
         "margin": 0.03, "world_scale": WORLD_SCALE,
+        "fracture": {"name": FRACTURE_MATERIAL, "maps": FRACTURE_MAPS},
         "pieces": [
-            {"name": n,
-             "boxes": [dict(b, patch=PATCH[b["patch"]][0]) for b in pieces[n]]}
+            {"name": n, "boxes": [spec_box(b) for b in pieces[n]]}
             for n in names
         ],
     }
@@ -1502,6 +1908,36 @@ def main():
             % (json.dumps(spec), maya_export.AUTHORING_UNIT,
                maya_export.UV_PER_METRE, BUILD_CODE), "build")["result_repr"])
     print("built %d pieces" % built["pieces"])
+    if built.get("order_fails"):
+        print("THE COMBINE DID NOT PRESERVE BOX ORDER IN THE FACE ARRAY, so "
+              "the two-material face split cannot be trusted:")
+        for row in built["order_fails"][:12]:
+            print("    " + row)
+        sys.exit(1)
+
+    # THE COUNT CHECK. A combine that dropped the per-box shading assignments
+    # would leave every other gate in this run green and ship a city whose
+    # tears render on the wrong atlas.
+    def _leaf(path):
+        node = path.split("|")[-1]
+        return node[:-5] if node.endswith("Shape") else node
+
+    want_frac = {n: sum(1 for b in pieces[n] if b.get("frac")) * 6
+                 for n in names if any(b.get("frac") for b in pieces[n])}
+    got_frac = {}
+    for path, count in (built.get("frac_faces") or {}).items():
+        got_frac[_leaf(path)] = got_frac.get(_leaf(path), 0) + count
+    if got_frac != want_frac:
+        print("FRACTURE FACE ASSIGNMENT IS WRONG - the combine did not carry "
+              "the per-box shading groups:")
+        for name in sorted(set(want_frac) | set(got_frac)):
+            if want_frac.get(name) != got_frac.get(name):
+                print("    %-26s want %s polygons, scene has %s"
+                      % (name, want_frac.get(name, 0), got_frac.get(name, 0)))
+        sys.exit(1)
+    print("fracture faces: %d pieces carry a second material, %d polygons "
+          "total, all matching their box lists"
+          % (len(want_frac), sum(want_frac.values())))
 
     check = ast.literal_eval(
         run("NAMES = %r\n%s" % (names, CHECK_CODE), "check")["result_repr"])
@@ -1515,6 +1951,29 @@ def main():
     # Maya writes a centimetre declaration for a metre-native scene and gives
     # no way to change it, so the declaration is corrected on the artifact.
     fbx_probe.set_unit_scale_factor(fbx)
+
+    # Submesh order, read from the bytes that shipped. The order is not
+    # chosen here - the exporter chooses it - so it is READ and then declared.
+    submesh_entries = []
+    for name in names:
+        per_material = {}
+        for b in pieces[name]:
+            key = FRACTURE_MATERIAL if b.get("frac") else "kit_material"
+            per_material[key] = per_material.get(key, 0) + 6
+        submesh_entries.append({"name": name,
+                                "polygons_per_material": per_material})
+    submesh_order, submesh_fails = verify_kit_submeshes(fbx, submesh_entries)
+    if submesh_fails:
+        print("SUBMESH ORDER OR MATERIAL ASSIGNMENT IS WRONG IN THE FBX - a "
+              "consumer binds materials by this index:")
+        for row in submesh_fails[:12]:
+            print("    " + row)
+        sys.exit(1)
+    two_mat = sorted(n for n, order in submesh_order.items() if len(order) > 1)
+    print("submesh order verified in the FBX: %d pieces single-material, "
+          "%d with two" % (len(submesh_order) - len(two_mat), len(two_mat)))
+    if two_mat:
+        print("    %s -> %s" % (two_mat[0], submesh_order[two_mat[0]]))
 
     violations = delivery_units.check_delivery(fbx, delivery_units.KIT_CEILING_M)
     if violations:
@@ -1688,7 +2147,15 @@ def main():
     # confirm a piece EXISTS and nowhere near enough to judge whether a torn
     # edge reads as continuous with the shard library. These are the claim's
     # evidence, so they get their own resolution.
-    damage_names = [n for n in names if parse_name(n)[1] == "damaged"]
+    # PAIRED, damaged beside fractured, two to a row. The whole question this
+    # sheet answers is what the second material buys, and a grid that put all
+    # six of one set then all six of the other would make the reader hold six
+    # images in their head to answer it.
+    damage_names = []
+    for name in [n for n in names if parse_name(n)[1] == "damaged"]:
+        role, _, variant = parse_name(name)
+        damage_names.append(name)
+        damage_names.append("kit_%s_fractured_%s" % (role, variant))
     damage_tiles, damage_blank = [], []
     for name in damage_names:
         shot = ok(call("render_scene", {
@@ -1701,7 +2168,7 @@ def main():
             damage_blank.append(name)
         damage_tiles.append(png)
     with open(os.path.join(OUT_DIR, "damage_detail.png"), "wb") as fh:
-        fh.write(images.contact_sheet(damage_tiles, cols=3))
+        fh.write(images.contact_sheet(damage_tiles, cols=2))
     print("\ndamage detail: %d of %d states rendered, %d blank"
           % (len(damage_tiles), len(damage_names), len(damage_blank)))
     if damage_blank:
@@ -1736,6 +2203,7 @@ def main():
             "budget_utilisation_pct": round(100.0 * tris / budget, 1),
             "outset_m": outset_measured,
             "outset_from_spec_m": outset[name],
+            "submeshes": submesh_order.get(name, []),
         })
 
     print("\n%-26s %-9s %-9s %6s %6s %7s %8s"
@@ -1832,6 +2300,47 @@ def main():
         "pivot": "cell centre (0,0,0) on every piece",
         "authored_facing": "+Z; the shell rotates in 90 degree steps. Corner "
                            "pieces read from +Z AND +X.",
+        "materials": {
+            "count": 2,
+            "kit_material": {
+                "shared": True,
+                "used_by": "all %d pieces" % len(entries),
+                "maps": ["kit_albedo.png", "kit_normal.png", "kit_mask.png"],
+                "note": "still ONE material for every intact piece and for "
+                        "the surviving skin of every damaged one, which is "
+                        "what keeps the standing city in a single draw call.",
+            },
+            FRACTURE_MATERIAL: {
+                "shared_with": "demigol_shards",
+                "used_by": "the 6 `fractured` pieces only, on their broken "
+                           "surfaces",
+                "maps": [],
+                "maps_note":
+                    "DELIBERATELY EMPTY. This delivery ships NO copy of the "
+                    "fracture atlas: resolve it from the demigol_shards "
+                    "delivery (fracture_albedo.png, fracture_normal.png, "
+                    "fracture_mask.png live there). A copy would be a SECOND "
+                    "material - kit debris would not batch with the shards it "
+                    "broke out of, ~40 MB of texture would be resident twice, "
+                    "and a shard re-author would leave the copy silently "
+                    "stale. The mirror of what demigol_shards already does "
+                    "with this kit's atlas.",
+                "texel_density_px_per_metre": round(
+                    PATCH_PX / FRACTURE_WORLD_SCALE, 1),
+                "texel_density_note":
+                    "the KIT's density, not the shard library's 269-394. "
+                    "demigol_shards projects broken faces locally about their "
+                    "own small centres; these are cell-scale boxes, and at a "
+                    "world_scale tight enough for 341 px/m a full-cell slab's "
+                    "box projection spans ~8.5 m of layout against a 3 m "
+                    "patch - it would spill into the NEIGHBOURING patch while "
+                    "still measuring inside 0..1, so the UV gate would pass a "
+                    "piece sampling an unrelated material. Both materials on "
+                    "one mesh now carry identical pixels per metre, which is "
+                    "what matters where they meet. Colour matches exactly; "
+                    "feature scale is coarser than a shard's.",
+            },
+        },
         "material": {
             "shared": True,
             "shader": "kit_material (standardSurface)",
@@ -1985,8 +2494,53 @@ def main():
                 "cell look damaged.",
             "no_brick_state": "the generator emits no Brick cells, so a brick "
                               "damage state would ship idle.",
+            "two_sets": {
+                "damaged": "ONE material. Drops in against ChunkDresser as it "
+                           "stands today, which writes a single "
+                           "`sharedMaterial`. The broken surfaces are the "
+                           "closest the kit atlas can get - see the measured "
+                           "table below.",
+                "fractured": "TWO submeshes. Geometrically IDENTICAL to its "
+                             "`damaged` twin - both are generated from one "
+                             "authored box list, so they cannot drift - with "
+                             "the freshly-broken boxes bound to "
+                             "`%s`. Needs ChunkDresser to write a two-element "
+                             "`sharedMaterials`." % FRACTURE_MATERIAL,
+                "why_both_ship": "the choice between them is a CAPABILITY "
+                                 "decision made once at wiring time, not a "
+                                 "per-cell one. Shipping only the second "
+                                 "would have left the delivery unusable until "
+                                 "someone changed the consumer.",
+                "why_a_context_and_not_variant_letters":
+                    "the shell picks variants from a coordinate hash, so "
+                    "`_c`/`_d` would let a hash hand a cell a two-material "
+                    "piece the consumer cannot render.",
+                "why_not_the_same_names_in_a_second_fbx":
+                    "that would have been the tidiest swap, and it re-arms "
+                    "the #596 trap exactly: identical node names across two "
+                    "files inside one delivery is how 626 hero catalog "
+                    "entries came to point at another building's mesh.",
+                "submesh_order": {
+                    "rule": "bind materials BY INDEX from each piece's own "
+                            "`submeshes` array. It is READ OUT OF THE "
+                            "EXPORTED FBX and not stated by the builder - the "
+                            "exporter chooses the order, so declaring it from "
+                            "the box list would only restate an intention.",
+                    "verified": "connection order and per-polygon material "
+                                "indices both re-read from the delivered "
+                                "bytes; polygon counts per material checked "
+                                "against the box list. NOTE the unit: kit "
+                                "polygons are QUADS, so a box is 6 polygons "
+                                "and 12 triangles.",
+                },
+            },
             "substitutes": DAMAGE_SUBSTITUTES,
             "continuity_with_demigol_shards": {
+                "for_the_fractured_set": "EXACT, by construction - those "
+                                         "surfaces are on the shard library's "
+                                         "own atlas, so there is no delta to "
+                                         "measure. The table below is about "
+                                         "the single-material `damaged` set.",
                 "the_constraint": "ask 2 wants these continuous with the "
                                   "shard library's fracture material; the "
                                   "kit's hard constraint is ONE material. So "
