@@ -1,0 +1,1304 @@
+{
+  "idle": {
+    "animation": {
+      "curve_nodes": 66,
+      "curves": 26,
+      "layers": 2,
+      "stacks": 2,
+      "takes": [
+        {
+          "duration_s": 2.0,
+          "name": "Take 001"
+        },
+        {
+          "duration_s": 2.0,
+          "name": "idle"
+        }
+      ],
+      "targets": [
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_ankle"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_ankle"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_elbow"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_elbow"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_knee"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_knee"
+        },
+        {
+          "curves": 3,
+          "duration_s": 2.0,
+          "key_count": 61,
+          "property": "Lcl Rotation",
+          "target": "L_shoulder"
+        },
+        {
+          "curves": 3,
+          "duration_s": 2.0,
+          "key_count": 61,
+          "property": "Lcl Rotation",
+          "target": "L_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "L_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "L_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "L_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "L_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_toe"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_toe"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_wrist"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_wrist"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_ankle"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_ankle"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_elbow"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_elbow"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_knee"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_knee"
+        },
+        {
+          "curves": 3,
+          "duration_s": 2.0,
+          "key_count": 61,
+          "property": "Lcl Rotation",
+          "target": "R_shoulder"
+        },
+        {
+          "curves": 3,
+          "duration_s": 2.0,
+          "key_count": 61,
+          "property": "Lcl Rotation",
+          "target": "R_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "R_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "R_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "R_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "R_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_toe"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_toe"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_wrist"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_wrist"
+        },
+        {
+          "curves": 1,
+          "duration_s": 2.0,
+          "key_count": 61,
+          "property": "DeformPercent",
+          "target": "blink"
+        },
+        {
+          "curves": 1,
+          "duration_s": 2.0,
+          "key_count": 61,
+          "property": "DeformPercent",
+          "target": "blink"
+        },
+        {
+          "curves": 3,
+          "duration_s": 2.0,
+          "key_count": 61,
+          "property": "Lcl Rotation",
+          "target": "chest"
+        },
+        {
+          "curves": 3,
+          "duration_s": 2.0,
+          "key_count": 61,
+          "property": "Lcl Rotation",
+          "target": "chest"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "chest"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "chest"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "chest"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "chest"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "chest"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "chest"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "head"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "head"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "neck"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "neck"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "pelvis"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "pelvis"
+        },
+        {
+          "curves": 3,
+          "duration_s": 2.0,
+          "key_count": 61,
+          "property": "Lcl Rotation",
+          "target": "spine_01"
+        },
+        {
+          "curves": 3,
+          "duration_s": 2.0,
+          "key_count": 61,
+          "property": "Lcl Rotation",
+          "target": "spine_01"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "spine_01"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "spine_01"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "spine_01"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "spine_01"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "spine_01"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "spine_01"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "spine_02"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "spine_02"
+        }
+      ],
+      "unavailable_reason": null
+    },
+    "duration_s": 2.0,
+    "fbx": "idle.fbx",
+    "frames": 61,
+    "keys": 5,
+    "per_key": [
+      {
+        "max_displacement": 0.0,
+        "time_s": 0.0
+      },
+      {
+        "max_displacement": 0.05949508022334415,
+        "time_s": 0.5
+      },
+      {
+        "max_displacement": 0.06620661951909963,
+        "time_s": 1.0
+      },
+      {
+        "max_displacement": 0.019839318873007463,
+        "time_s": 1.2
+      },
+      {
+        "max_displacement": 0.0,
+        "time_s": 2.0
+      }
+    ]
+  },
+  "walk": {
+    "animation": {
+      "curve_nodes": 106,
+      "curves": 66,
+      "layers": 2,
+      "stacks": 2,
+      "takes": [
+        {
+          "duration_s": 1.2,
+          "name": "Take 001"
+        },
+        {
+          "duration_s": 1.2,
+          "name": "walk"
+        }
+      ],
+      "targets": [
+        {
+          "curves": 3,
+          "duration_s": 1.2,
+          "key_count": 37,
+          "property": "Lcl Rotation",
+          "target": "L_ankle"
+        },
+        {
+          "curves": 3,
+          "duration_s": 1.2,
+          "key_count": 37,
+          "property": "Lcl Rotation",
+          "target": "L_ankle"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "L_ankle"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "L_ankle"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "L_ankle"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "L_ankle"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_ankle"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_ankle"
+        },
+        {
+          "curves": 3,
+          "duration_s": 1.2,
+          "key_count": 37,
+          "property": "Lcl Rotation",
+          "target": "L_elbow"
+        },
+        {
+          "curves": 3,
+          "duration_s": 1.2,
+          "key_count": 37,
+          "property": "Lcl Rotation",
+          "target": "L_elbow"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "L_elbow"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "L_elbow"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "L_elbow"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "L_elbow"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_elbow"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_elbow"
+        },
+        {
+          "curves": 3,
+          "duration_s": 1.2,
+          "key_count": 37,
+          "property": "Lcl Rotation",
+          "target": "L_hip"
+        },
+        {
+          "curves": 3,
+          "duration_s": 1.2,
+          "key_count": 37,
+          "property": "Lcl Rotation",
+          "target": "L_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "L_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "L_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "L_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "L_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_hip"
+        },
+        {
+          "curves": 3,
+          "duration_s": 1.2,
+          "key_count": 37,
+          "property": "Lcl Rotation",
+          "target": "L_knee"
+        },
+        {
+          "curves": 3,
+          "duration_s": 1.2,
+          "key_count": 37,
+          "property": "Lcl Rotation",
+          "target": "L_knee"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "L_knee"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "L_knee"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "L_knee"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "L_knee"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_knee"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_knee"
+        },
+        {
+          "curves": 3,
+          "duration_s": 1.2,
+          "key_count": 37,
+          "property": "Lcl Rotation",
+          "target": "L_shoulder"
+        },
+        {
+          "curves": 3,
+          "duration_s": 1.2,
+          "key_count": 37,
+          "property": "Lcl Rotation",
+          "target": "L_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "L_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "L_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "L_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "L_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_toe"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_toe"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_wrist"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "L_wrist"
+        },
+        {
+          "curves": 3,
+          "duration_s": 1.2,
+          "key_count": 37,
+          "property": "Lcl Rotation",
+          "target": "R_ankle"
+        },
+        {
+          "curves": 3,
+          "duration_s": 1.2,
+          "key_count": 37,
+          "property": "Lcl Rotation",
+          "target": "R_ankle"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "R_ankle"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "R_ankle"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "R_ankle"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "R_ankle"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_ankle"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_ankle"
+        },
+        {
+          "curves": 3,
+          "duration_s": 1.2,
+          "key_count": 37,
+          "property": "Lcl Rotation",
+          "target": "R_elbow"
+        },
+        {
+          "curves": 3,
+          "duration_s": 1.2,
+          "key_count": 37,
+          "property": "Lcl Rotation",
+          "target": "R_elbow"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "R_elbow"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "R_elbow"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "R_elbow"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "R_elbow"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_elbow"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_elbow"
+        },
+        {
+          "curves": 3,
+          "duration_s": 1.2,
+          "key_count": 37,
+          "property": "Lcl Rotation",
+          "target": "R_hip"
+        },
+        {
+          "curves": 3,
+          "duration_s": 1.2,
+          "key_count": 37,
+          "property": "Lcl Rotation",
+          "target": "R_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "R_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "R_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "R_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "R_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_hip"
+        },
+        {
+          "curves": 3,
+          "duration_s": 1.2,
+          "key_count": 37,
+          "property": "Lcl Rotation",
+          "target": "R_knee"
+        },
+        {
+          "curves": 3,
+          "duration_s": 1.2,
+          "key_count": 37,
+          "property": "Lcl Rotation",
+          "target": "R_knee"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "R_knee"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "R_knee"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "R_knee"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "R_knee"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_knee"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_knee"
+        },
+        {
+          "curves": 3,
+          "duration_s": 1.2,
+          "key_count": 37,
+          "property": "Lcl Rotation",
+          "target": "R_shoulder"
+        },
+        {
+          "curves": 3,
+          "duration_s": 1.2,
+          "key_count": 37,
+          "property": "Lcl Rotation",
+          "target": "R_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "R_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "R_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "R_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "target": "R_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_toe"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_toe"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_wrist"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "R_wrist"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "chest"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "chest"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "head"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "head"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "neck"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "neck"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Rotation",
+          "target": "pelvis"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Rotation",
+          "target": "pelvis"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "pelvis"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "target": "pelvis"
+        },
+        {
+          "curves": 3,
+          "duration_s": 1.2,
+          "key_count": 37,
+          "property": "Lcl Translation",
+          "target": "pelvis"
+        },
+        {
+          "curves": 3,
+          "duration_s": 1.2,
+          "key_count": 37,
+          "property": "Lcl Translation",
+          "target": "pelvis"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "pelvis"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "pelvis"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "spine_01"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "spine_01"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "spine_02"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "target": "spine_02"
+        }
+      ],
+      "unavailable_reason": null
+    },
+    "duration_s": 1.2,
+    "fbx": "walk.fbx",
+    "frames": 37,
+    "keys": 5,
+    "pelvis_bob": {
+      "contact_y": 0.97,
+      "passing_y": 1.01
+    },
+    "per_key": [
+      {
+        "max_displacement": 0.0,
+        "time_s": 0.0
+      },
+      {
+        "max_displacement": 0.48160563914796,
+        "time_s": 0.3
+      },
+      {
+        "max_displacement": 0.9804783582131349,
+        "time_s": 0.6
+      },
+      {
+        "max_displacement": 0.7973247932972147,
+        "time_s": 0.9
+      },
+      {
+        "max_displacement": 0.0,
+        "time_s": 1.2
+      }
+    ]
+  }
+}
