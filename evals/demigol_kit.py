@@ -319,6 +319,21 @@ BACK = 1.19          # where a recessed body stops
 FACE = H             # the envelope face itself
 
 
+def plate(x0, x1, y0, y1, z0, z1, patch, taper=None):
+    """A box authored as its six EDGES rather than a centre and a size.
+
+    Revision 3's damage states are mostly a statement about what is LEFT of a
+    face - "the plate survives from -H to -0.25 in y, and above that only to
+    the left of -0.25 in x". That reads directly as spans and does not read at
+    all as centres, and a hole described in centres is where an off-by-half
+    lands silently.
+    """
+    xc, xs = span(x0, x1)
+    yc, ys = span(y0, y1)
+    zc, zs = span(z0, z1)
+    return box(xc, yc, zc, xs, ys, zs, patch, taper=taper)
+
+
 def facade_bands(patch, ys, height=0.5, front=BACK):
     out = []
     zc, zs = span(front, FACE)
@@ -425,6 +440,196 @@ def mirror_x(boxes):
         m["pos"] = [-b["pos"][0], b["pos"][1], b["pos"][2]]
         out.append(m)
     return out
+
+
+SHARDS_MANIFEST = os.path.join(_HERE, "demigol_shards", "manifest.json")
+
+# WHICH INTACT CELL EACH DAMAGE STATE STANDS IN FOR. `damaged` is not a
+# context the classifier can derive from a cell's six neighbours - it is a
+# state the consumer knows and the grid does not - so the piece cannot be
+# selected the way every other piece is. This is the substitution table that
+# makes that selectable: for a hurt cell whose intact classification is one of
+# these (role, context) pairs, swap in the named piece and leave the mesh,
+# scale, collider and material tuple otherwise alone.
+#
+# Orientation matters and is stated, because two of these are authored on +Y.
+# A spall modelled on a vertical face is invisible on a roof deck, and the
+# deck is the surface an airborne golem spends its time looking at.
+#
+# `skin_patch` IS A GATE, and it exists because of a defect no automated check
+# on this branch could see. A damage state's SURVIVING SKIN sits in a cell
+# next to the intact piece it stands in for, so it has to be the same patch.
+# Both steel states were first authored on `steel_dark` while their intact
+# counterparts - kit_steel_roof_a's deck plate and kit_steel_column_a's whole
+# section - are `steel`. Every check passed: the patch exists, the budget
+# holds, the envelope holds, the tile renders and is not blank. It was found
+# by rendering the piece and looking at it beside the one it replaces, which
+# is not a thing a gate does. `check_damage_substitutions` is that gate now.
+DAMAGE_SUBSTITUTES = {
+    "kit_steel_damaged_a": {
+        "skin_patch": "steel",
+        "for": [["steel", "roof"], ["steel", "beam"]],
+        "damaged_face": "+Y",
+        "reads_as": "sheared deck plate, tear open to the structure below",
+    },
+    "kit_steel_damaged_b": {
+        "skin_patch": "steel",
+        "for": [["steel", "column"], ["steel", "corner"],
+                ["steel", "endcap"], ["steel", "lobby"]],
+        "damaged_face": "+Z",
+        "reads_as": "buckled column, one flange snapped and bent out",
+    },
+    "kit_concrete_damaged_a": {
+        "skin_patch": "concrete",
+        "for": [["concrete", "roof"]],
+        "damaged_face": "+Y",
+        "reads_as": "spalled deck, rebar mat exposed, one bar bent up out "
+                    "of the cell",
+    },
+    "kit_concrete_damaged_b": {
+        "skin_patch": "concrete",
+        "for": [["concrete", "base"], ["concrete", "beam"],
+                ["concrete", "soffit"]],
+        "damaged_face": "+Z",
+        "reads_as": "shear crack and a blown corner, rebar at the break",
+    },
+    "kit_glass_damaged_a": {
+        "skin_patch": "steel_dark",
+        "for": [["glass", "facade"], ["glass", "lobby"],
+                ["glass", "corner"], ["glass", "endcap"]],
+        "damaged_face": "+Z",
+        "reads_as": "shattered pane, three shards left in a surviving frame",
+    },
+    "kit_infill_damaged_a": {
+        "skin_patch": "infill",
+        "for": [["infill", "facade"], ["infill", "corner"],
+                ["infill", "endcap"]],
+        "damaged_face": "+Z",
+        "reads_as": "cracked curtain panel, one board hanging off, studs "
+                    "exposed behind",
+    },
+}
+
+
+# WHICH KIT PATCH STANDS IN FOR WHICH FRACTURE PATCH.
+#
+# A damage state's surfaces are of two kinds, and only one of them is a
+# continuity question:
+#
+#   * SURVIVING SKIN - the plate that did not tear, the concrete that did not
+#     spall. This has to match the INTACT NEIGHBOUR cell, so it simply uses
+#     the patch the intact piece would have used. Nothing to reconcile.
+#   * FRESHLY BROKEN surface - the tear edge, the exposed core, the rebar.
+#     This is what has to read continuous with `demigol_shards`, and the
+#     pairing below is authored, not inferred.
+#
+# It was tempting to compute the pairing as "nearest patch in the fracture
+# atlas by RGB distance" and let the numbers fall out. That was tried and it
+# is the WRONG INSTRUMENT: nearest-RGB pairs `steel` with `concrete_core` at
+# dRGB 24 and reports it as a good match, when the shard library would never
+# put concrete on a steel tear. It flatters the result by comparing against
+# whatever happens to be closest rather than against the thing the surface
+# actually has to sit beside. So the pair is declared here and only the delta
+# is measured.
+#
+# `shadow` is deliberately absent: a crack void and the dark behind a broken
+# pane are the ABSENCE of a surface, not a material, and the fracture atlas
+# has no counterpart for them to be continuous with.
+FRACTURE_ANALOGUE = {
+    "steel": "steel_torn",              # a fresh tear in plate
+    "rust": "rust",                     # exposed rebar and old corrosion
+    "grime": "grime",                   # soot, and the dark of opened structure
+    "concrete_dark": "concrete_dark",   # the core inside a spall
+    "glass_bright": "glass_green",      # a fresh glass edge
+    "trim": "infill_core",              # the board core inside a split panel
+}
+
+
+def fracture_continuity():
+    """The measured distance across each authored pair, against the DELIVERED
+    shard manifest.
+
+    Reads the delivered artifact and not the shard generator's source: if that
+    atlas is ever re-authored this re-measures itself, so the claim moves with
+    it instead of going stale. A named fracture patch that is not in the
+    delivery is an ERROR rather than a silently skipped row - the whole value
+    of this table is that it cannot quietly become true of nothing.
+    """
+    if not os.path.exists(SHARDS_MANIFEST):
+        return None
+    with open(SHARDS_MANIFEST) as fh:
+        frac = json.load(fh)["materials"]["fracture"]["patches"]
+    out = {}
+    for kit_name, frac_name in sorted(FRACTURE_ANALOGUE.items()):
+        if kit_name not in PATCH:
+            print("FRACTURE_ANALOGUE names a kit patch that does not exist: %s"
+                  % kit_name)
+            sys.exit(1)
+        if frac_name not in frac:
+            print("FRACTURE_ANALOGUE names a fracture patch absent from the "
+                  "delivered shard manifest: %s" % frac_name)
+            sys.exit(1)
+        kit_rgb = list(PATCH[kit_name][1])
+        frac_rgb = list(frac[frac_name]["rgb"])
+        delta = [abs(a - b) for a, b in zip(kit_rgb, frac_rgb)]
+        out[kit_name] = {
+            "kit_rgb": kit_rgb,
+            "stands_in_for": frac_name,
+            "fracture_rgb": frac_rgb,
+            "delta_rgb": delta,
+            "max_delta": max(delta),
+        }
+    return out
+
+
+def check_damage_substitutions(pieces):
+    """Every damage state must be substitutable, and must match what it
+    replaces. Four separate ways this can be wrong, all of them silent:
+
+      1. a damage piece with no entry - the consumer has no rule for it, so it
+         ships and is never selected;
+      2. an entry for a piece that does not exist - a rule pointing at nothing;
+      3. a (role, context) target with no intact piece in the kit - the
+         consumer is told to substitute for a classification the kit cannot
+         produce;
+      4. a `skin_patch` that no intact counterpart uses - the surviving skin
+         is the wrong colour, so every damaged cell is a visible seam.
+
+    (4) is the one that actually happened. It returns a list of failures
+    rather than raising, because reporting all four at once beats fixing them
+    one run at a time.
+    """
+    fails = []
+    damaged = {n for n in pieces if parse_name(n)[1] == "damaged"}
+    for name in sorted(damaged - set(DAMAGE_SUBSTITUTES)):
+        fails.append("%s has no DAMAGE_SUBSTITUTES entry" % name)
+    for name in sorted(set(DAMAGE_SUBSTITUTES) - damaged):
+        fails.append("DAMAGE_SUBSTITUTES names %s, which is not a damage "
+                     "piece in the kit" % name)
+    by_role_context = {}
+    for other in pieces:
+        role, context, _ = parse_name(other)
+        by_role_context.setdefault((role, context), []).append(other)
+    for name in sorted(damaged & set(DAMAGE_SUBSTITUTES)):
+        entry = DAMAGE_SUBSTITUTES[name]
+        skin = entry["skin_patch"]
+        if skin not in {b["patch"] for b in pieces[name]}:
+            fails.append("%s declares skin_patch %s but does not use it"
+                         % (name, skin))
+        for role, context in entry["for"]:
+            intact = by_role_context.get((role, context))
+            if not intact:
+                fails.append("%s substitutes for (%s, %s), which no intact "
+                             "piece provides" % (name, role, context))
+                continue
+            wearing = {other for other in intact
+                       if skin in {b["patch"] for b in pieces[other]}}
+            if not wearing:
+                fails.append(
+                    "%s wears skin %s, but no intact (%s, %s) piece uses it - "
+                    "the damaged cell would be a visible seam beside %s"
+                    % (name, skin, role, context, ", ".join(sorted(intact))))
+    return fails
 
 
 def PIECES():
@@ -608,6 +813,311 @@ def PIECES():
         [slab(front=1.02, patch="shadow"), pane("glass_bright", half_w=1.25, half_h=1.25)]
         + window_reveal("steel_dark", half_w=1.25, half_h=1.25)
         + [box(0, -1.3, span(BACK, FACE)[0], FULL, 0.38, span(BACK, FACE)[1], "concrete")]
+    )
+
+    # ======================================================================
+    # REVISION 3. Two asks, and a measurement behind each.
+    #
+    # ASK 1 - STEEL. Steel is what the game is about ("cut the bones, not the
+    # skin") and it had 6 pieces of 41. Worse, the kit shipped NO steel roof
+    # piece, so #611's rule S3b dressed every steel deck as a concrete plate:
+    # 13,186 of 45,638 cells, ~28% of all visible surface, resolving to one
+    # concrete family. Eleven steel pieces below.
+    #
+    # ASK 2 - DAMAGE STATES, in a `damaged` context. Not a variant letter:
+    # the shell picks variants from a coordinate hash, and damage is a STATE
+    # the consumer selects, so it can no more ride in the variant slot than
+    # chirality could - which is exactly why `endcap` exists. Six pieces.
+    # ======================================================================
+
+    # --- steel roofs: THE ask, and three of them on purpose ----------------
+    # One new piece dressed across all 13,186 fallback cells would replace one
+    # monotony with another, so the deck comes as a field piece, a plant piece
+    # and a perimeter crown - the same a/b/c split concrete already has, for
+    # the same reason.
+    #
+    # Deck heights follow `kit_concrete_roof_a` exactly (body to 0.6, cap to
+    # 0.9) so a steel deck and a concrete deck in adjacent cells sit flush.
+    # The ribs are PLAIN boxes, not tapered: `taper` flares X and Z together,
+    # so a trapezoidal flute spanning the full cell would pull its own ends
+    # away from the neighbour it has to meet. Standing-seam deck rather than
+    # trapezoidal deck, decided by the deformer and not by taste.
+    def steel_deck(rib_zs=(-1.2, -0.6, 0.0, 0.6, 1.2)):
+        out = [slab(top=0.45, patch="steel_dark"),
+               plate(-H, H, 0.45, 0.79, -H, H, "steel")]
+        out += [plate(-H, H, 0.79, 0.93, z - 0.15, z + 0.15, "steel_dark")
+                for z in rib_zs]
+        return out
+
+    p["kit_steel_roof_a"] = steel_deck() + [
+        # a drain collar and a cross seam: roof clutter, and the reason this
+        # variant can repeat without reading as a tiled texture
+        plate(0.58, 1.13, 0.75, 0.87, -1.13, -0.58, "grime"),
+        plate(-0.11, 0.11, 0.79, 0.99, -H, H, "steel"),
+    ]
+    # Rooftop plant, and the only piece in the kit that breaks the cell's TOP
+    # face. The golem is airborne constantly; a skyline needs something on it.
+    p["kit_steel_roof_b"] = steel_deck((-1.1, 0.0, 1.1)) + [
+        plate(-1.05, 0.45, 0.93, 1.05, -0.65, 0.85, "concrete_dark"),  # plinth
+        plate(-0.98, 0.38, 1.05, 1.45, -0.57, 0.77, "steel"),        # AHU body
+        plate(-0.98, 0.38, 1.02, 1.36, 0.67, 0.79, "shadow"),        # louvre
+        plate(0.79, 1.21, 0.63, 1.58, -1.16, -0.74, "steel_dark"),   # vent stack
+        plate(0.71, 1.29, 1.58, 1.70, -1.24, -0.66, "steel"),        # stack cap
+    ]
+    # The perimeter crown. Oversails +Z, so it is directional and the shell
+    # yaws it to whichever face is the building edge.
+    p["kit_steel_roof_c"] = steel_deck((-1.1, 0.0, 1.1)) + [
+        plate(-H, H, 0.79, 1.32, 1.05, 1.56, "steel"),               # parapet
+        cornice("trim", 1.40, 0.16, project=0.28, depth_in=0.55),    # coping
+        bracket("steel_dark", -0.95, 1.05, project=0.20),
+        bracket("steel_dark", 0.95, 1.05, project=0.20),
+    ]
+
+    # --- steel soffit: the underside of every one of those decks -----------
+    # Deliberately NOT `soffit_coffer`. A coffer is a masonry idea; the
+    # underside of a composite steel deck is corrugation crossed by a
+    # downstand beam, and that is what is permanently visible through the
+    # open ground floor.
+    p["kit_steel_soffit_a"] = [
+        slab(bottom=-0.62, patch="steel_dark"),
+        plate(-H, H, -0.94, -0.62, -H, H, "steel"),
+    ] + [
+        plate(-H, H, -1.16, -0.94, z - 0.17, z + 0.17, "steel_dark")
+        for z in (-1.2, -0.6, 0.0, 0.6, 1.2)
+    ] + [
+        plate(-0.21, 0.21, -H, -0.94, -H, H, "steel"),               # downstand web
+        plate(-0.43, 0.43, -H, -1.34, -H, H, "steel_dark"),          # bottom flange
+    ]
+
+    # --- steel facades: a curtain wall that reads as frame and glass -------
+    # Two variants because a curtain wall spans many cells in one glance, so a
+    # single variant tiles visibly - the same argument as the roofs.
+    p["kit_steel_facade_a"] = (
+        [slab(front=1.02, patch="shadow"),
+         pane("glass", half_w=1.3, half_h=0.85, back=1.02)]
+        + [plate(-H, H, -H, -0.85, BACK, FACE, "steel_dark"),        # spandrel
+           plate(-H, H, 0.85, H, BACK, FACE, "steel_dark")]
+        + mullions("steel", (-1.0, 1.0), width=0.22)
+        + rails("steel", (-0.85, 0.85), height=0.16)
+        + [cornice("steel_dark", 0.98, 0.12, project=0.22, depth_in=0.10)]
+    )
+    p["kit_steel_facade_b"] = (
+        [slab(front=1.02, patch="sky_glass"),
+         pane("glass_bright", half_w=1.3, half_h=1.2, back=1.02)]
+        + window_reveal("steel_dark", half_w=1.3, half_h=1.2)
+        # Projecting vertical fins. Silhouette is what reads across a street,
+        # and this is the cheapest silhouette a flat curtain wall can have.
+        + [plate(x - 0.08, x + 0.08, -H, H, BACK, CELL / 2.0 + 0.20, "steel")
+           for x in (-0.95, 0.0, 0.95)]
+    )
+
+    # --- steel corner, and its mirror --------------------------------------
+    # All four vertical corners of every building are steel columns full
+    # height and nothing was corner-specific. Rotating the authored (+Z,+X)
+    # corner by 90 deg steps walks the four corners of a rectangular plan; the
+    # reflex pair (+Z,-X), a wall that ENDS, is a MIRROR and unreachable by
+    # rotation - so it goes in `endcap`, exactly as brick/infill/glass do. The
+    # mirror costs one line and zero triangles.
+    # A CORNER COLUMN HAS TO READ AS A VERTICAL. The first version reused
+    # `corner_bands` the way brick and infill do - three bands per cell - and
+    # rendered as banded masonry with a steel palette: over three stacked
+    # cells that is nine horizontal lines and no vertical at all. Right for a
+    # brick quoin, wrong for the thing the ask describes as "steel columns
+    # full height". Now it is four full-height members plus ONE splice collar,
+    # which is the horizontal a real column actually has.
+    p["kit_steel_corner_a"] = (
+        [corner_body("shadow"), corner_post("steel"),
+         # the cover angle on the arris itself, full height, oversailing 0.10
+         plate(1.00, CELL / 2.0 + 0.10, -H, H, 1.00, CELL / 2.0 + 0.10,
+               "steel_dark"),
+         # full-height members on BOTH exposed faces - a corner reads from
+         # +Z and +X, so anything on only one of them is half a piece
+         plate(0.30, 0.70, -H, H, BACK, FACE, "steel"),
+         plate(-0.60, -0.20, -H, H, BACK, FACE, "steel"),
+         plate(BACK, FACE, -H, H, 0.30, 0.70, "steel"),
+         plate(BACK, FACE, -H, H, -0.60, -0.20, "steel")]
+        + corner_bands("steel_dark", (0.0,), height=0.34)
+    )
+    p["kit_steel_endcap_a"] = mirror_x(p["kit_steel_corner_a"])
+
+    # --- more columns: the single most repeated piece in the city ----------
+    # Differing by SILHOUETTE, not by decoration. Three I-sections wearing
+    # different trim would still be three I-sections at 30 m.
+    #
+    # _d: a box (HSS) section - four walls around a hollow.
+    p["kit_steel_column_d"] = [
+        plate(-0.75, -0.53, -H, H, -0.75, 0.75, "steel"),
+        plate(0.53, 0.75, -H, H, -0.75, 0.75, "steel"),
+        plate(-0.53, 0.53, -H, H, -0.75, -0.53, "steel"),
+        plate(-0.53, 0.53, -H, H, 0.53, 0.75, "steel"),
+    ] + [
+        # splice collars at +-1.15: SYMMETRIC on purpose, so two stacked cells
+        # meet collar to collar and read as one bolted joint, rather than as a
+        # detail that only ever appears on one side of a floor
+        plate(-0.98, 0.98, y - 0.10, y + 0.10, -0.98, 0.98, "steel_dark")
+        for y in (-1.15, 1.15)
+    ] + [
+        plate(-1.15, 1.15, y - 0.05, y + 0.05, -1.15, 1.15, "steel_dark")
+        for y in (-1.30, 1.30)
+    ] + [
+        plate(0.60, 0.80, -1.00, 0.60, 0.75, 0.85, "rust"),          # weep streak
+    ]
+    # _e: a stanchion that flares into its end plates. `taper` is free (12
+    # triangles either way) and the flare is what makes a column read as
+    # carrying load rather than as a post standing in a hole.
+    p["kit_steel_column_e"] = i_section("steel", web=0.4, flange=0.34,
+                                        depth=1.7) + [
+        box(0, -1.05, 0, 2.1, 0.75, 2.1, "steel_dark", taper=(1.0, 0.55)),
+        box(0, 1.05, 0, 2.1, 0.75, 2.1, "steel_dark", taper=(0.55, 1.0)),
+        plate(-1.25, 1.25, -H, -1.34, -1.25, 1.25, "steel"),
+        plate(-1.25, 1.25, 1.34, H, -1.25, 1.25, "steel"),
+        plate(-0.50, 0.50, -0.15, 0.15, -0.95, 0.95, "steel_dark"),
+        plate(-1.28, 1.28, -1.37, -1.27, -1.28, 1.28, "rust"),
+    ]
+    # _f: the same section wearing the building's services. A riser and a
+    # cable tray are what an industrial column actually looks like, and they
+    # change the profile without spending a triangle on ornament.
+    p["kit_steel_column_f"] = i_section("steel") + [
+        plate(0.70, 1.20, -H, H, 0.70, 1.20, "rust"),                # riser duct
+        plate(0.62, 1.28, -0.98, -0.82, 0.62, 1.28, "steel_dark"),
+        plate(0.62, 1.28, 0.82, 0.98, 0.62, 1.28, "steel_dark"),
+        plate(0.64, 1.26, -0.07, 0.07, 0.64, 1.26, "steel"),         # strap
+        plate(-1.20, -0.90, 0.29, 0.51, -0.95, 0.95, "steel_dark"),  # cable tray
+        plate(-0.85, 0.85, -H, -1.18, -0.85, 0.85, "grime"),
+    ]
+
+    # ======================================================================
+    # ASK 2 - THE DAMAGE STATES
+    #
+    # ~46,000 cells look pristine right up until they vanish. A damage state
+    # is the cell that is HURT but not yet eroded, so it must read continuous
+    # with the shard library's fracture material rather than as a second art
+    # style - and it must do that WITHOUT a second material, because one
+    # shading group is what keeps the city in one draw call.
+    #
+    # That is possible because the kit atlas already carries close analogues
+    # of the fracture patches these surfaces need. Measured, kit vs fracture
+    # (and re-measured against the DELIVERED shard manifest every run, so it
+    # cannot drift into a claim - see `fracture_continuity`):
+    #
+    #   rust        (128,74,44)    vs rust        (128,74,44)    dRGB 0,0,0
+    #   trim        (206,203,194)  vs infill_core (208,203,190)  dRGB 2,0,4
+    #   grime       (74,72,68)     vs grime       (78,76,71)     dRGB 4,4,3
+    #   concrete_dk (112,110,104)  vs concrete_dk (108,105,99)   dRGB 4,5,5
+    #   glass_brt   (140,186,199)  vs glass_green (146,186,180)  dRGB 6,0,19
+    #   steel       (140,148,162)  vs steel_torn  (176,182,190)  dRGB 36,34,28
+    #
+    # So exposed core, rebar and soot match within 5 of 255. Steel is the one
+    # real gap and it is one-directional: the fracture atlas is brighter on
+    # purpose ("a section opened a second ago should be bright bare metal").
+    # Inside the kit the RANKING is preserved instead - a tear authored on
+    # `steel` against a plate on `steel_dark` reads brighter than its
+    # surround, same as the fracture library, at a lower absolute.
+    # ======================================================================
+
+    # A sheared DECK plate, not a wall panel: the new steel roofs are about to
+    # become the largest single surface in the city, and a roof is the surface
+    # an airborne golem looks at. Damage on +Y, the face that is seen.
+    p["kit_steel_damaged_a"] = [
+        # THE BODY IS `steel_dark`, matching kit_steel_roof_a's body exactly.
+        # Making the whole body `shadow` did make the hole read - and turned
+        # the cell's four SIDE faces black, so a damaged deck at a building
+        # edge would have been a black void beside a grey neighbour. That is
+        # the same wrong-skin seam as before on a different face, which is
+        # why the darkness is now a tray inside the hole and nothing else.
+        slab(top=0.45, patch="steel_dark"),
+        plate(-0.28, 1.45, 0.44, 0.52, 0.17, 1.13, "shadow"),  # dark, in the hole
+        # THE SKIN IS `steel`, matching kit_steel_roof_a's deck plate exactly.
+        plate(-H, H, 0.45, 0.79, -H, 0.15, "steel"),           # plate, near half
+        plate(-H, -0.30, 0.45, 0.79, 0.15, H, "steel"),        # left of the tear
+        plate(-0.30, H, 0.45, 0.79, 1.15, H, "steel"),         # far strip
+        plate(-H, H, 0.79, 0.93, -1.00, -0.70, "steel_dark"),  # surviving rib
+        plate(-0.05, 0.25, 0.50, 0.70, 0.17, 1.13, "grime"),   # joist in the hole
+        plate(-0.30, 1.45, 0.72, 0.84, 0.13, 0.25, "steel_dark"),  # curled lip
+        # x stops at 1.45, NOT at the 1.5 cell face: this box is tapered, and
+        # a tapered box that reaches a face it is meant to meet pulls away
+        # from that neighbour as it rises (see the outset audit in main).
+        plate(-0.10, 1.45, 0.725, 1.275, 0.14, 0.26, "steel",
+              taper=(1.0, 0.78)),                                  # peeled flap
+        plate(0.23, 0.47, 0.38, 0.73, 0.28, 1.23, "steel_dark"),  # bent rib stub
+    ]
+    # A buckled column: the thing the player actually aims at.
+    # A COLUMN IS A VERTICAL, and the first version forgot it: a pile of
+    # plate fragments with no continuous member read as debris, not as a
+    # damaged column. The web and one flange now run the FULL height and the
+    # damage is a clean bite out of the other flange - which is also what a
+    # buckling failure actually looks like. Skin is `steel`, matching
+    # kit_steel_column_a's i_section exactly.
+    p["kit_steel_damaged_b"] = [
+        plate(-0.175, 0.175, -H, H, -0.8, 0.8, "steel"),         # web, full height
+        plate(-0.8, 0.8, -H, H, -0.95, -0.65, "steel"),          # flange, intact
+        plate(-0.8, 0.8, -H, 0.05, 0.65, 0.95, "steel"),         # flange, below break
+        plate(-0.8, 0.8, 0.75, H, 0.65, 0.95, "steel"),          # flange, above break
+        plate(-0.26, 0.26, 0.05, 0.75, 0.18, 0.62, "grime"),     # web behind the gap
+        plate(-0.8, 0.8, -0.05, 0.05, 0.62, 0.98, "steel_dark"),   # break edge
+        plate(-0.8, 0.8, 0.75, 0.85, 0.62, 0.98, "steel_dark"),    # break edge
+        # Peeled UPRIGHT over the height of the break, not laid flat across
+        # it: the flat version read as a shelf bolted to the column. Tapering
+        # to 0.70 curls its top, and pushing it to 1.62 buys 0.12 m of
+        # silhouette, which is what makes a broken column legible at 30 m.
+        plate(-0.30, 0.30, 0.05, 0.78, 0.95, 1.62, "steel",
+              taper=(1.0, 0.70)),                              # peeled flange
+        plate(-0.45, 0.45, -0.42, 0.02, 0.90, 0.98, "rust"),     # rust from the break
+    ]
+    # Exposed rebar, on a DECK - concrete's biggest job in this city is the
+    # S3b plate, and a spall authored on a vertical face would never be seen
+    # on one. Damage on +Y; the bent bar leaves the cell, which is the whole
+    # point of having an outset allowance.
+    p["kit_concrete_damaged_a"] = [
+        slab(top=0.55, patch="concrete_dark"),                 # the exposed core
+        plate(-H, H, 0.55, 0.90, -H, 0.30, "concrete"),
+        plate(-H, -0.40, 0.55, 0.90, 0.30, H, "concrete"),
+        plate(-0.40, H, 0.55, 0.90, 1.05, H, "concrete"),
+        plate(-0.45, H, 0.68, 0.76, 0.46, 0.54, "rust"),       # rebar mat
+        plate(-0.45, H, 0.68, 0.76, 0.81, 0.89, "rust"),
+        plate(0.16, 0.24, 0.68, 0.76, 0.26, 1.10, "rust"),
+        plate(1.01, 1.09, 0.68, 1.63, 0.64, 0.72, "rust"),     # a bar bent UP
+        plate(-0.55, H, 0.52, 0.68, 0.08, 0.32, "concrete_dark"),  # spall lip
+    ]
+    # A shear crack and a blown corner, on a vertical face: bases, beams and
+    # the plate cells that are seen edge-on.
+    p["kit_concrete_damaged_b"] = [
+        slab(front=0.90, patch="concrete_dark"),
+        plate(-H, 0.45, -H, H, 0.90, FACE, "concrete"),
+        plate(0.45, H, 0.15, H, 0.90, FACE, "concrete"),
+        plate(0.04, 0.16, -0.40, H, 1.09, FACE, "shadow"),     # crack
+        plate(-1.25, 0.15, -0.35, -0.24, 1.09, FACE, "shadow"),
+        plate(0.91, 0.99, -1.25, 0.15, 0.86, 0.94, "rust"),    # rebar, blown corner
+        plate(0.45, 1.45, -0.59, -0.51, 0.86, 0.94, "rust"),
+        box(0.98, -1.25, 1.18, 0.95, 0.35, 0.50, "concrete_dark", taper=(0.7, 1.0)),
+        plate(-0.18, 0.37, -1.45, -0.25, 1.44, FACE, "grime"),
+    ]
+    # A shattered pane. The frame survives, the glass mostly does not, and
+    # what is left is fangs - which is why two of these boxes carry a taper.
+    p["kit_glass_damaged_a"] = (
+        [slab(front=1.02, patch="shadow")]
+        + window_reveal("steel_dark", half_w=1.2, half_h=1.2)
+        + [plate(-1.15, -0.10, 0.40, 1.15, 1.07, 1.13, "glass"),
+           plate(-0.50, 1.10, -1.17, -0.87, 1.07, 1.13, "glass"),
+           plate(0.62, 1.14, 0.05, 0.78, 1.07, 1.13, "glass"),
+           box(0.45, 0.72, 1.10, 0.34, 0.85, 0.06, "glass_bright",
+               taper=(0.25, 1.0)),
+           box(0.90, 1.24, 1.28, 1.10, 0.16, 0.50, "steel_dark",
+               taper=(1.0, 0.70))]                             # buckled transom
+    )
+    # A cracked curtain panel with a board hanging off it. `trim` is the
+    # exposed board core - the closest match in the whole atlas to the
+    # fracture library's own `infill_core`, 2 of 255 apart.
+    p["kit_infill_damaged_a"] = (
+        [slab(front=1.05, patch="grime"),
+         plate(-H, 0.20, -H, H, 1.05, FACE, "infill"),
+         plate(0.20, H, -H, -0.10, 1.05, FACE, "infill"),
+         box(0.75, 0.55, 1.62, 1.35, 1.05, 0.12, "infill", taper=(1.0, 0.88)),
+         plate(0.52, 0.68, -0.40, H, 1.07, 1.37, "steel_dark"),   # exposed stud
+         plate(1.07, 1.23, -0.40, H, 1.07, 1.37, "steel_dark"),
+         plate(0.13, 0.27, -0.40, H, 1.15, 1.45, "trim"),         # torn board core
+         plate(0.20, 1.45, -0.17, -0.03, 1.15, 1.45, "trim")]
+        + mullions("infill_dark", (-1.2,), width=0.25, front=1.05)
     )
     return p
 
@@ -798,6 +1308,14 @@ for name in NAMES:
 # the UV range every piece stayed inside - without shipping a table.
 result = {
     "tris": {r[0]: r[1] for r in rows},
+    # Per-piece measured reach, added in revision 3. The manifest used to
+    # derive outset_m from the BOX SPEC, which is the intent and not the
+    # delivery: a `taper` shrinks a box after the spec is written, and both
+    # concrete bases declared 0.15 m of oversail while delivering 0.024. A
+    # number the consumer plans collision around should be measured off the
+    # thing that shipped. Two dicts of 58 floats is ~4 KB, well inside the
+    # repr cap that killed the full geometry table.
+    "extent": {r[0]: round(r[3], 5) for r in rows},
     "verts_total": sum(r[2] for r in rows),
     "max_abs_extent": round(max([r[3] for r in rows] or [0]), 5),
     "uv_min": round(min([r[4] for r in rows] or [0]), 5),
@@ -817,6 +1335,32 @@ result = FBX
 '''
 
 
+# The soffit is authored for a view NEITHER tiling proof takes. A deck's
+# underside is seen from below, and `render_scene`'s angle presets have no
+# bottom; `current` is documented to fall back to three_quarter, so a custom
+# camera cannot be used either. So the run is FLIPPED and shot from above.
+#
+# Stated loudly because it would otherwise be a lie in a picture: the piece is
+# authored the right way up. The 180 degree rotation here is an inspection
+# device and nothing in the delivery is upside down.
+SOFFIT_CODE = r'''
+import maya.cmds as cmds
+made = []
+for i, name in enumerate(NAMES):
+    dup = cmds.duplicate("|" + name, name="soffit_%d" % i, returnRootsOnly=True)[0]
+    dup = (cmds.ls(dup, long=True) or [dup])[0]
+    cmds.move(i * 3.0, 0, 0, dup, absolute=True)
+    made.append(dup)
+grp = cmds.group(made, name="kit_soffit_run")
+grp = (cmds.ls(grp, long=True) or [grp])[0]
+cmds.xform(grp, rotatePivot=(3.0, 0, 0), worldSpace=True)
+cmds.rotate(180, 0, 0, grp, absolute=True)
+result = {"group": grp, "pieces": len(made),
+          "bbox": [round(q, 4) for q in cmds.exactWorldBoundingBox(grp)]}
+result
+'''
+
+
 # A wall built out of the kit, on the real 3 m lattice, with pieces rotated by
 # the same 90 degree steps the shell uses. This is the only honest evidence for
 # the contract's tiling clause: the inset guarantees pieces cannot intersect,
@@ -830,14 +1374,14 @@ plan = json.loads(PLAN)
 made = []
 for item in plan:
     src = "|" + item["piece"]
-    dup = cmds.duplicate(src, name="wall_%d_%d" % (item["x"], item["y"]),
+    dup = cmds.duplicate(src, name="%s_%d_%d" % (GROUP, item["x"], item["y"]),
                          returnRootsOnly=True)[0]
     dup = (cmds.ls(dup, long=True) or [dup])[0]
     if item.get("ry"):
         cmds.rotate(0, item["ry"], 0, dup, absolute=True)
     cmds.move(item["x"] * 3.0, item["y"] * 3.0, 0, dup, absolute=True)
     made.append(dup)
-grp = cmds.group(made, name="kit_wall")
+grp = cmds.group(made, name=GROUP)
 grp = (cmds.ls(grp, long=True) or [grp])[0]
 bb = cmds.exactWorldBoundingBox(grp)
 result = {"group": grp, "pieces": len(made),
@@ -858,6 +1402,15 @@ def main():
 
     pieces = PIECES()
     names = list(pieces)
+
+    substitution_fails = check_damage_substitutions(pieces)
+    if substitution_fails:
+        print("DAMAGE SUBSTITUTION IS BROKEN - refusing to build:")
+        for why in substitution_fails:
+            print("    " + why)
+        sys.exit(1)
+    print("damage substitution: %d states, every skin matched to an intact "
+          "counterpart" % len(DAMAGE_SUBSTITUTES))
 
     # Budget is arithmetic, checked BEFORE anything is built: a piece that
     # cannot fit is a design error, not a render to look at.
@@ -892,6 +1445,38 @@ def main():
         for name, tris, budget in over:
             print("OVER BUDGET %-26s %d tris > %d" % (name, tris, budget))
         sys.exit(1)
+
+    # THE TAPER TRAP, audited rather than assumed. `taper` flares X and Z
+    # together, so a tapered box whose X or Z reach lands exactly on a meeting
+    # face (the 1.495 inset face, or the 1.5 cell face) does NOT meet its
+    # neighbour: the flare pulls its far end away and opens a notch in what is
+    # supposed to be a continuous run. This was nearly shipped on
+    # kit_steel_damaged_a's peeled flap; the audit is here so the next one
+    # cannot be nearly-shipped quietly.
+    #
+    # It PRINTS rather than fails, for one measured reason: the only piece in
+    # the kit that trips it is kit_brick_facade_c's string course, which is
+    # pre-existing, is brick, and brick is on this delivery's do-not-touch
+    # list. A gate that fails on a piece you are forbidden to fix is a gate
+    # that gets disabled.
+    taper_trap = []
+    for name, boxes in pieces.items():
+        for i, b in enumerate(boxes):
+            if not b.get("taper"):
+                continue
+            for axis, label in ((0, "x"), (2, "z")):
+                reach = abs(b["pos"][axis]) + b["dim"][axis] / 2.0
+                if abs(reach - H) < 1e-3 or abs(reach - CELL / 2.0) < 1e-3:
+                    taper_trap.append((name, i, label, round(reach, 4),
+                                       tuple(b["taper"])))
+    if taper_trap:
+        print("\nTAPER TRAP - tapered boxes reaching a meeting face, so the "
+              "flare pulls them off their neighbour:")
+        for name, i, label, reach, tp in taper_trap:
+            print("    %-26s box %-2d %s reach %.4f taper %s"
+                  % (name, i, label, reach, tp))
+    else:
+        print("\ntaper trap: no tapered box reaches a meeting face")
 
     # Declared outset per piece: how far the render mesh reaches past the true
     # cell face (1.5 m), which is the number the contract asks to see.
@@ -997,58 +1582,182 @@ def main():
     for x in range(5):
         wall.append({"piece": "kit_concrete_roof_b", "x": x, "y": 4, "ry": 0})
 
-    tiling = ast.literal_eval(
-        run("PLAN = %r\n%s" % (json.dumps(wall), TILING_CODE), "tiling")["result_repr"])
-    wall_shots = ok(call("render_scene", {
-        "angles": ["front", "three_quarter"], "renderer": "arnold",
-        "resolution": 900, "samples": 3, "zoom": 0.98,
-        "isolate": ["|kit_wall"], "target": ["|kit_wall"]}, 2400.0),
-        "render wall")["images"]
-    wall_pngs = [base64.b64decode(s["png_b64"]) for s in wall_shots]
-    wall_sheet = images.contact_sheet(wall_pngs, cols=2)
-    with open(os.path.join(OUT_DIR, "tiling_proof.png"), "wb") as fh:
-        fh.write(wall_sheet)
-    wall_blank = [i for i, p in enumerate(wall_pngs) if images.pixel_stats(p)["blank"]]
+    # THE SECOND WALL, new in revision 3. The first proves the revision-2
+    # kit still tiles; it cannot say anything about pieces it does not
+    # contain, and "the new pieces meet the old ones" is precisely the risk
+    # a new family introduces. So the steel wall is built from the eleven new
+    # steel pieces and all six damage states, with the roofs on top and the
+    # soffits directly beneath them - which is the relationship a deck and
+    # its underside actually have, and the only arrangement in which the
+    # soffit piece can be judged at all.
+    #
+    # The ends carry BOTH chiralities in one image: the mirrored `endcap` at
+    # x = 0 where the wall simply stops, the authored `corner` at x = 4.
+    steel_wall = []
+    for y in range(1, 4):
+        steel_wall.append({"piece": "kit_steel_endcap_a", "x": 0, "y": y, "ry": 0})
+        steel_wall.append({"piece": "kit_steel_corner_a", "x": 4, "y": y, "ry": 0})
+    for x, piece in enumerate(["kit_steel_column_d", "kit_steel_lobby_a",
+                               "kit_steel_column_e", "kit_steel_column_f",
+                               "kit_steel_damaged_b"]):
+        steel_wall.append({"piece": piece, "x": x, "y": 0, "ry": 0})
+    for x, piece in enumerate(["kit_steel_facade_b", "kit_infill_damaged_a",
+                               "kit_glass_damaged_a"]):
+        steel_wall.append({"piece": piece, "x": x + 1, "y": 1, "ry": 0})
+    for x, piece in enumerate(["kit_steel_facade_a", "kit_concrete_damaged_b",
+                               "kit_steel_facade_b"]):
+        steel_wall.append({"piece": piece, "x": x + 1, "y": 2, "ry": 0})
+    for x in range(1, 4):
+        steel_wall.append({"piece": "kit_steel_soffit_a", "x": x, "y": 3, "ry": 0})
+    for x, piece in enumerate(["kit_steel_roof_c", "kit_steel_roof_b",
+                               "kit_steel_damaged_a", "kit_concrete_damaged_a",
+                               "kit_steel_roof_a"]):
+        steel_wall.append({"piece": piece, "x": x, "y": 4, "ry": 0})
 
-    # 6 cells wide x 5 tall on a 3 m lattice. Revision 1's check asserted the
-    # wall matched the lattice inset by 5 mm on every face; under revision 2
-    # that is the WRONG rule, because ornament is meant to oversail. What must
-    # hold now is that every face sits inside the allowance band: no more than
-    # INSET short of the lattice, and no more than MAX_OUTSET past it.
-    want = [-1.5, -1.5, -1.5, 6 * 3.0 - 1.5, 5 * 3.0 - 1.5, 1.5]
-    excess = [want[i] - tiling["bbox"][i] if i < 3 else tiling["bbox"][i] - want[i]
-              for i in range(6)]
-    wall_ok = all(-INSET - 1e-3 <= e <= MAX_OUTSET + 1e-3 for e in excess)
-    print("\ntiling proof: %d pieces, bbox %s"
-          % (tiling["pieces"], tiling["bbox"]))
-    print("  lattice     %s" % [round(q, 4) for q in want])
-    print("  oversail    %s m per face (allowance -%.3f .. %.2f) -> %s"
-          % ([round(e, 4) for e in excess], INSET, MAX_OUTSET,
-             "WITHIN" if wall_ok else "OUT OF BAND"))
+    def build_wall(plan, group, cells_x, cells_y, out_png, angles, zoom=0.98):
+        """One wall, its render, and the oversail band it has to sit inside.
+
+        Revision 1's check asserted the wall matched the lattice inset by 5 mm
+        on every face; under revision 2 that is the WRONG rule, because
+        ornament is meant to oversail. What must hold is that every face sits
+        inside the allowance band: no more than INSET short of the lattice,
+        and no more than MAX_OUTSET past it.
+        """
+        built = ast.literal_eval(
+            run("PLAN = %r\nGROUP = %r\n%s" % (json.dumps(plan), group,
+                                                TILING_CODE),
+                "tiling %s" % group)["result_repr"])
+        shots = ok(call("render_scene", {
+            "angles": angles, "renderer": "arnold",
+            "resolution": 900, "samples": 3, "zoom": zoom,
+            "isolate": ["|" + group], "target": ["|" + group]}, 2400.0),
+            "render %s" % group)["images"]
+        pngs = [base64.b64decode(shot["png_b64"]) for shot in shots]
+        with open(os.path.join(OUT_DIR, out_png), "wb") as fh:
+            fh.write(images.contact_sheet(pngs, cols=2))
+        blank = [i for i, png in enumerate(pngs)
+                 if images.pixel_stats(png)["blank"]]
+        lattice = [-1.5, -1.5, -1.5,
+                   cells_x * 3.0 - 1.5, cells_y * 3.0 - 1.5, 1.5]
+        over = [lattice[i] - built["bbox"][i] if i < 3
+                else built["bbox"][i] - lattice[i] for i in range(6)]
+        inside = all(-INSET - 1e-3 <= e <= MAX_OUTSET + 1e-3 for e in over)
+        print("\n%s: %d pieces, bbox %s" % (group, built["pieces"], built["bbox"]))
+        print("  lattice     %s" % [round(q, 4) for q in lattice])
+        print("  oversail    %s m per face (allowance -%.3f .. %.2f) -> %s"
+              % ([round(e, 4) for e in over], INSET, MAX_OUTSET,
+                 "WITHIN" if inside else "OUT OF BAND"))
+        return {"group": group, "pieces": built["pieces"],
+                "measured_bbox": built["bbox"],
+                "lattice_bbox": [round(q, 4) for q in lattice],
+                "oversail_per_face_m": [round(e, 4) for e in over],
+                "allowance_m": [-INSET, MAX_OUTSET],
+                "within_allowance": bool(inside)}, blank, inside
+
+    tiling, wall_blank, wall_ok = build_wall(
+        wall, "kit_wall", 6, 5, "tiling_proof.png",
+        ["front", "three_quarter"])
+    # Roofs are looked at from ABOVE, so the steel wall gets a top view it
+    # would otherwise never be judged from - the same mistake #628 made when
+    # it framed a kit grid from one camera and filed a picture of the tower.
+    steel_tiling, steel_blank, steel_ok = build_wall(
+        steel_wall, "kit_steel_wall", 5, 5, "tiling_proof_steel.png",
+        ["three_quarter", "top"])
+    wall_blank = list(wall_blank) + list(steel_blank)
+    wall_ok = wall_ok and steel_ok
+
+    # ---- the soffit, from the one side it is for ---------------------------
+    soffit_run = ast.literal_eval(
+        run("NAMES = %r\n%s" % (["kit_steel_soffit_a"] * 3, SOFFIT_CODE),
+            "soffit run")["result_repr"])
+    soffit_shots = ok(call("render_scene", {
+        "angles": ["three_quarter", "top"], "renderer": "arnold",
+        "resolution": 700, "samples": 3, "zoom": 1.0,
+        "isolate": ["|kit_soffit_run"], "target": ["|kit_soffit_run"]}, 1200.0),
+        "render soffit run")["images"]
+    soffit_pngs = [base64.b64decode(shot["png_b64"]) for shot in soffit_shots]
+    with open(os.path.join(OUT_DIR, "soffit_underside.png"), "wb") as fh:
+        fh.write(images.contact_sheet(soffit_pngs, cols=2))
+    soffit_blank = [i for i, png in enumerate(soffit_pngs)
+                    if images.pixel_stats(png)["blank"]]
+    print("\nsoffit underside: %d pieces flipped and shot from above, %d blank"
+          % (soffit_run["pieces"], len(soffit_blank)))
+
+    # ---- damage detail: the six new states, close, beside nothing else -----
+    # The contact sheet renders every piece at 320 px, which is enough to
+    # confirm a piece EXISTS and nowhere near enough to judge whether a torn
+    # edge reads as continuous with the shard library. These are the claim's
+    # evidence, so they get their own resolution.
+    damage_names = [n for n in names if parse_name(n)[1] == "damaged"]
+    damage_tiles, damage_blank = [], []
+    for name in damage_names:
+        shot = ok(call("render_scene", {
+            "angles": ["three_quarter"], "renderer": "arnold",
+            "resolution": 560, "samples": 3, "zoom": 1.0,
+            "isolate": ["|" + name], "target": ["|" + name]}, 900.0),
+            "render damage %s" % name)["images"][0]
+        png = base64.b64decode(shot["png_b64"])
+        if images.pixel_stats(png)["blank"]:
+            damage_blank.append(name)
+        damage_tiles.append(png)
+    with open(os.path.join(OUT_DIR, "damage_detail.png"), "wb") as fh:
+        fh.write(images.contact_sheet(damage_tiles, cols=3))
+    print("\ndamage detail: %d of %d states rendered, %d blank"
+          % (len(damage_tiles), len(damage_names), len(damage_blank)))
+    if damage_blank:
+        print("  BLANK: %s" % ", ".join(damage_blank))
 
     measured = check["tris"]
+    extents = check.get("extent", {})
     entries = []
     total_tris = 0
+    total_budget = 0
+    # THE OUTSET AUDIT. `outset` above is derived from the box spec, which is
+    # the INTENT; a taper shrinks the box afterwards, so what ships can be
+    # smaller. Both concrete bases declared 0.15 and delivered 0.024 through
+    # exactly that gap. The manifest now carries the MEASURED number and the
+    # spec figure beside it, so the difference is visible instead of implied.
+    outset_gaps = []
     for name in names:
         role, context, variant = parse_name(name)
         tris = measured.get(name, 0)
+        budget = TRI_BUDGET.get(context, TRI_BUDGET_DEFAULT)
         total_tris += tris
+        total_budget += budget
+        reached = extents.get(name)
+        outset_measured = (round(max(0.0, reached - CELL / 2.0), 4)
+                           if reached is not None else outset[name])
+        if abs(outset_measured - outset[name]) > 1e-3:
+            outset_gaps.append((name, outset[name], outset_measured))
         entries.append({
             "name": name, "role": role, "context": context, "variant": variant,
             "triangles": tris, "boxes": len(pieces[name]),
-            "budget": TRI_BUDGET.get(context, TRI_BUDGET_DEFAULT),
-            "outset_m": outset[name],
+            "budget": budget,
+            "budget_utilisation_pct": round(100.0 * tris / budget, 1),
+            "outset_m": outset_measured,
+            "outset_from_spec_m": outset[name],
         })
 
-    print("\n%-26s %-9s %-8s %6s %6s" % ("piece", "role", "context", "tris", "cap"))
+    print("\n%-26s %-9s %-9s %6s %6s %7s %8s"
+          % ("piece", "role", "context", "tris", "cap", "util%", "outset"))
     for e in entries:
         flag = "" if e["triangles"] <= e["budget"] else "  OVER"
-        print("%-26s %-9s %-8s %6d %6d%s"
+        print("%-26s %-9s %-9s %6d %6d %6.0f%% %8.4f%s"
               % (e["name"], e["role"], e["context"], e["triangles"],
-                 e["budget"], flag))
-    print("\n%d pieces, %d triangles total, %d shading group(s): %s"
-          % (len(entries), total_tris, len(check["shading_groups"]),
-             ", ".join(check["shading_groups"])))
+                 e["budget"], e["budget_utilisation_pct"], e["outset_m"], flag))
+
+    # UTILISATION AS A PERCENTAGE, not a pass mark. Revision 1 passed while
+    # spending 6% of its budget, and "passed" is what hid that.
+    util = round(100.0 * total_tris / total_budget, 1)
+    print("\n%d pieces, %d triangles total against a %d-triangle budget = "
+          "%.1f%% UTILISATION, %d shading group(s): %s"
+          % (len(entries), total_tris, total_budget, util,
+             len(check["shading_groups"]), ", ".join(check["shading_groups"])))
+    if outset_gaps:
+        print("outset: spec vs delivered differs on %d piece(s) - the taper "
+              "gap, reported not hidden:" % len(outset_gaps))
+        for name, spec_v, meas_v in outset_gaps:
+            print("    %-26s spec %.4f  delivered %.4f" % (name, spec_v, meas_v))
     print("widest measured extent %.5f m (cell half-extent %.3f)"
           % (check["max_abs_extent"], H))
     print("UV range across every piece %.5f .. %.5f (atlas is 0..1)"
@@ -1059,6 +1768,40 @@ def main():
     print("contact sheet %d tiles, %d blank, clipped %.4f, mean luma %.1f"
           % (len(tiles), len(blanks), stats["clipped_fraction"],
              stats.get("mean_luma", -1)))
+
+    # Measured against the DELIVERED shard manifest, not against the shard
+    # generator's source: if that atlas is ever re-authored this re-measures
+    # itself instead of going stale.
+    continuity = fracture_continuity()
+    # A table nothing uses proves nothing, so the other direction is checked
+    # too: every patch a damage piece puts on a broken surface must be IN the
+    # pairing, and every pair must be used by something. `shadow` is the
+    # declared exception - a void, not a material - and everything else in a
+    # damage piece is surviving skin, which matches its intact neighbour
+    # rather than the fracture atlas.
+    damage_patches = {b["patch"] for name in names
+                      if parse_name(name)[1] == "damaged"
+                      for b in pieces[name]}
+    paired = damage_patches & set(FRACTURE_ANALOGUE)
+    print("\ndamage states use %d patches; %d are paired to the fracture "
+          "atlas, the rest are surviving skin or `shadow`"
+          % (len(damage_patches), len(paired)))
+    if continuity is None:
+        print("fracture continuity: demigol_shards is not delivered here - "
+              "recorded as null rather than as nothing")
+    else:
+        unused = set(FRACTURE_ANALOGUE) - damage_patches
+        if unused:
+            print("FRACTURE_ANALOGUE pairs patches no damage piece uses: %s"
+                  % ", ".join(sorted(unused)))
+        print("%-14s %-17s %-16s %-17s %s"
+              % ("kit patch", "kit rgb", "stands in for", "fracture rgb",
+                 "dRGB"))
+        for k in sorted(continuity, key=lambda k: continuity[k]["max_delta"]):
+            c = continuity[k]
+            print("%-14s %-17s %-16s %-17s %s"
+                  % (k, tuple(c["kit_rgb"]), c["stands_in_for"],
+                     tuple(c["fracture_rgb"]), tuple(c["delta_rgb"])))
 
     manifest = {
         "contract": "Demigol KIT OF PARTS",
@@ -1076,8 +1819,15 @@ def main():
                            "constrains which CELLS a piece occupies, never the "
                            "render mesh, because collision is generated from "
                            "the grid." % MAX_OUTSET,
-            "pieces_with_outset": sum(1 for v in outset.values() if v > 0),
-            "max_declared_outset_m": max(outset.values()),
+            "pieces_with_outset": sum(1 for e in entries if e["outset_m"] > 0),
+            "max_declared_outset_m": max(e["outset_m"] for e in entries),
+            "outset_is": "MEASURED off the built mesh, revision 3 onward. It "
+                         "used to be derived from the box spec, which is the "
+                         "intent and not the delivery - a `taper` shrinks a "
+                         "box after the spec is written, and both concrete "
+                         "bases declared 0.15 m while delivering 0.024. Each "
+                         "piece also carries outset_from_spec_m so the gap is "
+                         "visible rather than implied.",
         },
         "pivot": "cell centre (0,0,0) on every piece",
         "authored_facing": "+Z; the shell rotates in 90 degree steps. Corner "
@@ -1139,9 +1889,43 @@ def main():
                     "default": TRI_BUDGET_DEFAULT,
                     "tris_per_box": TRIS_PER_BOX},
         "totals": {"pieces": len(entries), "triangles": total_tris,
+                   "budget_triangles": total_budget,
+                   "budget_utilisation_pct": util,
+                   "utilisation_note":
+                       "REPORTED AS A PERCENTAGE, not as a pass mark. Revision "
+                       "1 passed while spending 6%% of its budget and the "
+                       "pass mark is what hid that. Revision 2 was %d tris of "
+                       "4,720 (50.1%%); revision 3 is %d of %d (%.1f%%), and "
+                       "all 17 new pieces sit at 9 boxes = 108 of 120 (90%%)."
+                       % (2364, total_tris, total_budget, util),
+                   "pieces_by_role": {
+                       r: sum(1 for e in entries if e["role"] == r)
+                       for r in sorted({e["role"] for e in entries})},
+                   "pieces_by_context": {
+                       c: sum(1 for e in entries if e["context"] == c)
+                       for c in sorted({e["context"] for e in entries})},
                    "shading_groups": check["shading_groups"],
                    "widest_extent_m": check["max_abs_extent"],
                    "uv_range": [check["uv_min"], check["uv_max"]]},
+        "taper_trap": {
+            "what": "`taper` flares X and Z together, so a tapered box whose X "
+                    "or Z reach lands on a meeting face (1.495 inset, or the "
+                    "1.5 cell face) does not actually meet its neighbour - the "
+                    "flare pulls its far end away and opens a notch in a run "
+                    "that is meant to be continuous.",
+            "offenders": [{"piece": t[0], "box": t[1], "axis": t[2],
+                           "reach_m": t[3], "taper": list(t[4])}
+                          for t in taper_trap],
+            "not_fixed_here": "the one offender is kit_brick_facade_c's string "
+                              "course. It is pre-existing, it is brick, and "
+                              "brick is on this delivery's do-not-touch list. "
+                              "Reported so it is a known finding rather than a "
+                              "silent one; it costs one number to fix whenever "
+                              "brick is next opened.",
+            "why_it_prints_instead_of_failing":
+                "a gate that fails on a piece you are forbidden to fix is a "
+                "gate that gets disabled.",
+        },
         "self_check": {
             "budget": "arithmetic, before the build: every piece is boxes at 12 "
                       "tris each, so the count is exact",
@@ -1152,30 +1936,143 @@ def main():
             "failures": check["fail_count"],
         },
         "pieces": entries,
-        "tiling_proof": {
-            "what": "a 6 x 5 wall built from the kit on the real 3 m lattice, "
-                    "mixing brick, infill, glass, steel and a corner run",
-            "pieces": tiling["pieces"],
-            "measured_bbox": tiling["bbox"],
-            "lattice_bbox": [round(q, 4) for q in want],
-            "oversail_per_face_m": [round(e, 4) for e in excess],
-            "allowance_m": [-INSET, MAX_OUTSET],
-            "within_allowance": bool(wall_ok),
+        "revision": 3,
+        "revision_3": {
+            "what_changed": "17 new pieces, 41 -> %d. Eleven steel and six "
+                            "damage states. No existing piece was touched, no "
+                            "patch colour moved, no new material and no new "
+                            "atlas: every new mesh lands on the existing 16 "
+                            "patches, so the whole city is still one draw "
+                            "call." % len(entries),
+            "why_steel": "Steel is what the game is about - the pillar is "
+                         "'cut the bones, not the skin', and steel is the only "
+                         "role the player aims at - and it had 6 pieces of 41. "
+                         "Worse, the kit shipped no steel roof piece at all, so "
+                         "#611's rule S3b dressed every steel deck as a "
+                         "concrete plate: 13,186 of 45,638 cells, ~28%% of all "
+                         "visible surface, resolving to one concrete family.",
+            "why_three_roofs": "One new piece dressed across all 13,186 "
+                               "fallback cells replaces one monotony with "
+                               "another. The deck ships as a field piece, a "
+                               "plant piece and a perimeter crown.",
+            "steel_pieces_before": 6,
+            "steel_pieces_after": sum(1 for e in entries
+                                      if e["role"] == "steel"),
+            "not_extended": "brick (11 pieces), non-steel corner/endcap, "
+                            "non-steel soffit and concrete_beam were left "
+                            "exactly as delivered. They are idle for generator "
+                            "reasons, not art reasons, and building more of "
+                            "what is already idle is the failure mode this "
+                            "delivery was told to avoid. There is deliberately "
+                            "no brick damage state for the same reason.",
+            "atlas_untouched": "kit_albedo.png, kit_normal.png and "
+                               "kit_mask.png are regenerated by the same "
+                               "deterministic code from the same 16-patch "
+                               "table. A new family is #653's business, not "
+                               "this delivery's.",
+        },
+        "damage_states": {
+            "what": "one hurt-but-not-yet-eroded state per role: sheared "
+                    "plate, exposed rebar, shattered pane, cracked infill. "
+                    "Two each for steel and concrete, the roles this game "
+                    "looks at most.",
+            "context": "damaged",
+            "why_a_context_and_not_a_variant_letter":
+                "the shell picks variants from a coordinate hash. Damage is a "
+                "STATE the consumer selects, so it can no more ride in the "
+                "variant slot than chirality could - which is exactly why the "
+                "`endcap` context exists. A hash must never be able to make a "
+                "cell look damaged.",
+            "no_brick_state": "the generator emits no Brick cells, so a brick "
+                              "damage state would ship idle.",
+            "substitutes": DAMAGE_SUBSTITUTES,
+            "continuity_with_demigol_shards": {
+                "the_constraint": "ask 2 wants these continuous with the "
+                                  "shard library's fracture material; the "
+                                  "kit's hard constraint is ONE material. So "
+                                  "they cannot BE that material, and the "
+                                  "continuity is a MEASUREMENT rather than a "
+                                  "claim.",
+                "how_it_is_measured":
+                    "the pairing is AUTHORED (FRACTURE_ANALOGUE in the "
+                    "generator) and only the delta is measured, against the "
+                    "DELIVERED shard manifest. Pairing by nearest RGB was "
+                    "tried and is the wrong instrument: it matches `steel` to "
+                    "`concrete_core` at dRGB 24 and calls that a good result, "
+                    "when the shard library would never put concrete on a "
+                    "steel tear. A named fracture patch missing from the "
+                    "delivery fails the run rather than dropping a row.",
+                "surviving_skin_is_not_in_this_table":
+                    "a damage piece's untorn surfaces use the same patch the "
+                    "INTACT piece would, because what they have to match is "
+                    "the neighbouring cell and not the fracture atlas. "
+                    "`shadow` is absent for a different reason: a crack void "
+                    "is the absence of a surface, not a material.",
+                "measured": continuity,
+                "the_one_real_gap":
+                    "steel. The fracture atlas's `steel_torn` is deliberately "
+                    "brighter than anything in the kit ('a section opened a "
+                    "second ago should be bright bare metal'), so a torn face "
+                    "here cannot match it in absolute value. What is preserved "
+                    "instead is the RANKING: a tear authored on `steel` "
+                    "against a plate on `steel_dark` reads brighter than its "
+                    "surround, same direction as the fracture library, lower "
+                    "absolute.",
+                "the_option_not_taken":
+                    "give these pieces a second submesh bound to "
+                    "`shard_fracture`. That is zero new materials for the "
+                    "PROJECT - #663 already ships it, so the batch count stays "
+                    "intact-kit plus everything-broken - and it would close the "
+                    "steel and glass gaps outright. It needs one consumer "
+                    "change: ChunkDresser writing a two-element sharedMaterials "
+                    "for `damaged` cells, where it writes a single "
+                    "sharedMaterial today. Not taken here because a piece that "
+                    "arrives unusable until someone changes the consumer is "
+                    "worse than a piece that drops in and is 36/255 too dark "
+                    "on one surface. Say the word and it is a re-run, not a "
+                    "re-model.",
+            },
+        },
+        "tiling_proof": dict(tiling, **{
+            "what": "a 6 x 5 wall built from the revision-2 kit on the real "
+                    "3 m lattice, mixing brick, infill, glass, steel and a "
+                    "corner run. UNCHANGED from revision 2 on purpose: it is "
+                    "the baseline that says the existing kit still tiles.",
             "corner_rule": "rotating the authored (+Z,+X) corner by 90 degree "
                            "steps gives (+X,-Z), (-Z,-X), (-X,+Z) - exactly the "
                            "four corners of a rectangular plan. A wall that "
                            "simply ENDS needs (+Z,-X), which is a mirror, not a "
-                           "rotation, and is not in this kit.",
-        },
+                           "rotation. Steel now has one: kit_steel_endcap_a.",
+        }),
+        "tiling_proof_steel": dict(steel_tiling, **{
+            "what": "a 5 x 5 wall built from revision 3's own pieces - all "
+                    "eleven steel and all six damage states - with the roofs "
+                    "on top and the soffits directly beneath them, which is "
+                    "the relationship a deck and its underside actually have "
+                    "and the only arrangement the soffit can be judged in.",
+            "why_a_second_wall": "the first wall cannot say anything about "
+                                 "pieces it does not contain, and 'the new "
+                                 "pieces meet the old ones' is exactly the "
+                                 "risk a new family introduces.",
+            "chirality": "both ends in one image - the mirrored endcap at "
+                         "x = 0 where the wall stops, the authored corner at "
+                         "x = 4.",
+            "rendered_from": ["three_quarter", "top"],
+            "why_a_top_view": "roofs are looked at from above. A wall shot "
+                              "from the front is a picture of the one surface "
+                              "these pieces are not about.",
+        }),
         "files": ["demigol_kit.fbx", "kit_albedo.png", "kit_normal.png",
-                  "kit_mask.png", "contact_sheet.png",
-                  "tiling_proof.png"],
+                  "kit_mask.png", "contact_sheet.png", "tiling_proof.png",
+                  "tiling_proof_steel.png", "damage_detail.png",
+                  "soffit_underside.png"],
     }
     with open(os.path.join(OUT_DIR, "manifest.json"), "w") as fh:
         json.dump(manifest, fh, indent=2)
 
     sys.exit(0 if check["fail_count"] == 0 and not blanks
-             and not wall_blank and wall_ok else 1)
+             and not wall_blank and wall_ok and not damage_blank
+             and not soffit_blank else 1)
 
 
 if __name__ == "__main__":

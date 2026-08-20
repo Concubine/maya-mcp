@@ -32,7 +32,55 @@ HEROES = ["tower", "block", "slab", "stump"]
 def test_reader_finds_every_kit_mesh():
     facts = fbx_probe.read_fbx(KIT)
     assert facts.version == 7700
-    assert len(facts.meshes) == 41
+    assert len(facts.meshes) == 58          # revision 3: 41 + 11 steel + 6 damage
+
+
+def test_the_kit_manifest_agrees_with_the_fbx_node_names():
+    """"FBX node names are truth and the manifest must agree with them" is a
+    contract clause that nothing checked. It is checkable against the two
+    delivered files alone, with no Maya in the loop, and the failure it
+    guards is the one #596 shipped: a manifest describing pieces the file
+    does not contain under those names.
+    """
+    import json
+    facts = fbx_probe.read_fbx(KIT)
+    manifest = json.loads(
+        (REPO / "evals" / "demigol_kit" / "manifest.json").read_text())
+    in_file = sorted(n.name for n in facts.nodes
+                     if facts.geometries.get(n.geometry))
+    declared = sorted(p["name"] for p in manifest["pieces"])
+    assert in_file == declared, (
+        "only in the FBX: %s | only in the manifest: %s"
+        % (sorted(set(in_file) - set(declared)),
+           sorted(set(declared) - set(in_file))))
+    assert len(in_file) == len(set(in_file)), "duplicate node names"
+
+
+def test_the_kit_manifest_declares_the_outset_the_fbx_delivers():
+    """`outset_m` is what the consumer plans collision headroom around, and
+    until revision 3 it was derived from the box SPEC - which a `taper`
+    silently shrinks afterwards. Measured off the vertices here, so the
+    declaration cannot drift from the delivery again.
+    """
+    import json
+    facts = fbx_probe.read_fbx(KIT)
+    manifest = json.loads(
+        (REPO / "evals" / "demigol_kit" / "manifest.json").read_text())
+    declared = {p["name"]: p["outset_m"] for p in manifest["pieces"]}
+    allowance = manifest["envelope"]["max_outset_m"]
+    for node in facts.nodes:
+        verts = facts.geometries.get(node.geometry)
+        if not verts:
+            continue
+        reach = max(max(abs(verts[i]), abs(verts[i + 1]), abs(verts[i + 2]))
+                    for i in range(0, len(verts), 3))
+        measured = max(0.0, reach - 1.5)
+        assert measured <= allowance + 1e-3, (
+            "%s oversails %.4f m, past the %.2f allowance"
+            % (node.name, measured, allowance))
+        assert measured <= declared[node.name] + 1e-3, (
+            "%s delivers %.4f m of outset but declares %.4f"
+            % (node.name, measured, declared[node.name]))
 
 
 def test_reader_strips_the_fbx_name_separator():

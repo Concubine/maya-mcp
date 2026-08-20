@@ -526,6 +526,146 @@ class TestKitAtlasArithmetic:
             % (course_px * 0.16, kit.COURSES_PER_METRE))
 
 
+# ==================================== revision 3: the steel pieces and damage
+
+class TestKitRevision3Steel:
+    """#677 ask 1. The gap was measurable, so the fix is checkable."""
+
+    def test_steel_has_a_piece_for_every_context_the_classifier_produces(self):
+        # #611's CellContext can classify a steel cell as any of these, and
+        # before revision 3 the kit answered only three of them - which is how
+        # 13,186 cells ended up falling back to a concrete plate.
+        want = {"roof", "soffit", "facade", "corner", "endcap",
+                "column", "beam", "lobby"}
+        have = {kit.parse_name(n)[1] for n in kit.PIECES()
+                if kit.parse_name(n)[0] == "steel"}
+        assert want <= have, "steel is still missing %s" % sorted(want - have)
+
+    def test_steel_roof_has_more_than_one_variant(self):
+        # One roof piece across 13,186 cells replaces one monotony with
+        # another. This is the whole reason there are three.
+        roofs = [n for n in kit.PIECES()
+                 if kit.parse_name(n)[:2] == ("steel", "roof")]
+        assert len(roofs) >= 3, roofs
+
+    def test_the_steel_endcap_is_the_mirror_of_the_steel_corner(self):
+        # Chirality is a mirror, not a rotation, so it cannot be reached by
+        # the shell's 90 degree steps and cannot ride in the hash-picked
+        # variant slot. Same rule brick, infill and glass already follow.
+        p = kit.PIECES()
+        assert (kit.mirror_x(p["kit_steel_corner_a"])
+                == p["kit_steel_endcap_a"])
+
+
+class TestKitDamageStates:
+    """#677 ask 2, and the gate for the one defect no automated check saw."""
+
+    def test_damage_is_a_context_and_never_a_variant(self):
+        # The shell picks variants from a coordinate hash. A hash must never
+        # be able to decide a cell looks damaged.
+        for name in kit.PIECES():
+            role, context, variant = kit.parse_name(name)
+            assert "damag" not in variant, name
+
+    def test_every_damage_state_is_substitutable_and_matches_its_neighbour(self):
+        assert kit.check_damage_substitutions(kit.PIECES()) == []
+
+    def test_a_damage_state_wearing_the_wrong_skin_is_caught(self):
+        # THE POSITIVE CONTROL. Both steel states shipped their first render
+        # on `steel_dark` while the intact pieces they replace are `steel`,
+        # and every check of the day passed. `shadow` is a patch the piece
+        # really uses, so this exercises the seam branch and not the
+        # does-not-use-it branch.
+        pieces = kit.PIECES()
+        entry = dict(kit.DAMAGE_SUBSTITUTES["kit_steel_damaged_a"])
+        entry["skin_patch"] = "shadow"
+        saved = kit.DAMAGE_SUBSTITUTES["kit_steel_damaged_a"]
+        kit.DAMAGE_SUBSTITUTES["kit_steel_damaged_a"] = entry
+        try:
+            fails = kit.check_damage_substitutions(pieces)
+        finally:
+            kit.DAMAGE_SUBSTITUTES["kit_steel_damaged_a"] = saved
+        assert any("visible seam" in f for f in fails), fails
+
+    def test_a_damage_state_with_no_substitution_rule_is_caught(self):
+        pieces = dict(kit.PIECES())
+        pieces["kit_concrete_damaged_z"] = pieces["kit_concrete_damaged_a"]
+        fails = kit.check_damage_substitutions(pieces)
+        assert any("no DAMAGE_SUBSTITUTES entry" in f for f in fails), fails
+
+    def test_no_brick_damage_state(self):
+        # The generator emits no Brick cells, so a brick damage state would
+        # ship idle - the one failure mode #677 named outright.
+        assert not [n for n in kit.PIECES()
+                    if kit.parse_name(n)[:2] == ("brick", "damaged")]
+
+
+class TestKitFractureContinuity:
+    """The damage states have to read continuous with `demigol_shards`, and
+    the kit may not use its material. So the claim is a measurement."""
+
+    def test_every_broken_surface_patch_is_paired_to_the_fracture_atlas(self):
+        used = {b["patch"] for n in kit.PIECES()
+                if kit.parse_name(n)[1] == "damaged"
+                for b in kit.PIECES()[n]}
+        # Everything not paired must be either surviving skin (a patch an
+        # intact piece of the same role also uses) or the declared void.
+        intact = {}
+        for other, boxes in kit.PIECES().items():
+            if kit.parse_name(other)[1] == "damaged":
+                continue
+            intact.setdefault(kit.parse_name(other)[0], set()).update(
+                b["patch"] for b in boxes)
+        for patch in used - set(kit.FRACTURE_ANALOGUE):
+            assert patch == "shadow" or any(patch in v for v in intact.values()), (
+                "%s is neither paired to the fracture atlas, nor `shadow`, "
+                "nor a patch any intact piece wears" % patch)
+
+    def test_the_pairing_names_nothing_the_kit_does_not_have(self):
+        for kit_patch in kit.FRACTURE_ANALOGUE:
+            assert kit_patch in kit.PATCH, kit_patch
+
+    def test_the_pairing_names_nothing_the_shard_delivery_does_not_have(self):
+        import json as _json
+        if not os.path.exists(kit.SHARDS_MANIFEST):
+            pytest.skip("demigol_shards is not delivered in this tree")
+        with open(kit.SHARDS_MANIFEST) as fh:
+            frac = _json.load(fh)["materials"]["fracture"]["patches"]
+        for frac_patch in kit.FRACTURE_ANALOGUE.values():
+            assert frac_patch in frac, frac_patch
+
+    def test_no_pair_is_dead(self):
+        used = {b["patch"] for n in kit.PIECES()
+                if kit.parse_name(n)[1] == "damaged"
+                for b in kit.PIECES()[n]}
+        assert set(kit.FRACTURE_ANALOGUE) <= used, (
+            "FRACTURE_ANALOGUE pairs patches no damage piece uses: %s"
+            % sorted(set(kit.FRACTURE_ANALOGUE) - used))
+
+
+class TestKitTaperTrap:
+    """`taper` flares X and Z together, so a tapered box reaching a meeting
+    face pulls away from the neighbour it is supposed to meet."""
+
+    def test_no_new_piece_sits_in_the_taper_trap(self):
+        # kit_brick_facade_c's string course does, and is grandfathered: it
+        # is pre-existing and brick is on #677's do-not-touch list. Pinning
+        # the known set is what stops a SECOND one appearing unnoticed.
+        known = {"kit_brick_facade_c"}
+        caught = set()
+        for name, boxes in kit.PIECES().items():
+            for b in boxes:
+                if not b.get("taper"):
+                    continue
+                for axis in (0, 2):
+                    reach = abs(b["pos"][axis]) + b["dim"][axis] / 2.0
+                    if (abs(reach - kit.H) < 1e-3
+                            or abs(reach - kit.CELL / 2.0) < 1e-3):
+                        caught.add(name)
+        assert caught == known, (
+            "taper trap set moved: %s" % sorted(caught ^ known))
+
+
 # ====================================================== revision 3: silhouette
 
 class TestTiers:
