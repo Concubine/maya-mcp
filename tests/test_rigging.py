@@ -777,6 +777,13 @@ class TestPoseIk:
                     if c[0] == "setAttr" and c[1] == "|pelvis|hip|knee.rotate"
                     and i < handle_at]
         assert prebends, "the interior joint must be nudged BEFORE the handle exists"
+        # regression: preferredAngle seed and restore - no persistent IK state
+        pa_calls = [c for c in fake.calls
+                    if c[0] == "setAttr" and c[1] == "|pelvis|hip|knee.preferredAngle"]
+        assert len(pa_calls) >= 2, (
+            "preferredAngle must be set at least twice (seed and restore)")
+        assert fake.attrs["|pelvis|hip|knee.preferredAngle"] == [(0.0, 0.0, 0.0)], (
+            "the final preferredAngle must restore to the prior value")
 
     def test_out_of_reach_target_warns_with_the_reach(self, fake):
         self._rig(fake)

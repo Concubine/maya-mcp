@@ -2732,6 +2732,10 @@ class TestPoseIkInMaya:
         from maya_plugin.handlers import rigging
 
         root = self._skeleton()
+        # regression: capture preferredAngle before IK solve to verify restore
+        interior_joint = "|ik_pelvis|ik_hip|ik_knee"
+        before_pa = cmds.getAttr(interior_joint + ".preferredAngle")[0]
+
         out = rigging.pose_ik({"root": root, "joint": "ik_ankle",
                                "target": self.TARGET, "pole": self.POLE})
         # the bind-pose leg is perfectly straight - this asserts the
@@ -2749,6 +2753,12 @@ class TestPoseIkInMaya:
         assert not cmds.ls(type="ikEffector")
         assert not cmds.ls(type="poleVectorConstraint")
         assert not cmds.ls("*_pole", type="transform")
+        # regression: preferredAngle must restore - no persistent IK state includes it
+        after_pa = cmds.getAttr(interior_joint + ".preferredAngle")[0]
+        for axis in range(3):
+            assert abs(after_pa[axis] - before_pa[axis]) < 1e-9, (
+                "preferredAngle did not restore: before %r, after %r"
+                % (before_pa, after_pa))
 
     def test_bake_is_the_phase1_pose_currency(self):
         import maya.cmds as cmds
