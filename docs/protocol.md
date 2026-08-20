@@ -309,7 +309,7 @@ nothing validates at all. Non-numeric text, floats and booleans are still refuse
 |---|---|---|
 | `create_skeleton` | `{ joints? \| chain?, chain_prefix?, root_name? }` | `{ root, joints: [{name, position, parent, orient}], warnings }` |
 | `bind_skin` | `{ mesh, root, method?, max_influences? }` | `{ mesh, root, skin_cluster, influences, unweighted_vertices, max_influences_exceeded, per_joint, warnings }` |
-| `pose_skeleton` | `{ root, rotations, space? }` | `{ applied, joints: [{name, world_position}], max_displacement, displaced_vertices, warnings }` |
+| `pose_skeleton` | `{ root, rotations, space? }` | `{ applied, joints: [{name, world_position}], max_displacement, displaced_vertices, per_mesh, warnings }` |
 | `reset_pose` | `{ root }` | `{ reset, max_displacement, warnings }` |
 
 `create_skeleton` takes either an explicit `joints` hierarchy or the `chain`
@@ -334,11 +334,50 @@ absolute** (not deltas — re-applying a pose is idempotent). This map is the
 pose currency phases 3 and 6 reuse: IK bakes into it, a clip keys it.
 `max_displacement` is measured from vertices before/after, never bounding
 boxes; a near-zero result against the mesh's own size warns, since that
-usually means the rotation landed on a joint owning no vertices.
+usually means the rotation landed on a joint owning no vertices. Each bound
+mesh is also measured alone in `per_mesh` — a combined max can hide one
+inert mesh among several.
 
 `reset_pose` restores the skeleton's `dagPose` bind pose. An unbound
 skeleton has no bind pose — rotations are zeroed instead (the
 `create_skeleton` rest pose) and a warning says so.
+
+## Commands (rigging phase 2 / #668)
+
+| cmd | params | result |
+|---|---|---|
+| `weight_report` | `{ mesh }` | `{ mesh, skin_cluster, vertices, max_influences, unweighted_vertices, unweighted_sample, max_influences_exceeded, exceeded_sample, max_weight_sum_error, histogram, per_joint, warnings }` |
+| `mirror_weights` | `{ mesh, axis?, direction? }` | `{ mesh, skin_cluster, axis, direction, mirrored_vertices, on_plane_vertices, unpaired_vertices, changed_vertices, unweighted_vertices, warnings }` |
+| `smooth_weights` | `{ mesh, joints?, iterations? }` | `{ mesh, skin_cluster, iterations, smoothed_vertices, changed_vertices, unweighted_vertices, max_influences_exceeded, warnings }` |
+| `set_region_weights` | `{ mesh, joint, faces? \| within_radius_of? + radius?, weight, falloff? }` | `{ mesh, skin_cluster, joint, vertices_in_region, changed_vertices, sole_owner_vertices, unweighted_vertices, warnings }` |
+
+Binding is one call; *good* weights are the craft, and agents cannot paint —
+so the craft is programmatic. All four operate on an existing bind and refuse
+an unbound mesh. `weight_report` is the perception tool (a measurement, no
+checkpoint): per-joint ownership, offending-vertex samples, the
+influence-count histogram, weight-sum drift. The three mutators write the
+whole table in one API call, then **re-read it and report from the re-read**:
+`changed_vertices` and post-op integrity (`unweighted_vertices`) are
+measured, never computed.
+
+`mirror_weights` pairs vertices and influences by reflected position
+(`+to-` copies the +axis side onto the −axis side). An asymmetric skeleton —
+an off-plane joint with no positional twin — refuses; asymmetric mesh regions
+are counted in `unpaired_vertices`, left unchanged, and warned about. Run it
+from the bind pose; a posed mesh pairs garbage and warns.
+
+`smooth_weights` is laplacian smoothing over the mesh graph — the fix for
+stair-stepped falloff at hips and shoulders. Every smoothed row is pruned
+back to the cluster's `max_influences` and renormalized, so smoothing never
+breaks the bind's promise to the exporter. `joints` limits smoothing to
+vertices those joints hold.
+
+`set_region_weights` blends one joint toward `weight` over a region — face
+ids (hard assignment) or a sphere (`within_radius_of` + `radius`, `linear` or
+`none` falloff) — while the other influences share the remainder in their
+existing proportions. An empty region refuses rather than silently doing
+nothing; a vertex the joint solely owns cannot shed weight (nobody to give it
+to) and is counted in `sole_owner_vertices`.
 
 ## Delivery
 
