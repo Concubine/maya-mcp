@@ -1,0 +1,251 @@
+{
+  "honesty": {
+    "residual": 2.320000000055914,
+    "warnings": [
+      "the target sits 2.78 from R_shoulder but the chain reaches only 0.46 - the solve will fall short and residual reports the miss",
+      "|humanoid moved by 5.191e-05 against a size of 2.347 - near-zero deformation usually means the chain owns none of its vertices"
+    ]
+  },
+  "poses": {
+    "crouch": {
+      "fk_max_visible_ratio": 1.233997,
+      "fk_worst_match": 7.783644864701074e-06,
+      "ik_max_visible_ratio": 1.206891,
+      "merged_rotations": {
+        "L_ankle": [
+          0,
+          0,
+          39.529
+        ],
+        "R_ankle": [
+          0,
+          0,
+          39.529
+        ],
+        "chest": [
+          0,
+          -10.0,
+          0
+        ],
+        "spine_01": [
+          0,
+          -10.0,
+          0
+        ],
+        "spine_02": [
+          0,
+          -10.0,
+          0
+        ],
+        "|pelvis|L_hip": [
+          0.0,
+          59.99988,
+          0.0
+        ],
+        "|pelvis|L_hip|L_knee": [
+          0.0,
+          -104.740736,
+          -0.0
+        ],
+        "|pelvis|L_hip|L_knee|L_ankle": [
+          0.0,
+          0.0,
+          39.529
+        ],
+        "|pelvis|R_hip": [
+          0.0,
+          59.99988,
+          0.0
+        ],
+        "|pelvis|R_hip|R_knee": [
+          0.0,
+          -104.740736,
+          -0.0
+        ],
+        "|pelvis|R_hip|R_knee|R_ankle": [
+          0.0,
+          0.0,
+          39.529
+        ],
+        "|pelvis|spine_01|spine_02|chest|L_shoulder": [
+          -179.999999,
+          0.0,
+          94.998061
+        ],
+        "|pelvis|spine_01|spine_02|chest|L_shoulder|L_elbow": [
+          -0.0,
+          -0.0,
+          -16.003877
+        ],
+        "|pelvis|spine_01|spine_02|chest|L_shoulder|L_elbow|L_wrist": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "|pelvis|spine_01|spine_02|chest|R_shoulder": [
+          180.0,
+          -0.0,
+          94.998061
+        ],
+        "|pelvis|spine_01|spine_02|chest|R_shoulder|R_elbow": [
+          0.0,
+          -0.0,
+          -16.003877
+        ],
+        "|pelvis|spine_01|spine_02|chest|R_shoulder|R_elbow|R_wrist": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "posing_calls_ik": 5,
+      "residuals": {
+        "L_ankle": 1.583913250727856e-06,
+        "L_wrist": 2.166253953926802e-06,
+        "R_ankle": 1.583913250727856e-06,
+        "R_wrist": 2.1662536713003745e-06
+      }
+    },
+    "extend": {
+      "fk_max_visible_ratio": 1.260613,
+      "fk_worst_match": 3.378240421678705e-08,
+      "ik_max_visible_ratio": 1.220136,
+      "merged_rotations": {
+        "L_ankle": [
+          0,
+          0,
+          7.529
+        ],
+        "R_ankle": [
+          0,
+          0,
+          7.529
+        ],
+        "chest": [
+          0,
+          0.0,
+          0
+        ],
+        "spine_01": [
+          0,
+          0.0,
+          0
+        ],
+        "spine_02": [
+          0,
+          0.0,
+          0
+        ],
+        "|pelvis|L_hip": [
+          0.0,
+          -0.0,
+          0.0
+        ],
+        "|pelvis|L_hip|L_knee": [
+          0.0,
+          4e-06,
+          0.0
+        ],
+        "|pelvis|L_hip|L_knee|L_ankle": [
+          0.0,
+          0.0,
+          7.529
+        ],
+        "|pelvis|R_hip": [
+          0.0,
+          -0.0,
+          0.0
+        ],
+        "|pelvis|R_hip|R_knee": [
+          0.0,
+          4e-06,
+          0.0
+        ],
+        "|pelvis|R_hip|R_knee|R_ankle": [
+          0.0,
+          0.0,
+          7.529
+        ],
+        "|pelvis|spine_01|spine_02|chest|L_shoulder": [
+          180.0,
+          -0.0,
+          115.0
+        ],
+        "|pelvis|spine_01|spine_02|chest|L_shoulder|L_elbow": [
+          0.0,
+          0.0,
+          -18.000001
+        ],
+        "|pelvis|spine_01|spine_02|chest|L_shoulder|L_elbow|L_wrist": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "|pelvis|spine_01|spine_02|chest|R_shoulder": [
+          180.0,
+          -0.0,
+          115.0
+        ],
+        "|pelvis|spine_01|spine_02|chest|R_shoulder|R_elbow": [
+          -0.0,
+          -0.0,
+          -18.000001
+        ],
+        "|pelvis|spine_01|spine_02|chest|R_shoulder|R_elbow|R_wrist": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "posing_calls_ik": 5,
+      "residuals": {
+        "L_ankle": 2.9321531433504725e-08,
+        "L_wrist": 4.014257307851706e-09,
+        "R_ankle": 2.9321531433504725e-08,
+        "R_wrist": 4.014257307851706e-09
+      }
+    },
+    "reach": {
+      "merged_rotations": {
+        "|pelvis|L_hip": [
+          -7.274104,
+          56.940436,
+          -14.610151
+        ],
+        "|pelvis|L_hip|L_knee": [
+          -0.146513,
+          -67.599331,
+          13.616614
+        ],
+        "|pelvis|L_hip|L_knee|L_ankle": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "|pelvis|spine_01|spine_02|chest|R_shoulder": [
+          110.449564,
+          39.882767,
+          -104.432515
+        ],
+        "|pelvis|spine_01|spine_02|chest|R_shoulder|R_elbow": [
+          1.232131,
+          -28.907283,
+          29.006659
+        ],
+        "|pelvis|spine_01|spine_02|chest|R_shoulder|R_elbow|R_wrist": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "posing_calls_ik": 2,
+      "residuals": {
+        "L_ankle": 8.73896862012998e-08,
+        "R_wrist": 2.0086049622471863e-09
+      }
+    }
+  },
+  "purity": {
+    "currency_max_err": 0.0
+  }
+}
