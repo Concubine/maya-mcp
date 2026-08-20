@@ -553,8 +553,11 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
             pass
     try:
         cmds.loadPlugin("fbxmaya", quiet=True)
-    except Exception:
-        pass
+    except Exception as exc:
+        raise HandlerError(
+            "the fbxmaya plugin failed to load: %s" % exc,
+            hint="the bundled FBX plugin lives in Maya's plug-ins directory; "
+                 "check the Plug-in Manager")
     for statement in (FBX_PREAMBLE_MEL + FBX_SCENE_CONTENT_MEL
                       + FBX_SHAPES_MEL + FBX_SKINS_MEL[include_skins]
                       + FBX_ANIM_MEL[include_animation]):

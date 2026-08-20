@@ -487,7 +487,7 @@ reports each channel's name and delta payload as read from the bytes.
 | cmd | params | result |
 |---|---|---|
 | `author_clip` | `{ root, name, fps=30, keys: [{time_s, rotations?, blend_weights?, root_position?}], interpolation, loop }` | `{ root, clip, fps, duration_s, frames, keyed_joints, keyed_weight_channels, root_position_keyed, interpolation, loop, replaced, per_key, warnings }` |
-| `preview_clip` | `{ root, name, angle?, every_nth?, resolution?, renderer? }` | `{ clip, fps, frames, images, ... }` |
+| `preview_clip` | `{ root, name, angle?, every_nth?, resolution?, renderer?, zoom? }` | `{ clip, fps, frames, images, ... }` |
 | `delete_clip` | `{ root }` | `{ root, clip, deleted_curves, max_displacement, warnings }` |
 
 `author_clip` keys the phase-1 pose map over time. **One clip exists per
@@ -508,7 +508,10 @@ change. `delete_clip` removes the curves, zeroes keyed weight channels,
 restores the bind pose, and reports the measured displacement.
 
 `preview_clip` renders every-nth frame through the render pipeline into one
-contact sheet (camera placed at frame 0 and held). Export: pass
+contact sheet (camera placed at frame 0 and held); `zoom` (default 1.0,
+mirrors `render_scene`'s) closes the framing in — the gate measured the
+default 320px cell unjudgeable and needed zoom 1.5-1.6 to read a blink.
+Export: pass
 `include_animation=true` to `export_fbx` — the clip bakes to per-frame
 curves (`FBXExportBakeComplexAnimation`) in one take named after the clip,
 and the byte gate asserts rotation curves per keyed joint at

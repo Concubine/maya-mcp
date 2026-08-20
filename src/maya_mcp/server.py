@@ -2378,6 +2378,11 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "'hw2' (default here) - a preview is many frames and motion "
             "does not need refraction."
         ))] = "hw2",
+        zoom: Annotated[float, Field(ge=0.2, le=8.0, description=(
+            "1.0 fits the framed subject; 2.0 is twice as close. The "
+            "default 320px cell is unjudgeable at 1.0 for small motion - "
+            "reading a blink needed 1.5-1.6."
+        ))] = 1.0,
         timeout_s: Annotated[float, Field(ge=30.0, le=MAX_RENDER_TIMEOUT_S,
                                           description=(
             "Seconds for ALL frames; a timeout does not stop the render."
@@ -2390,7 +2395,7 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "preview_clip",
             {"root": root, "name": name, "angle": angle,
              "every_nth": every_nth, "resolution": resolution,
-             "renderer": renderer},
+             "renderer": renderer, "zoom": zoom},
             timeout_s=timeout_s,
         )
         shots = result.get("images", [])

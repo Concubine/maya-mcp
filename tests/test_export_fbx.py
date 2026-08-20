@@ -414,12 +414,15 @@ def test_include_skins_must_be_a_bool(tmp_path):
 class FakeCmds:
     """Just enough Maya to drive the handler: record the calls, write a file."""
 
-    def __init__(self, existing=("golem_C_pelvis",)):
+    def __init__(self, existing=("golem_C_pelvis",), load_plugin_raises=None):
         self.existing = set(existing)
         self.calls = []
+        self.load_plugin_raises = load_plugin_raises
 
     def loadPlugin(self, name, quiet=False):
         self.calls.append(("loadPlugin", name))
+        if self.load_plugin_raises is not None:
+            raise self.load_plugin_raises
 
     def objExists(self, name):
         return name in self.existing
@@ -511,6 +514,21 @@ def test_a_clean_export_reports_the_file_not_the_scene(monkeypatch, tmp_path):
     # defaults, and the result says so with a null rather than an absent key.
     assert "FBXExportSkins -v false" in mel.evaluated
     assert out["skin"] is None
+
+
+def test_a_failed_plugin_load_raises_a_clear_handler_error(monkeypatch, tmp_path):
+    # #695 regression: loadPlugin's failure used to be swallowed by a bare
+    # `except Exception: pass`, so a genuinely missing plugin surfaced later
+    # as an obscure MEL error ("Cannot find procedure ...") instead of here,
+    # where the cause is known.
+    node = fbxbytes.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1, geometry=7)
+    facts = _facts([node])
+    cmds = FakeCmds(load_plugin_raises=RuntimeError("fbxmaya not found"))
+    _install(monkeypatch, cmds, facts)
+
+    with pytest.raises(HandlerError, match="fbxmaya plugin failed to load"):
+        export.export_fbx({"path": str(tmp_path / "golem.fbx"),
+                           "metres_per_unit": 1.0})
 
 
 def _good_skin_block():

@@ -1913,6 +1913,21 @@ class TestClipTools:
         text = " ".join(c.text for c in result.content if c.type == "text")
         assert "t=1.20s" in text
 
+    def test_preview_forwards_zoom(self):
+        # #695 fix wave: 320px default framing was unjudgeable in the gate;
+        # zoom mirrors render_scene's and must reach the handler.
+        png = png_b64(32, 32)
+        conn = FakeConn(responses={"preview_clip": {
+            "clip": "walk", "fps": 30,
+            "frames": [{"frame": 0, "time_s": 0.0}],
+            "images": [{"label": "t=0.00s", "angle": "side", "png_b64": png}],
+            "renderer": "hw2", "samples": 1, "fallback_light": False,
+            "zoom": 1.6, "relit_lights": 0}})
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_preview_clip", {
+            "root": "|pelvis", "name": "walk", "angle": "side", "zoom": 1.6}))
+        assert conn.calls[0]["params"]["zoom"] == 1.6
+
     def test_export_gains_include_animation(self):
         conn = FakeConn(responses={"export_fbx": dict(
             _export_result_stub(), animation=None)})
