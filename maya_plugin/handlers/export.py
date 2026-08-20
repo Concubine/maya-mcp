@@ -538,13 +538,23 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
         # before every export below. Reproduced directly: a 24 fps clip
         # exported first, then a 30 fps clip exported second in the SAME
         # mayapy process, baked the second clip's curves at 24 samples/s too
-        # (25 keys, not 31) - wrong and silent, no exception, no violation
-        # this reader could catch structurally since the file is internally
-        # consistent (duration_s still reads ~1.0 s). Unloading and
-        # reloading the plugin forces it to re-read the scene's current
-        # frame rate before every animated export.
-        cmds.unloadPlugin("fbxmaya", force=True)
-    cmds.loadPlugin("fbxmaya", quiet=True)
+        # (25 keys, not 31). Without the reload, a legitimate 30 fps export
+        # following a 24 fps one FAILS the gate with a bogus "bakes 25 keys,
+        # expected 31" violation (measured); it is silent only for a
+        # weight-channels-only clip, where the gate requires just >=2 keys.
+        # Unloading and reloading the plugin forces it to re-read the
+        # scene's current frame rate before every animated export.
+        try:
+            # a refused unload (GUI Maya, FBX UI open) must not abort the
+            # export - skipping the reload just means a stale fps surfaces
+            # as the key-count violation above.
+            cmds.unloadPlugin("fbxmaya", force=True)
+        except Exception:
+            pass
+    try:
+        cmds.loadPlugin("fbxmaya", quiet=True)
+    except Exception:
+        pass
     for statement in (FBX_PREAMBLE_MEL + FBX_SCENE_CONTENT_MEL
                       + FBX_SHAPES_MEL + FBX_SKINS_MEL[include_skins]
                       + FBX_ANIM_MEL[include_animation]):

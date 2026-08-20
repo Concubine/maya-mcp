@@ -3258,10 +3258,10 @@ class TestBlendshapeExportInMaya:
 
 
 class TestClipInMaya:
-    # The mayapy session is ONE persistent Maya scene across tests: reused
-    # joint names would collide with unique_name and make short-name
-    # resolution ambiguous, so every test builds under its OWN prefix (the
-    # bs_base/bs_base8 precedent in the blendshape classes above).
+    # The scene is reset per test, but PROCESS state (loaded plugins, the
+    # fbxmaya fps cache) persists - prefixes/teardowns guard against
+    # cross-test process residue, following the bs_base/bs_base8 precedent
+    # in the blendshape classes above.
     def _rig(self, cmds, prefix, bound=True):
         from maya_plugin.handlers import rigging
 
@@ -3300,8 +3300,10 @@ class TestClipInMaya:
         rz = cmds.getAttr(root + "|ca_mid.rotateZ")
         assert 30.0 < rz < 60.0     # linear tangents, halfway-ish
         cmds.currentTime(0)
-        # teardown: the mayapy scene persists, and a leftover clip would
-        # trip the export leg's one-clip-per-file scan
+        # teardown: the scene is reset per test, but PROCESS state (loaded
+        # plugins, the fbxmaya fps cache) persists - this guards against
+        # cross-test process residue tripping the export leg's
+        # one-clip-per-file scan
         clip.delete_clip({"root": root})
 
     def test_static_mutators_refuse_then_delete_clip_restores(self):
@@ -3367,7 +3369,8 @@ class TestClipInMaya:
 
 
 class TestClipExportInMaya:
-    # Same persistent-scene rule as TestClipInMaya: one prefix per test.
+    # Same reset-per-test-scene, persistent-process rule as TestClipInMaya:
+    # one prefix per test.
     def _clipped_scene(self, cmds, prefix, with_blink=True):
         from maya_plugin.handlers import blendshape, clip, rigging
 
@@ -3418,9 +3421,10 @@ class TestClipExportInMaya:
 
         base, root = self._clipped_scene(cmds, "cd")
         path = str(tmp_path / "sway.fbx").replace("\\", "/")
-        # SELECTED export (mesh + root): the persistent mayapy scene holds
-        # other tests' meshes, and a selected export keeps this file about
-        # this rig - same shape the skin-export contract documents.
+        # SELECTED export (mesh + root): the scene resets per test, but
+        # earlier prefixed meshes can still be present within a run, and a
+        # selected export keeps this file about this rig - same shape the
+        # skin-export contract documents.
         result = export.export_fbx({"path": path, "metres_per_unit": 1.0,
                                     "nodes": [base, root],
                                     "include_skins": True,
@@ -3433,8 +3437,7 @@ class TestClipExportInMaya:
         # the file carries 2 takes, not 1 (see export.py's FBX_ANIM_MEL and
         # anim_violations comments for what was tried and rejected). The
         # clip-named take must be present; the extra one is not a defect.
-        assert "sway" in [t["name"] for t in anim["takes"]]
-        assert len(anim["takes"]) == 2
+        assert [t["name"] for t in anim["takes"]] == ["Take 001", "sway"]
         sway_take = next(t for t in anim["takes"] if t["name"] == "sway")
         # (1) tick constant: a 1.0 s clip must measure 1.0 s in ticks
         assert sway_take["duration_s"] == pytest.approx(1.0, abs=0.04)
@@ -3445,7 +3448,10 @@ class TestClipExportInMaya:
         assert mid["key_count"] == 31          # round(1.0 * 30) + 1
         root_t = by[("cd_root", "Lcl Translation")]
         assert root_t["key_count"] == 31
-        # (5) DeformPercent: presence gated; RECORD the measured count here
+        # (5) DeformPercent - MEASURED key_count 31: weight curves resample
+        # with everything else once Resample All is on. The contract
+        # deliberately keeps >=2 (channels may be sparse), so the assertion
+        # stays loose.
         blink = by[("cd_blink", "DeformPercent")]
         assert blink["key_count"] >= 2
         # an independent read of the bytes agrees with the tool
@@ -3519,11 +3525,14 @@ class TestClipExportInMaya:
         base_b, root_b = _clipped_rig("cgb")
         path = str(tmp_path / "two_roots.fbx").replace("\\", "/")
         try:
-            with pytest.raises(HandlerError, match="one file is one take"):
+            with pytest.raises(HandlerError,
+                                match=r"2 skeletons carry a clip") as excinfo:
                 export.export_fbx({
                     "path": path, "metres_per_unit": 1.0,
                     "nodes": [base_a, root_a, base_b, root_b],
                     "include_animation": True})
+            assert "cga_root" in str(excinfo.value)
+            assert "cgb_root" in str(excinfo.value)
         finally:
             clip.delete_clip({"root": root_a})
             clip.delete_clip({"root": root_b})
