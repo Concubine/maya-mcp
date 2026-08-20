@@ -311,3 +311,70 @@ class TestShapeFacts:
         out = fbxbytes.shape_facts(FbxFacts(version=7500))
         assert out == {"blend_deformers": 0, "channels": 0, "shapes": [],
                        "unavailable_reason": None}
+
+
+class TestAnimFacts:
+    """Animation records (#695). Synthetic facts here; that these shapes
+    match what Maya WRITES - tick size, property strings, take naming - is
+    pinned under mayapy (TestClipExportInMaya)."""
+
+    def _facts(self):
+        facts = FbxFacts(version=7500)
+        facts.nodes.append(FbxNode(name="L_hip", kind="LimbNode", uid=1))
+        tick = fbxbytes.KTIME_PER_SECOND
+        facts.anim_curves[10] = {"key_count": 31, "first_tick": 0,
+                                 "last_tick": tick}
+        facts.anim_curves[11] = {"key_count": 31, "first_tick": 0,
+                                 "last_tick": tick}
+        facts.anim_curves[12] = {"key_count": 31, "first_tick": 0,
+                                 "last_tick": tick}
+        facts.anim_nodes[20] = {"name": "R", "target": 1,
+                                "target_kind": "model",
+                                "property": "Lcl Rotation",
+                                "curves": [10, 11, 12]}
+        facts.anim_stacks = 1
+        facts.anim_layers = {30}
+        facts.takes = [{"name": "walk", "start_tick": 0, "stop_tick": tick}]
+        return facts
+
+    def test_a_healthy_file_reads_clean(self):
+        out = fbxbytes.anim_facts(self._facts())
+        assert out["stacks"] == 1 and out["layers"] == 1
+        assert out["curves"] == 3 and out["curve_nodes"] == 1
+        assert out["takes"] == [{"name": "walk", "duration_s": 1.0}]
+        assert out["targets"] == [{"target": "L_hip",
+                                   "property": "Lcl Rotation", "curves": 3,
+                                   "key_count": 31, "duration_s": 1.0}]
+        assert out["unavailable_reason"] is None
+
+    def test_a_channel_target_reads_by_alias(self):
+        facts = self._facts()
+        facts.blend_channels[40] = {"name": "shapes.blink", "shape": None,
+                                    "deformer": None}
+        facts.anim_curves[13] = {"key_count": 5, "first_tick": 0,
+                                 "last_tick": fbxbytes.KTIME_PER_SECOND}
+        facts.anim_nodes[21] = {"name": "DeformPercent", "target": 40,
+                                "target_kind": "channel",
+                                "property": "DeformPercent",
+                                "curves": [13]}
+        out = fbxbytes.anim_facts(facts)
+        by = {(t["target"], t["property"]): t for t in out["targets"]}
+        assert by[("blink", "DeformPercent")]["key_count"] == 5
+
+    def test_orphans_and_mismatches_are_reasons_never_guesses(self):
+        facts = self._facts()
+        facts.anim_nodes[21] = {"name": "T", "target": None,
+                                "target_kind": None, "property": None,
+                                "curves": []}
+        facts.anim_curves[11]["key_count"] = 30
+        out = fbxbytes.anim_facts(facts)
+        assert "drives nothing" in out["unavailable_reason"]
+        assert "disagree on key count" in out["unavailable_reason"]
+        by = {t["target"]: t for t in out["targets"] if t["target"]}
+        assert by["L_hip"]["key_count"] is None
+
+    def test_an_animation_less_facts_reads_empty(self):
+        out = fbxbytes.anim_facts(FbxFacts(version=7500))
+        assert out == {"stacks": 0, "layers": 0, "curves": 0,
+                       "curve_nodes": 0, "takes": [], "targets": [],
+                       "unavailable_reason": None}

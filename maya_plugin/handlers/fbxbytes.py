@@ -24,6 +24,11 @@ _SIMPLE = {b"C": ("<?", 1), b"B": ("<B", 1), b"Y": ("<h", 2), b"I": ("<i", 4),
            b"F": ("<f", 4), b"D": ("<d", 8), b"L": ("<q", 8)}
 _ARRAYS = (b"f", b"d", b"l", b"i", b"c", b"b")
 
+# FBX KTime: ticks per second. The SDK constant; PINNED against a real Maya
+# export of a clip with a measured duration (TestClipExportInMaya) rather
+# than trusted from documentation.
+KTIME_PER_SECOND = 46186158000
+
 # Every FBX property that carries a vec3 into a node's transform.
 _TRIPLES = {
     "Lcl Translation": "translation",
@@ -100,6 +105,18 @@ class FbxFacts:
     shape_geoms: dict = field(default_factory=dict)
     blend_channels: dict = field(default_factory=dict)
     blend_deformers: dict = field(default_factory=dict)
+    # Animation (#602 phase 6 / #695). anim_curves: AnimationCurve uid ->
+    # {"key_count", "first_tick", "last_tick"} - counts and endpoints only,
+    # never the arrays (a 61-frame bake x 60+ curves of floats is memory
+    # nothing asks about). anim_nodes: AnimationCurveNode uid -> {"name",
+    # "target" uid, "target_kind" "model"|"channel"|None, "property" (the
+    # OP-connection property string, e.g. "Lcl Rotation"), "curves": [uid]}.
+    # takes come from the Takes section: name + LocalTime endpoint ticks.
+    anim_curves: dict = field(default_factory=dict)
+    anim_nodes: dict = field(default_factory=dict)
+    anim_stacks: int = 0
+    anim_layers: set = field(default_factory=set)
+    takes: list = field(default_factory=list)
 
 
 def _clean(raw):
@@ -120,12 +137,15 @@ def read_fbx(path):
     facts = FbxFacts(version=version)
     _connections = []
 
-    def prop(pos, want_ints=False):
-        """Decode one property. `want_ints` is gated by the CALLER on purpose.
+    def prop(pos, want_ints=False, want_longs=False, want_floats=False):
+        """Decode one property. `want_ints`/`want_longs`/`want_floats` are
+        gated by the CALLER on purpose.
 
-        Int arrays are decoded only where a record needs them (a cluster's
-        Indexes), never for PolygonVertexIndex - a 4M-face kit would balloon
-        this reader's memory for numbers nothing asks about.
+        Int/long/float arrays are decoded only where a record needs them (a
+        cluster's Indexes, an AnimationCurve's KeyTime), never for
+        PolygonVertexIndex or KeyValueFloat - a 4M-face kit, or a 61-frame
+        bake x 60+ curves, would balloon this reader's memory for numbers
+        nothing asks about.
         """
         code = data[pos:pos + 1]
         pos += 1
@@ -143,10 +163,18 @@ def read_fbx(path):
             pos += 12
             payload = data[pos:pos + comp]
             pos += comp
-            if code == b"d" or (want_ints and code == b"i"):
+            fmt = None
+            if code == b"d":
+                fmt = "<%dd"
+            elif want_ints and code == b"i":
+                fmt = "<%di"
+            elif want_longs and code == b"l":
+                fmt = "<%dq"
+            elif want_floats and code == b"f":
+                fmt = "<%df"
+            if fmt is not None:
                 raw = zlib.decompress(payload) if encoding == 1 else payload
-                fmt = ("<%dd" if code == b"d" else "<%di") % length
-                return struct.unpack(fmt, raw), pos
+                return struct.unpack(fmt % length, raw), pos
             return None, pos
         raise ValueError("unknown FBX typecode %r at %d" % (code, pos))
 
@@ -165,7 +193,9 @@ def read_fbx(path):
             starts = []
             for _ in range(nprops):
                 starts.append(pos + 1)   # skip the typecode byte
-                val, pos = prop(pos, want_ints=(name == "Indexes"))
+                val, pos = prop(pos, want_ints=(name == "Indexes"),
+                                want_longs=(name == "KeyTime"),
+                                want_floats=False)
                 values.append(val)
 
             if name == "Vertices" and values and isinstance(values[0], tuple):
@@ -176,10 +206,16 @@ def read_fbx(path):
                     if isinstance(node, int):
                         facts.geometries[node] = values[0]
             elif name == "C" and len(values) >= 3:
-                # ("OO", child, parent). Geometry connects to its Model the same
-                # way a Model connects to its parent Model, so one pass wires
-                # both; the 0 parent is the scene root.
-                _connections.append((values[1], values[2]))
+                # ("OO", child, parent) or ("OP", child, parent, property).
+                # Geometry connects to its Model the same way a Model
+                # connects to its parent Model, so one pass wires both; the
+                # 0 parent is the scene root. An OP connection (an
+                # AnimationCurveNode into a Model's "Lcl Rotation", say)
+                # carries a fourth property-string value - link_prop.
+                _connections.append(
+                    (values[1], values[2],
+                     values[3] if len(values) > 3
+                     and isinstance(values[3], str) else None))
             elif name == "P" and values and isinstance(values[0], str):
                 key = values[0]
                 if key == "UnitScaleFactor":
@@ -234,6 +270,33 @@ def read_fbx(path):
                 strs = [v for v in values if isinstance(v, str)]
                 if strs and strs[-1] == "BindPose":
                     facts.bind_pose_count += 1
+            elif name == "AnimationCurve":
+                uid = values[0] if values and isinstance(values[0], int) else None
+                if uid is not None:
+                    facts.anim_curves[uid] = {"key_count": 0,
+                                              "first_tick": None,
+                                              "last_tick": None}
+                    child = ("acurve", uid)
+            elif name == "AnimationCurveNode":
+                uid = values[0] if values and isinstance(values[0], int) else None
+                strs = [v for v in values if isinstance(v, str)]
+                if uid is not None:
+                    facts.anim_nodes[uid] = {
+                        "name": _clean(strs[0]) if strs else "?",
+                        "target": None, "target_kind": None,
+                        "property": None, "curves": []}
+                    child = ("anode", uid)
+            elif name == "AnimationStack":
+                facts.anim_stacks += 1
+            elif name == "AnimationLayer":
+                uid = values[0] if values and isinstance(values[0], int) else None
+                if uid is not None:
+                    facts.anim_layers.add(uid)
+            elif name == "Take":
+                strs = [v for v in values if isinstance(v, str)]
+                facts.takes.append({"name": _clean(strs[0]) if strs else "?",
+                                    "start_tick": None, "stop_tick": None})
+                child = ("take", len(facts.takes) - 1)
             elif (name == "Indexes" and isinstance(node, tuple)
                     and node[0] == "cluster" and values
                     and isinstance(values[0], tuple)):
@@ -246,6 +309,19 @@ def read_fbx(path):
                     and node[0] == "cluster" and values
                     and isinstance(values[0], tuple)):
                 facts.clusters[node[1]]["weights"] = values[0]
+            elif (name == "KeyTime" and isinstance(node, tuple)
+                    and node[0] == "acurve" and values
+                    and isinstance(values[0], tuple)):
+                ticks = values[0]
+                rec = facts.anim_curves[node[1]]
+                rec["key_count"] = len(ticks)
+                rec["first_tick"] = ticks[0] if ticks else None
+                rec["last_tick"] = ticks[-1] if ticks else None
+            elif (name == "LocalTime" and isinstance(node, tuple)
+                    and node[0] == "take" and len(values) >= 2
+                    and all(isinstance(v, int) for v in values[:2])):
+                facts.takes[node[1]]["start_tick"] = values[0]
+                facts.takes[node[1]]["stop_tick"] = values[1]
             if pos < end_off:
                 walk(pos, end_off, child)
             pos = end_off
@@ -254,7 +330,7 @@ def read_fbx(path):
     walk(27, len(data), None)
 
     by_uid = {n.uid: n for n in facts.nodes if n.uid is not None}
-    for child, parent in _connections:
+    for child, parent, link_prop in _connections:
         if child in by_uid and (parent in by_uid or parent == 0):
             # 0 is the scene root: an explicit "no parent", kept distinct
             # from connections into non-Model records (clusters, materials),
@@ -275,6 +351,19 @@ def read_fbx(path):
             facts.blend_channels[child]["deformer"] = parent
         elif child in facts.blend_deformers and parent in facts.geometries:
             facts.blend_deformers[child]["geometry"] = parent
+        elif child in facts.anim_curves and parent in facts.anim_nodes:
+            facts.anim_nodes[parent]["curves"].append(child)
+        elif child in facts.anim_nodes and parent in by_uid:
+            facts.anim_nodes[child]["target"] = parent
+            facts.anim_nodes[child]["target_kind"] = "model"
+            facts.anim_nodes[child]["property"] = link_prop
+        elif child in facts.anim_nodes and parent in facts.blend_channels:
+            facts.anim_nodes[child]["target"] = parent
+            facts.anim_nodes[child]["target_kind"] = "channel"
+            facts.anim_nodes[child]["property"] = link_prop
+        # AnimationCurveNode->AnimationLayer and Layer->Stack connections
+        # fall through every arm and are dropped - the layer/stack COUNTS
+        # are the facts; membership adds nothing a violation would read.
     return facts
 
 
@@ -561,5 +650,76 @@ def shape_facts(facts):
         "blend_deformers": len(facts.blend_deformers),
         "channels": len(facts.blend_channels),
         "shapes": sorted(shapes, key=lambda e: e["name"]),
+        "unavailable_reason": "; ".join(reasons) or None,
+    }
+
+
+def anim_facts(facts):
+    """What the file's animation records hold. Reading, not policy (#645).
+
+    Per curve node: the Model (joint) or BlendShapeChannel it drives, the
+    OP-connection property that says WHICH plug ("Lcl Rotation",
+    "Lcl Translation", "DeformPercent" - measured under mayapy,
+    TestClipExportInMaya), the curve count and their agreed key count.
+    Structural failures - an orphan curve node, curves that disagree on key
+    count - are reasons, never guesses; POLICY (expected counts, take
+    naming, zero-when-off) lives in export.anim_violations.
+    """
+    reasons = []
+    targets = []
+    by_uid = {n.uid: n for n in facts.nodes if n.uid is not None}
+    for uid, node in sorted(facts.anim_nodes.items()):
+        entry = {"target": None,
+                 "property": (node["property"] or node["name"]),
+                 "curves": len(node["curves"]),
+                 "key_count": None, "duration_s": None}
+        if node["target_kind"] == "model" and node["target"] in by_uid:
+            entry["target"] = by_uid[node["target"]].name
+        elif (node["target_kind"] == "channel"
+                and node["target"] in facts.blend_channels):
+            entry["target"] = (facts.blend_channels[node["target"]]["name"]
+                               .split(".")[-1])
+        else:
+            reasons.append("curve node %r drives nothing this reader holds"
+                           % node["name"])
+        counts = set()
+        first = []
+        last = []
+        for cuid in node["curves"]:
+            curve = facts.anim_curves.get(cuid)
+            if curve is None:
+                continue
+            counts.add(curve["key_count"])
+            if curve["first_tick"] is not None:
+                first.append(curve["first_tick"])
+            if curve["last_tick"] is not None:
+                last.append(curve["last_tick"])
+        if len(counts) == 1:
+            entry["key_count"] = counts.pop()
+            if first and last:
+                entry["duration_s"] = ((max(last) - min(first))
+                                       / float(KTIME_PER_SECOND))
+        elif counts:
+            reasons.append(
+                "curve node %r's curves disagree on key count (%s)"
+                % (node["name"],
+                   ", ".join(str(c) for c in sorted(counts))))
+        targets.append(entry)
+    takes = []
+    for take in facts.takes:
+        duration = None
+        if (take["start_tick"] is not None
+                and take["stop_tick"] is not None):
+            duration = ((take["stop_tick"] - take["start_tick"])
+                        / float(KTIME_PER_SECOND))
+        takes.append({"name": take["name"], "duration_s": duration})
+    return {
+        "stacks": facts.anim_stacks,
+        "layers": len(facts.anim_layers),
+        "curves": len(facts.anim_curves),
+        "curve_nodes": len(facts.anim_nodes),
+        "takes": takes,
+        "targets": sorted(targets,
+                          key=lambda e: (e["target"] or "", e["property"])),
         "unavailable_reason": "; ".join(reasons) or None,
     }
