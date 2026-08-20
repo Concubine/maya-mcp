@@ -254,3 +254,60 @@ class TestSkinRecordsFromTheCommittedArtifact:
             os.path.join(REPO, "evals", "golem_delivery", "golem.fbx"))
         assert facts.skins == {}
         assert fbxbytes.skin_facts(facts)["deformers"] == 0
+
+
+class TestShapeFacts:
+    """Blend-shape records (#691). Synthetic facts here; that these shapes
+    match what Maya WRITES is pinned under mayapy
+    (TestBlendshapeExportInMaya), which is also where the channel-naming
+    measurement lives."""
+
+    def _facts(self):
+        facts = FbxFacts(version=7500)
+        facts.nodes.append(FbxNode(name="humanoid", kind="Mesh", uid=1,
+                                   geometry=10))
+        facts.geometries[10] = (0.0, 0.0, 0.0)
+        facts.shape_geoms[20] = {"name": "brow_raise", "points": 6,
+                                 "indexes": (0, 1, 2, 3, 4, 5)}
+        facts.blend_channels[30] = {"name": "brow_raise", "shape": 20,
+                                    "deformer": 40}
+        facts.blend_deformers[40] = {"geometry": 10, "channels": [30]}
+        return facts
+
+    def test_a_healthy_file_reads_clean(self):
+        out = fbxbytes.shape_facts(self._facts())
+        assert out["blend_deformers"] == 1 and out["channels"] == 1
+        assert out["shapes"] == [
+            {"name": "brow_raise", "points": 6, "indexes": 6}]
+        assert out["unavailable_reason"] is None
+
+    def test_channel_names_are_cleaned_to_the_alias(self):
+        facts = self._facts()
+        facts.blend_channels[30]["name"] = "humanoid_shapes.brow_raise"
+        out = fbxbytes.shape_facts(facts)
+        assert out["shapes"][0]["name"] == "brow_raise"
+
+    def test_orphan_links_are_reasons_never_guesses(self):
+        facts = self._facts()
+        facts.blend_channels[30]["shape"] = None
+        facts.blend_deformers[40]["geometry"] = None
+        out = fbxbytes.shape_facts(facts)
+        assert "links no shape geometry" in out["unavailable_reason"]
+        assert "deforms no geometry" in out["unavailable_reason"]
+        assert out["shapes"][0]["points"] == 0
+
+    def test_shapes_are_sorted_by_name(self):
+        facts = self._facts()
+        facts.shape_geoms[21] = {"name": "a_first", "points": 3,
+                                 "indexes": (0, 1, 2)}
+        facts.blend_channels[31] = {"name": "a_first", "shape": 21,
+                                    "deformer": 40}
+        facts.blend_deformers[40]["channels"].append(31)
+        out = fbxbytes.shape_facts(facts)
+        assert [s["name"] for s in out["shapes"]] == ["a_first",
+                                                      "brow_raise"]
+
+    def test_a_shapeless_facts_reads_empty(self):
+        out = fbxbytes.shape_facts(FbxFacts(version=7500))
+        assert out == {"blend_deformers": 0, "channels": 0, "shapes": [],
+                       "unavailable_reason": None}

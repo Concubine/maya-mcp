@@ -91,6 +91,15 @@ class FbxFacts:
     skins: dict = field(default_factory=dict)
     clusters: dict = field(default_factory=dict)
     bind_pose_count: int = 0
+    # Blend shapes (#602 phase 5 / #691). shape_geoms: Shape-class Geometry
+    # uid -> {"name", "points" (delta-vertex COUNT - nothing needs the
+    # floats), "indexes" (tuple of sparse vertex ids)}. blend_channels:
+    # BlendShapeChannel deformer uid -> {"name", "shape" geom uid,
+    # "deformer" uid}. blend_deformers: BlendShape deformer uid ->
+    # {"geometry" mesh-geometry uid, "channels": [uid]}.
+    shape_geoms: dict = field(default_factory=dict)
+    blend_channels: dict = field(default_factory=dict)
+    blend_deformers: dict = field(default_factory=dict)
 
 
 def _clean(raw):
@@ -160,9 +169,12 @@ def read_fbx(path):
                 values.append(val)
 
             if name == "Vertices" and values and isinstance(values[0], tuple):
-                facts.meshes.append(values[0])
-                if isinstance(node, int):
-                    facts.geometries[node] = values[0]
+                if isinstance(node, tuple) and node[0] == "shape":
+                    facts.shape_geoms[node[1]]["points"] = len(values[0]) // 3
+                else:
+                    facts.meshes.append(values[0])
+                    if isinstance(node, int):
+                        facts.geometries[node] = values[0]
             elif name == "C" and len(values) >= 3:
                 # ("OO", child, parent). Geometry connects to its Model the same
                 # way a Model connects to its parent Model, so one pass wires
@@ -190,7 +202,14 @@ def read_fbx(path):
                                 kind=strs[1] if len(strs) > 1 else "?", uid=uid)
                 facts.nodes.append(child)
             elif name == "Geometry":
-                child = values[0] if values and isinstance(values[0], int) else None
+                uid = values[0] if values and isinstance(values[0], int) else None
+                strs = [v for v in values if isinstance(v, str)]
+                if uid is not None and strs and strs[-1] == "Shape":
+                    facts.shape_geoms[uid] = {"name": _clean(strs[0]),
+                                              "points": 0, "indexes": ()}
+                    child = ("shape", uid)
+                else:
+                    child = uid
             elif name == "Deformer":
                 uid = values[0] if values and isinstance(values[0], int) else None
                 strs = [v for v in values if isinstance(v, str)]
@@ -202,6 +221,15 @@ def read_fbx(path):
                     facts.clusters[uid] = {"indexes": (), "weights": (),
                                            "model": None}
                     child = ("cluster", uid)
+                elif uid is not None and klass == "BlendShape":
+                    facts.blend_deformers[uid] = {"geometry": None,
+                                                  "channels": []}
+                    child = ("blend", uid)
+                elif uid is not None and klass == "BlendShapeChannel":
+                    facts.blend_channels[uid] = {
+                        "name": _clean(strs[0]) if strs else "?",
+                        "shape": None, "deformer": None}
+                    child = ("channel", uid)
             elif name == "Pose":
                 strs = [v for v in values if isinstance(v, str)]
                 if strs and strs[-1] == "BindPose":
@@ -210,6 +238,10 @@ def read_fbx(path):
                     and node[0] == "cluster" and values
                     and isinstance(values[0], tuple)):
                 facts.clusters[node[1]]["indexes"] = values[0]
+            elif (name == "Indexes" and isinstance(node, tuple)
+                    and node[0] == "shape" and values
+                    and isinstance(values[0], tuple)):
+                facts.shape_geoms[node[1]]["indexes"] = values[0]
             elif (name == "Weights" and isinstance(node, tuple)
                     and node[0] == "cluster" and values
                     and isinstance(values[0], tuple)):
@@ -236,6 +268,13 @@ def read_fbx(path):
             facts.skins[parent]["clusters"].append(child)
         elif child in facts.skins and parent in facts.geometries:
             facts.skins[child]["geometry"] = parent
+        elif child in facts.shape_geoms and parent in facts.blend_channels:
+            facts.blend_channels[parent]["shape"] = child
+        elif child in facts.blend_channels and parent in facts.blend_deformers:
+            facts.blend_deformers[parent]["channels"].append(child)
+            facts.blend_channels[child]["deformer"] = parent
+        elif child in facts.blend_deformers and parent in facts.geometries:
+            facts.blend_deformers[child]["geometry"] = parent
     return facts
 
 
@@ -480,5 +519,47 @@ def skin_facts(facts, tol=1e-3):
         "bind_pose_present": facts.bind_pose_count > 0,
         "max_weight_sum_error": max_err,
         "unweighted_file_vertices": unweighted,
+        "unavailable_reason": "; ".join(reasons) or None,
+    }
+
+
+def shape_facts(facts):
+    """What the file's blend-shape records hold. Reading, not policy (#645).
+
+    Per channel: the alias name maya_create_blendshape authored and the
+    linked Shape geometry's payload sizes. Maya has been observed writing
+    the channel name either bare or deformer-qualified, so the name is
+    cleaned to its last dot-segment (measured under mayapy,
+    TestBlendshapeExportInMaya - the naming pin for this reader). Structural
+    link failures are reasons, never guesses; POLICY (empty deltas,
+    index/point mismatch, missing declared names) lives in
+    export.shape_violations.
+    """
+    reasons = []
+    shapes = []
+    for uid, channel in facts.blend_channels.items():
+        entry = {"name": channel["name"].split(".")[-1],
+                 "points": 0, "indexes": 0}
+        geom_uid = channel["shape"]
+        if geom_uid is None or geom_uid not in facts.shape_geoms:
+            reasons.append("channel %r links no shape geometry"
+                           % entry["name"])
+        else:
+            geom = facts.shape_geoms[geom_uid]
+            entry["points"] = geom["points"]
+            entry["indexes"] = len(geom["indexes"])
+        if channel["deformer"] is None:
+            reasons.append("channel %r links no blendShape deformer"
+                           % entry["name"])
+        shapes.append(entry)
+    for uid, deformer in facts.blend_deformers.items():
+        if deformer["geometry"] is None:
+            reasons.append(
+                "blendShape deformer %d deforms no geometry this reader "
+                "holds" % uid)
+    return {
+        "blend_deformers": len(facts.blend_deformers),
+        "channels": len(facts.blend_channels),
+        "shapes": sorted(shapes, key=lambda e: e["name"]),
         "unavailable_reason": "; ".join(reasons) or None,
     }
