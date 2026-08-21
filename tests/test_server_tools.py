@@ -1949,3 +1949,58 @@ class TestClipTools:
         preview = by_name["maya_preview_clip"].annotations
         assert (preview.read_only_hint, preview.destructive_hint,
                 preview.idempotent_hint) == (True, False, True)
+
+
+class TestAuthorClipTimeoutIsReachable:
+    """#721: author_clip's own timeout error tells the caller to pass a larger
+    timeout_s, and no schema offered one. The #640-5 fix applied to the clip
+    tools - keying a long clip on a heavy scene, or keying at all while an
+    Arnold RenderView (IPR) re-renders on every scene mutation, outlives 120 s.
+    """
+
+    def _conn(self):
+        return FakeConn(responses={"author_clip": {
+            "root": "|pelvis", "clip": "idle", "fps": 30,
+            "duration_s": 1.0, "frames": 31, "keyed_joints": 3,
+            "keyed_weight_channels": [], "root_position_keyed": False,
+            "interpolation": "linear", "loop": False, "replaced": None,
+            "per_key": [{"time_s": 0.0, "max_displacement": 0.0},
+                        {"time_s": 1.0, "max_displacement": 0.12}],
+            "warnings": []}})
+
+    @staticmethod
+    def _keys():
+        return [{"time_s": 0.0, "rotations": {"jnt_a": [0, 0, 0]}},
+                {"time_s": 1.0, "rotations": {"jnt_a": [0, 30, 0]}}]
+
+    def test_the_schema_offers_one(self):
+        mcp = server_mod.create_server(self._conn())
+        tool = next(t for t in run(mcp.list_tools())
+                    if t.name == "maya_author_clip")
+        props = tool.input_schema["properties"]
+        assert "timeout_s" in props, sorted(props)
+        assert props["timeout_s"]["default"] == 120
+
+    def test_it_defaults_to_the_bool_timeout(self):
+        conn = self._conn()
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_author_clip", {
+            "root": "|pelvis", "name": "idle", "keys": self._keys()}))
+        assert conn.calls[0]["timeout_s"] == server_mod.BOOL_TIMEOUT_S
+
+    def test_it_can_be_given_longer(self):
+        conn = self._conn()
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_author_clip", {
+            "root": "|pelvis", "name": "idle", "keys": self._keys(),
+            "timeout_s": 900.0}))
+        assert conn.calls[0]["timeout_s"] == 900.0
+
+    def test_asking_past_the_dispatchers_ceiling_is_refused(self):
+        conn = self._conn()
+        mcp = server_mod.create_server(conn)
+        with pytest.raises(Exception):
+            run(mcp.call_tool("maya_author_clip", {
+                "root": "|pelvis", "name": "idle", "keys": self._keys(),
+                "timeout_s": server_mod.MAX_RENDER_TIMEOUT_S + 1.0}))
+        assert conn.calls == []

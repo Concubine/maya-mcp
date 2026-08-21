@@ -2313,6 +2313,13 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "weights, root position) - a cycle that does not close pops on "
             "repeat in-engine. Refusal carries the measured difference."
         ))] = False,
+        timeout_s: Annotated[float, Field(ge=1.0, le=MAX_RENDER_TIMEOUT_S,
+                                          description=(
+            "Seconds before the call times out. Raise it for a long clip on "
+            "a heavy scene - and note that an open Arnold RenderView (IPR) "
+            "re-renders on every scene mutation, which can stall keyframing "
+            "for minutes (#721). A timeout does not stop the keying."
+        ))] = BOOL_TIMEOUT_S,
     ) -> AuthorClipResult:
         """Key the pose map over time - ONE clip per skeleton, replacing any
         previous clip with a warning.
@@ -2329,7 +2336,7 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 {"root": root, "name": name, "fps": fps,
                  "keys": [k.model_dump(exclude_none=True) for k in keys],
                  "interpolation": interpolation, "loop": loop},
-                timeout_s=BOOL_TIMEOUT_S,
+                timeout_s=float(timeout_s),
             )
         )
 
