@@ -223,6 +223,37 @@ def test_an_identity_joint_is_not():
     assert export.gate_violations(facts) == []
 
 
+# --- #703: segment scale compensate reaches Unity as InheritType 2 ---
+
+
+def test_a_segment_scale_compensate_joint_is_a_violation():
+    # Maya writes InheritType 2 for a joint whose segmentScaleCompensate is
+    # on. Unity does not implement that inheritance: with the metres
+    # declaration it materialises the unit conversion as localScale 100 on
+    # every such joint and then compounds it per level (#703, measured in
+    # Unity 6000.0.47f1 - a 12-joint serpent reached world scale 10^22).
+    facts = _facts(nodes=[fbxbytes.FbxNode(name="spine_03", kind="LimbNode",
+                                           inherit_type=2)])
+    out = export.gate_violations(facts)
+    assert any("spine_03" in v and "InheritType 2" in v for v in out)
+
+
+def test_an_inherit_type_1_joint_is_not():
+    # SSC off exports as InheritType 1, which every consumer composes plainly.
+    facts = _facts(nodes=[fbxbytes.FbxNode(name="spine_03", kind="LimbNode",
+                                           inherit_type=1)])
+    assert export.gate_violations(facts) == []
+
+
+def test_inherit_type_2_is_gated_on_joints_only():
+    # Maya's SSC flag exists only on joints, so only LimbNodes can carry the
+    # measured defect; gating a Mesh or Null on it would refuse a file this
+    # server cannot produce for a reason nobody measured (#646's lesson).
+    facts = _facts(nodes=[fbxbytes.FbxNode(name="tube", kind="Mesh", uid=1,
+                                           inherit_type=2)])
+    assert export.gate_violations(facts) == []
+
+
 def test_skin_violations_compose():
     # include_skins=true with no skin in the bytes is the false-green class.
     sfacts = {"deformers": 0, "clusters": 0, "influenced_models": 0,

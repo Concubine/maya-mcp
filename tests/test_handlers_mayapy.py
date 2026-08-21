@@ -2229,6 +2229,22 @@ class TestCreateSkeletonInMaya:
         assert out["root"] == "|lone"
         assert out["joints"][0]["position"] == pytest.approx([1.0, 2.0, 3.0])
 
+    def test_joints_are_created_without_segment_scale_compensate(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import rigging
+
+        # Maya's default (on) exports as FBX InheritType 2, which Unity turns
+        # into 100x scale compounding per joint level under the metres
+        # declaration (#703). This toolset never scales joints - the export
+        # gate refuses scaled joints unconditionally - so SSC buys nothing in
+        # Maya, and off at creation means the scene matches the artifact.
+        out = rigging.create_skeleton({
+            "chain": [[0, 0, 0], [0, 2, 0], [0, 4, 0]], "chain_prefix": "ssc"})
+        for j in out["joints"]:
+            assert not cmds.getAttr(
+                j["name"] + ".segmentScaleCompensate"), j["name"]
+
 
 class TestBindSkinInMaya:
     def _chain(self, rigging, n=4, height=4.0):

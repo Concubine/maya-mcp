@@ -318,7 +318,10 @@ skeleton that dies half-built is orphan cleanup nobody asked for. Orientation
 defaults to Maya's own convention (X aims at the first child, leaves
 zeroed); whatever actually landed, default or explicit `orient` override, is
 reported per joint in **degrees**, because orientation is where every rig
-surprise lives.
+surprise lives. Joints are created with `segmentScaleCompensate` **off**:
+Maya's default exports as FBX `InheritType 2`, which Unity compounds into
+100x scale per joint level under the metres declaration (#703), and this
+toolset never scales joints, so the flag buys nothing.
 
 `bind_skin`'s `unweighted_vertices` must be `0` for a deliverable bind — a
 vertex no joint owns stays behind when the creature moves, and nothing looks
@@ -559,3 +562,11 @@ to ~7e-3 per vertex on export alone — a `1e-3` tolerance tried first refused
 a real, correctly-bound mesh. LimbNodes (skinned joints) gate under the same
 identity-scale rule as meshes (#629), since a joint's scale reaches a vertex
 without being its ancestor.
+
+LimbNodes additionally must not carry FBX `InheritType 2` — Maya writes it for
+a joint whose `segmentScaleCompensate` is on, and Unity (which does not
+implement that inheritance) materialises the metres declaration as
+localScale 100 on every such joint and compounds it per level, silently
+(#703: a 12-joint serpent instantiated at world scale ~10^21 m with a clean
+console). `create_skeleton` turns SSC off at joint creation, so this fires
+only on skeletons authored outside the tool or predating the fix.

@@ -50,6 +50,12 @@ def create_skeleton(params: Dict[str, Any]) -> Dict[str, Any]:
         else:
             cmds.select(long_names[joint["parent"]], replace=True)
         node = cmds.joint(name=unique, position=joint["position"])
+        # Maya's SSC default exports as FBX InheritType 2, which Unity turns
+        # into 100x scale compounding per joint level under the metres
+        # declaration (#703). This toolset never scales joints, so the flag
+        # buys nothing here; off at creation keeps the scene matching the
+        # artifact, and the export gate refuses InheritType 2 regardless.
+        cmds.setAttr(node + ".segmentScaleCompensate", 0)
         long_names[joint["name"]] = _long(cmds, node)
 
     root_long = long_names[resolved[0]["name"]]

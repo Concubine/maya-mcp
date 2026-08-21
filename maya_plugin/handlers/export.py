@@ -186,8 +186,8 @@ def _scale_reaches_vertices(facts) -> set:
 def gate_violations(facts) -> List[str]:
     """Ways the written file breaks the export invariant, as readable strings.
 
-    Two assertions, and only two, because these are the two that hold for EVERY
-    export this server can be asked to make:
+    Three assertions, and only three, because these are the ones that hold for
+    EVERY export this server can be asked to make:
 
       scale        a compensating node scale makes a wrong vertex magnitude
                    render correctly, which is how three revisions shipped at
@@ -196,6 +196,10 @@ def gate_violations(facts) -> List[str]:
                    _scale_reaches_vertices for why that is not every node
       declaration  metre-magnitude vertices declared as centimetres is the same
                    defect inverted, and a consumer measures unit scale on import
+      inheritance  a joint exported with segmentScaleCompensate (InheritType 2)
+                   is internally consistent bytes that Unity turns into 100x
+                   scale compounding per joint level (#703) - the one defect
+                   the first two assertions PROVABLY cannot see
 
     Deliberately absent, though evals/delivery_units.py checks them: the
     one-root rule (a RIG rule - the demigol kit legitimately exports 41 roots)
@@ -213,6 +217,21 @@ def gate_violations(facts) -> List[str]:
                 "node %r has scale %s, expected identity - a compensating node "
                 "scale hides a wrong vertex magnitude"
                 % (node.name, tuple(round(s, 6) for s in node.scaling)))
+    for node in facts.nodes:
+        # Maya writes InheritType 2 for a joint whose segmentScaleCompensate
+        # is on. Unity does not implement that inheritance: combined with the
+        # metres declaration it materialises the unit conversion as localScale
+        # 100 on every such joint, compounding per level, with no import
+        # warning (#703 - a 12-joint serpent reached world scale 10^22). Only
+        # joints carry Maya's SSC flag, so only LimbNodes are gated: refusing
+        # a kind that cannot produce the defect is #646's mistake again.
+        if node.kind == "LimbNode" and node.inherit_type == 2:
+            out.append(
+                "joint %r carries InheritType 2 (segmentScaleCompensate) - "
+                "Unity compounds the unit conversion 100x per joint level; "
+                "this skeleton predates #703: set segmentScaleCompensate 0 "
+                "on its joints or recreate it with maya_create_skeleton"
+                % node.name)
     if facts.unit_scale_factor != fbxbytes.DECLARES_METRES:
         out.append(
             "the file declares UnitScaleFactor %r, expected %g - the vertices "
