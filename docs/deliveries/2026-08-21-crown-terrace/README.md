@@ -42,14 +42,19 @@ across a whole building. The taper-trap gate, written by revision 3, fired on al
 They are **stepped** instead: two untapered bands of different projection, which gives the same
 light-catching top edge for one extra box and meets its neighbours exactly.
 
-## Open question for the user — a taste call, not a defect
+## Divergence — answered, 2026-08-21
 
-The four crowns are tonally similar: three of them put a pale `trim` coping over a pale parapet,
-and only `kit_brick_crown_a` carries its own body colour up into the cap. Across a district that
-may read as **one roofline with inconsistent trim** rather than as four buildings ending
-differently — which is the exact risk the delivery set out to test, and the reason the four are
-photographed side by side in `crown_detail.png`.
+The first cut put the same pale `trim` coping on three of the four crowns, and side by side they
+converged into one roofline with slightly different trim. User's call: *"as long as the divergence
+looks human made, I like divergence."*
 
-If they should diverge harder, the lever is cheap: the parapet is a single tonal band
-(`plate(..., BACK, FACE, patch)`), so giving each family its own parapet patch is a one-word
-change per piece and no new triangles.
+So the four now differ by **material logic and by silhouette**, not by palette shuffle — each cap
+is the one a builder would have chosen for that wall (metal on curtain wall, stone on brick,
+concrete on concrete), and the two crowns that share a wall family are pushed apart on shape: a
+shallow crisp modern edge against a tall attic storey. A hash sprinkling four colour schemes down
+a street reads as a machine; a rule that follows the material reads as a decision, which is what
+survives being looked at.
+
+`crown_divergence_street.png` is the test that matters — four separate buildings, one family each,
+one glance. `crown_divergence_caps.png` is the pair that share a wall material, which is the hard
+case.

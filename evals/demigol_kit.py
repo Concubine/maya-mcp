@@ -1287,11 +1287,31 @@ def PIECES():
         # (`slab(front=BACK)` plus bands from BACK to FACE) and the crowns now
         # follow it. A crown is a facade piece that happens to stop.
         slab(front=BACK, patch="infill"),
-        cornice("trim", 0.32, 0.26, project=0.30, depth_in=0.50),
-        bracket("infill_dark", -0.95, 0.00, project=0.24, w=0.26, h=0.46),
-        bracket("infill_dark", 0.95, 0.00, project=0.24, w=0.26, h=0.46),
-        # the parapet is a TONAL band on the face, not a separate lump of wall
-        plate(-H, H, 0.46, 1.18, BACK, FACE, "infill_dark"),
+        # THE CAP FOLLOWS THE WALL, WHICH IS WHAT MAKES THE DIVERGENCE READ AS
+        # AUTHORED RATHER THAN SHUFFLED (user, 2026-08-21: divergence is wanted,
+        # as long as it looks human made).
+        #
+        # Revision 4's first cut put the same pale `trim` coping on three of the
+        # four crowns, so they converged into one roofline with slightly
+        # different trim - the failure this delivery was written to test for.
+        # The fix is not to randomise the colours: a hash that sprays four
+        # palettes across a street reads as a machine, and a machine is exactly
+        # what must not be visible. It is to give each crown the cap a BUILDER
+        # would have chosen for that wall, and let the palettes differ as a
+        # consequence. A curtain wall gets a metal capping. Brick gets a stone
+        # coping. Concrete gets concrete. That reasoning is legible from the
+        # street even when the reasoning itself is not - it is why real streets
+        # look varied without looking random.
+        #
+        # This one is the quiet modern parapet, and its divergence is SHAPE as
+        # much as material: a SHALLOW, crisp cap - a recessed shadow groove,
+        # a short parapet, a thin metal coping with barely any projection, and
+        # no corbels at all, because a curtain wall does not corbel. Set beside
+        # crown_b's tall attic it reads as a different design attitude rather
+        # than as the same cap in another colour, which is what "human made"
+        # has to mean when two buildings share a wall material.
+        plate(-H, H, 0.86, 1.02, BACK, FACE - 0.10, "shadow"),
+        plate(-H, H, 1.02, 1.30, BACK, FACE, "infill_dark"),
         # THE COPING IS STEPPED, NOT BATTERED, and the taper-trap gate is why.
         # `taper` flares X and Z together, so a full-width box that tapers
         # pulls its own ends in from the cell face and opens a notch between
@@ -1300,41 +1320,53 @@ def PIECES():
         # different projection give the same light-catching top edge for one
         # box, and meet their neighbours exactly. The upper band tops out at
         # H, because nothing is ever stacked on a crown.
-        cornice("trim", 1.28, 0.14, project=0.24, depth_in=0.45),
-        cornice("trim", 1.4225, 0.145, project=0.16, depth_in=0.38),
+        cornice("steel", 1.3875, 0.165, project=0.14, depth_in=0.36),
     ]
-    # The piered variant: the same cap with a rhythm across it, so a long
-    # roofline does not read as one extruded band. The piers stand PROUD of the
-    # parapet band rather than replacing part of it - same rule as above.
+    # The piered variant: the SAME building type one grade fancier, which is how
+    # a human varies a street - not a different palette, a bigger budget. Its
+    # piers and coping are concrete, so the structure reads through the skin.
+    # The piers stand PROUD of the parapet band rather than replacing part of
+    # it - same continuous-body rule as above.
     p["kit_infill_crown_b"] = [
         slab(front=BACK, patch="infill"),
-        cornice("trim", 0.32, 0.24, project=0.28, depth_in=0.50),
-        plate(-H, H, 0.44, 1.14, BACK, FACE, "infill_dark"),
+        # A TALL ATTIC STOREY, deliberately about half the cell, against
+        # crown_a's shallow band. Same wall family, opposite decision about how
+        # a building should end - which is the difference two architects make,
+        # and the difference a hash cannot.
+        cornice("infill_dark", 0.02, 0.26, project=0.26, depth_in=0.50),
+        plate(-H, H, 0.16, 1.16, BACK, FACE, "infill_dark"),
     ] + [
-        plate(x - 0.15, x + 0.15, 0.44, 1.20, FACE, CELL / 2.0 + 0.12, "trim")
+        plate(x - 0.19, x + 0.19, 0.16, 1.22, FACE, CELL / 2.0 + 0.16, "concrete")
         for x in (-1.0, 0.0, 1.0)
     ] + [
-        cornice("trim", 1.26, 0.14, project=0.26, depth_in=0.45),
-        cornice("trim", 1.4125, 0.165, project=0.17, depth_in=0.38),
+        cornice("concrete", 1.28, 0.16, project=0.30, depth_in=0.48),
+        cornice("concrete", 1.4225, 0.145, project=0.20, depth_in=0.40),
     ]
-    # Brick wears its cap heavier, and gets dentils - the one place in the kit
-    # where a repeated small box is worth its triangles, because a dentil
-    # course is what says "this building has a top" at 60 m. They project from
-    # the body, which is behind them at every height.
+    # The old masonry building, and the ONLY crown that keeps a pale stone
+    # coping - which is now a piece of information rather than a default,
+    # because a stone cap over brick is what a bricklayer builds and nothing
+    # else in the kit wears one. The dentils are BRICK, not stone: a real
+    # dentil course in a brick cornice is corbelled brick, and making them
+    # stone was the tell that they had been coloured rather than built.
+    # They project from the body, which is behind them at every height.
     p["kit_brick_crown_a"] = [
         slab(front=BACK, patch="brick"),
         cornice("brick_dark", 0.26, 0.22, project=0.20, depth_in=0.45),
     ] + [
         plate(x - 0.11, x + 0.11, 0.40, 0.62, FACE - 0.05,
-              CELL / 2.0 + 0.26, "trim")
+              CELL / 2.0 + 0.26, "brick")
         for x in (-1.05, -0.35, 0.35, 1.05)
     ] + [
         plate(-H, H, 0.66, 1.16, BACK, FACE, "brick"),
         cornice("trim", 1.26, 0.16, project=0.30, depth_in=0.50),
         cornice("trim", 1.4225, 0.145, project=0.20, depth_in=0.40),
     ]
-    # Civic/brutalist: no ornament, one very deep coping. The silhouette does
-    # all of the work, which is the point of having a fourth crown at all.
+    # Civic/brutalist: no ornament, one very deep coping, and one tone all the
+    # way through. Its divergence is that it REFUSES a contrasting cap - the
+    # cheapest way to look like a different architect is to leave out the move
+    # everyone else made. The parapet is the dark band and the coping is the
+    # lighter concrete above it, inverting the light-cap-over-dark-parapet
+    # order the other three share.
     p["kit_concrete_crown_a"] = [
         slab(front=BACK, patch="concrete"),
         plate(-H, H, 0.55, 1.05, BACK, FACE, "concrete_dark"),

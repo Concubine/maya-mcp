@@ -39,11 +39,23 @@ none of them is what a wall ring needs: a deck piece spends its cell on the hori
 surface, and a crown cell has no horizontal surface at all. It is wall, all the way up,
 ending in the sky.
 
-Four of them — `kit_infill_crown_a` (plain), `kit_infill_crown_b` (piered), `kit_brick_crown_a`
-(dentil course), `kit_concrete_crown_a` (civic, no ornament, one very deep coping). Each reads
-the same three moves, because that is what makes a skyline legible from across a district
-rather than merely detailed: a cornice with a real shadow under it, a parapet **tonally**
-separated from the wall below, and a coping that oversails.
+Four of them, and **they diverge on purpose** — user's direction, 2026-08-21: *"as long as the
+divergence looks human made, I like divergence."*
+
+The way to get that is **not** a hash spraying four palettes across a street; a machine choosing
+at random is exactly the thing that must not be visible. It is to give each crown the cap a
+**builder** would have chosen for that wall, and let the differences follow:
+
+| piece | the building it is | the cap, and why |
+|---|---|---|
+| `kit_infill_crown_a` | quiet modern curtain wall | shallow, crisp: a recessed shadow groove, a short parapet, a thin **metal** coping with almost no projection, no corbels — a curtain wall does not corbel |
+| `kit_infill_crown_b` | the same wall, a bigger budget | a **tall attic storey**, about half the cell, with deep **concrete** piers and a heavy concrete coping. Same family, opposite decision about how a building ends |
+| `kit_brick_crown_a` | old masonry | a corbelled **brick** dentil course under a pale **stone** coping — the only crown in the kit that wears stone, which makes it information rather than a default |
+| `kit_concrete_crown_a` | civic / brutalist | refuses a contrasting cap altogether: one tone through, one very deep coping, and the light band *above* the dark one — inverting the order the other three share |
+
+The first cut of this delivery put the same pale `trim` coping on three of the four and they
+converged into one roofline with slightly different trim — the exact failure the side-by-side
+render was set up to catch.
 
 ### 2. `terrace` — the setback lip
 

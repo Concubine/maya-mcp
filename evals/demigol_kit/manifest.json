@@ -232,10 +232,10 @@
   },
   "totals": {
     "pieces": 70,
-    "triangles": 5544,
+    "triangles": 5508,
     "budget_triangles": 8200,
-    "budget_utilisation_pct": 67.6,
-    "utilisation_note": "REPORTED AS A PERCENTAGE, not as a pass mark. Revision 1 passed while spending 6% of its budget and the pass mark is what hid that. Revision 2 was 2364 tris of 4,720 (50.1%); revision 3 is 5544 of 8200 (67.6%), and all 17 new pieces sit at 9 boxes = 108 of 120 (90%).",
+    "budget_utilisation_pct": 67.2,
+    "utilisation_note": "REPORTED AS A PERCENTAGE, not as a pass mark. Revision 1 passed while spending 6% of its budget and the pass mark is what hid that. Revision 2 was 2364 tris of 4,720 (50.1%); revision 3 is 5508 of 8200 (67.2%), and all 17 new pieces sit at 9 boxes = 108 of 120 (90%).",
     "pieces_by_role": {
       "brick": 13,
       "concrete": 14,
@@ -1068,12 +1068,12 @@
       "role": "infill",
       "context": "crown",
       "variant": "a",
-      "triangles": 84,
-      "boxes": 7,
+      "triangles": 48,
+      "boxes": 4,
       "budget": 120,
-      "budget_utilisation_pct": 70.0,
-      "outset_m": 0.3,
-      "outset_from_spec_m": 0.3,
+      "budget_utilisation_pct": 40.0,
+      "outset_m": 0.14,
+      "outset_from_spec_m": 0.14,
       "submeshes": [
         "kit_material"
       ]
@@ -1087,8 +1087,8 @@
       "boxes": 8,
       "budget": 120,
       "budget_utilisation_pct": 80.0,
-      "outset_m": 0.28,
-      "outset_from_spec_m": 0.28,
+      "outset_m": 0.3,
+      "outset_from_spec_m": 0.3,
       "submeshes": [
         "kit_material"
       ]
