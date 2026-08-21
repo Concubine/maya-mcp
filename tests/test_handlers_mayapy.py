@@ -2246,6 +2246,63 @@ class TestCreateSkeletonInMaya:
                 j["name"] + ".segmentScaleCompensate"), j["name"]
 
 
+class TestCreateSkeletonPositionsInMaya:
+    """#719: the #713 golem asked for jnt_torso at (0, 2.05, 0) with
+    orient [0,0,0] and measured (0.33, 1.72, 0) - Maya lays a child's
+    translate in its PARENT's frame, so overwriting the parent's jointOrient
+    swings the child through world space. Silent wrong-position is the bug;
+    the requested world positions are the contract.
+    """
+
+    def test_explicit_orient_keeps_the_requested_positions(self):
+        from maya_plugin.handlers import rigging
+
+        out = rigging.create_skeleton({"joints": [
+            {"name": "jnt_root", "position": [0, 0, 0], "orient": [0, 0, 0]},
+            {"name": "jnt_torso", "position": [0, 2.05, 0],
+             "parent": "jnt_root", "orient": [0, 0, 0]},
+            {"name": "jnt_head", "position": [0, 3.4, 0],
+             "parent": "jnt_torso", "orient": [0, 0, 0]},
+        ]})
+        by_name = {j["name"].rsplit("|", 1)[-1]: j for j in out["joints"]}
+        assert by_name["jnt_torso"]["position"] == pytest.approx(
+            [0, 2.05, 0], abs=1e-6)
+        assert by_name["jnt_head"]["position"] == pytest.approx(
+            [0, 3.4, 0], abs=1e-6)
+        assert by_name["jnt_torso"]["orient"] == pytest.approx(
+            [0, 0, 0], abs=1e-6)
+
+    def test_world_aligned_joints_share_the_world_axes(self):
+        """The point of orient [0,0,0] on every joint: local X means the same
+        axis on every bone, which is what an all-hinges-X rig wants."""
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import rigging
+
+        out = rigging.create_skeleton({"joints": [
+            {"name": "w_root", "position": [0, 0, 0], "orient": [0, 0, 0]},
+            {"name": "w_a", "position": [0.4, 1.0, 0], "parent": "w_root",
+             "orient": [0, 0, 0]},
+            {"name": "w_b", "position": [0.9, 1.8, 0], "parent": "w_a",
+             "orient": [0, 0, 0]},
+        ]})
+        for j in out["joints"]:
+            m = cmds.xform(j["name"], query=True, worldSpace=True, matrix=True)
+            assert m[:3] == pytest.approx([1, 0, 0], abs=1e-6), j["name"]
+            assert m[4:7] == pytest.approx([0, 1, 0], abs=1e-6), j["name"]
+
+    def test_auto_orient_still_places_and_orients_as_before(self):
+        """The re-assertion must not disturb the deforming-rig default."""
+        from maya_plugin.handlers import rigging
+
+        out = rigging.create_skeleton({
+            "chain": [[0, 0, 0], [0, 2, 0], [0, 4, 0]], "chain_prefix": "ar"})
+        assert [tuple(round(v, 6) for v in j["position"])
+                for j in out["joints"]] == [(0, 0, 0), (0, 2, 0), (0, 4, 0)]
+        assert out["joints"][0]["orient"][2] == pytest.approx(90.0, abs=1e-4)
+        assert out["joints"][2]["orient"] == pytest.approx([0.0, 0.0, 0.0])
+
+
 class TestBindSkinInMaya:
     def _chain(self, rigging, n=4, height=4.0):
         step = height / (n - 1)

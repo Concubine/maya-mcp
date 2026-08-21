@@ -907,6 +907,54 @@ class TestClipGuard:
         assert out["applied"] == 1
 
 
+class TestPositionsSurviveExplicitOrient:
+    """#719: `orient` used to cost the caller their positions. Maya lays a
+    child's translate in the PARENT's frame, so overwriting a parent's
+    jointOrient swings its children through world space - asked for
+    (0, 2.05, 0), the #713 golem measured (0.33, 1.72, 0). The requested
+    world positions are the contract, so they are re-asserted after
+    orienting. Real placement is mayapy's job
+    (TestCreateSkeletonPositionsInMaya); this pins the call SEQUENCE.
+    """
+
+    @staticmethod
+    def _sets(fake):
+        return [c for c in fake.calls if c[0] == "xform_set"]
+
+    def test_every_joint_is_re_asserted_parents_first(self, fake):
+        rigging.create_skeleton({"joints": [
+            {"name": "jnt_root", "position": [0, 0, 0]},
+            {"name": "jnt_torso", "position": [0, 2.05, 0],
+             "parent": "jnt_root", "orient": [0, 0, 0]},
+            {"name": "jnt_head", "position": [0, 3.4, 0],
+             "parent": "jnt_torso", "orient": [0, 0, 0]},
+        ]})
+        assert self._sets(fake) == [
+            ("xform_set", "|jnt_root", (0, 0, 0)),
+            ("xform_set", "|jnt_root|jnt_torso", (0, 2.05, 0)),
+            ("xform_set", "|jnt_root|jnt_torso|jnt_head", (0, 3.4, 0)),
+        ]
+
+    def test_the_re_assertion_follows_the_orient_writes(self, fake):
+        """Before them it would be undone by the very edit that moves them."""
+        rigging.create_skeleton({"joints": [
+            {"name": "a", "position": [0, 0, 0]},
+            {"name": "b", "position": [0, 2, 0], "parent": "a",
+             "orient": [0, 0, 0]},
+        ]})
+        kinds = [c[0] for c in fake.calls]
+        assert kinds.index("xform_set") > max(
+            i for i, c in enumerate(fake.calls)
+            if c[0] == "setAttr" and "jointOrient" in c[1])
+
+    def test_an_auto_oriented_chain_is_re_asserted_too(self, fake):
+        """No orient given: the positions are the same contract, and the
+        re-assertion must be a no-op rather than a special case."""
+        rigging.create_skeleton({"chain": [[0, 0, 0], [0, 2, 0]],
+                                 "chain_prefix": "c"})
+        assert [c[2] for c in self._sets(fake)] == [(0, 0, 0), (0, 2, 0)]
+
+
 class TestBoundMeshes:
     """#720: two rig shapes are legal. A skinned mesh is found through its
     skinCluster; a rigid-parent rig (#713 - chunks parented under joints, no

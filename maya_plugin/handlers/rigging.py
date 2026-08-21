@@ -79,6 +79,17 @@ def create_skeleton(params: Dict[str, Any]) -> Dict[str, Any]:
                          units.degrees_to_ui(cmds, joint["orient"][1]),
                          units.degrees_to_ui(cmds, joint["orient"][2]))
 
+    # Setting jointOrient does not move the joint it is set on, but a child's
+    # translate lives in its PARENT's frame - so re-orienting a parent swings
+    # every child through world space. Asked for (0, 2.05, 0) with an explicit
+    # orient, the #713 golem measured (0.33, 1.72, 0), silently (#719). The
+    # requested world positions are the contract, so they are re-asserted here,
+    # parents first (a parent move carries its children, which are re-asserted
+    # in turn); resolve_joints guarantees that order.
+    for joint in resolved:
+        cmds.xform(long_names[joint["name"]], worldSpace=True,
+                   translation=joint["position"])
+
     joints_out = []
     for joint in resolved:
         node = long_names[joint["name"]]
