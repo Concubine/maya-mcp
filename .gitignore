@@ -39,3 +39,10 @@ evals/export_scene_live/
 # PreRotation / ScalingPivot is rebuilt on every run
 evals/fbx_probe_live/
 evals/image_tools_live/
+
+# Same rule as every other run above: auto-checkpoints are the safety net for a
+# wedged Maya, not part of the delivery. #665 rerun and the lizard run, folded in
+# from D:\devel\ where they were built.
+evals/golem_rerun_665/out/checkpoints/
+evals/golem_rerun_665/out_v3/checkpoints/
+evals/lizard_run/checkpoints/
