@@ -517,13 +517,45 @@ class TestKitAtlasArithmetic:
         assert kit.COURSES_PER_PATCH == pytest.approx(
             kit.COURSES_PER_METRE * kit.WORLD_SCALE)
 
-    def test_a_brick_course_is_thick_enough_to_survive_a_mortar_bed(self):
-        # The bed is 0.16 of a course. Below ~2 px it stops reading as mortar
-        # and becomes the corduroy #600 item 3 complains about.
+    # THIS USED TO BE A >= 2.0 px FLOOR ON THE MORTAR BED, and revision 4
+    # retired it rather than lowering it, which is the part worth reading.
+    #
+    # The floor's stated premise was that below ~2 px a bed "stops reading as
+    # mortar and becomes corduroy". That premise was never rendered. Revision 4
+    # rendered it - a 78 m brick wall at a grazing angle, unfiltered, at 6, 9
+    # and 13 courses/m - and 13, whose bed is 1.4 px, read BETTER than 6, whose
+    # bed is 3.0 px. A 1-px checker positive control in the same patch, same
+    # camera, same filtering, tore into violent moire, so the test could have
+    # shown the failure and did not.
+    #
+    # Lowering the threshold to 1.4 would have been worse than useless: a gate
+    # retuned to whatever the delivery happens to ship asserts nothing at all.
+    # So the floor is gone and the VALUE is pinned instead, the same way the
+    # golden hash is pinned on the Demigol side - a deliberate art decision that
+    # may only move on purpose, with one file to edit when it does.
+    #
+    # WHAT THIS SUITE CANNOT SEE, stated so a green run is not misread: the
+    # renders behind this number came from Maya's rasteriser. Demigol samples
+    # the same atlas through Unity with BC block compression, where a 1.4 px
+    # dark line is exactly the feature a codec smears. Nobody has measured that,
+    # it cannot be measured from here, and it is flagged on Demigol #652.
+    BRICK_COURSES_PER_METRE = 13.0
+
+    def test_the_brick_pitch_is_the_pinned_value(self):
+        assert kit.COURSES_PER_METRE == pytest.approx(
+            self.BRICK_COURSES_PER_METRE), (
+            "brick pitch moved to %.1f courses/m. That is an art decision, not "
+            "a tuning knob - move this pin deliberately and say why, in the "
+            "generator comment and the delivery README."
+            % kit.COURSES_PER_METRE)
+
+    def test_the_quoted_course_and_bed_pixels_match_the_pinned_pitch(self):
+        # The README and manifest quote these; a change that moves them
+        # silently is a documentation bug as well as an art one.
         course_px = (kit.ATLAS_PX // kit.ATLAS_COLS) / kit.COURSES_PER_PATCH
-        assert course_px * 0.16 >= 2.0, (
-            "mortar bed is %.2f px at %.1f courses/m"
-            % (course_px * 0.16, kit.COURSES_PER_METRE))
+        assert course_px == pytest.approx(8.75, abs=0.05)
+        assert course_px * 0.16 == pytest.approx(1.40, abs=0.02)
+        assert 1000.0 / kit.COURSES_PER_METRE == pytest.approx(76.9, abs=0.1)
 
 
 # ==================================== revision 3: the steel pieces and damage

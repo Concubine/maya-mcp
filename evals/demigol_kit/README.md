@@ -76,7 +76,7 @@ Same rule that made `endcap` and `damaged` contexts: the shell picks variants fr
 coordinate hash, and both of these are chosen by **position**. A hash must never be able to
 put a coping halfway up a building.
 
-### 4. Brick re-pitched, 6 → 9 courses/m
+### 4. Brick re-pitched, 6 → 13 courses/m (real brick)
 
 Revision 3 coarsened brick to 6/m on a **prediction** that a faithful 13/m course would alias
 on Demigol's no-mipmap import path. Revision 4 rendered it: a 78 m brick wall at a grazing
@@ -88,11 +88,20 @@ What 6/m cost: a 167 mm course is twice a real brick, so at close and play dista
 read as large-format blockwork, and the coarse courses stayed individually resolvable far
 enough out to read as horizontal striping rather than as material.
 
-**9 rather than 13** for a reason the render cannot settle: this test is Maya's rasteriser,
-Demigol's is Unity with **BC-compressed** textures, and block compression at a 1.4 px mortar
-bed is where a thin dark line smears. 9/m puts the bed at **2.0 px — on** the floor the
-generator tests pin, not under it. 13 remains available; the evidence is in
-`docs/deliveries/2026-08-21-brick-pitch/`.
+**The value is 13** — user's call, 2026-08-21, shown the shipped-versus-alternative pair at
+close and play distance. An intermediate 9 courses/m was delivered first and overruled.
+
+**The one risk that remains is not the aliasing one.** Every render behind this decision came
+from Maya's rasteriser; Demigol samples the same atlas through Unity with **BC block
+compression**, where a 1.4 px dark line is exactly what a block codec smears. Nobody has
+measured it and it cannot be measured from this repo — flagged on Demigol #652. *If brick ever
+reads mushy in Unity and crisp here, check that before the pitch, the atlas size or the mip
+setting.*
+
+The old `>= 2 px` mortar-bed floor in the generator tests is **gone, not lowered**. Its premise
+is exactly what the render disproved, and a gate retuned to whatever the delivery ships asserts
+nothing. The pitch is pinned by equality instead, like a golden hash: one file to edit, on
+purpose, with a reason.
 
 ### 5. The grandfathered taper-trap offender is fixed
 

@@ -219,11 +219,11 @@
     "world_scale_m_per_patch": 9.0,
     "how_it_is_achieved": "uv_atlas world_scale mode: UV scale is derived from real-world size, so a 0.5 m band and a 3 m slab carry identical pixels per metre. Family 1 normalised each box to fill its patch, so density varied ~6x between pieces and was not knowable from the manifest - that unknowability was the defect.",
     "why_not_170": "A box auto-projection lays a piece's six faces side by side: measured live, a cube's UV bbox spans 2.858 face-widths, not one. So a patch covers ~9 m of layout, not one 3 m face, and px/m is patch_px / world_scale. The contract's ~170 px/m assumed one patch per face; reaching it under box projection would need a 6144 atlas. 4096 gives 113.8 px/m.",
-    "brick_courses_per_metre": 9.0,
-    "brick_courses_per_3m_face": 27,
-    "brick_course_px": 12.64,
-    "brick_mortar_bed_px": 2.02,
-    "brick_note": "DELIBERATELY COARSER THAN REAL BRICK. 81 courses across the 9 m patch, so a 3 m face reads ~27 rather than the ~39 a real wall would. Revision 2 authored the real 13 courses/m and that was the wrong target: it put a course at 8.75 px and the mortar bed at 1.4 px, which reads as corduroy up close and aliases at distance because the import path disables mipmaps to protect the patch margin. At 2.0 px the bed survives both."
+    "brick_courses_per_metre": 13.0,
+    "brick_courses_per_3m_face": 39,
+    "brick_course_px": 8.75,
+    "brick_mortar_bed_px": 1.4,
+    "brick_note": "DELIBERATELY COARSER THAN REAL BRICK. 117 courses across the 9 m patch, so a 3 m face reads ~39 rather than the ~39 a real wall would. Revision 2 authored the real 13 courses/m and that was the wrong target: it put a course at 8.75 px and the mortar bed at 1.4 px, which reads as corduroy up close and aliases at distance because the import path disables mipmaps to protect the patch margin. At 1.4 px the bed survives both."
   },
   "budgets": {
     "interior": 20,
@@ -1348,9 +1348,11 @@
     "why_contexts_not_variants": "the shell picks variants from a coordinate hash, and both of these are chosen by POSITION. A hash must never be able to put a coping halfway up a building - the same rule that made `endcap` and `damaged` contexts.",
     "brick_pitch": {
       "from_courses_per_m": 6.0,
-      "to_courses_per_m": 9.0,
+      "to_courses_per_m": 13.0,
+      "decided_by": "the user, 2026-08-21, shown the shipped-versus-alternative pair at close and play distance. An intermediate 9 courses/m was delivered first and overruled in favour of real brick.",
       "why": "revision 3 coarsened brick to 6/m on a PREDICTION that a real 13/m course would alias on Demigol's no-mipmap import path. Revision 4 rendered it: a 78 m brick wall at a grazing angle, unfiltered, at 6, 9 and 13 courses/m, and 13 showed no moire anywhere along the sweep. A 1-px checker positive control in the same patch, same camera, same filtering, tore into violent moire - so the aliasing condition was genuinely reproduced and real brick survived it.",
-      "why_9_and_not_13": "the test is Maya's rasteriser; Demigol's is Unity with BC-compressed textures, and block compression at a 1.4 px mortar bed is exactly where a thin dark line smears. 9/m puts the bed at 2.0 px - ON the floor the generator tests pin, not under it - and needs no assumption about a codec nobody has measured. 13 remains available and the evidence for it ships.",
+      "the_open_risk": "NOT aliasing - that was tested. Every render behind this decision came from Maya's rasteriser, and Demigol samples the same atlas through Unity with BC block compression, where a 1.4 px dark line is exactly what a block codec smears. Nobody has measured it and it cannot be measured from this repo. Flagged on Demigol #652. If brick reads mushy in Unity and crisp here, check this before the pitch, the atlas size or the mip setting.",
+      "the_retired_gate": "the generator tests used to pin a >= 2 px floor on the mortar bed. Revision 4 RETIRED it rather than lowering it: its premise (sub-2px cannot read as mortar) is what the render disproved, and a gate retuned to whatever the delivery ships asserts nothing. The pitch is pinned by equality instead.",
       "what_6_cost": "a 167 mm course is twice a real brick, so at close and play distance the wall read as large-format blockwork rather than brick, and the coarse courses stayed individually resolvable far enough out to read as horizontal striping rather than as material."
     },
     "not_extended": "no second family, no atlas change, no facade tier axis. The atlas is still full at 16 of 16 patches and that constraint is unchanged - see Demigol #653."

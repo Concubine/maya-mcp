@@ -118,23 +118,34 @@ PX_PER_METRE = PATCH_PX / WORLD_SCALE
 # individually resolvable far enough out that they read as horizontal
 # striping rather than as material.
 #
-# 9 is chosen over 13 for a reason the render cannot settle. This test is
-# Maya's rasteriser; Demigol's is Unity with BC-compressed textures, and block
-# compression at a 1.4 px mortar bed is exactly where a thin dark line smears.
-# 9 courses/m puts the bed at 2.0 px - ON the floor the generator tests pin,
-# not under it - doubles the perceived fineness against 6, and needs no
-# assumption about a codec nobody here has measured. 13 remains available and
-# the evidence for it is in docs/deliveries/; going there is the Demigol
-# side's call once the atlas is seen through Unity's own compressor.
+# THE VALUE IS 13: REAL BRICK. User's call, 2026-08-21, shown the shipped-versus-
+# alternative pair at close and play distance and asked to decide.
+#
+# An intermediate 9 was delivered first, and the reason it was NOT kept is worth
+# recording, because it was a good reason that the user overruled with their eyes
+# open. 9 put the mortar bed at 2.0 px, exactly on the floor the generator tests
+# used to pin, so it needed no assumption about anything unmeasured. 13 puts the
+# bed at 1.4 px.
+#
+# THE ONE RISK THAT REMAINS, AND IT IS NOT THE ALIASING ONE. Every render behind
+# this decision came from Maya's rasteriser. Demigol samples the same atlas
+# through Unity with BC block compression, and a 1.4 px dark line is exactly the
+# feature a block codec smears. Nobody has measured it, it cannot be measured
+# from this repo, and it is flagged on Demigol #652. If brick ever comes back
+# looking mushy in Unity and crisp here, THIS is the first thing to check - not
+# the pitch, not the atlas size, not the mip setting.
 #
 # The other route - fix the margin so mips can be on - stays rejected: a patch
 # atlas and mipmapping are structurally incompatible, since by mip 5 a 1024
 # patch is 32 px and the 3% margin is 1 px. That needs a Texture2DArray and a
 # shader change on the Demigol side.
 #
-# tests/test_demigol_generators.py pins the 2 px floor. 9 sits exactly on it,
-# so that gate still guards the direction it was written to guard.
-COURSES_PER_METRE = 9.0
+# The old >= 2 px floor in tests/test_demigol_generators.py is GONE, not lowered.
+# Its premise ("sub-2px cannot read as mortar") is the thing the render
+# disproved, and a gate retuned to whatever the delivery ships asserts nothing.
+# The value is pinned by equality instead, like a golden hash: one file to edit,
+# on purpose, with a reason.
+COURSES_PER_METRE = 13.0
 COURSES_PER_PATCH = COURSES_PER_METRE * WORLD_SCALE
 
 # index, albedo rgb, style, metallic, smoothness
@@ -2725,6 +2736,10 @@ def main():
             "brick_pitch": {
                 "from_courses_per_m": 6.0,
                 "to_courses_per_m": COURSES_PER_METRE,
+                "decided_by": "the user, 2026-08-21, shown the shipped-versus-"
+                              "alternative pair at close and play distance. An "
+                              "intermediate 9 courses/m was delivered first and "
+                              "overruled in favour of real brick.",
                 "why": "revision 3 coarsened brick to 6/m on a PREDICTION "
                        "that a real 13/m course would alias on Demigol's "
                        "no-mipmap import path. Revision 4 rendered it: a 78 m "
@@ -2734,16 +2749,25 @@ def main():
                        "the same patch, same camera, same filtering, tore "
                        "into violent moire - so the aliasing condition was "
                        "genuinely reproduced and real brick survived it.",
-                "why_9_and_not_13": "the test is Maya's rasteriser; Demigol's "
-                                    "is Unity with BC-compressed textures, "
-                                    "and block compression at a 1.4 px mortar "
-                                    "bed is exactly where a thin dark line "
-                                    "smears. 9/m puts the bed at 2.0 px - ON "
-                                    "the floor the generator tests pin, not "
-                                    "under it - and needs no assumption about "
-                                    "a codec nobody has measured. 13 remains "
-                                    "available and the evidence for it "
-                                    "ships.",
+                "the_open_risk": "NOT aliasing - that was tested. Every "
+                                 "render behind this decision came from "
+                                 "Maya's rasteriser, and Demigol samples the "
+                                 "same atlas through Unity with BC block "
+                                 "compression, where a 1.4 px dark line is "
+                                 "exactly what a block codec smears. Nobody "
+                                 "has measured it and it cannot be measured "
+                                 "from this repo. Flagged on Demigol #652. If "
+                                 "brick reads mushy in Unity and crisp here, "
+                                 "check this before the pitch, the atlas size "
+                                 "or the mip setting.",
+                "the_retired_gate": "the generator tests used to pin a >= 2 px "
+                                    "floor on the mortar bed. Revision 4 "
+                                    "RETIRED it rather than lowering it: its "
+                                    "premise (sub-2px cannot read as mortar) "
+                                    "is what the render disproved, and a gate "
+                                    "retuned to whatever the delivery ships "
+                                    "asserts nothing. The pitch is pinned by "
+                                    "equality instead.",
                 "what_6_cost": "a 167 mm course is twice a real brick, so at "
                                "close and play distance the wall read as "
                                "large-format blockwork rather than brick, and "

@@ -63,19 +63,23 @@ individually resolvable much further out, at play distance they read as **horizo
 rather than as material. The finer pitch is the one that stops reading as a pattern and starts
 reading as a surface.
 
-## What revision 4 does: 9 courses/m, not 13
+## DECIDED: 13 courses/m — real brick
 
-9 is chosen over 13 for a reason this test cannot settle. It is Maya's rasteriser; Demigol's is
-Unity with **BC-compressed** textures, and block compression at a 1.4 px mortar bed is exactly
-where a thin dark line smears. 9 courses/m:
+**User's call, 2026-08-21**, shown `the_choice_close.png` / `the_choice_play.png` — the shipped
+9 courses/m against the 13 alternative, same camera, one decision.
 
-- puts the mortar bed at **2.0 px — on** the floor `tests/test_demigol_generators.py` pins, not under it,
-- doubles the perceived fineness against 6,
-- needs no assumption about a codec nobody here has measured.
+An intermediate **9** was delivered first and overruled. Its argument was that 9 put the mortar
+bed at 2.0 px, exactly on the pinned floor, and so required no assumption about anything
+unmeasured. 13 puts the bed at 1.4 px and looks like brick.
 
-**13 remains available and the evidence for it is in this folder.** Going there is the Demigol
-side's call once the atlas has been seen through Unity's own compressor — that is the one
-measurement that would settle it, and it can only be taken on that side.
+**The open risk is not aliasing — that was tested here and survived.** It is that every render
+in this folder came from Maya's rasteriser, while Demigol samples the same atlas through Unity
+with **BC block compression**, where a 1.4 px dark line is exactly the feature a block codec
+smears. That measurement can only be taken on the Unity side and is flagged on #652. If brick
+reads mushy in Unity and crisp in these images, that is the first thing to check.
+
+The generator's old `>= 2 px` mortar-bed floor was **retired, not lowered** — see
+`tests/test_demigol_generators.py`. Its premise was the claim these renders disproved.
 
 ## Method note
 
