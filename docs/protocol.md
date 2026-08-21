@@ -445,8 +445,17 @@ the arc so a one-sided range puts neutral at the extreme —
 no-hyperextension as the range's own asymmetry. A parented chunk without
 an override gets an explicit LOCKED joint plus a warning; a parentless
 chunk gets `joint: null`. `parent` defaults to the nearest mesh-bearing
-ancestor in the chunk set; flat-sibling destruction rigs supply it via
-overrides, because there parenthood is design intent too.
+ancestor in the chunk set — and in a rigid-parent rig (#713), where each
+chunk hangs off its own joint and the parent chunk is a SIBLING branch under
+an ancestor joint rather than an ancestor, to the chunk carried by the
+nearest ancestor joint above the chunk's own (#722). Chunks sharing one
+joint are welded, never each other's parent; if an ancestor joint carries
+several, the first by name is taken and the choice is warned. Flat-sibling
+destruction rigs still supply `parent` via overrides, because there
+parenthood is design intent too. **An override that supplies joint limits
+for a chunk that resolves parentless REFUSES** — a limit with no joint to
+attach to used to be dropped silently, leaving a manifest that looked
+complete with no limits in it (#722).
 
 Validation is ANALYTIC, not simulated (#675): degenerate volumes,
 rest-pose-excluding ranges, multiple parentless bodies and every override
@@ -489,7 +498,7 @@ reports each channel's name and delta payload as read from the bytes.
 
 | cmd | params | result |
 |---|---|---|
-| `author_clip` | `{ root, name, fps=30, keys: [{time_s, rotations?, blend_weights?, root_position?}], interpolation, loop }` | `{ root, clip, fps, duration_s, frames, keyed_joints, keyed_weight_channels, root_position_keyed, interpolation, loop, replaced, per_key, warnings }` |
+| `author_clip` | `{ root, name, fps=30, keys: [{time_s, rotations?, blend_weights?, root_position?}], interpolation, loop, timeout_s=120 }` | `{ root, clip, fps, duration_s, frames, keyed_joints, keyed_weight_channels, root_position_keyed, interpolation, loop, replaced, per_key, warnings }` |
 | `preview_clip` | `{ root, name, angle?, every_nth?, resolution?, renderer?, zoom? }` | `{ clip, fps, frames, images, ... }` |
 | `delete_clip` | `{ root }` | `{ root, clip, deleted_curves, max_displacement, warnings }` |
 
@@ -502,7 +511,18 @@ skeleton) and a world `root_position` for the root joint — the pelvis bob a
 walk needs. `loop=true` refuses a clip whose last key does not close onto
 its first, with the measured per-channel difference. Every key's
 displacement is MEASURED by driving the scene time to that frame;
-`duration_s` is re-read from the curves.
+`duration_s` is re-read from the curves. `timeout_s` (default 120, ceiling
+`MAX_TIMEOUT_S`) exists because the tool's own timeout advice was
+unfollowable (#721): a long clip on a heavy scene outlives the default, and
+an open Arnold RenderView (IPR) re-renders on every scene mutation, which
+can stall keyframing for minutes.
+
+**Displacement is measured against whatever the skeleton MOVES — by
+deformation OR by rigid parenting.** A mesh transform parented under a joint
+with no skinCluster anywhere (#713's rig) is a legal rig, not an empty one;
+it used to report `max_displacement: 0` and `preview_clip` refused it
+outright (#720). `preview_clip` now refuses only a skeleton that moves no
+mesh by EITHER mechanism, and the refusal names both.
 
 **While a clip exists, static pose mutators refuse** (`pose_skeleton`,
 `pose_ik`, `reset_pose`, `set_blendshape_weights`): curves own the
