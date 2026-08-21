@@ -238,8 +238,9 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
             "samples" % (", ".join("%g" % t for t in fractional), fps))
     if not meshes:
         warnings.append(
-            "no skinned mesh is bound to this skeleton - the clip moves "
-            "bare joints only; bind_skin first if deformation was the point")
+            "this skeleton moves no mesh (no skinned bind, no mesh parented "
+            "under its joints) - the clip moves bare joints only; the "
+            "displacement below is measured against nothing")
 
     session.auto_checkpoint("author_clip")
 
@@ -483,9 +484,12 @@ def preview_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     meshes = rigging._bound_meshes(cmds, set(joints))
     if not meshes:
         raise HandlerError(
-            "no skinned mesh is bound to this skeleton - bare joints "
-            "render nothing",
-            hint="bind_skin first; the preview frames the bound meshes")
+            "this skeleton moves no mesh - neither a skinned bind nor a "
+            "mesh parented under one of its joints; bare joints render "
+            "nothing",
+            hint="bind_skin for a deforming rig, or parent the chunks under "
+                 "their joints for a rigid-body rig; the preview frames "
+                 "whatever the skeleton moves")
 
     # Reassert the CLIP's own time unit (mirrors author_clip): another clip
     # authored since - on this skeleton or any other - may have left the

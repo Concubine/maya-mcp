@@ -370,8 +370,9 @@ def pose_skeleton(params: Dict[str, Any]) -> Dict[str, Any]:
     warnings: List[str] = []
     if not meshes:
         warnings.append(
-            "no skinned mesh is bound to this skeleton - the pose moved bare "
-            "joints only; bind_skin first if deformation was the point")
+            "this skeleton moves no mesh (no skinned bind, no mesh parented "
+            "under its joints) - the pose moved bare joints only; the "
+            "displacement below is measured against nothing")
     else:
         # Per mesh, not combined: a combined max hides one inert mesh among
         # several (#668 review item a).
@@ -1035,8 +1036,9 @@ def pose_ik(params: Dict[str, Any]) -> Dict[str, Any]:
         displaced += mesh_count
     if not meshes:
         warnings.append(
-            "no skinned mesh is bound to this skeleton - the solve moved "
-            "bare joints only; bind_skin first if deformation was the point")
+            "this skeleton moves no mesh (no skinned bind, no mesh parented "
+            "under its joints) - the solve moved bare joints only; the "
+            "displacement below is measured against nothing")
     else:
         for entry in per_mesh:
             extent = sculpt_math.bbox_extent(before[entry["mesh"]])

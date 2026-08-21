@@ -21,9 +21,12 @@ class FakeCmds:
     per plug; listConnections answers from that map. currentTime drives the
     fake pose the _points seam reads."""
 
-    def __init__(self, bound=True):
+    def __init__(self, bound=True, rigid_chunks=None):
         self.joints = ["|root", "|root|mid", "|root|mid|tip"]
         self.bound = bound
+        # #713/#720: the second legal rig shape - chunks parented under
+        # joints with no skinCluster anywhere. joint -> chunk transform.
+        self.rigid_chunks = dict(rigid_chunks or {})
         self.curves = {}          # plug -> curve node name
         self.keys = {}            # plug -> {frame: value}
         self.tangents = []        # (node, attr, itt, ott)
@@ -67,15 +70,24 @@ class FakeCmds:
         return "mesh" if node.endswith("Shape") else "transform"
 
     def listRelatives(self, node, children=False, parent=False, shapes=False,
-                      type=None, fullPath=False, **kw):
+                      allDescendents=False, type=None, fullPath=False, **kw):
         if children and type == "joint":
             kids = [j for j in self.joints
                     if j.rsplit("|", 1)[0] == node and j != node]
             return kids or None
         if shapes:
-            return ["|body|bodyShape"] if node == "|body" else None
+            if node == "|body":
+                return ["|body|bodyShape"]
+            if node in self.rigid_chunks.values():
+                return [node + "|" + node.rsplit("|", 1)[-1] + "Shape"]
+            return None
         if parent:
             return ["|body"] if node == "|body|bodyShape" else None
+        if allDescendents:
+            # Real Maya excludes shapes from type="transform"; the chunk
+            # transform under this joint is what _bound_meshes is after.
+            chunk = self.rigid_chunks.get(node)
+            return [chunk] if chunk else None
         return None
 
     def listHistory(self, node, pruneDagObjects=False, **kw):
@@ -184,9 +196,9 @@ class FakeCmds:
         return []   # nothing bound via dagPose in the fake: zero-rotation path
 
 
-@pytest.fixture
-def fake(monkeypatch):
-    fake = FakeCmds()
+def _install(fake, monkeypatch):
+    """Wire a FakeCmds into the clip module - the `fake` fixture's body,
+    reusable by tests that need a differently-shaped scene (#720)."""
     monkeypatch.setattr(clip, "_cmds", lambda: fake)
     monkeypatch.setattr(clip.session, "auto_checkpoint",
                         lambda label: fake.checkpoints.append(label) or
@@ -202,6 +214,11 @@ def fake(monkeypatch):
 
     monkeypatch.setattr(clip, "_points", points)
     return fake
+
+
+@pytest.fixture
+def fake(monkeypatch):
+    return _install(FakeCmds(), monkeypatch)
 
 
 def _author(fake, name="idle", fps=30, keys=None, **kw):
@@ -304,7 +321,7 @@ class TestAuthor:
             {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
             {"time_s": 0.333, "rotations": {"mid": [0, 0, 10]}}])
         assert any("between frames" in w for w in out["warnings"])
-        assert any("no skinned mesh" in w for w in out["warnings"])
+        assert any("moves no mesh" in w for w in out["warnings"])
 
 
 class TestDelete:
@@ -415,7 +432,7 @@ class TestPreviewClip:
     def test_unbound_skeleton_refuses(self, fake, monkeypatch):
         self._wire(fake, monkeypatch)
         fake.bound = False
-        with pytest.raises(HandlerError, match="no skinned mesh"):
+        with pytest.raises(HandlerError, match="moves no mesh"):
             clip.preview_clip({"root": "root", "name": "idle"})
 
     def test_default_stride_never_self_refuses_on_the_forced_last_frame(
@@ -483,6 +500,68 @@ class TestPreviewClip:
                                "every_nth": 1})
         assert fake.time_unit_calls == []
         fake.bound = False
-        with pytest.raises(HandlerError, match="no skinned mesh"):
+        with pytest.raises(HandlerError, match="moves no mesh"):
             clip.preview_clip({"root": "root", "name": "idle"})
         assert fake.time_unit_calls == []
+
+
+class TestRigidParentRig:
+    """#720: a rig whose chunks are parented under joints with NO skinCluster
+    (#713's golem) is a legal rig, not an empty one. It used to report
+    max_displacement 0 - an echo (#636) - and preview_clip refused it
+    outright.
+    """
+
+    def _rigid(self, monkeypatch):
+        return _install(
+            FakeCmds(bound=False, rigid_chunks={"|root|mid": "|root|mid|chunk"}),
+            monkeypatch)
+
+    def test_author_measures_the_chunk_it_moves(self, monkeypatch):
+        fake = self._rigid(monkeypatch)
+        # The fixture's _points seam moves its vertex with |root.rotateX, so
+        # keying the root is what makes a measurable displacement exist at
+        # all; a zero here means the chunk was never found (#636).
+        out = _author(fake, keys=[
+            {"time_s": 0.0, "rotations": {"root": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"root": [30, 0, 0]}}])
+        assert max(k["max_displacement"] for k in out["per_key"]) > 0.0
+        assert not [w for w in out["warnings"] if "mesh" in w]
+
+    def test_preview_renders_it(self, monkeypatch):
+        fake = self._rigid(monkeypatch)
+        _author(fake, keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [0, 0, 45]}}])
+        calls = {}
+
+        def run_shots(cmds, shots, params):
+            calls["shots"] = shots
+            return {"images": [{"label": s["label"], "angle": s["angle"],
+                                "png_b64": "x"} for s in shots],
+                    "renderer": "hw2", "samples": 1, "fallback_light": False,
+                    "zoom": 1.0, "relit_lights": 0}
+
+        monkeypatch.setattr(clip.render, "_run_shots", run_shots)
+        out = clip.preview_clip({"root": "root", "name": "idle"})
+        assert out["clip"] == "idle"
+        assert all(s["frame_on"] == ["|root|mid|chunk"] for s in calls["shots"])
+
+    def test_a_skeleton_that_moves_nothing_still_refuses_naming_both_shapes(
+            self, monkeypatch):
+        """The refusal survives - it just has to be true. Bare joints render
+        nothing whether or not a skinCluster was the missing piece."""
+        fake = _install(FakeCmds(bound=False), monkeypatch)
+        _author(fake, keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [0, 0, 45]}}])
+        with pytest.raises(HandlerError, match="moves no mesh") as excinfo:
+            clip.preview_clip({"root": "root", "name": "idle"})
+        assert "parented" in str(excinfo.value)
+
+    def test_author_warns_only_when_nothing_moves(self, monkeypatch):
+        fake = _install(FakeCmds(bound=False), monkeypatch)
+        out = _author(fake, keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [0, 0, 45]}}])
+        assert [w for w in out["warnings"] if "moves no mesh" in w]

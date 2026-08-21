@@ -313,7 +313,7 @@ class TestPoseValidation:
     def test_no_bound_mesh_is_a_warning_not_silence(self, fake):
         self._skeleton(fake)
         out = rigging.pose_skeleton({"root": "r", "rotations": {"a": [0, 0, 10]}})
-        assert any("no skinned mesh" in w for w in out["warnings"])
+        assert any("moves no mesh" in w for w in out["warnings"])
         assert out["max_displacement"] == 0.0
 
     def test_a_unique_short_name_resolves_to_its_joint(self, fake):
