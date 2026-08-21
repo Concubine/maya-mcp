@@ -138,10 +138,28 @@ def _collect_chunks(cmds, params: Dict[str, Any],
     return found
 
 
-def _parent_of(cmds, chunk: str, chunk_set) -> Optional[str]:
-    """Nearest mesh-bearing ancestor WITHIN the chunk set - plain groups
-    between a chunk and its parent chunk are skipped, not parents."""
+def _parent_of(cmds, chunk: str, chunk_set,
+               warnings: Optional[List[str]] = None) -> Optional[str]:
+    """The chunk this one articulates against - plain groups between a chunk
+    and its parent chunk are skipped, not parents.
+
+    Two rig shapes reach here. In a GROUP rig the parent chunk is a genuine
+    ancestor, and the upward walk finds it. In a rigid-parent rig (#713) each
+    chunk hangs off its own jnt_*, so the parent chunk is NOT an ancestor at
+    all - it is a sibling branch hanging off an ancestor JOINT, which no
+    upward walk can reach. Reading that as parentless returned all 15 bodies
+    with parent:null and silently dropped every joint limit with them (#722).
+
+    So once the walk crosses the chunk's own joint, each ancestor joint is
+    asked what chunk IT carries. Chunks on the SAME joint are deliberately
+    never candidates for each other: they are welded (no articulation is
+    possible between them) and parenting them to each other would build a
+    cycle. Several chunks on one ancestor joint are structurally
+    interchangeable - all welded to it - so the first by name is taken and
+    the choice is reported, never silent.
+    """
     node = chunk
+    own_joint_seen = False
     while True:
         parents = cmds.listRelatives(node, parent=True, fullPath=True)
         if not parents:
@@ -149,6 +167,26 @@ def _parent_of(cmds, chunk: str, chunk_set) -> Optional[str]:
         node = parents[0]
         if node in chunk_set:
             return node
+        if cmds.nodeType(node) == "joint":
+            if not own_joint_seen:
+                own_joint_seen = True   # our own joint: its chunks are siblings
+                continue
+            carried = sorted(
+                c for c in (cmds.listRelatives(node, children=True,
+                                               fullPath=True,
+                                               type="transform") or [])
+                if c in chunk_set)
+            if not carried:
+                continue
+            if len(carried) > 1 and warnings is not None:
+                warnings.append(
+                    "%s: joint %s carries %d chunks (%s) - they are welded "
+                    "to it, so %s was taken as the parent; pass "
+                    "overrides={%r: {'parent': ...}} to name another"
+                    % (_short(chunk), _short(node), len(carried),
+                       ", ".join(_short(c) for c in carried),
+                       _short(carried[0]), _short(chunk)))
+            return carried[0]
 
 
 def _vec3(value) -> Optional[List[float]]:
@@ -317,8 +355,17 @@ def author_physics(params: Dict[str, Any]) -> Dict[str, Any]:
                          "the parent in root/chunks")
             parent = by_short[parent_short]
         else:
-            parent = _parent_of(cmds, chunk, chunk_set)
+            parent = _parent_of(cmds, chunk, chunk_set, warnings)
         if parent is None:
+            if any(k in spec for k in ("hinge_axis", "hinge_range_deg",
+                                       "twist_range_deg")):
+                raise HandlerError(
+                    "override for %r supplies joint limits, but the chunk "
+                    "resolves parentless - a limit with no joint to attach "
+                    "to would be dropped, and the manifest would look "
+                    "complete with no limits in it (#722)" % short,
+                    hint="pass overrides={%r: {'parent': '<chunk>'}} so the "
+                         "body has a joint, or drop the limit keys" % short)
             parentless.append(chunk)
 
         joint: Optional[Dict[str, Any]] = None

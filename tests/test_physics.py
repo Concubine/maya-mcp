@@ -42,6 +42,7 @@ class FakeCmds:
         self.objects = []      # transform long names
         self.parents = {}      # child long -> parent long (transforms only)
         self.shapes = {}       # transform long -> shape long
+        self.node_types = {}   # long name -> nodeType override (e.g. "joint")
 
     def ls(self, pattern=None, long=False, type=None, **kw):
         if pattern is None:
@@ -74,6 +75,8 @@ class FakeCmds:
         return kids or None
 
     def nodeType(self, node):
+        if node in self.node_types:
+            return self.node_types[node]
         return "mesh" if node.endswith("Shape") else "transform"
 
 
@@ -330,3 +333,127 @@ class TestReadOnly:
         second = physics.author_physics({"root": "golem"})
         assert first == second     # deterministic, and the fake has no
                                    # mutators - any write would AttributeError
+
+
+def _joint_scene(fake):
+    """The #713 rig shape: chunks hang off jnt_* joints, so chunk-to-chunk
+    ancestry runs THROUGH the skeleton - and the parent chunk is not an
+    ancestor at all, it is a sibling branch under the ancestor joint.
+
+    |golem
+      |golem|jnt_pelvis  (joint)
+        |golem|jnt_pelvis|pelvis_plates (mesh)
+        |golem|jnt_pelvis|jnt_torso  (joint)
+          |golem|jnt_pelvis|jnt_torso|torso_plates (mesh)
+          |golem|jnt_pelvis|jnt_torso|jnt_arm (joint)
+            |golem|jnt_pelvis|jnt_torso|jnt_arm|arm_plates (mesh)
+    """
+    j_pelvis = "|golem|jnt_pelvis"
+    j_torso = j_pelvis + "|jnt_torso"
+    j_arm = j_torso + "|jnt_arm"
+    pelvis = j_pelvis + "|pelvis_plates"
+    torso = j_torso + "|torso_plates"
+    arm = j_arm + "|arm_plates"
+    fake.objects = ["|golem", j_pelvis, j_torso, j_arm, pelvis, torso, arm]
+    fake.parents = {j_pelvis: "|golem", j_torso: j_pelvis, j_arm: j_torso,
+                    pelvis: j_pelvis, torso: j_torso, arm: j_arm}
+    fake.node_types = {j_pelvis: "joint", j_torso: "joint", j_arm: "joint"}
+    fake.shapes = {pelvis: pelvis + "|pelvis_platesShape",
+                   torso: torso + "|torso_platesShape",
+                   arm: arm + "|arm_platesShape"}
+    fake.geoms = {"pelvis_plates": cube_at([0.0, 0.0, 0.0]),
+                  "torso_plates": cube_at([0.0, 1.0, 0.0]),
+                  "arm_plates": cube_at([1.0, 1.0, 0.0])}
+    return {"pelvis": pelvis, "torso": torso, "arm": arm,
+            "j_pelvis": j_pelvis, "j_torso": j_torso, "j_arm": j_arm}
+
+
+class TestAncestryThroughJoints:
+    """#722: after the #713 golem interposed joints between its chunks,
+    author_physics returned all 15 bodies with parent:null - and every hinge
+    override in the same call was then silently dropped, so the manifest
+    looked complete and carried no joint limits at all.
+    """
+
+    def test_parent_is_the_chunk_carried_by_the_ancestor_joint(self, fake):
+        n = _joint_scene(fake)
+        chunk_set = {n["pelvis"], n["torso"], n["arm"]}
+        assert physics._parent_of(fake, n["torso"], chunk_set) == n["pelvis"]
+        assert physics._parent_of(fake, n["arm"], chunk_set) == n["torso"]
+
+    def test_the_topmost_chunk_is_still_parentless(self, fake):
+        n = _joint_scene(fake)
+        chunk_set = {n["pelvis"], n["torso"], n["arm"]}
+        assert physics._parent_of(fake, n["pelvis"], chunk_set) is None
+
+    def test_chunks_on_the_same_joint_are_siblings_not_each_others_parent(
+            self, fake):
+        """Welded to one joint, they cannot articulate against each other -
+        and parenting them to each other would build a cycle."""
+        n = _joint_scene(fake)
+        second = n["j_torso"] + "|torso_trim"
+        fake.objects.append(second)
+        fake.parents[second] = n["j_torso"]
+        fake.shapes[second] = second + "|torso_trimShape"
+        fake.geoms["torso_trim"] = cube_at([0.0, 1.5, 0.0])
+        chunk_set = {n["pelvis"], n["torso"], second, n["arm"]}
+        assert physics._parent_of(fake, n["torso"], chunk_set) == n["pelvis"]
+        assert physics._parent_of(fake, second, chunk_set) == n["pelvis"]
+
+    def test_a_group_rig_is_unchanged(self, fake):
+        """No joints anywhere: the nearest mesh-bearing ancestor still wins."""
+        _scene(fake)
+        chunk_set = {"|golem|pelvis", "|golem|pelvis|grp|belly",
+                     "|golem|pelvis|thigh", "|golem|tracer"}
+        assert physics._parent_of(
+            fake, "|golem|pelvis|grp|belly", chunk_set) == "|golem|pelvis"
+        assert physics._parent_of(fake, "|golem|tracer", chunk_set) is None
+
+    def test_author_physics_reports_the_joint_chain(self, fake):
+        n = _joint_scene(fake)
+        out = physics.author_physics({"root": "golem"})
+        parents = {b["chunk"]: b["parent"] for b in out["bodies"]}
+        assert parents[n["torso"]] == n["pelvis"]
+        assert parents[n["arm"]] == n["torso"]
+        assert parents[n["pelvis"]] is None
+
+    def test_a_hinge_override_now_lands_on_a_joint(self, fake):
+        n = _joint_scene(fake)
+        out = physics.author_physics({
+            "root": "golem",
+            "overrides": {"arm_plates": {"hinge_axis": [0, 0, 1],
+                                         "hinge_range_deg": [-10, 90]}}})
+        arm = [b for b in out["bodies"] if b["chunk"] == n["arm"]][0]
+        assert arm["joint"] is not None
+        assert arm["joint"]["source"] == "override"
+
+
+class TestUndeliverableOverrideRefuses:
+    """#722 part 2: a limit with no joint to attach to must not vanish - the
+    manifest would look complete and carry no limits in it."""
+
+    def test_hinge_override_on_a_parentless_chunk_refuses(self, fake):
+        _scene(fake)
+        with pytest.raises(HandlerError, match="parentless") as excinfo:
+            physics.author_physics({
+                "root": "golem",
+                "overrides": {"tracer": {"hinge_axis": [0, 0, 1],
+                                         "hinge_range_deg": [0, 90]}}})
+        assert "tracer" in str(excinfo.value)
+
+    def test_a_parentless_chunk_with_no_limits_is_still_only_a_warning(
+            self, fake):
+        _scene(fake)
+        out = physics.author_physics({"root": "golem"})
+        assert [b for b in out["bodies"] if b["parent"] is None]
+
+    def test_naming_the_parent_makes_the_limit_deliverable(self, fake):
+        _scene(fake)
+        out = physics.author_physics({
+            "root": "golem",
+            "overrides": {"tracer": {"parent": "pelvis",
+                                     "hinge_axis": [0, 0, 1],
+                                     "hinge_range_deg": [0, 90]}}})
+        tracer = [b for b in out["bodies"] if b["chunk"] == "|golem|tracer"][0]
+        assert tracer["parent"] == "|golem|pelvis"
+        assert tracer["joint"]["source"] == "override"
