@@ -1,0 +1,71 @@
+{
+  "$schema_note": "The v3 animation takes, as data. Ships alongside the FBXs because of a hard toolset limit: maya_author_clip holds ONE clip per skeleton and maya_export_fbx refuses to write more than one ('2 skeletons carry a clip - one file is one take'). So the saved Maya scene can only ever contain one take at a time, and it is delivered at REST with no clip. This file is how you rebuild either take exactly, and how an engine that wants the curves without parsing FBX can get them.",
+  "units": "rotations in DEGREES, local to the joint; positions in METRES, world. fps 30.",
+  "rig": "17 joints, root jnt_pelvis, all jointOrient (0,0,0) and world-axis-aligned, so local rx is the sagittal hinge.",
+  "takes": {
+    "idle": {
+      "fbx": "golem_idle.fbx",
+      "take_name_in_fbx": "idle",
+      "duration_s": 4.0,
+      "fps": 30,
+      "frames": 121,
+      "loop": "seamless; verified two ways - author_clip loop validation accepted it, and the rendered frame 120 is PIXEL-IDENTICAL to frame 0 (max channel diff 0)",
+      "root_motion": "none. jnt_pelvis is deliberately NOT keyed.",
+      "clip_root": "jnt_pelvis",
+      "interpolation": "smooth",
+      "design": "The resting crouch breathing. A slow mass shift: torso settles, head counters, shoulders roll fractionally, fists drift. Distal joints are PHASE-OFFSET later than the torso (torso peaks 1.4 s, shoulders 1.7, forearms 2.0, fists 2.2) so the arms lag and overshoot - the same distal-weighting story the masses tell.",
+      "measured_travel_cm": {
+        "head": {"y": 0.54, "z": 4.04},
+        "chest": {"y": 0.20, "z": 1.76},
+        "fist_L": {"x": 1.36, "y": 1.37, "z": 7.06},
+        "tracer": {"y": 0.88, "z": 3.99},
+        "foot_L": {"x": 0.0, "y": 0.0, "z": 0.0},
+        "pelvis": {"x": 0.0, "y": 0.0, "z": 0.0}
+      },
+      "feet_planted": "exactly 0.00 cm of foot and pelvis travel, by construction",
+      "keys": [
+        {"time_s": 0.0, "rotations": {"jnt_torso": [0, 0, 0], "jnt_head": [0, 0, 0], "jnt_upperarm_L": [0, 0, 0], "jnt_upperarm_R": [0, 0, 0], "jnt_forearm_L": [0, 0, 0], "jnt_forearm_R": [0, 0, 0], "jnt_fist_L": [0, 0, 0], "jnt_fist_R": [0, 0, 0]}},
+        {"time_s": 1.4, "rotations": {"jnt_torso": [1.25, 0, 0]}},
+        {"time_s": 1.7, "rotations": {"jnt_head": [-0.85, 0, 0], "jnt_upperarm_L": [0.45, 0, 0.25], "jnt_upperarm_R": [0.45, 0, -0.25]}},
+        {"time_s": 2.0, "rotations": {"jnt_forearm_L": [0.5, 0, 0], "jnt_forearm_R": [0.5, 0, 0]}},
+        {"time_s": 2.2, "rotations": {"jnt_fist_L": [0.8, 0, 0], "jnt_fist_R": [0.8, 0, 0]}},
+        {"time_s": 2.8, "rotations": {"jnt_torso": [-0.55, 0, 0]}},
+        {"time_s": 3.1, "rotations": {"jnt_head": [0.4, 0, 0], "jnt_upperarm_L": [-0.2, 0, -0.1], "jnt_upperarm_R": [-0.2, 0, 0.1]}},
+        {"time_s": 3.4, "rotations": {"jnt_forearm_L": [-0.22, 0, 0], "jnt_forearm_R": [-0.22, 0, 0]}},
+        {"time_s": 3.6, "rotations": {"jnt_fist_L": [-0.35, 0, 0], "jnt_fist_R": [-0.35, 0, 0]}},
+        {"time_s": 4.0, "rotations": {"jnt_torso": [0, 0, 0], "jnt_head": [0, 0, 0], "jnt_upperarm_L": [0, 0, 0], "jnt_upperarm_R": [0, 0, 0], "jnt_forearm_L": [0, 0, 0], "jnt_forearm_R": [0, 0, 0], "jnt_fist_L": [0, 0, 0], "jnt_fist_R": [0, 0, 0]}}
+      ]
+    },
+    "visor_scan": {
+      "fbx": "golem_visor_scan.fbx",
+      "take_name_in_fbx": "visor_scan",
+      "duration_s": 1.6,
+      "fps": 30,
+      "frames": 49,
+      "loop": "seamless; frame 48 is PIXEL-IDENTICAL to frame 0 (max channel diff 0)",
+      "root_motion": "none",
+      "clip_root": "jnt_tracer",
+      "interpolation": "smooth",
+      "design": "The tracer eye sweeping the visor slot. jnt_tracer translates along X (a sine, so it eases at the turns); jnt_tracer_tail is a lever pivoted 1.0 m BEHIND the visor whose small yaw adds a lagging X offset to the tail, so the gap between core and tail breathes - 0.228 m stretched, 0.122 m compressed - instead of the pair sliding as one rigid bar.",
+      "amplitude_note": "The README's +/-0.24 m was computed for a CENTRED tracer. At rest the core sits at x 0..0.2 and the tail at -0.155..0.005, so +/-0.24 would push the emitter outside the 0.72 m recess. This take uses +/-0.14 m, measured to keep BOTH meshes inside the slot: worst core clearance 0.020 m, worst tail clearance 0.066 m.",
+      "keys": [
+        {"time_s": 0.0, "root_position": [0.0, 3.5, 0.45], "rotations": {"jnt_tracer_tail": [0, -3.088, 0]}},
+        {"time_s": 0.2, "root_position": [0.09899, 3.5, 0.45], "rotations": {"jnt_tracer_tail": [0, -2.616, 0]}},
+        {"time_s": 0.4, "root_position": [0.14, 3.5, 0.45], "rotations": {"jnt_tracer_tail": [0, -0.614, 0]}},
+        {"time_s": 0.6, "root_position": [0.09899, 3.5, 0.45], "rotations": {"jnt_tracer_tail": [0, 1.748, 0]}},
+        {"time_s": 0.8, "root_position": [0.0, 3.5, 0.45], "rotations": {"jnt_tracer_tail": [0, 3.088, 0]}},
+        {"time_s": 1.0, "root_position": [-0.09899, 3.5, 0.45], "rotations": {"jnt_tracer_tail": [0, 2.616, 0]}},
+        {"time_s": 1.2, "root_position": [-0.14, 3.5, 0.45], "rotations": {"jnt_tracer_tail": [0, 0.614, 0]}},
+        {"time_s": 1.4, "root_position": [-0.09899, 3.5, 0.45], "rotations": {"jnt_tracer_tail": [0, -1.748, 0]}},
+        {"time_s": 1.6, "root_position": [0.0, 3.5, 0.45], "rotations": {"jnt_tracer_tail": [0, -3.088, 0]}}
+      ],
+      "known_limitation": "The tail trails the core on the outbound (+X) stroke and therefore LEADS it on the return. A comet that swaps sides needs the tail to cross the core, which requires ~0.35 m of extra travel; the 0.72 m recess cannot hold that plus the sweep. Fixing it properly means art, not animation: a symmetric tracer, or two tails that cross-fade. Documented rather than hidden."
+    }
+  },
+  "how_to_rebuild_a_take_in_maya": [
+    "1. Open out_v3/golem_v3.ma (delivered at rest, no clip).",
+    "2. maya_author_clip(root=<clip_root>, name=<take>, fps=30, loop=true, interpolation='smooth', keys=<keys above>).",
+    "3. maya_export_fbx(path=..., metres_per_unit=1.0, include_animation=true, nodes=['|golem']).",
+    "4. maya_delete_clip(root=<clip_root>) before authoring the other take - one clip per skeleton is enforced."
+  ]
+}

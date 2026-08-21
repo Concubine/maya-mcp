@@ -1,5 +1,11 @@
 # #665 — Golem rebuild with rigging available: findings report
 
+> **Relocated 2026-08-21.** The run was built in `D:\devel\golem-rerun\` and now
+> lives here, next to this report: `out/`, `out_v21/`, `out_v3/` and the briefs.
+> The absolute paths below and in the BRIEF/DESIGN files are left as written —
+> they are what the builder was actually told, and rewriting them would edit the
+> record. Auto-checkpoints stayed behind the gitignore, as with every other run.
+
 Run date 2026-08-21. Clean-room build by a fresh agent in `D:\devel\golem-rerun\`
 (brief + creature spec only, no access to this repo or the #601 delivery),
 against the post-SSC-fix plugin (f32c49ec1e49) on a disposable Maya (pid 7280,

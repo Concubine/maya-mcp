@@ -1,0 +1,47 @@
+{
+  "$schema_note": "The five motion-state poses, v3. Rotation-only: every value is a rotation in DEGREES about the joint hinge axis [1,0,0]; nothing translates except the documented root_offset_m, which is engine-driven root motion (jump height / squat depth), not articulation. UNCHANGED IN VALUE from v2/v2.1 - what changed in v3 is WHERE you apply them: the target nodes are now the jnt_* joints, not the golem_* groups.",
+  "v3_change": "Apply local_deg to the joints named below (jnt_pelvis, jnt_torso, ...). Because every joint has jointOrient (0,0,0) and a world-aligned frame, a joint's local rx is the same sagittal hinge the v2 numbers always meant - the values transfer with no conversion. VERIFIED: the crouch pose was applied to the v3 joint rig via maya_pose_skeleton and reads correctly (see previews/pose_crouch_side.png); the resulting ankle sits at y 0.831, which minus the documented root_offset_m of -0.52 puts the foot at 0.311 = the rest ankle pivot height, i.e. the feet plant exactly as designed.",
+  "how_to_apply": "local_deg is the local rotation of each articulation joint relative to its parent. world_deg is the same pose expressed as absolute world-space orientation; for this all-parallel-X rig, world = sum of locals down the chain. The extend pose adds a Z-axis abduction on the arm chain: [rx, 0, rz], with rz mirrored (L negative shown; negate rz for the R side). All other values are L/R symmetric.",
+  "sign_convention": "positive rotates the segment's lower end backward (-Z). Hip flexion (leg forward) is negative, knee flexion positive, torso forward pitch positive.",
+  "joint_name_map": {
+    "pelvis": "jnt_pelvis", "torso": "jnt_torso", "head": "jnt_head",
+    "thigh": "jnt_thigh_L / jnt_thigh_R", "shin": "jnt_shin_L / jnt_shin_R", "foot": "jnt_foot_L / jnt_foot_R",
+    "upperarm": "jnt_upperarm_L / jnt_upperarm_R", "forearm": "jnt_forearm_L / jnt_forearm_R", "fist": "jnt_fist_L / jnt_fist_R"
+  },
+  "relationship_to_takes": "These five are POSE TARGETS for the physics-driven jump cycle - the engine drives toward them with forces. They are not clips and are deliberately not baked into the FBX takes. The takes (idle, visor_scan in golem_takes.json) are the creature's autonomous life and layer UNDER physics; these poses are what physics aims at.",
+  "poses": {
+    "rest": {
+      "fires_on": "idle",
+      "root_offset_m": 0.0,
+      "local_deg": {"pelvis": 0, "torso": 0, "head": 0, "thigh": 0, "shin": 0, "foot": 0, "upperarm": 0, "forearm": 0, "fist": 0},
+      "note": "Exactly the delivered file, untouched. The 35-40 deg knee coil and silverback arm hang are authored into the geometry."
+    },
+    "crouch": {
+      "fires_on": "jump wind-up (~1.1 s)",
+      "root_offset_m": -0.52,
+      "local_deg": {"pelvis": 12, "torso": 22, "head": -14, "thigh": -60, "shin": 50, "foot": -2, "upperarm": 41, "forearm": -25, "fist": 8},
+      "world_deg": {"pelvis": 12, "torso": 34, "head": 20, "thigh": -48, "shin": 2, "foot": 0, "upperarm": 75, "forearm": 50, "fist": 58},
+      "verified_on_v3_rig": true
+    },
+    "extend": {
+      "fires_on": "release",
+      "root_offset_m": 0.15,
+      "local_deg": {"pelvis": -5, "torso": -3, "head": 12, "thigh": 25, "shin": -38, "foot": 33, "upperarm_rx": -147, "upperarm_rz": -25, "forearm_rx": 10, "forearm_rz": 0, "fist_rx": 0, "fist_rz": 0},
+      "world_deg": {"pelvis": -5, "torso": -8, "head": 4, "thigh": 20, "shin": -18, "foot": 15, "upperarm": [-155, 0, -25], "forearm": [-145, 0, -25], "fist": [-145, 0, -25]},
+      "note": "shin -38 = the knee's own range edge; legs are anatomically straight. Arm locals about non-parallel axes are approximate - the authoritative arm values are the world_deg triples; mirror rz for the right side."
+    },
+    "air": {
+      "fires_on": "airborne",
+      "root_offset_m": 0.90,
+      "local_deg": {"pelvis": 10, "torso": 8, "head": -24, "thigh": -80, "shin": 45, "foot": 20, "upperarm": -68, "forearm": -50, "fist": 5},
+      "world_deg": {"pelvis": 10, "torso": 18, "head": -6, "thigh": -70, "shin": -25, "foot": -5, "upperarm": -50, "forearm": -100, "fist": -95}
+    },
+    "absorb": {
+      "fires_on": "landing; engine scales depth by impact speed",
+      "root_offset_m": -0.61,
+      "local_deg": {"pelvis": 15, "torso": 23, "head": -13, "thigh": -70, "shin": 52, "foot": 3, "upperarm": -118, "forearm": -5, "fist": 10},
+      "world_deg": {"pelvis": 15, "torso": 38, "head": 25, "thigh": -55, "shin": -3, "foot": 0, "upperarm": -80, "forearm": -85, "fist": -75},
+      "note": "shin at 52 = deepest knee compression the range allows. This is the full-speed landing; scale locals toward rest for softer impacts."
+    }
+  }
+}

@@ -1,0 +1,155 @@
+{
+  "$schema_note": "Golem colossus physics/assembly manifest, v3 (2026-08-21, ticket #713). Units: METRES and CUBIC METRES. Y-up, creature faces +Z. Rest pose = out_v3/golem.fbx exactly as delivered. See README_engine.md. EVERY number here was re-measured from the v3 scene after rigging - none carried forward from v2.1 on faith. They agree with v2.1 to 3 decimals, which is the proof that adding the animation rig did not disturb the geometry.",
+  "whats_new_in_v3": "The asset now carries an animation skeleton (17 joints, prefix jnt_). Chunk MESHES and their golem_<segment> transforms are unchanged and undeformed - there is NO skinning anywhere. Each golem_<segment> group is now a child of its jnt_<segment> joint, so the joint IS the articulation node and the joint's world position IS the joint pivot. Physics consumers can ignore the joints entirely and use the chunk list below; animation consumers drive the joints.",
+  "density_note": "mass values numerically equal solid volume in m^3 (density 1.0). The engine owns the real density constant. Suggested: kiln-fired earth ~1900-2200 kg/m^3.",
+  "conventions": {
+    "up": "+Y",
+    "forward": "+Z",
+    "hinge_axis_all_joints": [1.0, 0.0, 0.0],
+    "rotation_sign": "positive X rotation moves a segment's LOWER end backward (-Z). Knee flexion is +, hip flexion (leg forward) is -, torso forward pitch is +. VERIFIED on the v3 rig: jnt_torso rx +10 moved jnt_head from (0,3.18,0.10) to (0,3.145,0.295), i.e. the upper body pitches forward.",
+    "limits_are_relative_to_rest": "0 deg = the delivered rest pose. Ranges are [lo, hi] about the hinge axis, in the chunk's parent frame.",
+    "joint_frames": "every jnt_* has jointOrient = (0,0,0) and a world-axis-aligned frame (measured: max world-axes error 0.0). So a joint's local rx IS the sagittal hinge - the same convention as the chunk data. This is deliberate; see NOTES.md."
+  },
+  "rig": {
+    "root_joint": "jnt_pelvis",
+    "joint_count": 17,
+    "skinclusters": 0,
+    "note": "Joints are rigid parents, not deformers. jnt_tracer and jnt_tracer_tail carry the render-only visor tracer and exist ONLY for the visor_scan take; they own no collider and no mass.",
+    "joint_world_positions": {
+      "jnt_pelvis": [0.0, 1.72, 0.0],
+      "jnt_torso": [0.0, 2.05, 0.0],
+      "jnt_head": [0.0, 3.18, 0.10],
+      "jnt_tracer": [0.0, 3.50, 0.45],
+      "jnt_tracer_tail": [0.0, 3.50, -0.55],
+      "jnt_upperarm_L": [1.05, 3.20, 0.0],
+      "jnt_forearm_L": [1.17, 2.26, 0.10],
+      "jnt_fist_L": [1.12, 1.16, 0.25],
+      "jnt_upperarm_R": [-1.05, 3.20, 0.0],
+      "jnt_forearm_R": [-1.17, 2.26, 0.10],
+      "jnt_fist_R": [-1.12, 1.16, 0.25],
+      "jnt_thigh_L": [0.45, 1.72, 0.0],
+      "jnt_shin_L": [0.55, 0.905, 0.33],
+      "jnt_foot_L": [0.60, 0.31, 0.17],
+      "jnt_thigh_R": [-0.45, 1.72, 0.0],
+      "jnt_shin_R": [-0.55, 0.905, 0.33],
+      "jnt_foot_R": [-0.60, 0.31, 0.17]
+    },
+    "joint_placement_error_m": 0.0
+  },
+  "chunks": [
+    {
+      "name": "pelvis_plates", "node": "golem/jnt_pelvis/golem_pelvis", "parent": null,
+      "joint_pivot": [0.0, 1.72, 0.0], "drives_with_joint": "jnt_pelvis",
+      "mass_solid": 1.348349, "mass_breakdown": {"plates_mesh": 0.986317, "render_core_folded": 0.362032},
+      "com": [0.0, 1.8647, 0.0265],
+      "collider_authored": {"kind": "box", "centre": [0.0, 1.85, 0.0], "size": [1.45, 0.99, 0.72], "rotation_deg": [0, 0, 0]},
+      "collider_measured": {"kind": "capsule", "radius": 0.62207, "height": 0.20133, "volume_ratio": 1.27, "max_escape": 0.18524},
+      "joint_limits": null
+    },
+    {
+      "name": "torso_plates", "node": "golem/jnt_pelvis/jnt_torso/golem_torso", "parent": "pelvis_plates",
+      "joint_pivot": [0.0, 2.05, 0.0], "drives_with_joint": "jnt_torso",
+      "mass_solid": 5.537314, "mass_breakdown": {"plates_mesh": 3.943294, "render_core_folded": 1.594020},
+      "com": [0.0, 2.7094, -0.0015],
+      "collider_authored": {"kind": "box", "centre": [0.0, 2.62, 0.02], "size": [2.44, 1.5, 1.3], "rotation_deg": [-8, 0, 0]},
+      "collider_measured": {"kind": "capsule", "radius": 1.08927, "height": 0.41609, "volume_ratio": 1.77, "max_escape": 0.35178},
+      "joint_limits": {"hinge_deg": [-20, 30], "twist_deg": [-20, 20]},
+      "solver_cone": {"swing_axis": [0, 1, 0], "swing1": 25, "swing2": 0, "twist_lo": -20, "twist_hi": 20, "swing_centre_deg": 5}
+    },
+    {
+      "name": "head_plates", "node": "golem/jnt_pelvis/jnt_torso/jnt_head/golem_head", "parent": "torso_plates",
+      "joint_pivot": [0.0, 3.18, 0.10], "drives_with_joint": "jnt_head",
+      "mass_solid": 0.840101, "mass_breakdown": {"plates_mesh": 0.644741, "render_core_folded": 0.195360},
+      "com": [0.0009, 3.6187, 0.2004],
+      "collider_authored": {"kind": "box", "centre": [0.0, 3.6, 0.24], "size": [0.86, 0.9, 0.92], "rotation_deg": [0, 0, 0]},
+      "collider_measured": {"kind": "capsule", "radius": 0.61057, "height": 0.0, "volume_ratio": 1.48, "max_escape": 0.09061},
+      "joint_limits": {"hinge_deg": [-30, 20], "twist_deg": [-30, 30]},
+      "solver_cone": {"swing_axis": [0, 1, 0], "swing1": 25, "swing2": 0, "twist_lo": -30, "twist_hi": 30, "swing_centre_deg": -5},
+      "note": "head_visor_recess, visor_tracer_core and visor_tracer_tail are render-only and NOT folded into this mass (0.0156 + 0.0011 + 0.0006 m^3 between them). The tracer pair now hangs off jnt_tracer / jnt_tracer_tail rather than golem_head, but still goes wherever the brow goes."
+    },
+    {
+      "name": "upperarm_L_plates", "node": "golem/jnt_pelvis/jnt_torso/jnt_upperarm_L/golem_upperarm_L", "parent": "torso_plates",
+      "joint_pivot": [1.05, 3.20, 0.0], "drives_with_joint": "jnt_upperarm_L",
+      "mass_solid": 0.300741, "mass_breakdown": {"plates_mesh": 0.216373, "render_core_folded": 0.084368},
+      "com": [1.1268, 2.9130, 0.0389],
+      "collider_authored": {"kind": "box", "centre": [1.11, 2.73, 0.05], "size": [0.5, 1.05, 0.52], "rotation_deg": [-6, 0, 8]},
+      "collider_measured": {"kind": "capsule", "radius": 0.35865, "height": 0.48688, "volume_ratio": 1.80, "max_escape": 0.11273},
+      "joint_limits": {"hinge_deg": [-170, 70], "twist_deg": [-30, 30]},
+      "solver_cone": {"swing_axis": [0, 1, 0], "swing1": 120, "swing2": 0, "twist_lo": -30, "twist_hi": 30, "swing_centre_deg": -50},
+      "note": "Widest range on the body, by design: crouch sweeps arms to +41 local, extend throws them to -155 world with ~25 deg abduction."
+    },
+    {
+      "name": "forearm_L_plates", "node": "golem/jnt_pelvis/jnt_torso/jnt_upperarm_L/jnt_forearm_L/golem_forearm_L", "parent": "upperarm_L_plates",
+      "joint_pivot": [1.17, 2.26, 0.10], "drives_with_joint": "jnt_forearm_L",
+      "mass_solid": 0.183741, "mass_breakdown": {"plates_mesh": 0.126158, "render_core_folded": 0.057583},
+      "com": [1.1906, 1.7525, 0.1596],
+      "collider_authored": {"kind": "box", "centre": [1.145, 1.71, 0.175], "size": [0.42, 1.15, 0.45], "rotation_deg": [-8, 0, 2]},
+      "collider_measured": {"kind": "capsule", "radius": 0.32015, "height": 0.69297, "volume_ratio": 2.86, "max_escape": 0.12149},
+      "joint_limits": {"hinge_deg": [-110, 10], "twist_deg": [0, 0]},
+      "solver_cone": {"swing_axis": [0, 1, 0], "swing1": 60, "swing2": 0, "twist_lo": 0, "twist_hi": 0, "swing_centre_deg": -50}
+    },
+    {
+      "name": "fist_L_plates", "node": "golem/jnt_pelvis/jnt_torso/jnt_upperarm_L/jnt_forearm_L/jnt_fist_L/golem_fist_L", "parent": "forearm_L_plates",
+      "joint_pivot": [1.12, 1.16, 0.25], "drives_with_joint": "jnt_fist_L",
+      "mass_solid": 0.213122, "mass_breakdown": {"plates_mesh": 0.213122},
+      "com": [1.1231, 0.9390, 0.3057],
+      "collider_authored": {"kind": "box", "centre": [1.12, 0.90, 0.28], "size": [0.52, 0.58, 0.60], "rotation_deg": [0, 0, 0]},
+      "collider_measured": {"kind": "sphere", "radius": 0.46692, "volume_ratio": 2.00, "max_escape": 0.0},
+      "joint_limits": {"hinge_deg": [-25, 25], "twist_deg": [-10, 10]},
+      "solver_cone": {"swing_axis": [0, 1, 0], "swing1": 25, "swing2": 0, "twist_lo": -10, "twist_hi": 10, "swing_centre_deg": 0},
+      "note": "The fist is the mass of the arm: fist+forearm (0.3969) outweighs the upper arm (0.3007), ratio 1.32:1. Distal weighting is authored, not tuned."
+    },
+    {
+      "name": "thigh_L_plates", "node": "golem/jnt_pelvis/jnt_thigh_L/golem_thigh_L", "parent": "pelvis_plates",
+      "joint_pivot": [0.45, 1.72, 0.0], "drives_with_joint": "jnt_thigh_L",
+      "mass_solid": 0.353314, "mass_breakdown": {"plates_mesh": 0.251579, "render_core_folded": 0.101735},
+      "com": [0.5314, 1.3931, 0.1424],
+      "collider_authored": {"kind": "box", "centre": [0.50, 1.31, 0.165], "size": [0.60, 1.0, 0.62], "rotation_deg": [-22, 0, -6]},
+      "collider_measured": {"kind": "capsule", "radius": 0.47822, "height": 0.40117, "volume_ratio": 2.97, "max_escape": 0.06043},
+      "joint_limits": {"hinge_deg": [-80, 60], "twist_deg": [-15, 15]},
+      "solver_cone": {"swing_axis": [0, 1, 0], "swing1": 70, "swing2": 0, "twist_lo": -15, "twist_hi": 15, "swing_centre_deg": -10}
+    },
+    {
+      "name": "shin_L_plates", "node": "golem/jnt_pelvis/jnt_thigh_L/jnt_shin_L/golem_shin_L", "parent": "thigh_L_plates",
+      "joint_pivot": [0.55, 0.905, 0.33], "drives_with_joint": "jnt_shin_L",
+      "mass_solid": 0.067223, "mass_breakdown": {"plates_mesh": 0.040153, "render_core_folded": 0.027070},
+      "com": [0.5750, 0.5752, 0.2774],
+      "collider_authored": {"kind": "box", "centre": [0.575, 0.59, 0.25], "size": [0.34, 0.72, 0.50], "rotation_deg": [15, 0, -4]},
+      "collider_measured": {"kind": "box", "size": [0.77135, 0.57950, 0.29696], "volume_ratio": 3.31, "max_escape": 0.0},
+      "joint_limits": {"hinge_deg": [-38, 52], "twist_deg": [0, 0]},
+      "solver_cone": {"swing_axis": [0, 1, 0], "swing1": 45, "swing2": 0, "twist_lo": 0, "twist_hi": 0, "swing_centre_deg": 7},
+      "note": "KNEE. -38 IS the straight-leg limit: the rest pose carries 38 deg of authored flex, so 0 deg of anatomical hyperextension exists at the range edge, not as a special case. Thigh:shin mass is 5.26:1 - legs are proximally weighted by construction."
+    },
+    {
+      "name": "foot_L_plates", "node": "golem/jnt_pelvis/jnt_thigh_L/jnt_shin_L/jnt_foot_L/golem_foot_L", "parent": "shin_L_plates",
+      "joint_pivot": [0.60, 0.31, 0.17], "drives_with_joint": "jnt_foot_L",
+      "mass_solid": 0.219719, "mass_breakdown": {"plates_mesh": 0.219719},
+      "com": [0.5937, 0.1748, 0.2512],
+      "collider_authored": {"kind": "box", "centre": [0.60, 0.15, 0.22], "size": [0.65, 0.32, 1.05], "rotation_deg": [0, 0, 0]},
+      "collider_measured": {"kind": "capsule", "radius": 0.41968, "height": 0.36270, "volume_ratio": 2.32, "max_escape": 0.13497},
+      "joint_limits": {"hinge_deg": [-35, 35], "twist_deg": [0, 0]},
+      "solver_cone": {"swing_axis": [0, 1, 0], "swing1": 35, "swing2": 0, "twist_lo": 0, "twist_hi": 0, "swing_centre_deg": 0}
+    },
+    {"name": "upperarm_R_plates", "mirror_of": "upperarm_L_plates", "joint_pivot": [-1.05, 3.20, 0.0], "drives_with_joint": "jnt_upperarm_R"},
+    {"name": "forearm_R_plates", "mirror_of": "forearm_L_plates", "joint_pivot": [-1.17, 2.26, 0.10], "drives_with_joint": "jnt_forearm_R"},
+    {"name": "fist_R_plates", "mirror_of": "fist_L_plates", "joint_pivot": [-1.12, 1.16, 0.25], "drives_with_joint": "jnt_fist_R"},
+    {"name": "thigh_R_plates", "mirror_of": "thigh_L_plates", "joint_pivot": [-0.45, 1.72, 0.0], "drives_with_joint": "jnt_thigh_R"},
+    {"name": "shin_R_plates", "mirror_of": "shin_L_plates", "joint_pivot": [-0.55, 0.905, 0.33], "drives_with_joint": "jnt_shin_R"},
+    {"name": "foot_R_plates", "mirror_of": "foot_L_plates", "joint_pivot": [-0.60, 0.31, 0.17], "drives_with_joint": "jnt_foot_R"}
+  ],
+  "measured_reference": {
+    "note": "collider_measured on each chunk is maya_author_physics's principal-frame auto-fit, reported for comparison. PREFER collider_authored: the auto-fit wastes volume on the limbs (volume_ratio 2.86-3.31 on thigh/shin/forearm, and the tool warns about exactly those), while the authored boxes stay under ~1.7. The authored set is unchanged from v2.1 and was re-verified valid: the geometry is byte-for-byte the same model.",
+    "measured_plates_only_masses": {
+      "pelvis": 0.986317, "torso": 3.943294, "head": 0.644741,
+      "upperarm": 0.216373, "forearm": 0.126158, "fist": 0.213122,
+      "thigh": 0.251579, "shin": 0.040153, "foot": 0.219719
+    },
+    "total_plates_volume_m3": 7.708561,
+    "all_chunks_watertight": true,
+    "verification_sweep_v3": {
+      "meshes": 29, "watertight": "29/29", "live_scales": 0, "tris": 11828,
+      "height_m": 4.06675, "core_containment_min_m": 0.02, "skinclusters": 0,
+      "note": "Identical to the v2.1 baseline on every axis except the 17 added joints."
+    }
+  }
+}

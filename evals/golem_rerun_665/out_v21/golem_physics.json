@@ -1,0 +1,511 @@
+{
+  "$schema_note": "Golem colossus physics/assembly manifest. Units: METRES and CUBIC METRES throughout. Y-up, creature faces +Z. Rest pose = the FBX/scene exactly as delivered. See README_engine.md for how to consume this. REVISED v2.1 (2026-08-21): core render meshes inset for containment (all cores >=2cm inside their plates, measured) and trim lips combined into torso/pelvis plates; masses re-measured accordingly. Geometry: out_v21/golem.fbx.",
+  "density_note": "mass values numerically equal solid volume in m^3 (density 1.0). The engine owns the real density constant. Suggested: kiln-fired earth ~1900-2200 kg/m^3.",
+  "conventions": {
+    "up": "+Y",
+    "forward": "+Z",
+    "hinge_axis_all_joints": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "rotation_sign": "positive X rotation moves a segment's LOWER end backward (-Z). Knee flexion is +, hip flexion (leg forward) is -, torso forward pitch is +.",
+    "limits_are_relative_to_rest": "0 deg = the delivered rest pose. Ranges are [lo, hi] about the hinge axis, in the chunk's parent frame."
+  },
+  "chunks": [
+    {
+      "name": "pelvis_plates",
+      "node": "golem/golem_pelvis",
+      "parent": null,
+      "joint_pivot": [
+        0.0,
+        1.72,
+        0.0
+      ],
+      "mass_solid": 1.348,
+      "mass_breakdown": {
+        "plates_mesh": 0.986,
+        "render_core_folded": 0.362
+      },
+      "com": [
+        0.0,
+        1.863,
+        0.006
+      ],
+      "collider_authored": {
+        "kind": "box",
+        "centre": [
+          0.0,
+          1.85,
+          0.0
+        ],
+        "size": [
+          1.45,
+          0.99,
+          0.72
+        ],
+        "rotation_deg": [
+          0,
+          0,
+          0
+        ]
+      },
+      "joint_limits": null
+    },
+    {
+      "name": "torso_plates",
+      "node": ".../golem_torso",
+      "parent": "pelvis_plates",
+      "joint_pivot": [
+        0.0,
+        2.05,
+        0.0
+      ],
+      "mass_solid": 5.537,
+      "mass_breakdown": {
+        "plates_mesh": 3.943,
+        "render_core_folded": 1.594
+      },
+      "com": [
+        0.0,
+        2.731,
+        -0.017
+      ],
+      "collider_authored": {
+        "kind": "box",
+        "centre": [
+          0.0,
+          2.62,
+          0.02
+        ],
+        "size": [
+          2.44,
+          1.5,
+          1.3
+        ],
+        "rotation_deg": [
+          -8,
+          0,
+          0
+        ]
+      },
+      "joint_limits": {
+        "hinge_deg": [
+          -20,
+          30
+        ],
+        "twist_deg": [
+          -20,
+          20
+        ]
+      }
+    },
+    {
+      "name": "head_plates",
+      "node": ".../golem_head",
+      "parent": "torso_plates",
+      "joint_pivot": [
+        0.0,
+        3.18,
+        0.1
+      ],
+      "mass_solid": 0.84,
+      "mass_breakdown": {
+        "plates_mesh": 0.645,
+        "render_core_folded": 0.195
+      },
+      "com": [
+        0.001,
+        3.624,
+        0.243
+      ],
+      "collider_authored": {
+        "kind": "box",
+        "centre": [
+          0.0,
+          3.6,
+          0.24
+        ],
+        "size": [
+          0.86,
+          0.9,
+          0.92
+        ],
+        "rotation_deg": [
+          0,
+          0,
+          0
+        ]
+      },
+      "joint_limits": {
+        "hinge_deg": [
+          -30,
+          20
+        ],
+        "twist_deg": [
+          -30,
+          30
+        ]
+      },
+      "note": "The visor tracer (visor_tracer_core / visor_tracer_tail) and recess are render-only children of this chunk; they go wherever the brow goes."
+    },
+    {
+      "name": "upperarm_L_plates",
+      "node": ".../golem_upperarm_L",
+      "parent": "torso_plates",
+      "joint_pivot": [
+        1.05,
+        3.2,
+        0.0
+      ],
+      "mass_solid": 0.3,
+      "mass_breakdown": {
+        "plates_mesh": 0.216,
+        "render_core_folded": 0.084
+      },
+      "com": [
+        1.133,
+        2.961,
+        0.035
+      ],
+      "collider_authored": {
+        "kind": "box",
+        "centre": [
+          1.11,
+          2.73,
+          0.05
+        ],
+        "size": [
+          0.5,
+          1.05,
+          0.52
+        ],
+        "rotation_deg": [
+          -6,
+          0,
+          8
+        ]
+      },
+      "joint_limits": {
+        "hinge_deg": [
+          -170,
+          70
+        ],
+        "twist_deg": [
+          -30,
+          30
+        ]
+      },
+      "note": "Widest range on the body, by design: crouch sweeps arms to +41 local, extend throws them to -155 world with ~25 deg abduction."
+    },
+    {
+      "name": "forearm_L_plates",
+      "node": ".../golem_forearm_L",
+      "parent": "upperarm_L_plates",
+      "joint_pivot": [
+        1.17,
+        2.26,
+        0.1
+      ],
+      "mass_solid": 0.184,
+      "mass_breakdown": {
+        "plates_mesh": 0.126,
+        "render_core_folded": 0.058
+      },
+      "com": [
+        1.211,
+        1.765,
+        0.153
+      ],
+      "collider_authored": {
+        "kind": "box",
+        "centre": [
+          1.145,
+          1.71,
+          0.175
+        ],
+        "size": [
+          0.42,
+          1.15,
+          0.45
+        ],
+        "rotation_deg": [
+          -8,
+          0,
+          2
+        ]
+      },
+      "joint_limits": {
+        "hinge_deg": [
+          -110,
+          10
+        ],
+        "twist_deg": [
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "name": "fist_L_plates",
+      "node": ".../golem_fist_L",
+      "parent": "forearm_L_plates",
+      "joint_pivot": [
+        1.12,
+        1.16,
+        0.25
+      ],
+      "mass_solid": 0.213,
+      "mass_breakdown": {
+        "plates_mesh": 0.213
+      },
+      "com": [
+        1.123,
+        0.939,
+        0.306
+      ],
+      "collider_authored": {
+        "kind": "box",
+        "centre": [
+          1.12,
+          0.9,
+          0.28
+        ],
+        "size": [
+          0.52,
+          0.58,
+          0.6
+        ],
+        "rotation_deg": [
+          0,
+          0,
+          0
+        ]
+      },
+      "joint_limits": {
+        "hinge_deg": [
+          -25,
+          25
+        ],
+        "twist_deg": [
+          -10,
+          10
+        ]
+      },
+      "note": "The fist is the mass of the arm: fist+forearm (0.397) outweighs the upper arm (0.300). Distal weighting is authored, not tuned."
+    },
+    {
+      "name": "thigh_L_plates",
+      "node": ".../golem_thigh_L",
+      "parent": "pelvis_plates",
+      "joint_pivot": [
+        0.45,
+        1.72,
+        0.0
+      ],
+      "mass_solid": 0.354,
+      "mass_breakdown": {
+        "plates_mesh": 0.252,
+        "render_core_folded": 0.102
+      },
+      "com": [
+        0.544,
+        1.422,
+        0.133
+      ],
+      "collider_authored": {
+        "kind": "box",
+        "centre": [
+          0.5,
+          1.31,
+          0.165
+        ],
+        "size": [
+          0.6,
+          1.0,
+          0.62
+        ],
+        "rotation_deg": [
+          -22,
+          0,
+          -6
+        ]
+      },
+      "joint_limits": {
+        "hinge_deg": [
+          -80,
+          60
+        ],
+        "twist_deg": [
+          -15,
+          15
+        ]
+      }
+    },
+    {
+      "name": "shin_L_plates",
+      "node": ".../golem_shin_L",
+      "parent": "thigh_L_plates",
+      "joint_pivot": [
+        0.55,
+        0.905,
+        0.33
+      ],
+      "mass_solid": 0.067,
+      "mass_breakdown": {
+        "plates_mesh": 0.04,
+        "render_core_folded": 0.027
+      },
+      "com": [
+        0.575,
+        0.572,
+        0.296
+      ],
+      "collider_authored": {
+        "kind": "box",
+        "centre": [
+          0.575,
+          0.59,
+          0.25
+        ],
+        "size": [
+          0.34,
+          0.72,
+          0.5
+        ],
+        "rotation_deg": [
+          15,
+          0,
+          -4
+        ]
+      },
+      "joint_limits": {
+        "hinge_deg": [
+          -38,
+          52
+        ],
+        "twist_deg": [
+          0,
+          0
+        ]
+      },
+      "note": "KNEE. -38 IS the straight-leg limit: the rest pose carries 38 deg of authored flex, so 0 deg of anatomical hyperextension exists at the range edge, not as a special case. Thigh:shin mass is 5.3:1 - legs are proximally weighted by construction."
+    },
+    {
+      "name": "foot_L_plates",
+      "node": ".../golem_foot_L",
+      "parent": "shin_L_plates",
+      "joint_pivot": [
+        0.6,
+        0.31,
+        0.17
+      ],
+      "mass_solid": 0.22,
+      "mass_breakdown": {
+        "plates_mesh": 0.22
+      },
+      "com": [
+        0.594,
+        0.175,
+        0.251
+      ],
+      "collider_authored": {
+        "kind": "box",
+        "centre": [
+          0.6,
+          0.15,
+          0.22
+        ],
+        "size": [
+          0.65,
+          0.32,
+          1.05
+        ],
+        "rotation_deg": [
+          0,
+          0,
+          0
+        ]
+      },
+      "joint_limits": {
+        "hinge_deg": [
+          -35,
+          35
+        ],
+        "twist_deg": [
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "name": "upperarm_R_plates",
+      "mirror_of": "upperarm_L_plates",
+      "joint_pivot": [
+        -1.05,
+        3.2,
+        0.0
+      ]
+    },
+    {
+      "name": "forearm_R_plates",
+      "mirror_of": "forearm_L_plates",
+      "joint_pivot": [
+        -1.17,
+        2.26,
+        0.1
+      ]
+    },
+    {
+      "name": "fist_R_plates",
+      "mirror_of": "fist_L_plates",
+      "joint_pivot": [
+        -1.12,
+        1.16,
+        0.25
+      ]
+    },
+    {
+      "name": "thigh_R_plates",
+      "mirror_of": "thigh_L_plates",
+      "joint_pivot": [
+        -0.45,
+        1.72,
+        0.0
+      ]
+    },
+    {
+      "name": "shin_R_plates",
+      "mirror_of": "shin_L_plates",
+      "joint_pivot": [
+        -0.55,
+        0.905,
+        0.33
+      ]
+    },
+    {
+      "name": "foot_R_plates",
+      "mirror_of": "foot_L_plates",
+      "joint_pivot": [
+        -0.6,
+        0.31,
+        0.17
+      ]
+    }
+  ],
+  "measured_reference": {
+    "note": "Tool-measured colliders (principal-frame auto-fit) and tetra-measured volumes are reproducible from the scene via maya_author_physics. The authored colliders above are hand-fit from the known primitive dimensions and are TIGHTER on thighs/shins/forearms (auto-fit volume_ratio up to 3.3 there; authored boxes stay under ~1.7). Prefer the authored set.",
+    "measured_plates_only_masses": {
+      "pelvis": 0.986,
+      "torso": 3.943,
+      "head": 0.645,
+      "upperarm": 0.216,
+      "forearm": 0.126,
+      "fist": 0.213,
+      "thigh": 0.252,
+      "shin": 0.04,
+      "foot": 0.22
+    },
+    "all_chunks_watertight": true
+  }
+}
