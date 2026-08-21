@@ -251,7 +251,17 @@ def _hierarchy_joints(cmds, root_long: str) -> List[str]:
 
 
 def _bound_meshes(cmds, joint_set) -> List[str]:
-    """Transforms of every mesh whose skinCluster any of these joints drives."""
+    """Transforms of every mesh this skeleton MOVES - by deformation or by
+    rigid parenting.
+
+    Two rig shapes are legal here. A skinned mesh is found through its
+    skinCluster's influences. A rigid-parent rig (#713: chunks parented under
+    joints, no deformer anywhere) is found structurally - a mesh transform
+    under a joint moves with that joint, and reporting zero displacement for
+    it would be an echo, not a measurement (#636, #720).
+
+    Skinned meshes come first, then descendants; de-duplicated, long names.
+    """
     out: List[str] = []
     for sc in cmds.ls(type="skinCluster") or []:
         influences = cmds.skinCluster(sc, query=True, influence=True) or []
@@ -262,6 +272,14 @@ def _bound_meshes(cmds, joint_set) -> List[str]:
             transform = cmds.listRelatives(shape, parent=True, fullPath=True)
             if transform and transform[0] not in out:
                 out.append(transform[0])
+    for joint in sorted(joint_set):
+        for node in cmds.listRelatives(joint, allDescendents=True,
+                                       fullPath=True, type="transform") or []:
+            if not cmds.listRelatives(node, shapes=True, fullPath=True,
+                                      type="mesh"):
+                continue
+            if node not in out:
+                out.append(node)
     return out
 
 

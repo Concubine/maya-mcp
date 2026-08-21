@@ -905,3 +905,96 @@ class TestClipGuard:
         out = rigging.pose_skeleton({"root": "<root>",
                                      "rotations": {"<child>": [0, 0, 10]}})
         assert out["applied"] == 1
+
+
+class TestBoundMeshes:
+    """#720: two rig shapes are legal. A skinned mesh is found through its
+    skinCluster; a rigid-parent rig (#713 - chunks parented under joints, no
+    deformer at all) is found structurally. Reporting zero displacement for
+    the second shape is an echo, not a measurement (#636).
+    """
+
+    @staticmethod
+    def _hierarchy(fake, parents, shapes):
+        """Wire the fake for shape queries and type-filtered descendants.
+
+        The base fake answers children queries only and ignores `type`; real
+        Maya excludes shapes from type="transform" and returns mesh shapes
+        for shapes=True.
+        """
+        fake.parents = dict(parents)
+        fake.shapes = dict(shapes)
+        shape_nodes = set(shapes.values())
+
+        def listRelatives(node, shapes=False, type=None, **kw):
+            if shapes:
+                shape = fake.shapes.get(node)
+                if shape is None or type not in (None, "mesh"):
+                    return None
+                return [shape]
+            out = FakeCmds.listRelatives(fake, node, **kw) or []
+            if type == "transform":
+                out = [n for n in out if n not in shape_nodes]
+            return out or None
+        fake.listRelatives = listRelatives
+
+    def test_finds_rigidly_parented_children(self, fake):
+        """A chunk parented under a joint moves with it, skinCluster or not."""
+        self._hierarchy(
+            fake,
+            parents={"|root|jnt_torso": "|root",
+                     "|root|jnt_torso|torso_plates": "|root|jnt_torso",
+                     "|root|jnt_torso|torso_plates|torso_platesShape":
+                         "|root|jnt_torso|torso_plates"},
+            shapes={"|root|jnt_torso|torso_plates":
+                    "|root|jnt_torso|torso_plates|torso_platesShape"})
+        found = rigging._bound_meshes(fake, {"|root|jnt_torso"})
+        assert found == ["|root|jnt_torso|torso_plates"]
+
+    def test_a_chunk_under_a_descendant_joint_counts_too(self, fake):
+        """The skeleton MOVES it - depth through the joint chain is not a
+        reason to call the displacement zero."""
+        self._hierarchy(
+            fake,
+            parents={"|root|jnt_a": "|root",
+                     "|root|jnt_a|jnt_b": "|root|jnt_a",
+                     "|root|jnt_a|jnt_b|shin": "|root|jnt_a|jnt_b",
+                     "|root|jnt_a|jnt_b|shin|shinShape":
+                         "|root|jnt_a|jnt_b|shin"},
+            shapes={"|root|jnt_a|jnt_b|shin": "|root|jnt_a|jnt_b|shin|shinShape"})
+        assert rigging._bound_meshes(fake, {"|root|jnt_a", "|root|jnt_a|jnt_b"}) \
+            == ["|root|jnt_a|jnt_b|shin"]
+
+    def test_a_shapeless_group_under_a_joint_is_not_a_mesh(self, fake):
+        """Locators, empty groups and child joints are not geometry."""
+        self._hierarchy(
+            fake,
+            parents={"|root|jnt_a": "|root",
+                     "|root|jnt_a|grp_empty": "|root|jnt_a"},
+            shapes={})
+        assert rigging._bound_meshes(fake, {"|root|jnt_a"}) == []
+
+    def test_a_skinned_mesh_that_is_also_a_descendant_appears_once(self, fake):
+        self._hierarchy(
+            fake,
+            parents={"|root|jnt_a": "|root",
+                     "|root|jnt_a|body": "|root|jnt_a",
+                     "|root|jnt_a|body|bodyShape": "|root|jnt_a|body"},
+            shapes={"|root|jnt_a|body": "|root|jnt_a|body|bodyShape"})
+        fake.skin_clusters = ["skinCluster1"]
+        fake.skin_influences = {"skinCluster1": ["|root|jnt_a"]}
+        fake.skin_geometry = {"skinCluster1": ["|root|jnt_a|body|bodyShape"]}
+        assert rigging._bound_meshes(fake, {"|root|jnt_a"}) == ["|root|jnt_a|body"]
+
+    def test_an_unrelated_skinned_mesh_is_unaffected(self, fake):
+        """The skinned path is untouched: a mesh bound to these joints but
+        living outside their hierarchy still comes back."""
+        self._hierarchy(
+            fake,
+            parents={"|root|jnt_a": "|root",
+                     "|meshA|meshAShape": "|meshA"},
+            shapes={"|meshA": "|meshA|meshAShape"})
+        fake.skin_clusters = ["scA"]
+        fake.skin_influences = {"scA": ["|root|jnt_a"]}
+        fake.skin_geometry = {"scA": ["|meshA|meshAShape"]}
+        assert rigging._bound_meshes(fake, {"|root|jnt_a"}) == ["|meshA"]
