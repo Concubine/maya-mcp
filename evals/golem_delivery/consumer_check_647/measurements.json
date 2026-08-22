@@ -1,0 +1,90 @@
+{
+  "measured": "2026-08-22, Unity 6000.0.47f1, fresh scratch project, default import settings",
+  "unit_claim": {
+    "cube_ok.fbx": {
+      "tight_vertex_size_m": [
+        3.0,
+        3.0,
+        3.0
+      ],
+      "claimed_m": 3.0
+    },
+    "golem.fbx": {
+      "tight_vertex_size_m": [
+        2.728331,
+        4.02173,
+        1.242306
+      ],
+      "our_parser_size_m": [
+        2.728331,
+        4.02173,
+        1.242306
+      ],
+      "claimed_height_m": 4.02173
+    },
+    "importer": {
+      "globalScale": 1.0,
+      "useFileScale": true,
+      "fileScale": 1.0,
+      "manual_correction_needed": false
+    },
+    "hierarchy": {
+      "transforms": 33,
+      "roots": 1,
+      "max_depth": 6,
+      "non_identity_scales": 0
+    },
+    "verdict": "CONFIRMED - metre vertices + UnitScaleFactor 100 reads as metres"
+  },
+  "method_note": "Renderer.bounds reported 4.096457 for the golem (+1.86%): it is the transformed local AABB, not tight vertex bounds. Same trap as Maya's exactWorldBoundingBox, same asset, same magnitude. Compose vertices.",
+  "pose_divergence": {
+    "height_m": {
+      "rest": {
+        "declared": 4.02173,
+        "ours": 4.02173,
+        "unity": 4.02173
+      },
+      "absorb": {
+        "declared": 3.53258,
+        "ours": 3.532583,
+        "unity": 3.532583
+      },
+      "air": {
+        "declared": 3.64654,
+        "ours": 3.646538,
+        "unity": 3.646538
+      },
+      "crouch": {
+        "declared": 3.50229,
+        "ours": 3.502292,
+        "unity": 3.502292
+      },
+      "extend": {
+        "declared": 5.06306,
+        "ours": 5.063056,
+        "unity": 5.048837
+      }
+    },
+    "fist_to_fist_m": {
+      "absorb": {
+        "ours": 2.664701,
+        "unity": 1.231642
+      },
+      "air": {
+        "ours": 3.639748,
+        "unity": 0.440584
+      },
+      "crouch": {
+        "ours": 1.93618,
+        "unity": 2.62116
+      },
+      "extend": {
+        "ours": 2.468996,
+        "unity": 2.77234
+      }
+    },
+    "euler_order_swept": "all six orderings tried in Unity; they collapse to two distinct results (poses rotate X and Z only) and neither reproduces our composition - order is NOT the cause",
+    "cause": "rotation pivots. golem_R_upperarm |Rp|=3.3166 m with translation [0,0,0]; 30 RotationPivot records across 33 nodes; arm chunks' own rotation is [0,0,0] so Rp cancels at rest and only diverges once posed. A Unity Transform cannot express a rotation pivot.",
+    "ticket": 737
+  }
+}
