@@ -785,11 +785,10 @@ class TestDelete:
 
     def test_a_named_delete_removes_one_clip_and_leaves_the_others(self, fake):
         _author(fake, name="idle")
-        # walk keys only 'tip', not 'mid'; idle's mid curves will have no keys
-        # once idle is deleted (walk's padding adds pins at 32-62, but those
-        # are boundary keys on a separate curve that stays because walk's
-        # explicit keys exist). Actually, walk's padding DOES keep mid curves
-        # alive. Change this to test the actual scenario: make walk key mid too.
+        # walk uses _author's default keys too, which key the same channels
+        # as idle (mid rotations + root.translateY). Deleting idle only cuts
+        # idle's own frame range, so walk's keys on those same curves survive
+        # - see the deleted_curves == 0 assertion below.
         _author(fake, name="walk")
         out = clip.delete_clip({"root": "root", "name": "idle"})
         assert out["clip"] == "idle" and out["clips"] == ["walk"]
@@ -842,26 +841,29 @@ class TestDelete:
         keys too, and the evaluated poses would differ. This test captures
         evaluated values before and compares after."""
         # Clip A: keys 'mid' with real motion
-        _author(fake, name="clipA", fps=30, keys=[
+        rec_a = _author(fake, name="clipA", fps=30, keys=[
             {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
             {"time_s": 1.0, "rotations": {"mid": [0, 0, 45]}}])
         # Clip B: keys only 'tip', so 'mid' gets padding (rest pins) at B's
-        # boundaries. B's range is 32-62, mid gets pins at 0.0 (rest) at those
-        # frames. But A owns 0-30, so B's padding at frames 32, 62 carries
-        # only rest, not A's motion.
-        _author(fake, name="clipB", fps=30, keys=[
+        # boundaries - a rest-pose (0.0) key at B's start_frame and
+        # end_frame. Those pins live entirely inside B's own range, so they
+        # carry only rest, not A's or C's motion.
+        rec_b = _author(fake, name="clipB", fps=30, keys=[
             {"time_s": 0.0, "rotations": {"tip": [0, 0, 0]}},
             {"time_s": 1.0, "rotations": {"tip": [0, 0, 20]}}])
         # Clip C: keys 'mid' with real motion again (in a different range)
-        _author(fake, name="clipC", fps=30, keys=[
+        rec_c = _author(fake, name="clipC", fps=30, keys=[
             {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
             {"time_s": 1.0, "rotations": {"mid": [0, 0, 30]}}])
 
         # Capture A's and C's evaluated poses BEFORE the delete, at their own
-        # key frames and a mid-frame. A owns 0-30, C owns 96-126 (gap of 32
-        # frames after B's 32-62).
-        a_start, a_end = 0.0, 30.0
-        c_start, c_end = 96.0, 126.0
+        # key frames and a mid-frame. Read the actual ranges back from
+        # author_clip's return value rather than hardcoding them - each clip
+        # starts GAP_FRAMES+1 past the previous clip's end_frame (clipmath's
+        # next_start_frame), so a hand-computed literal drifts the moment
+        # that gap changes.
+        a_start, a_end = float(rec_a["start_frame"]), float(rec_a["end_frame"])
+        c_start, c_end = float(rec_c["start_frame"]), float(rec_c["end_frame"])
 
         a_poses_before = [
             fake.evaluate("|root|mid.rotateZ", a_start),
@@ -899,7 +901,7 @@ class TestDelete:
 
         # Verify B's range carries no keys on mid's channel after delete
         mid_rotZ_keys = fake.keys.get("|root|mid.rotateZ", {})
-        b_range = range(32, 63)  # B's frame range: 32-62
+        b_range = range(rec_b["start_frame"], rec_b["end_frame"] + 1)
         for frame in b_range:
             assert float(frame) not in mid_rotZ_keys, \
                 (f"B's padding key at frame {frame} should be deleted")
