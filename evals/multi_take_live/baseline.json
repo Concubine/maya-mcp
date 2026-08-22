@@ -1,0 +1,42 @@
+{
+  "clips": [
+    {
+      "end_frame": 60,
+      "fps": 30,
+      "joints": [
+        "chest",
+        "spine_01"
+      ],
+      "name": "idle",
+      "root_position_used": false,
+      "start_frame": 0
+    },
+    {
+      "end_frame": 145,
+      "fps": 30,
+      "joints": [
+        "L_ankle",
+        "L_hip",
+        "L_knee",
+        "R_ankle",
+        "R_hip",
+        "R_knee"
+      ],
+      "name": "step",
+      "root_position_used": true,
+      "start_frame": 109
+    },
+    {
+      "end_frame": 192,
+      "fps": 30,
+      "joints": [
+        "R_elbow",
+        "R_shoulder"
+      ],
+      "name": "wave",
+      "root_position_used": false,
+      "start_frame": 147
+    }
+  ],
+  "fbx": "multi_take.fbx"
+}
