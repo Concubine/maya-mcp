@@ -3408,6 +3408,20 @@ class TestClipInMaya:
                                "rotations": {"cb_mid": [0, 0, 10]}})
 
     def test_loop_refusal_and_replace_are_real(self):
+        """PRE-EXISTING TEST, CORRECTED FOR #718 (found failing by Task
+        10's whole-file run - not a Task 8 blind edit, but written at #695
+        before #718 gave a rig multiple simultaneous clips). Its old
+        assertions encoded #695's single-clip-per-rig behaviour: any
+        second author_clip call, regardless of name, replaced the rig's
+        one clip outright. #718 replaced that with "same name re-appends
+        at the tail; a different name is a SECOND clip that coexists" (see
+        clip.py's module docstring, decision 4) - so authoring "second"
+        after "first" must NOT report replaced="first", and "first"'s
+        curve must still be on the rig afterward (padded by the
+        self-contained rule, not deleted). MEASURED: re-authoring the SAME
+        name is what still reports `replaced` and cuts the old curve range
+        - checked below on "first" itself.
+        """
         import maya.cmds as cmds
 
         from maya_plugin.dispatcher import HandlerError
@@ -3433,11 +3447,23 @@ class TestClipInMaya:
                 {"time_s": 0.0, "rotations": {"cc_tip": [0, 0, 0]}},
                 {"time_s": 1.0, "rotations": {"cc_tip": [0, 0, 20]}},
             ]})
-        assert out["replaced"] == "first"
-        # the first clip's curves are GONE, not merged
-        assert not (cmds.listConnections(
+        # MEASURED: a NEW name is a second, coexisting clip - nothing is
+        # replaced, and "first"'s clip and curves survive.
+        assert out["replaced"] is None
+        assert out["clips"] == ["first", "second"]
+        assert (cmds.listConnections(
             root + "|cc_mid.rotateZ",
             source=True, destination=False, type="animCurve") or [])
+        # re-authoring the SAME name ("first") is what replaces: its old
+        # range is cut and it is re-appended at the tail.
+        redo = clip.author_clip({
+            "root": root, "name": "first", "fps": 30,
+            "keys": [
+                {"time_s": 0.0, "rotations": {"cc_mid": [0, 0, 60]}},
+                {"time_s": 1.0, "rotations": {"cc_mid": [0, 0, 0]}},
+            ]})
+        assert redo["replaced"] == "first"
+        assert redo["clips"] == ["second", "first"]
         clip.delete_clip({"root": root})   # scene-persistence teardown
 
 
@@ -3617,3 +3643,389 @@ class TestClipExportInMaya:
         finally:
             clip.delete_clip({"root": root_a})
             clip.delete_clip({"root": root_b})
+
+
+class TestMultiTakeExportInMaya:
+    """#718's measurement battery. Same reset-per-test-scene,
+    persistent-process rule as TestClipExportInMaya: one prefix per test.
+
+    Every assertion here pins a literal the byte gate rests on. On failure,
+    read the raw facts (facts.takes / facts.anim_nodes), fix the READER or
+    the VIOLATION to the measured truth, and record the measured value in
+    a comment here - never force the literal.
+
+    MEASURED (this battery, mayapy, 2026-08-22): all five plan questions
+    answered by a real two-clip export.
+      1. a two-clip file carries 3 takes: the exporter's own always-present
+         default ("Take 001") plus the two named ones ("idle", "walk") -
+         same "+1" shape TestClipExportInMaya measured for a single clip.
+      2. each named take's start_s/stop_s matches its OWN declared frame
+         range converted at the clip's fps (idle 0..1.0s, walk
+         32/30..62/30s) - NOT the whole bake span.
+      3. STOP-WORTHY, MEASURED, CONTRADICTS THE DESIGN ASSUMPTION: curve
+         records ARE segmented per take, not one-per-plug over the whole
+         bake range. A rotation plug that any clip touches (directly or
+         through the self-contained rule's padding) carries THREE separate
+         AnimationCurveNode records in the file, not one: one spanning the
+         WHOLE bake range (ticks matching "Take 001", key_count
+         span_frames+1 = 63) and one PER NAMED TAKE, each spanning only
+         that take's own tick range with that take's own key_count (31 for
+         both idle 0-30 and walk 32-62 here, since both happen to be the
+         same length). Confirmed directly off facts.anim_nodes (raw
+         AnimationCurveNode records, not the aggregated `targets` view) -
+         see test_curve_records_are_segmented_per_take, which reads the
+         bytes through a gate-BYPASSING export helper because going
+         through the real export.export_fbx() gate is what exposed this:
+         its `by.setdefault((target, property), t)` first-wins map picks
+         WHICHEVER of the three duplicate records the FBX file happens to
+         list first, ordered by an FBX-internal object UID that is NOT
+         stable run-to-run for the identical scene (measured: 8 back-to-back
+         exports of the byte-identical scene in one process split 6 pass /
+         2 fail; a single export re-run immediately after this file's
+         probe script alone flipped from pass to fail). export_fbx()
+         therefore currently PASSES OR FAILS ITS OWN GATE NON-DETERMINISTICALLY
+         on a genuinely correct multi-take export, roughly as often as it
+         picks the "Take 001" duplicate (63 keys, matches `expected`) as it
+         picks a per-take duplicate (31 keys, "bakes 31 keys, expected 63"
+         violation). Per this task's explicit instruction, this is NOT
+         fixed here: making anim_violations correct requires attributing
+         each curve record to the take that actually owns it, which needs
+         `fbxbytes.anim_facts`'s `targets` to carry take identity - a
+         reader SHAPE change, and a design decision on what "correct" even
+         means here (does the policy validate every duplicate, just the
+         default take's, or something else) that is above this task's pay
+         grade. Filed as a follow-up; see the task report.
+      4. "Take 001" (the exporter's default) spans the WHOLE bake range,
+         0..62/30 s - it is not scoped to any one clip.
+      5. mt_mid (keyed only in idle) reads back its rest value (0.0) at
+         EVERY integer frame of walk's own range (32..62 inclusive), not
+         merely at the two boundary keys the self-contained rule pins -
+         see test_every_frame_of_a_padded_range_holds_rest.
+    """
+
+    def _two_clip_scene(self, cmds, prefix):
+        from maya_plugin.handlers import clip, rigging
+
+        base = cmds.ls(cmds.polyCube(name=prefix + "_base", height=2,
+                                     subdivisionsHeight=4)[0], long=True)[0]
+        skeleton = rigging.create_skeleton({"joints": [
+            {"name": prefix + "_root", "position": [0.0, -1.0, 0.0]},
+            {"name": prefix + "_mid", "position": [0.0, 0.0, 0.0],
+             "parent": prefix + "_root"},
+            {"name": prefix + "_tip", "position": [0.0, 1.0, 0.0],
+             "parent": prefix + "_mid"}]})
+        rigging.bind_skin({"mesh": base, "root": skeleton["root"]})
+        idle = clip.author_clip({
+            "root": skeleton["root"], "name": "idle", "fps": 30,
+            "keys": [
+                {"time_s": 0.0, "rotations": {prefix + "_mid": [0, 0, 0]}},
+                {"time_s": 0.5, "rotations": {prefix + "_mid": [0, 0, 30]}},
+                {"time_s": 1.0, "rotations": {prefix + "_mid": [0, 0, 0]}}]})
+        walk = clip.author_clip({
+            "root": skeleton["root"], "name": "walk", "fps": 30,
+            "keys": [
+                {"time_s": 0.0, "rotations": {prefix + "_tip": [0, 0, 0]}},
+                {"time_s": 0.5, "rotations": {prefix + "_tip": [0, 0, 25]}},
+                {"time_s": 1.0, "rotations": {prefix + "_tip": [0, 0, 0]}}]})
+        return base, skeleton["root"], idle, walk
+
+    def test_the_layout_is_what_the_tool_reported(self):
+        import maya.cmds as cmds
+
+        base, root, idle, walk = self._two_clip_scene(cmds, "mt")
+        assert (idle["start_frame"], idle["end_frame"]) == (0, 30)
+        assert (walk["start_frame"], walk["end_frame"]) == (32, 62)
+        assert walk["clips"] == ["idle", "walk"]
+        # MEASURED: walk never mentions mt_mid on any key, so it is a pure
+        # rest pin (padded_channels) - not "held", which is reserved for a
+        # channel a clip DOES key somewhere in its own range but misses at
+        # one of its own boundary frames (walk keys no channel that way in
+        # this scene, so held_channels is exercised only by mt_tip's
+        # back-fill, a different list).
+        assert walk["padded_channels"] == ["mt_mid"]
+        assert walk["back_filled"]["channels"] == ["mt_tip"]
+        assert cmds.playbackOptions(query=True, maxTime=True) == 62
+
+    def test_a_padded_channel_holds_rest_through_the_other_clip(self):
+        """THE contamination check, in the scene: mt_mid is keyed in idle
+        and never mentioned in walk, so without the pad it would hold
+        idle's last value through every frame of walk."""
+        import maya.cmds as cmds
+
+        base, root, idle, walk = self._two_clip_scene(cmds, "mu")
+        mid = cmds.ls("mu_mid", long=True)[0]
+        for frame in (32, 47, 62):
+            cmds.currentTime(frame)
+            assert abs(cmds.getAttr(mid + ".rotateZ")) < 1e-4, frame
+        # ...and idle still measures what it measured before walk existed
+        tip = cmds.ls("mu_tip", long=True)[0]
+        for frame in (0, 15, 30):
+            cmds.currentTime(frame)
+            assert abs(cmds.getAttr(tip + ".rotateZ")) < 1e-4, frame
+
+    def test_every_frame_of_a_padded_range_holds_rest(self):
+        """Extends the brief's boundary-sample check (item 2 of the four
+        measurements this task owes): the headless fake interpolates
+        linearly between keys and cannot model real tangent shape, so it
+        can only prove the two ENDPOINTS of a pinned span are flat. Real
+        tangents could still bow between them. This samples every integer
+        frame in walk's own range under a real evaluated curve.
+
+        MEASURED: mt_mid's rotateX/Y/Z hold exactly 0.0 (< 1e-4) at every
+        one of the 31 integer frames 32..62 inclusive - the flat in/out
+        tangents _pin sets on the two boundary keys (32, 62) hold the
+        whole span between them flat too, not just the sampled ends.
+        """
+        import maya.cmds as cmds
+
+        base, root, idle, walk = self._two_clip_scene(cmds, "mv2")
+        mid = cmds.ls("mv2_mid", long=True)[0]
+        for frame in range(32, 63):
+            cmds.currentTime(frame)
+            for attr in ("rotateX", "rotateY", "rotateZ"):
+                assert abs(cmds.getAttr(mid + "." + attr)) < 1e-4, \
+                    (frame, attr)
+
+    def _export_bypassing_the_gate(self, cmds, mel, path, nodes, declared):
+        """Writes the FBX exactly the way export_fbx does (same MEL, same
+        preamble constants, same bake-range/split-into-takes calls) but
+        WITHOUT export_fbx's anim_violations gate on top.
+
+        Exists only because the gate itself is what this class's item 3
+        measured as non-deterministic (see the class docstring): calling
+        the real export.export_fbx() on a multi-take scene sometimes
+        raises for a scene that is not actually wrong, so a test that
+        needs to inspect the RAW bytes reliably cannot go through it. This
+        reuses export.py's own exposed constants (FBX_PREAMBLE_MEL etc. -
+        the same ones evals/maya_export.py composes from, per export.py's
+        module docstring) rather than re-deriving the MEL, so it cannot
+        silently drift from what export_fbx actually sends the exporter.
+        """
+        from maya_plugin.handlers import export as export_mod, fbxbytes
+
+        cmds.loadPlugin("fbxmaya", quiet=True)
+        for statement in (export_mod.FBX_PREAMBLE_MEL
+                          + export_mod.FBX_SCENE_CONTENT_MEL
+                          + export_mod.FBX_SHAPES_MEL
+                          + export_mod.FBX_SKINS_MEL[True]
+                          + export_mod.FBX_ANIM_MEL[True]):
+            mel.eval(statement)
+        span = int(declared["span_frames"])
+        mel.eval("FBXExportBakeComplexStart -v 0")
+        mel.eval("FBXExportBakeComplexEnd -v %d" % span)
+        mel.eval("FBXExportSplitAnimationIntoTakes -clear")
+        for record in declared["clips"]:
+            mel.eval('FBXExportSplitAnimationIntoTakes -v "%s" %d %d'
+                     % (record["name"], record["start_frame"],
+                        record["end_frame"]))
+        mel.eval("FBXExportScaleFactor %g" % export_mod.EXPORT_SCALE_FACTOR)
+        cmds.select(nodes, replace=True)
+        cmds.file(path, force=True, options="v=0", type="FBX export",
+                  pr=True, es=True)
+        fbxbytes.set_unit_scale_factor(path)
+        return fbxbytes.read_fbx(path)
+
+    def test_the_measurements(self, tmp_path):
+        """Items 1, 2 and 4 go through fbxbytes.anim_facts on a real
+        export - reliable, since none of them depend on which of a
+        segmented plug's duplicate curve records a first-wins lookup
+        happens to land on. Item 3 is measured RAW (see the class
+        docstring for the full finding and why): counting
+        AnimationCurveNode records per (target, property) pair directly,
+        never through the gate.
+        """
+        import maya.cmds as cmds
+        import maya.mel as mel
+
+        from maya_plugin.handlers import clip, export, fbxbytes
+
+        base, root, idle, walk = self._two_clip_scene(cmds, "mv")
+        path = str(tmp_path / "two.fbx").replace("\\", "/")
+        declared = export._scene_clips(cmds)
+        facts = self._export_bypassing_the_gate(cmds, mel, path,
+                                                [base, root], declared)
+        anim = fbxbytes.anim_facts(facts)
+        names = [t["name"] for t in anim["takes"]]
+        # (1) MEASURED: the exporter's own default take rides along with
+        # the two named ones.
+        assert "idle" in names and "walk" in names
+        assert len(names) == 3, names
+        by = {t["name"]: t for t in anim["takes"]}
+        # (2) MEASURED: each split take carries its OWN LocalTime range.
+        assert abs(by["idle"]["start_s"] - 0.0) < 1e-3
+        assert abs(by["idle"]["stop_s"] - 1.0) < 1e-3
+        assert abs(by["walk"]["start_s"] - 32 / 30.0) < 1e-3
+        assert abs(by["walk"]["stop_s"] - 62 / 30.0) < 1e-3
+        # (4) MEASURED: Take 001 spans the whole bake range.
+        assert abs(by["Take 001"]["stop_s"] - 62 / 30.0) < 1e-3
+        # (3) MEASURED, RAW, off facts.anim_nodes directly (see the class
+        # docstring for the full finding): each rotation plug carries
+        # THREE AnimationCurveNode records, not one - segmented per take,
+        # contradicting the "one curve per plug over the whole span"
+        # design assumption export.anim_violations and the docstrings
+        # above it were written against.
+        by_uid = {n.uid: n for n in facts.nodes if n.uid is not None}
+        counts = {}
+        for node in facts.anim_nodes.values():
+            if node["target_kind"] != "model" or node["target"] not in by_uid:
+                continue
+            key = (by_uid[node["target"]].name, node["property"])
+            counts[key] = counts.get(key, 0) + 1
+        for joint in ("mv_mid", "mv_tip"):
+            assert counts[(joint, "Lcl Rotation")] == 3, counts
+        clip.delete_clip({"root": root})   # scene-persistence teardown
+
+    def test_curve_records_are_segmented_per_take(self, tmp_path):
+        """Item 1 of the four owed measurements, gone one level deeper
+        than the count in test_the_measurements: this pins the exact tick
+        range and key_count of EACH of the three duplicate records per
+        plug, proving they are not just three copies of the same thing
+        but three DIFFERENT segments - one matching the whole bake range
+        ("Take 001"'s own ticks, 63 keys) and one matching each named
+        take's own ticks (31 keys each, since idle and walk are both 1s
+        clips here).
+
+        STOP: this is exactly the segmentation the task brief said to
+        stop on rather than reshape the reader for - see the class
+        docstring for the full finding, why export.export_fbx()'s gate is
+        measured non-deterministic as a direct consequence, and why that
+        is not fixed in this task.
+        """
+        import maya.cmds as cmds
+        import maya.mel as mel
+
+        from maya_plugin.handlers import clip, export, fbxbytes
+
+        base, root, idle, walk = self._two_clip_scene(cmds, "mv3")
+        path = str(tmp_path / "raw.fbx").replace("\\", "/")
+        declared = export._scene_clips(cmds)
+        facts = self._export_bypassing_the_gate(cmds, mel, path,
+                                                [base, root], declared)
+        by_uid = {n.uid: n for n in facts.nodes if n.uid is not None}
+        span_ticks = int(round(62 / 30.0 * fbxbytes.KTIME_PER_SECOND))
+        idle_ticks = (0, int(round(30 / 30.0 * fbxbytes.KTIME_PER_SECOND)))
+        walk_ticks = (int(round(32 / 30.0 * fbxbytes.KTIME_PER_SECOND)),
+                     int(round(62 / 30.0 * fbxbytes.KTIME_PER_SECOND)))
+        for joint in ("mv3_mid", "mv3_tip"):
+            ranges = []
+            for node in facts.anim_nodes.values():
+                if (node["target_kind"] != "model"
+                        or by_uid.get(node["target"], None) is None
+                        or by_uid[node["target"]].name != joint
+                        or node["property"] != "Lcl Rotation"):
+                    continue
+                curve = facts.anim_curves[node["curves"][0]]
+                ranges.append((curve["first_tick"], curve["last_tick"],
+                              curve["key_count"]))
+            ranges.sort()
+            # MEASURED (tolerant to a few ticks of rounding): one record
+            # spans the WHOLE bake range with 63 keys, one spans idle's
+            # own range with 31, one spans walk's own range with 31.
+            assert len(ranges) == 3, (joint, ranges)
+            (first, first_last, first_n) = ranges[0]
+            assert first == 0
+            assert abs(first_last - idle_ticks[1]) < 1000
+            assert first_n == 31
+            (second, second_last, second_n) = ranges[1]
+            assert second == 0
+            assert abs(second_last - span_ticks) < 1000
+            assert second_n == 63
+            (third, third_last, third_n) = ranges[2]
+            assert abs(third - walk_ticks[0]) < 1000
+            assert abs(third_last - walk_ticks[1]) < 1000
+            assert third_n == 31
+        clip.delete_clip({"root": root})   # scene-persistence teardown
+
+    def test_a_named_delete_leaves_the_other_take_exportable(self, tmp_path):
+        """MEASURED CORRECTION: the brief's version of this test called
+        the real export.export_fbx() gate directly - and delete_clip does
+        NOT re-pack a surviving clip's frame range (clip.py: "Gaps are
+        NOT re-packed"), so walk keeps end_frame=62 and declared span_frames
+        stays 62 even with idle gone. That means mw_tip (walk's own
+        channel) STILL carries the same segmented duplicate-record
+        ambiguity item 3 measured - a "Take 001" duplicate spanning 0-62
+        (63 keys) and a "walk" duplicate spanning 32-62 (31 keys) - so this
+        exact call was measured to fail the gate too (mw_tip bakes 31,
+        expected 63), non-deterministically, on this task's whole-file
+        run. Rewritten on the bypass helper so this test verifies what it
+        is actually FOR - that a named delete leaves the surviving clip's
+        take in the file and the deleted one's name gone - without
+        depending on the gate's measured-broken first-wins pick.
+        """
+        import maya.cmds as cmds
+        import maya.mel as mel
+
+        from maya_plugin.handlers import clip, export, fbxbytes
+
+        base, root, idle, walk = self._two_clip_scene(cmds, "mw")
+        out = clip.delete_clip({"root": root, "name": "idle"})
+        assert out["clips"] == ["walk"]
+        path = str(tmp_path / "one.fbx").replace("\\", "/")
+        declared = export._scene_clips(cmds)
+        assert [r["name"] for r in declared["clips"]] == ["walk"]
+        facts = self._export_bypassing_the_gate(cmds, mel, path,
+                                                [base, root], declared)
+        anim = fbxbytes.anim_facts(facts)
+        names = [t["name"] for t in anim["takes"]]
+        assert "walk" in names and "idle" not in names
+
+    def test_named_delete_measures_real_curve_removal(self):
+        """Item 3 of the four owed measurements: delete_clip's
+        `deleted_curves` depends on real Maya actually removing a curve
+        node once cutKey(..., clear=True) empties it of every key - only
+        the headless test fake asserts that behaviour today. This measures
+        it against a real Maya, and against the raw curve state before and
+        after, rather than trusting the reported number alone.
+
+        MEASURED: in this two-clip scene, deleting "idle" reports
+        deleted_curves == 0. Real Maya does NOT delete either mt_mid's or
+        mt_tip's curve nodes here, because the self-contained rule (#718)
+        means every channel used anywhere on the rig carries keys spanning
+        the WHOLE timeline by construction: mt_mid keeps the two rest-pin
+        keys walk's own authoring pinned at frames 32/62 (outside idle's
+        cut range 0-30), and mt_tip keeps its own walk-authored keys at
+        32/47/62 (also outside the cut range) - cutKey(clear=True) removes
+        only the keys IN the cut range, and a curve with keys left on it
+        is not deleted. A curve node is only fully emptied, and thus
+        deleted, when the channel it drives is NOT touched by any
+        surviving clip's own keys or by the self-contained rule's pads -
+        structurally the case only for the LAST clip's teardown path
+        (delete_clip with no surviving clips), which the full-teardown
+        branch below measures instead.
+        """
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import clip
+
+        base, root, idle, walk = self._two_clip_scene(cmds, "mx")
+        mid = cmds.ls("mx_mid", long=True)[0]
+        tip = cmds.ls("mx_tip", long=True)[0]
+        mid_curves_before = set(cmds.listConnections(
+            mid + ".rotateX", source=True, destination=False,
+            type="animCurve") or [])
+        tip_curves_before = set(cmds.listConnections(
+            tip + ".rotateX", source=True, destination=False,
+            type="animCurve") or [])
+        out = clip.delete_clip({"root": root, "name": "idle"})
+        assert out["deleted_curves"] == 0
+        # the curve nodes themselves are the SAME objects, still present,
+        # just missing the keys idle owned
+        mid_curves_after = set(cmds.listConnections(
+            mid + ".rotateX", source=True, destination=False,
+            type="animCurve") or [])
+        tip_curves_after = set(cmds.listConnections(
+            tip + ".rotateX", source=True, destination=False,
+            type="animCurve") or [])
+        assert mid_curves_after == mid_curves_before
+        assert tip_curves_after == tip_curves_before
+        # walk's own motion is untouched by deleting idle
+        cmds.currentTime(47)
+        assert abs(cmds.getAttr(tip + ".rotateZ") - 25.0) < 1e-3
+        # MEASURED: the full-teardown path (name omitted, last clip) DOES
+        # delete every curve - there is nothing left to hold them open.
+        final = clip.delete_clip({"root": root})
+        assert final["deleted_curves"] > 0
+        assert not cmds.listConnections(mid + ".rotateX", source=True,
+                                        destination=False, type="animCurve")
+        assert not cmds.listConnections(tip + ".rotateX", source=True,
+                                        destination=False, type="animCurve")
