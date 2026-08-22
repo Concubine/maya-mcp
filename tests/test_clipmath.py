@@ -105,3 +105,81 @@ class TestLoopViolations:
         out = clipmath.loop_violations(self._first(), last)
         assert any("blink" in v and "0.4" in v for v in out)
         assert any("root_position" in v and "0.05" in v for v in out)
+
+
+class TestRecords:
+    def _records(self):
+        return [
+            {"name": "idle", "fps": 30, "start_frame": 0, "end_frame": 60,
+             "duration_s": 2.0, "loop": True, "interpolation": "smooth",
+             "joints": ["chest"], "weight_channels": ["blink"],
+             "root_position_used": False},
+            {"name": "walk", "fps": 30, "start_frame": 62, "end_frame": 98,
+             "duration_s": 1.2, "loop": True, "interpolation": "linear",
+             "joints": ["L_hip"], "weight_channels": [],
+             "root_position_used": True},
+        ]
+
+    def test_a_bare_object_reads_as_one_record(self):
+        """Every scene authored before #718 carries a bare object with no
+        frame range: it is clip one, starting at frame 0."""
+        out = clipmath.normalized_records(
+            {"name": "sway", "fps": 30, "duration_s": 1.5, "loop": False,
+             "interpolation": "linear", "joints": ["mid"],
+             "weight_channels": [], "root_position_used": False})
+        assert len(out) == 1
+        assert out[0]["start_frame"] == 0 and out[0]["end_frame"] == 45
+        assert out[0]["name"] == "sway"
+
+    def test_a_nameless_value_survives_as_one_record(self):
+        """clip_meta reports an unparseable attr as name-only; that must not
+        crash the layout math either."""
+        out = clipmath.normalized_records({"name": "junk"})
+        assert out[0]["name"] == "junk" and out[0]["fps"] == 30
+        assert out[0]["start_frame"] == 0 and out[0]["end_frame"] == 0
+        assert clipmath.normalized_records(None) == []
+        assert clipmath.normalized_records("not json at all") == []
+
+    def test_records_come_back_in_timeline_order(self):
+        out = clipmath.normalized_records(list(reversed(self._records())))
+        assert [r["name"] for r in out] == ["idle", "walk"]
+
+    def test_next_start_leaves_exactly_one_gap_frame(self):
+        assert clipmath.next_start_frame([]) == 0
+        # idle ends at 60, frame 61 is the gap, walk starts at 62
+        assert clipmath.next_start_frame(self._records()[:1]) == 62
+        assert clipmath.next_start_frame(self._records()) == 100
+
+    def test_fps_conflict_names_the_fps_in_use_and_its_clips(self):
+        assert clipmath.fps_conflict([], 24) is None
+        assert clipmath.fps_conflict(self._records(), 30) is None
+        message = clipmath.fps_conflict(self._records(), 24)
+        assert "30" in message and "idle" in message and "walk" in message
+
+    def test_channel_union_is_every_channel_any_clip_touches(self):
+        union = clipmath.channel_union(self._records())
+        assert union["joints"] == ["L_hip", "chest"]
+        assert union["weight_channels"] == ["blink"]
+        assert union["root_position_used"] is True
+        empty = clipmath.channel_union([])
+        assert empty == {"joints": [], "weight_channels": [],
+                         "root_position_used": False}
+
+    def test_drop_record_returns_the_record_and_the_rest(self):
+        dropped, kept = clipmath.drop_record(self._records(), "idle")
+        assert dropped["start_frame"] == 0 and dropped["end_frame"] == 60
+        assert [r["name"] for r in kept] == ["walk"]
+        missing, kept = clipmath.drop_record(self._records(), "nope")
+        assert missing is None and len(kept) == 2
+
+    def test_overlaps_and_duplicate_names_are_violations(self):
+        assert clipmath.overlap_violations(self._records()) == []
+        bad = self._records()
+        bad[1]["start_frame"] = 60
+        out = clipmath.overlap_violations(bad)
+        assert any("overlap" in v and "idle" in v and "walk" in v
+                   for v in out)
+        dupe = self._records()
+        dupe[1]["name"] = "idle"
+        assert any("more than one take named 'idle'" in v
+                   for v in clipmath.overlap_violations(dupe))

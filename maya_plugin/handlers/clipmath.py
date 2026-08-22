@@ -109,6 +109,117 @@ def fractional_frame_times(times: List[float], fps: int) -> List[float]:
     return out
 
 
+# One unowned frame between clips. That frame is where the interpolation
+# from one clip's last pose to the next clip's first pose lives, and no
+# take's range includes it (#718 design). Zero would make two takes share
+# a frame; more would only pad the file.
+GAP_FRAMES = 1
+
+
+def _record(raw, start_frame):
+    """One clip record, with its frame range filled in when the stored
+    shape predates #718 (a bare object, no range: it is clip one)."""
+    fps = raw.get("fps") or 30
+    duration_s = float(raw.get("duration_s") or 0.0)
+    start = int(raw.get("start_frame", start_frame))
+    end = int(raw.get("end_frame", start + round(duration_s * fps)))
+    return {"name": raw.get("name"), "fps": int(fps),
+            "start_frame": start, "end_frame": end,
+            "duration_s": duration_s,
+            "loop": bool(raw.get("loop", False)),
+            "interpolation": raw.get("interpolation", "linear"),
+            "joints": list(raw.get("joints") or []),
+            "weight_channels": list(raw.get("weight_channels") or []),
+            "root_position_used": bool(raw.get("root_position_used", False))}
+
+
+def normalized_records(raw):
+    """Clip records in timeline order, from either stored shape.
+
+    A bare object is every scene authored before #718: read as a
+    one-element list whose record starts at frame 0 (the design's
+    compatibility rule - nothing migrates on disk). Anything else that is
+    not a list or dict carries no clips.
+    """
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for entry in raw:
+        if isinstance(entry, dict):
+            out.append(_record(entry, 0))
+    out.sort(key=lambda r: r["start_frame"])
+    return out
+
+
+def next_start_frame(records) -> int:
+    """Where a new clip goes: after the last clip's end, past the gap
+    frame. The first clip on a rig starts at 0."""
+    if not records:
+        return 0
+    return max(r["end_frame"] for r in records) + GAP_FRAMES + 1
+
+
+def fps_conflict(records, fps) -> Optional[str]:
+    """Why this fps cannot join these clips, or None.
+
+    Not a compromise: a take IS a frame range on one timeline, so one file
+    cannot carry two frame rates."""
+    others = sorted({r["fps"] for r in records})
+    if not others or others == [fps]:
+        return None
+    return ("this rig's clips are %s fps (%s); a clip at %s fps cannot join "
+            "them - one file is one timeline, so one rig is one frame rate"
+            % (", ".join(str(f) for f in others),
+               ", ".join(repr(r["name"]) for r in records), fps))
+
+
+def channel_union(records):
+    """Every channel ANY clip on the rig touches - the set each clip must
+    key at its own boundary frames to stay self-contained."""
+    joints, weights = set(), set()
+    root = False
+    for r in records:
+        joints.update(r["joints"])
+        weights.update(r["weight_channels"])
+        root = root or r["root_position_used"]
+    return {"joints": sorted(joints), "weight_channels": sorted(weights),
+            "root_position_used": root}
+
+
+def drop_record(records, name):
+    """(the record named `name` or None, the records without it)."""
+    found = None
+    kept = []
+    for r in records:
+        if found is None and r["name"] == name:
+            found = r
+        else:
+            kept.append(r)
+    return found, kept
+
+
+def overlap_violations(records) -> List[str]:
+    """Ranges that share a frame, and names that repeat. A take is a range
+    over one timeline: two takes claiming one frame are two readings of the
+    same keys, and a consumer looks a take up BY NAME."""
+    out = []
+    ordered = sorted(records, key=lambda r: r["start_frame"])
+    for prev, cur in zip(ordered, ordered[1:]):
+        if cur["start_frame"] <= prev["end_frame"]:
+            out.append(
+                "takes %r (%d-%d) and %r (%d-%d) overlap"
+                % (prev["name"], prev["start_frame"], prev["end_frame"],
+                   cur["name"], cur["start_frame"], cur["end_frame"]))
+    seen = set()
+    for r in ordered:
+        if r["name"] in seen:
+            out.append("more than one take named %r" % r["name"])
+        seen.add(r["name"])
+    return out
+
+
 def loop_violations(first: Dict[str, Any], last: Dict[str, Any]) -> List[str]:
     """Ways the last key fails to close onto the first, with measured deltas.
 
