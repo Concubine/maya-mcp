@@ -1,9 +1,14 @@
-"""author_clip / delete_clip (#695) under a FakeCmds.
+"""author_clip / delete_clip (#695, #718) under a FakeCmds.
 
 Real curve evaluation is mayapy's job (tests/test_handlers_mayapy.py); this
-file pins validation, the one-clip-at-a-time replace rule, the foreign-curve
-refusal, metadata, measured per-key displacement (via the _points seam and a
-linear fake), tangent mapping, and delete_clip's teardown.
+file pins validation, the #718 self-contained-takes rule (a clip pins every
+channel it does not declare at its own boundaries, and back-fills a channel
+it introduces across every earlier clip's own boundaries), append/re-author/
+delete across MULTIPLE clips sharing one timeline, the foreign-curve
+refusal, metadata (both the #718 list shape and the pre-#718 bare-object
+shape), measured per-key displacement (via the _points seam and a linear
+fake), tangent mapping, and delete_clip's teardown (partial - one clip out
+of several - and full).
 """
 
 import json
@@ -528,6 +533,34 @@ class TestSelfContainedTakes:
                    for w in out["warnings"]), out["warnings"]
         assert fake.keys["|root|mid.rotateZ"][32.0] == pytest.approx(0.0)
 
+    def test_a_legacy_weight_channel_pins_at_zero_not_its_first_key(
+            self, fake):
+        """Final review Fix 3: `rest.setdefault(..., 0.0)` used to cover
+        only `mine["weight_channels"]` (this clip's own aliases). A weight
+        channel declared SOLELY by a pre-#718 clip - no per-channel rest
+        record exists for it either, since legacy scenes predate that
+        bookkeeping - reached `_rest_value`, which falls back to inferring
+        rest from the curve's EARLIEST keyed value. For a legacy clip that
+        opens non-zero (blink held at 1.0), that infers the wrong rest
+        entirely: the phase-5 rule is that weights-all-zero IS the reset,
+        not 'whatever a legacy clip happened to open with'. Constructed by
+        hand-writing the legacy bare-object metadata shape (clip_meta's
+        other read path) with curves author_clip itself never wrote."""
+        fake.string_attrs["|root"] = {"mcp_clip": json.dumps({
+            "name": "old", "fps": 30, "start_frame": 0, "end_frame": 30,
+            "duration_s": 1.0, "loop": False, "interpolation": "linear",
+            "joints": [], "weight_channels": ["blink"],
+            "root_position_used": False})}
+        fake.curves["body_shapes.blink"] = "legacy_crv"
+        fake.keys["body_shapes.blink"] = {0.0: 1.0, 30.0: 1.0}
+        out = _author(fake, name="new", keys=self._idle())   # never touches blink
+        assert not any("no rest value was recorded" in w and "blink" in w
+                       for w in out["warnings"]), out["warnings"]
+        keys = fake.keys["body_shapes.blink"]
+        start, end = out["start_frame"], out["end_frame"]
+        assert keys[float(start)] == pytest.approx(0.0)
+        assert keys[float(end)] == pytest.approx(0.0)
+
     def test_a_posed_rig_warns_that_rest_is_not_the_bind_pose(self, fake):
         """#718 review Fix 4: _capture_rest reads the rig's CURRENT pose,
         which is the bind pose only when nobody posed the rig first. A
@@ -678,6 +711,50 @@ class TestSelfContainedTakes:
         assert set(out["padded_channels"]) == {"root_position"}
         assert not (set(out["held_channels"]) & set(out["padded_channels"]))
 
+    def test_a_clip_introduced_channel_still_pins_its_own_boundaries(
+            self, fake):
+        """Final review Fix 1: the wave-1 code only padded channels ANY
+        OTHER clip on the rig declares (`theirs`) - a channel this clip
+        ALONE introduces (`mine \\ theirs`) was left unpinned, on the
+        reasoning that "no other clip's keys are on that curve to bleed
+        in". That reasoning is false: the BACK-FILL pass (below, in this
+        same call) writes rest keys onto exactly that curve, at idle's own
+        boundary frames (0 and 30) - two frames short of walk's start
+        (32). Evaluating THROUGH those keys (not just checking where keys
+        land) is the only way to see the bug: without walk's own boundary
+        pins, walk's introduced channel `tip` ramps up from idle's
+        back-filled rest keys instead of holding flat at its own
+        authored value of 40 degrees."""
+        _author(fake, name="idle", keys=self._idle())   # declares 'mid' only
+        out = _author(fake, name="walk", keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 0.5, "rotations": {"tip": [0, 0, 40]}},
+            {"time_s": 1.0, "rotations": {"mid": [0, 0, 20]}}])
+        start, end = out["start_frame"], out["end_frame"]
+        assert (start, end) == (32, 62)
+        # walk's OWN range must read a flat 40 on tip - not a ramp bled in
+        # from idle's back-filled rest keys at frames 0 and 30. Without the
+        # fix this reads ~4.71 at frame 32 and ~16.47 at frame 37.
+        for frame in (float(start), 37.0, float(end)):
+            assert fake.evaluate("|root|mid|tip.rotateZ", frame) == \
+                pytest.approx(40.0)
+        assert "tip" in out["held_channels"]
+        assert "tip" not in out["padded_channels"]
+
+    def test_a_single_clip_rig_is_untouched_by_the_new_pinning(self, fake):
+        """The gate on `kept` being non-empty: a rig's FIRST clip has no
+        earlier clip to back-fill against, so padding its own channels
+        against themselves must add nothing - exactly the two authored
+        keys, no new pins, no extra tangent calls."""
+        before = list(fake.tangents)
+        out = _author(fake, name="idle", keys=self._idle())
+        assert out["padded_channels"] == []
+        assert out["held_channels"] == []
+        assert out["back_filled"] == {"clips": [], "channels": []}
+        assert sorted(fake.keys["|root|mid.rotateZ"]) == [0.0, 30.0]
+        new_tangents = fake.tangents[len(before):]
+        assert all(t[2] == (0, 30) for t in new_tangents)   # main pass only
+
     # -- #718 review wave 3: end_frame = int(round(measured_end)) rounds
     # DOWN whenever the last key's fractional part is below 0.5, so a key
     # exactly on the clip's own final frame can sit outside the OLD
@@ -712,6 +789,35 @@ class TestSelfContainedTakes:
         assert 0.0 < mid_val < 50.0
         assert "mid" in out["held_channels"]
         assert "mid" not in out["padded_channels"]
+
+    def test_round_down_reauthor_cut_does_not_leave_a_stray_fractional_key(
+            self, fake):
+        """Final review Fix 2: the same rounds-down trap, in the CUT
+        rather than the pad/tangent passes. `a`'s first version keys `mid`
+        at time_s 0.0 and 0.6 (24 fps): frames 0 and 14.4, so end_frame
+        rounds DOWN to 14 (#636's int(round(...))). Re-authoring `a` with
+        new keys at 0.0 and 1.0 used to cut only (start_frame, end_frame)
+        == (0, 14) - the old key at 14.4, holding the FIRST version's
+        value (50), sat outside that window and survived, so the
+        re-authored curve read the OLD version's pose between frames 14
+        and 15 instead of a clean ramp. The fix widens the cut by
+        GAP_FRAMES, which costs nothing: no take's range ever includes
+        that frame."""
+        _author(fake, name="a", fps=24, keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 0.6, "rotations": {"mid": [0, 0, 50]}}])
+        out = _author(fake, name="a", fps=24, keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [0, 0, 10]}}])
+        assert out["replaced"] == "a"
+        start, end = out["start_frame"], out["end_frame"]
+        assert (start, end) == (0, 24)   # only clip on the rig: re-appends at 0
+        # the stray key at 14.4 (the OLD version's) must be gone - nothing
+        # left on the curve but the two newly-authored keys
+        assert sorted(fake.keys["|root|mid.rotateZ"]) == [0.0, 24.0]
+        for frame in (7.0, 14.0, 14.4, 15.0, 24.0):
+            assert fake.evaluate("|root|mid.rotateZ", frame) == \
+                pytest.approx(10.0 * frame / 24.0)
 
     def test_round_down_sparse_channel_is_held_not_rest(self, fake):
         """Same root cause, sparse variant: `mid` is keyed ONLY at the

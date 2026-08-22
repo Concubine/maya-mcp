@@ -463,9 +463,9 @@ def main():
     check("idle: the file carries a take named after the clip",
           idle_take is not None,
           json.dumps([t["name"] for t in anim["takes"]] if anim else None))
-    check("idle: take duration matches within a frame",
+    check("idle: take duration matches within half a frame",
           idle_take is not None
-          and abs(idle_take["duration_s"] - 2.0) <= 1.0 / 30,
+          and abs(idle_take["duration_s"] - 2.0) <= 0.5 / 30,
           "duration_s=%s" % (idle_take or {}).get("duration_s"))
     by = by_target(anim, "idle")
     idle_joints = ("spine_01", "chest", "L_shoulder", "R_shoulder")
@@ -594,7 +594,7 @@ def main():
     check("walk export: idle's take is STILL present by name (append, "
           "not replace)",
           idle_take_still_here is not None
-          and abs(idle_take_still_here["duration_s"] - 2.0) <= 1.0 / 30,
+          and abs(idle_take_still_here["duration_s"] - 2.0) <= 0.5 / 30,
           "takes=%s duration_s=%s"
           % ([t["name"] for t in anim_w["takes"]],
              (idle_take_still_here or {}).get("duration_s")))
@@ -602,9 +602,9 @@ def main():
           walk_take is not None
           and by_w.get(("L_hip", "Lcl Rotation"), {}).get("key_count") == 37,
           json.dumps([t["name"] for t in anim_w["takes"]]))
-    check("walk: the 'walk' take's duration matches within a frame",
+    check("walk: the 'walk' take's duration matches within half a frame",
           walk_take is not None
-          and abs(walk_take["duration_s"] - 1.2) <= 1.0 / WALK_FPS,
+          and abs(walk_take["duration_s"] - 1.2) <= 0.5 / WALK_FPS,
           "duration_s=%s" % (walk_take or {}).get("duration_s"))
     check("walk: root translation curves present at 37 keys",
           by_w.get(("pelvis", "Lcl Translation"), {}).get("key_count") == 37,

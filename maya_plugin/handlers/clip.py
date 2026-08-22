@@ -442,8 +442,20 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     replaced, kept = clipmath.drop_record(records, name)
     if replaced is not None:
         for plug in sorted(set(_joint_plugs(joints) + weight_plugs)):
+            # #718 final review Fix 2: widened past `end_frame` by
+            # GAP_FRAMES. `end_frame` is `int(round(measured_end))`
+            # (#636), which rounds DOWN whenever the last key's fractional
+            # part is below 0.5 - a key at end_frame+0.4 (e.g.
+            # measured_end=14.4, end_frame=14) then sits outside
+            # (start_frame, end_frame) and survives this cut, holding the
+            # REPLACED version's value and polluting the re-authored take
+            # between end_frame and that stray key. Widening is free: no
+            # take's range ever includes the unowned gap frame
+            # (clipmath.GAP_FRAMES), so nothing legitimate lives there
+            # either.
             cmds.cutKey(plug, time=(replaced["start_frame"],
-                                    replaced["end_frame"]), clear=True)
+                                    replaced["end_frame"]
+                                    + clipmath.GAP_FRAMES), clear=True)
 
     start_frame = clipmath.next_start_frame(kept)
 
@@ -521,6 +533,41 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     # the previous clip's last key, and BACKWARDS from a later clip's
     # first key. Both are pinned here, and both are reported.
     theirs = clipmath.channel_union(kept)
+    # #718 final review Fix 3: `mine`'s setdefault (above) only covers
+    # weight channels THIS clip declares. A weight channel declared solely
+    # by an earlier (possibly pre-#718 legacy) clip needs the same
+    # by-rule 0.0 - without it, a legacy clip's weight channel falls
+    # through to `_rest_value`'s curve-inference fallback and gets pinned
+    # at whatever that legacy clip happened to key FIRST (e.g. a blink
+    # held open at 1.0), which is a visibly wrong pose in the exported
+    # take. Weights-all-zero IS the reset (phase 5), for a legacy channel
+    # exactly as much as for one this clip itself introduces.
+    for alias in theirs["weight_channels"]:
+        node = alias_map.get(alias)
+        if node is not None and not isinstance(node, HandlerError):
+            rest.setdefault(_rest_key("%s.%s" % (node, alias)), 0.0)
+    # #718 final review Fix 1: pad over `theirs` UNION `mine`, not
+    # `theirs` alone, whenever an earlier clip exists on this rig. The
+    # excuse the wave-1 comment gave for skipping `mine \ theirs` - "a
+    # channel only this clip touches has no other clip's keys on its
+    # curve to bleed in" - is FALSE: the BACK-FILL pass below writes rest
+    # keys onto exactly that curve, at every earlier clip's own boundary
+    # frames, and the nearest of those can sit as little as GAP_FRAMES+1
+    # frames before this clip's start. So a channel this clip introduces
+    # still needs its own boundary pins - not because a neighbour
+    # declares it, but because THIS call's own back-fill puts foreign
+    # keys on that curve outside this clip's range. Gated on `kept` being
+    # non-empty: a rig's first clip has no earlier clip to back-fill
+    # against, so its own channels are left exactly as authored - no new
+    # keys, no auto-tangent perturbation.
+    pad_joints = theirs["joints"]
+    pad_weight_channels = theirs["weight_channels"]
+    pad_root_position = theirs["root_position_used"]
+    if kept:
+        pad_joints = sorted(set(pad_joints) | set(mine["joints"]))
+        pad_weight_channels = sorted(
+            set(pad_weight_channels) | set(mine["weight_channels"]))
+        pad_root_position = pad_root_position or mine["root_position_used"]
     padded_channels: List[str] = []
     held_channels: List[str] = []
     back_filled_channels: List[str] = []
@@ -588,11 +635,14 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     # key) while never keying it at its OWN first/last frame - `mine`
     # alone can't tell whether the boundary is actually covered, so
     # skipping a channel just because it's in `mine` let a neighbour's
-    # pose bleed across the boundary the clip never keyed. Iterating
-    # `theirs` (not `theirs u mine`) is still right: a channel only THIS
-    # clip touches has no other clip's keys on its curve to bleed in, and
-    # padding it would change a single-clip rig's authored motion.
-    for short in theirs["joints"]:
+    # pose bleed across the boundary the clip never keyed.
+    #
+    # The set iterated is `pad_joints`/`pad_weight_channels`/
+    # `pad_root_position` (computed above, final review Fix 1) - `theirs`
+    # union `mine` when an earlier clip exists, `theirs` alone otherwise -
+    # not `theirs` by itself: see that block for why a channel this clip
+    # alone introduces still needs its own pins.
+    for short in pad_joints:
         plugs, warning = _pin_plugs(short)
         if not plugs:
             warnings.append(warning)
@@ -602,7 +652,7 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
             held_channels.append(short)
         elif "rest" in kinds:
             padded_channels.append(short)
-    for alias in theirs["weight_channels"]:
+    for alias in pad_weight_channels:
         node = alias_map.get(alias)
         if node is None or isinstance(node, HandlerError):
             warnings.append(
@@ -615,7 +665,7 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
             held_channels.append(alias)
         elif kind == "rest":
             padded_channels.append(alias)
-    if theirs["root_position_used"]:
+    if pad_root_position:
         kinds = {kind for kind in (_pad_boundaries(p)
                                    for p in root_translate_plugs) if kind}
         if "held" in kinds:
@@ -806,8 +856,16 @@ def delete_clip(params: Dict[str, Any]) -> Dict[str, Any]:
         # gap costs nothing, and re-packing would move keys the caller did
         # not touch.
         for plug in sorted(driven):
+            # #718 final review Fix 2 (consistency, not a defect here): the
+            # same widening as author_clip's re-author cut. A fractional
+            # straggler past `end_frame` already lands in unowned gap
+            # space after a delete - no clip claims it either way - so
+            # this is hygiene: keeping delete_clip's cut shape identical
+            # to author_clip's rather than leaving a stray orphaned key
+            # nobody can see.
             cmds.cutKey(plug, time=(doomed_record["start_frame"],
-                                    doomed_record["end_frame"]), clear=True)
+                                    doomed_record["end_frame"]
+                                    + clipmath.GAP_FRAMES), clear=True)
         remaining = _anim_curves(cmds, _joint_plugs(joints) + weight_plugs)
         deleted_curves = len({c for curves in driven.values() for c in curves}
                              - {c for curves in remaining.values()

@@ -6,17 +6,24 @@ per-frame centroid series. Its discrimination depends on an absolute quantity
 makes it the actual proof that a missing backward-pin guard would be caught.
 This test covers the two discrimination paths: a known constant offset and
 the identical-series case.
+
+#718 final review Fix 4: imports the REAL function from evals/multi_take_live.py
+rather than keeping a private copy - a copy can never fail for a regression in
+the function it is supposed to be proving, which defeats the whole point of
+this file. Follows tests/test_multi_take_unity.py's sys.path convention for
+reaching into evals/.
 """
+
+import os
+import sys
 
 import pytest
 
+_EVALS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "evals")
+if _EVALS not in sys.path:
+    sys.path.insert(0, _EVALS)
 
-def worst_centroid_delta(before, after):
-    """Pure function from multi_take_live.py - compute max per-axis centroid
-    delta across two series.
-    """
-    return max(abs(a["centroid"][i] - b["centroid"][i])
-              for a, b in zip(before, after) for i in range(3))
+from multi_take_live import worst_centroid_delta          # noqa: E402
 
 
 class TestWorstCentroidDelta:
