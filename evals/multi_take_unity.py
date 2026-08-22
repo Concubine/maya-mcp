@@ -34,7 +34,7 @@ Usage:
 Exit: 0 pass, 1 fail.
 
 THE SCRATCH PROJECT ALREADY EXISTS on this machine, at
-`D:\devel\unity-mt718-scratch` (Unity 6000.0.47f1, with
+`D:/devel/unity-mt718-scratch` (Unity 6000.0.47f1, with
 `com.coplaydev.unity-mcp` pulled from the same git URL Demigol's manifest
 uses). Open it and its MCP bridge connects; there is no need to build a new
 one. Creating it from scratch is `Unity.exe -createProject <path> -batchmode
