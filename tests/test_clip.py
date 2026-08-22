@@ -678,6 +678,65 @@ class TestSelfContainedTakes:
         assert set(out["padded_channels"]) == {"root_position"}
         assert not (set(out["held_channels"]) & set(out["padded_channels"]))
 
+    # -- #718 review wave 3: end_frame = int(round(measured_end)) rounds
+    # DOWN whenever the last key's fractional part is below 0.5, so a key
+    # exactly on the clip's own final frame can sit outside the OLD
+    # [start_frame, end_frame] window `own` was filtered by. Both tests
+    # below key at 24 fps, time_s=0.6 -> frame 14.4 relative to the
+    # clip's start - exactly the repro from the review.
+
+    def test_round_down_held_value_is_not_flattened(self, fake):
+        """`walk` keys `mid` at time_s 0.0 and 0.6 (24 fps): frames 0 and
+        14.4 relative to its own start. end_frame rounds down to 14, short
+        of the authored key at 14.4. The old `own` filter excluded 14.4,
+        so the pin at end_frame fell back to `own[-1]` == the clip's
+        FIRST value (0), flattening the whole take between the two keys -
+        the curve read flat at 0 across 0..14 and only ramped up to 50 in
+        the sliver between 14 and 14.4, outside the baked integer-frame
+        take. `idle` runs first so `mid` is in `theirs` and padding
+        actually runs for it (a lone first clip is never padded)."""
+        _author(fake, name="idle", fps=24, keys=self._idle())
+        out = _author(fake, name="walk", fps=24, keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 0.6, "rotations": {"mid": [0, 0, 50]}}])
+        start, end = out["start_frame"], out["end_frame"]
+        assert end == start + 14          # the rounds-down frame under test
+        # the pinned end_frame must carry walk's own FINAL authored value,
+        # not its first
+        assert fake.evaluate("|root|mid.rotateZ", float(end)) == \
+            pytest.approx(50.0)
+        # and the take must not be flat: a middle frame sits strictly
+        # between the first and last authored values, not pinned at the
+        # first
+        mid_val = fake.evaluate("|root|mid.rotateZ", float(start + 7))
+        assert 0.0 < mid_val < 50.0
+        assert "mid" in out["held_channels"]
+        assert "mid" not in out["padded_channels"]
+
+    def test_round_down_sparse_channel_is_held_not_rest(self, fake):
+        """Same root cause, sparse variant: `mid` is keyed ONLY at the
+        fractional time_s=0.6 (frame 14.4 relative), never at either of
+        walk's own boundary frames. Under the old bound, that single key
+        sits outside [start_frame, end_frame] entirely, so `own` came
+        back empty and `_pad_boundaries` took the rest path - classifying
+        a channel this clip genuinely animates as unanimated, and its
+        authored value (35) never appears inside the baked take at all.
+        `tip` is keyed at both ends so start/end_frame land where the
+        repro needs them; it is incidental to what's under test here."""
+        _author(fake, name="idle", fps=24, keys=self._idle())
+        out = _author(fake, name="walk", fps=24, keys=[
+            {"time_s": 0.0, "rotations": {"tip": [0, 0, 0]}},
+            {"time_s": 0.6, "rotations": {"mid": [0, 0, 35],
+                                          "tip": [0, 0, 20]}}])
+        start, end = out["start_frame"], out["end_frame"]
+        assert end == start + 14          # the rounds-down frame under test
+        assert "mid" in out["held_channels"]
+        assert "mid" not in out["padded_channels"]
+        assert fake.keys["|root|mid.rotateZ"][float(start)] == \
+            pytest.approx(35.0)
+        assert fake.keys["|root|mid.rotateZ"][float(end)] == \
+            pytest.approx(35.0)
+
     def test_reauthor_preserves_a_later_clips_evaluated_pose_and_vacates_cleanly(
             self, fake):
         _author(fake, name="idle", keys=self._idle())

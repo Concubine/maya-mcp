@@ -551,6 +551,19 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     # end pins at the value it held at its OWN latest key (max(own)) -
     # exactly what a lone clip's curve would already hold there, read the
     # same way `_rest_value` reads any evaluated value: `getAttr(time=t)`.
+    # #718 review wave 3 Fix: `own`'s upper bound is `measured_end` (the
+    # UNROUNDED keyed maximum), not `end_frame`. `end_frame` is
+    # int(round(measured_end)), which rounds DOWN whenever the last key's
+    # fractional part is below 0.5 - a key at frame 14.4 with end_frame 14
+    # would sit outside [start_frame, end_frame] and get filtered out of
+    # `own` entirely. That silently swaps this clip's OWN final value for
+    # whichever earlier value happened to survive the filter (its first
+    # key, if the channel has no other keys in range), flattening the
+    # authored motion; or, if the fractional key was the plug's ONLY key
+    # in range, empties `own` altogether and misclassifies a channel this
+    # clip genuinely animates as "rest". `measured_end` is already this
+    # clip's true keyed span (computed above, per #636) - reuse it rather
+    # than re-deriving the same quantity.
     def _pad_boundaries(plug: str) -> str:
         """Pin `plug`'s missing boundary frame(s) of THIS clip's own
         [start_frame, end_frame]. Returns "held", "rest", or "" (nothing
@@ -560,7 +573,8 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
                   if float(f) not in times]
         if not missing:
             return ""
-        own = sorted(t for t in times if start_frame <= t <= end_frame)
+        own = sorted(t for t in times
+                     if start_frame <= t <= max(end_frame, measured_end))
         if not own:
             _pin(plug, missing, _rest_value(cmds, plug, rest, warnings))
             return "rest"
