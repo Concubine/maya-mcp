@@ -734,6 +734,34 @@ class ClipKeyMeasure(BaseModel):
         "the scene's time was driven there and the vertices re-read."))
 
 
+class ClipRecord(BaseModel):
+    """One clip on a rig: a named frame range on the shared timeline."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    fps: int
+    start_frame: int
+    end_frame: int
+    duration_s: float
+    loop: bool = False
+    interpolation: str = "linear"
+    joints: List[str] = Field(default_factory=list)
+    weight_channels: List[str] = Field(default_factory=list)
+    root_position_used: bool = False
+
+
+class BackFillReport(BaseModel):
+    """Channels this clip introduced, pinned at rest across the clips that
+    predate them - so those clips measure exactly what they measured when
+    they were authored."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    clips: List[str] = Field(default_factory=list)
+    channels: List[str] = Field(default_factory=list)
+
+
 class AuthorClipResult(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -748,9 +776,32 @@ class AuthorClipResult(BaseModel):
     root_position_keyed: bool
     interpolation: str
     loop: bool
+    start_frame: int = Field(description=(
+        "First frame of the range this clip took. Derived and REPORTED - "
+        "the caller never computes frames."))
+    end_frame: int = Field(description=(
+        "Last frame of the range, MEASURED back from the curves."))
+    clips: List[str] = Field(default_factory=list, description=(
+        "Every clip on this rig now, in timeline order. All of them export "
+        "as named takes into one FBX."))
+    padded_channels: List[str] = Field(default_factory=list, description=(
+        "Channels other clips touch that this one does not - keyed at rest "
+        "at this clip's own boundary frames so the take is self-contained."))
+    held_channels: List[str] = Field(default_factory=list, description=(
+        "Channels other clips touch AND this one does too, but not at its "
+        "own boundary frame(s) - keyed at THIS clip's own held value there "
+        "(what its own range would already hold), never at rest. Rest would "
+        "invent motion this clip never authored; padded_channels is the "
+        "sibling case where rest is the honest pin because this clip never "
+        "keys the channel at all."))
+    back_filled: BackFillReport = Field(default_factory=BackFillReport,
+                                        description=(
+        "Channels this clip introduced, pinned at rest across earlier "
+        "clips. Never a change to their motion - a restoration of it."))
     replaced: Optional[str] = Field(
         default=None, description=(
-            "The clip this call replaced - ONE clip exists at a time."))
+            "The clip this call re-authored (same name), re-appended at "
+            "the tail. None for a new name."))
     per_key: List[ClipKeyMeasure]
     warnings: List[str] = Field(default_factory=list)
 
@@ -760,6 +811,8 @@ class DeleteClipResult(BaseModel):
 
     root: str
     clip: Optional[str] = None
+    clips: List[str] = Field(default_factory=list, description=(
+        "The clips left on the rig, in timeline order."))
     deleted_curves: int
     max_displacement: float
     warnings: List[str] = Field(default_factory=list)
@@ -770,6 +823,10 @@ class TakeRecord(BaseModel):
 
     name: str
     duration_s: Optional[float] = None
+    start_s: Optional[float] = Field(default=None, description=(
+        "Where the take starts on the file's timeline, from its LocalTime "
+        "ticks. Several takes share one timeline (#718)."))
+    stop_s: Optional[float] = None
 
 
 class AnimCurveTarget(BaseModel):
@@ -783,6 +840,20 @@ class AnimCurveTarget(BaseModel):
     duration_s: Optional[float] = None
 
 
+class AnimClipFacts(BaseModel):
+    """One declared clip as the FILE holds it - the frame range read back
+    from its take, not echoed from the scene."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    start_frame: Optional[int] = None
+    end_frame: Optional[int] = None
+    duration_s: Optional[float] = None
+    curves: int = Field(description=(
+        "Curve records driving the channels this clip declared."))
+
+
 class AnimFacts(BaseModel):
     """Animation records read back OUT OF THE FILE, never from the scene."""
 
@@ -794,6 +865,10 @@ class AnimFacts(BaseModel):
     curve_nodes: int
     takes: List[TakeRecord]
     targets: List[AnimCurveTarget]
+    clips: List[AnimClipFacts] = Field(default_factory=list, description=(
+        "Per declared clip, what the file carries for it. One rig may hold "
+        "several clips and they all export as named takes into this one "
+        "file (#718)."))
     unavailable_reason: Optional[str] = None
 
 

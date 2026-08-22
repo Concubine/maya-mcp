@@ -1859,7 +1859,11 @@ class TestClipTools:
                 "duration_s": 1.2, "frames": 37, "keyed_joints": 8,
                 "keyed_weight_channels": ["blink"],
                 "root_position_keyed": True, "interpolation": "smooth",
-                "loop": True, "replaced": "idle",
+                "loop": True, "start_frame": 39, "end_frame": 75,
+                "clips": ["idle", "walk"], "padded_channels": [],
+                "held_channels": [],
+                "back_filled": {"clips": [], "channels": []},
+                "replaced": "idle",
                 "per_key": [{"time_s": 0.0, "max_displacement": 0.0},
                             {"time_s": 1.2, "max_displacement": 0.31}],
                 "warnings": []}
@@ -1886,12 +1890,25 @@ class TestClipTools:
 
     def test_delete_marshals(self):
         conn = FakeConn(responses={"delete_clip": {
-            "root": "|pelvis", "clip": "walk", "deleted_curves": 27,
+            "root": "|pelvis", "clip": "walk", "clips": [],
+            "deleted_curves": 27,
             "max_displacement": 0.31, "warnings": []}})
         mcp = server_mod.create_server(conn)
         result = run(mcp.call_tool("maya_delete_clip", {"root": "|pelvis"}))
         assert conn.calls[0]["cmd"] == "delete_clip"
+        assert conn.calls[0]["params"]["name"] is None
         assert result.structured_content["deleted_curves"] == 27
+
+    def test_delete_marshals_a_name(self):
+        conn = FakeConn(responses={"delete_clip": {
+            "root": "|pelvis", "clip": "idle", "clips": ["walk"],
+            "deleted_curves": 0,
+            "max_displacement": 0.0, "warnings": []}})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_delete_clip", {
+            "root": "|pelvis", "name": "idle"}))
+        assert conn.calls[0]["params"]["name"] == "idle"
+        assert result.structured_content["clips"] == ["walk"]
 
     def test_preview_composites_one_sheet(self):
         png = png_b64(32, 32)
@@ -1963,7 +1980,11 @@ class TestAuthorClipTimeoutIsReachable:
             "root": "|pelvis", "clip": "idle", "fps": 30,
             "duration_s": 1.0, "frames": 31, "keyed_joints": 3,
             "keyed_weight_channels": [], "root_position_keyed": False,
-            "interpolation": "linear", "loop": False, "replaced": None,
+            "interpolation": "linear", "loop": False,
+            "start_frame": 0, "end_frame": 30, "clips": ["idle"],
+            "padded_channels": [], "held_channels": [],
+            "back_filled": {"clips": [], "channels": []},
+            "replaced": None,
             "per_key": [{"time_s": 0.0, "max_displacement": 0.0},
                         {"time_s": 1.0, "max_displacement": 0.12}],
             "warnings": []}})
@@ -2004,3 +2025,38 @@ class TestAuthorClipTimeoutIsReachable:
                 "root": "|pelvis", "name": "idle", "keys": self._keys(),
                 "timeout_s": server_mod.MAX_RENDER_TIMEOUT_S + 1.0}))
         assert conn.calls == []
+
+
+class TestMultiTakeSurface:
+    """#718: one rig carries N clips, and the surface has to say so."""
+
+    def test_delete_clip_takes_an_optional_name(self):
+        mcp = server_mod.create_server(FakeConn())
+        tools = {t.name: t for t in run(mcp.list_tools())}
+        schema = tools["maya_delete_clip"].input_schema
+        assert "name" in schema["properties"]
+        assert "name" not in schema.get("required", [])
+        assert "every clip" in schema["properties"]["name"]["description"]
+
+    def test_author_clip_says_clips_no_longer_replace_each_other(self):
+        mcp = server_mod.create_server(FakeConn())
+        tools = {t.name: t for t in run(mcp.list_tools())}
+        desc = tools["maya_author_clip"].description
+        assert "APPENDED" in desc or "appended" in desc
+        assert "ONE file" in desc or "one file" in desc
+
+    def test_author_clip_result_reports_the_range_it_took(self):
+        from maya_mcp.schemas import AuthorClipResult
+
+        fields = AuthorClipResult.model_fields
+        for name in ("start_frame", "end_frame", "clips", "padded_channels",
+                     "back_filled"):
+            assert name in fields, sorted(fields)
+
+    def test_take_records_carry_their_place_on_the_timeline(self):
+        from maya_mcp.schemas import AnimFacts, DeleteClipResult, TakeRecord
+
+        assert "start_s" in TakeRecord.model_fields
+        assert "stop_s" in TakeRecord.model_fields
+        assert "clips" in AnimFacts.model_fields
+        assert "clips" in DeleteClipResult.model_fields

@@ -494,28 +494,80 @@ there is no parameter). The byte gate refuses an export whose scene
 declares a target the file does not carry, and the result's `shapes` block
 reports each channel's name and delta payload as read from the bytes.
 
-## Commands (rigging phase 6 / clips / #695)
+## Commands (rigging phase 6 / clips / #695, multi-take #718)
 
 | cmd | params | result |
 |---|---|---|
-| `author_clip` | `{ root, name, fps=30, keys: [{time_s, rotations?, blend_weights?, root_position?}], interpolation, loop, timeout_s=120 }` | `{ root, clip, fps, duration_s, frames, keyed_joints, keyed_weight_channels, root_position_keyed, interpolation, loop, replaced, per_key, warnings }` |
-| `preview_clip` | `{ root, name, angle?, every_nth?, resolution?, renderer?, zoom? }` | `{ clip, fps, frames, images, ... }` |
-| `delete_clip` | `{ root }` | `{ root, clip, deleted_curves, max_displacement, warnings }` |
+| `author_clip` | `{ root, name, fps=30, keys: [{time_s, rotations?, blend_weights?, root_position?}], interpolation, loop, timeout_s=120 }` | `{ root, clip, fps, duration_s, frames, keyed_joints, keyed_weight_channels, root_position_keyed, interpolation, loop, start_frame, end_frame, clips, padded_channels, held_channels, back_filled, replaced, per_key, warnings }` |
+| `preview_clip` | `{ root, name, angle?, every_nth?, resolution?, renderer?, zoom? }` | `{ clip, fps, start_frame, end_frame, frames, images, ... }` |
+| `delete_clip` | `{ root, name? }` | `{ root, clip, clips, deleted_curves, max_displacement, warnings }` |
 
-`author_clip` keys the phase-1 pose map over time. **One clip exists per
-skeleton at a time**: authoring under a new name replaces the previous clip
-(warning naming it); there is no clip library and no persistent solver
-state beyond the curves themselves plus one metadata attr on the root. Keys
-may also carry blendshape weights (resolved across the meshes bound to the
-skeleton) and a world `root_position` for the root joint — the pelvis bob a
-walk needs. `loop=true` refuses a clip whose last key does not close onto
-its first, with the measured per-channel difference. Every key's
+`author_clip` keys the phase-1 pose map over time. **One rig carries as many
+named clips as the asset needs, laid end to end on ONE shared timeline** —
+not a clip library with independent timelines, one timeline that every
+clip on the rig occupies a range of. A new clip is always **APPENDED**
+after the last one already on the rig: its `start_frame` is derived, never
+passed, and `end_frame` is MEASURED back from the curves once keying is
+done — the caller never computes frames, it reads them off the result.
+Between two clips sits **exactly one unowned gap frame** (`GAP_FRAMES = 1`
+in `clipmath.py`): if a clip ends at frame `E`, the next one starts at
+`E + 2`, and frame `E + 1` belongs to neither — it is where the
+interpolation from one clip's last pose to the next clip's first pose would
+otherwise live, and leaving it unclaimed keeps every take's range an exact,
+non-overlapping frame count. Re-authoring an existing name does not edit it
+in place: its old range is cut and it is **re-appended at the tail**, so it
+moves in take order but no OTHER clip's motion changes — `replaced` names
+it when this happened, and is `None` for a genuinely new name. **One fps
+per rig**: every clip shares the fps of the ones already on the rig,
+because a take is a frame range on one timeline and one file cannot carry
+two frame rates; a clip authored at a different fps is refused, naming the
+existing rate.
+
+Keys may also carry blendshape weights (resolved across the meshes bound to
+the skeleton) and a world `root_position` for the root joint — the pelvis
+bob a walk needs. `loop=true` refuses a clip whose last key does not close
+onto its first, with the measured per-channel difference. Every key's
 displacement is MEASURED by driving the scene time to that frame;
-`duration_s` is re-read from the curves. `timeout_s` (default 120, ceiling
-`MAX_TIMEOUT_S`) exists because the tool's own timeout advice was
+`duration_s` is re-read from the authored curves. `timeout_s` (default 120,
+ceiling `MAX_TIMEOUT_S`) exists because the tool's own timeout advice was
 unfollowable (#721): a long clip on a heavy scene outlives the default, and
 an open Arnold RenderView (IPR) re-renders on every scene mutation, which
 can stall keyframing for minutes.
+
+**The self-contained rule, and its two kinds of pin.** All clips on a rig
+share one curve per channel, so a channel a clip never mentions would
+silently hold whatever a neighbour left there — the previous clip's last
+pose forward, or a later clip's first pose backward. `author_clip` closes
+both directions:
+
+* **`padded_channels`** — channels some OTHER clip on the rig touches that
+  THIS clip does not key anywhere in its own range. Pinned at their REST
+  value (the value recorded the moment the channel first became
+  curve-driven, or inferred with a warning for a scene that predates this
+  attribute) at this clip's own boundary frames, so the take cannot inherit
+  a neighbour's pose — a caller reading only this clip's take sees the rig
+  sitting at rest outside the motion it actually authors.
+* **`held_channels`** — channels this clip DOES animate, but did not key
+  exactly at one of its own boundary frames (a sparse declaration, or a
+  fractional-time key that rounds short of the boundary). These are pinned
+  at the clip's OWN held value there — what its own range would already
+  evaluate to at that frame — never at rest. Pinning rest here would
+  invent motion the clip never authored: it would rewrite an authored final
+  pose into a rest pose one frame later. `held_channels` is the honest
+  sibling of `padded_channels`: same self-contained goal, opposite pin
+  value, because one case has real motion to preserve and the other does
+  not.
+
+Both directions are also closed **backwards**: a curve holds its first
+key's value backward in time, so a channel a NEW clip introduces (one no
+earlier clip on the rig ever declared) would rewrite every earlier clip's
+pose the moment it gets keys of its own. `back_filled` reports this case —
+`{ clips, channels }`, the earlier clips and the channels pinned across
+them — pinned at rest across their ranges, which RESTORES what each of
+them measured when it was originally authored rather than changing it.
+There is no "own held value" to prefer here, because this clip has no keys
+of its own inside an earlier clip's range (clips are always appended at the
+tail, by construction).
 
 **Displacement is measured against whatever the skeleton MOVES — by
 deformation OR by rigid parenting.** A mesh transform parented under a joint
@@ -524,33 +576,93 @@ it used to report `max_displacement: 0` and `preview_clip` refused it
 outright (#720). `preview_clip` now refuses only a skeleton that moves no
 mesh by EITHER mechanism, and the refusal names both.
 
-**While a clip exists, static pose mutators refuse** (`pose_skeleton`,
+**While any clip exists, static pose mutators refuse** (`pose_skeleton`,
 `pose_ik`, `reset_pose`, `set_blendshape_weights`): curves own the
 channels, and a static write would be silently overridden on the next frame
-change. `delete_clip` removes the curves, zeroes keyed weight channels,
-restores the bind pose, and reports the measured displacement.
+change. `delete_clip` takes an optional `name`, and what happens turns on
+whether the rig has any clip LEFT afterward, not on whether `name` was
+passed:
 
-`preview_clip` renders every-nth frame through the render pipeline into one
-contact sheet (camera placed at frame 0 and held); `zoom` (default 1.0,
-mirrors `render_scene`'s) closes the framing in — the gate measured the
-default 320px cell unjudgeable and needed zoom 1.5-1.6 to read a blink.
-Export: pass
-`include_animation=true` to `export_fbx` — the clip bakes to per-frame
-curves (`FBXExportBakeComplexAnimation`) in one take named after the clip,
-and the byte gate asserts rotation curves per keyed joint at
-`round(duration*fps)+1` keys, root translation curves when root_position
-was used, DeformPercent curves per keyed weight channel, and the take's
-name and duration. With `include_animation=false` (the default) the gate
-asserts the file carries ZERO curve records even when the scene is
-animated. The result gains `animation`.
+* **clips remain** — this is the normal named-partial-delete: cuts just
+  that clip's range, leaving every other clip on the rig untouched. `clips`
+  in the result reports what is left, in timeline order. **Gaps are not
+  re-packed**: a take is an explicit frame range, so a hole where a middle
+  clip used to be costs nothing and stays a hole — re-packing would move
+  keys the caller never touched. `clip` in the result names the one that
+  was removed.
+* **none remain** — whether `name` was omitted (delete everything) or it
+  named the LAST clip still on the rig, the effect is the same full
+  teardown as before #718: every curve deleted, every keyed weight channel
+  zeroed, the bind pose restored. `clips` in the result is then always
+  `[]`.
 
-**MEASURED (not in the plan): the file also carries a second take.**
-`FBXExportSplitAnimationIntoTakes` writes the named take *alongside* the
+Both report the measured displacement of the return.
+
+**`deleted_curves` on a NAMED, partial delete is structurally 0 while two or
+more clips remain on the rig — this is a measurement, not a bug.** The
+self-contained rule (above) keys every channel the rig uses at every clip's
+own boundary frames, so cutting one clip's frame range essentially never
+empties a curve outright: the curve still carries keys from the clips that
+remain, including the pins the deleted clip's neighbours hold at their own
+boundaries. `deleted_curves` counts curves that disappear ENTIRELY, and with
+other clips still declaring those same channels, that count is honestly
+zero. A future reader seeing 0 next to "deleted" should not "fix" this —
+the curves that emptied out are exactly the ones a full (unnamed) delete
+reports.
+
+The rig's `playbackOptions` range is always set to the **full span** —
+frame 0 through the latest `end_frame` across every clip on the rig, not
+just the one most recently authored or deleted — so opening the scene and
+scrubbing shows every clip, and `delete_clip` re-derives it after cutting a
+range too.
+
+`preview_clip` now takes the clip **by name** — a rig carries several, and
+there is no more "the live clip" to default to; an unknown name is refused
+with the names present. It renders every-nth frame through the render
+pipeline into one contact sheet (camera placed at frame 0 of the NAMED
+clip and held); `zoom` (default 1.0, mirrors `render_scene`'s) closes the
+framing in — the gate measured the default 320px cell unjudgeable and
+needed zoom 1.5-1.6 to read a blink. The result's `frames` list is a trap
+for the unwary: `frame` is **absolute** (the rig's own timeline position,
+`start_frame` plus the offset), but `time_s` is **clip-relative** (seconds
+from the clip's own start, matching what `author_clip`'s `keys[].time_s`
+meant when it was authored) — the same pair of units the rest of this
+section uses throughout, never mixed within one field.
+
+Export: pass `include_animation=true` to `export_fbx` — **every clip on the
+rig** bakes to per-frame curves over the whole rig's span
+(`FBXExportBakeComplexAnimation`, from frame `0` to `span_frames`, the
+highest `end_frame` among the rig's clips), and one
+`FBXExportSplitAnimationIntoTakes` call per clip carves that single baked
+range into that many named takes. The byte gate asserts, per declared clip:
+rotation curves per keyed joint at `span_frames + 1` keys (the WHOLE span's
+key count — one curve per plug spans the whole bake, not any single clip's
+range), root translation curves when `root_position` was used by any clip,
+DeformPercent curves per keyed weight channel, and — looked up **by name**
+among the file's takes — that take's start/stop against the declared
+clip's own `start_frame`/`end_frame` (converted through the rig's fps, half
+a frame of tolerance). With `include_animation=false` (the default) the
+gate asserts the file carries ZERO curve records even when the scene is
+animated. The result gains `animation`, whose `clips` field is a per-clip
+list — `{ name, start_frame, end_frame, duration_s, curves }` — read back
+from the take and curve records the bytes actually carry, not echoed from
+the scene.
+
+**MEASURED: the file always carries one MORE take than clips declared.**
+`FBXExportSplitAnimationIntoTakes` writes each named take *alongside* the
 exporter's own always-present default take (`"Take 001"`), so a correctly
-exported clip legitimately carries **two** takes, not exactly one.
-`anim_violations` looks the declared clip up **by name** among the file's
-takes and ignores the rest — an extra take is not a violation, the same
-rule `shape_violations` applies to undeclared shape channels.
+exported N-clip rig legitimately carries **`N + 1`** takes — two for one
+clip, as before #718, and one more per additional clip. `anim_violations`
+looks each declared clip up **by name** among the file's takes and ignores
+the rest — an extra take is not a violation, the same rule
+`shape_violations` applies to undeclared shape channels.
+
+**Multi-CLIP is supported; multi-RIG refuses.** One skeleton may carry any
+number of clips and they all export into the one file's takes. Two
+DIFFERENT skeletons each carrying clips in the same scene refuse the
+export outright, naming both roots: a take is a frame range over the WHOLE
+file, so a multi-rig file would need a timeline policy of its own that
+does not exist yet. `delete_clip` the rig that is not being exported.
 
 ## Delivery
 

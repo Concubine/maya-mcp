@@ -925,11 +925,12 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "skeleton root in nodes alongside the mesh."
         ))] = False,
         include_animation: Annotated[bool, Field(description=(
-            "Bake the authored clip to per-frame curves and write it as one "
-            "take named after the clip. Refuses when no clip exists. False "
-            "(the default) pins animation export OFF - a static export of "
-            "an animated scene is byte-identical to an unanimated one, "
-            "asserted from the bytes."
+            "Bake every clip on the rig to per-frame curves over one shared "
+            "timeline and write each as its own named take (plus Maya's "
+            "own always-present default take). Refuses when no clip "
+            "exists. False (the default) pins animation export OFF - a "
+            "static export of an animated scene is byte-identical to an "
+            "unanimated one, asserted from the bytes."
         ))] = False,
     ) -> ExportFbxResult:
         """Export FBX and gate the result on the BYTES it just wrote.
@@ -2321,15 +2322,17 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "for minutes (#721). A timeout does not stop the keying."
         ))] = BOOL_TIMEOUT_S,
     ) -> AuthorClipResult:
-        """Key the pose map over time - ONE clip per skeleton, replacing any
-        previous clip with a warning.
+        """Key the pose map over time - one rig carries as many named clips
+        as the asset needs, and they all export as takes into ONE file.
 
-        The currency is exactly pose_skeleton's rotation map, plus optional
-        blendshape weights and a root position per key. While the clip
-        exists, static pose tools refuse (curves own the channels);
-        maya_delete_clip returns the skeleton to static posing. Every key's
-        displacement is MEASURED by evaluating the scene at that frame.
-        Export it with maya_export_fbx include_animation=true."""
+        A new clip is APPENDED after the last one (its range is derived and
+        reported, never passed); re-authoring a name re-appends it at the
+        tail, and no other clip's motion changes. One fps per rig. Every
+        clip keys every channel the rig touches at its own boundary frames,
+        so a take can never inherit a neighbour's pose. While clips exist,
+        static pose tools refuse; maya_delete_clip removes one or all.
+        Every key's displacement is MEASURED by evaluating the scene at
+        that frame. Export with maya_export_fbx include_animation=true."""
         return AuthorClipResult.model_validate(
             maya.request(
                 "author_clip",
@@ -2348,12 +2351,18 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
     )
     def maya_delete_clip(
         root: Annotated[str, Field(description="Skeleton root joint.")],
+        name: Annotated[Optional[str], Field(description=(
+            "Delete just this clip, leaving the rig's other clips "
+            "untouched. Omit to delete every clip and return the skeleton "
+            "to static posing. Gaps left behind are not re-packed - a "
+            "take is an explicit frame range."
+        ))] = None,
     ) -> DeleteClipResult:
-        """Remove the clip's curves, zero its weight channels, restore the
-        bind pose - the skeleton returns to static posing. Reports the
-        measured displacement of the return."""
+        """Remove one clip's curves, or every clip's - the skeleton returns
+        to static posing when the last one goes. Reports the measured
+        displacement of the return and the clips left."""
         return DeleteClipResult.model_validate(
-            maya.request("delete_clip", {"root": root},
+            maya.request("delete_clip", {"root": root, "name": name},
                          timeout_s=BOOL_TIMEOUT_S)
         )
 
@@ -2366,8 +2375,8 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
     def maya_preview_clip(
         root: Annotated[str, Field(description="Skeleton root joint.")],
         name: Annotated[str, Field(description=(
-            "The clip's name - refused if it is not the live clip, so a "
-            "stale assumption is never judged."
+            "Which clip to render - a rig carries several. Refused with "
+            "the names present if it carries no clip by this name."
         ))],
         angle: Annotated[Angle, Field(description=(
             "One angle for every frame. 'side' reads a walk; 'front' reads "
