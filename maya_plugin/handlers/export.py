@@ -362,9 +362,33 @@ def anim_violations(afacts, declared) -> List[str]:
     Otherwise declared is the dict _scene_clips returns: one rig, N clips
     laid end to end on one baked timeline (#718). Every declared clip is
     its own named take, looked up BY NAME among however many takes the
-    file carries - joint/weight-channel curves are asserted once each,
-    over the UNION of every clip's declared channels, because one curve
-    per plug spans the whole bake range rather than being cut per take.
+    file carries.
+
+    MEASURED (#718 Task 10, t718-10-report.md finding #3): this function
+    used to assume one curve record per plug, spanning the whole bake
+    range. That is false for a real multi-take export. A two-clip file
+    carries THREE AnimationCurveNode records per animated plug - one
+    full-span node under Maya's own always-present default take
+    ("Take 001", 63 keys over the whole 0..62 range for two 31-frame
+    clips), plus one per named take carrying that take's OWN range (31
+    keys each). Splitting into takes crops the SAME channel set into every
+    take, so the channel set checked below is still the union of every
+    clip's declarations, but the key count checked is now that TAKE's own
+    span (end_frame - start_frame + 1), never the file's whole span.
+
+    Collapsing the three duplicates first-wins on (target, property), as
+    this function used to (`by.setdefault((target, property), t)`), picks
+    among them by an FBX-internal object UID that is NOT stable across
+    otherwise-identical exports: 8 back-to-back exports of one correct
+    scene in one process measured 6 passes and 2 failures - the shipped
+    gate refused a correct file at random. Attribution
+    (fbxbytes.anim_facts's "take" field, resolved structurally through the
+    AnimationCurveNode -> AnimationLayer -> AnimationStack connection
+    chain, never guessed from tick ranges) removes the ambiguity: every
+    check below looks only at the records attributed to the take under
+    test. Records attributed to "Take 001", or to no take at all, are
+    ignored - not flagged - the same rule that already tolerates extra
+    undeclared takes.
     """
     out: List[str] = []
     if declared is None:
@@ -414,41 +438,59 @@ def anim_violations(afacts, declared) -> List[str]:
                 % (record["name"], take["start_s"], take["stop_s"],
                    record["start_frame"], record["end_frame"],
                    want_start, want_stop))
-    # One curve per plug spans the WHOLE bake range, so the key count is
-    # the span's, not any single clip's, and the channel set is the union
-    # of every clip's declarations - which is exactly what the
-    # self-contained rule keys at every clip boundary.
-    expected = int(declared["span_frames"]) + 1
-    union = clipmath.channel_union(declared["clips"])
-    by = {}
+
+    # Curve records attributed to THIS take only - see the docstring above
+    # for why a collapsed, take-blind lookup is non-deterministic. Records
+    # attributed to "Take 001" or to no take are excluded on purpose: they
+    # duplicate a named take's own channels at the whole-file span, and
+    # letting them satisfy a per-take check would silently readmit the
+    # exact ambiguity attribution exists to remove.
+    by_take_target = {}
     for t in afacts["targets"]:
-        by.setdefault((t["target"], t["property"]), t)
-    for joint in union["joints"]:
-        t = by.get((joint, "Lcl Rotation"))
-        if t is None:
-            out.append("joint %r has no rotation curves in the file" % joint)
+        if t["take"] is None or t["take"] == "Take 001":
             continue
-        if t["curves"] != 3:
-            out.append("joint %r carries %d curve(s), expected 3 (X, Y, Z)"
-                       % (joint, t["curves"]))
-        if t["key_count"] != expected:
-            out.append("joint %r bakes %s keys, expected %d"
-                       % (joint, t["key_count"], expected))
-    if union["root_position_used"]:
-        t = by.get((declared["root"], "Lcl Translation"))
-        if t is None:
-            out.append("a clip keys the root's position but the file "
-                       "carries no root translation curves")
-        elif t["key_count"] != expected:
-            out.append("root translation bakes %s keys, expected %d"
-                       % (t["key_count"], expected))
-    for alias in union["weight_channels"]:
-        t = by.get((alias, "DeformPercent"))
-        if t is None:
-            out.append("weight channel %r has no curves in the file" % alias)
-        elif (t["key_count"] or 0) < 2:
-            out.append("weight channel %r carries %s key(s), expected at "
-                       "least 2" % (alias, t["key_count"]))
+        by_take_target.setdefault((t["take"], t["target"], t["property"]), t)
+    union = clipmath.channel_union(declared["clips"])
+    for record in declared["clips"]:
+        take = by_take.get(record["name"])
+        if take is None:
+            continue   # already reported above
+        expected = int(record["end_frame"]) - int(record["start_frame"]) + 1
+        for joint in union["joints"]:
+            t = by_take_target.get((record["name"], joint, "Lcl Rotation"))
+            if t is None:
+                out.append("joint %r has no rotation curves in take %r"
+                           % (joint, record["name"]))
+                continue
+            if t["curves"] != 3:
+                out.append(
+                    "joint %r carries %d curve(s) in take %r, expected 3 "
+                    "(X, Y, Z)" % (joint, t["curves"], record["name"]))
+            if t["key_count"] != expected:
+                out.append(
+                    "joint %r bakes %s keys in take %r, expected %d"
+                    % (joint, t["key_count"], record["name"], expected))
+        if union["root_position_used"]:
+            t = by_take_target.get(
+                (record["name"], declared["root"], "Lcl Translation"))
+            if t is None:
+                out.append(
+                    "a clip keys the root's position but take %r carries "
+                    "no root translation curves" % record["name"])
+            elif t["key_count"] != expected:
+                out.append(
+                    "root translation bakes %s keys in take %r, expected %d"
+                    % (t["key_count"], record["name"], expected))
+        for alias in union["weight_channels"]:
+            t = by_take_target.get((record["name"], alias, "DeformPercent"))
+            if t is None:
+                out.append("weight channel %r has no curves in take %r"
+                           % (alias, record["name"]))
+            elif (t["key_count"] or 0) < 2:
+                out.append(
+                    "weight channel %r carries %s key(s) in take %r, "
+                    "expected at least 2"
+                    % (alias, t["key_count"], record["name"]))
     return out
 
 
@@ -456,16 +498,21 @@ def anim_clip_facts(afacts, declared) -> List[Dict[str, Any]]:
     """Per declared clip, what the FILE holds for it: the frame range its
     take spans (converted back from the take's own LocalTime, not echoed
     from the scene), its duration, and the curve records driving the
-    channels that clip declared. A clip whose take is absent reports a
-    null range rather than an invented one - anim_violations is what
-    fails the export for it."""
+    channels that clip declared - counted from that clip's OWN take (#718
+    Task 10b: a multi-take file carries a separate curve record per plug
+    PER TAKE, not one collapsed record - see anim_violations's docstring
+    for the measured shape). A clip whose take is absent reports a null
+    range and 0 curves rather than an invented count - anim_violations is
+    what fails the export for it."""
     fps = float(declared["fps"])
     by_take = {}
     for take in afacts["takes"]:
         by_take.setdefault(take["name"], take)
-    by_target = {}
+    by_take_target = {}
     for t in afacts["targets"]:
-        by_target.setdefault((t["target"], t["property"]), t)
+        if t["take"] is None:
+            continue
+        by_take_target.setdefault((t["take"], t["target"], t["property"]), t)
     out = []
     for record in declared["clips"]:
         take = by_take.get(record["name"])
@@ -476,13 +523,15 @@ def anim_clip_facts(afacts, declared) -> List[Dict[str, Any]]:
             duration = take["duration_s"]
         curves = 0
         for joint in record["joints"]:
-            entry = by_target.get((joint, "Lcl Rotation"))
+            entry = by_take_target.get((record["name"], joint, "Lcl Rotation"))
             curves += entry["curves"] if entry else 0
         for alias in record["weight_channels"]:
-            entry = by_target.get((alias, "DeformPercent"))
+            entry = by_take_target.get(
+                (record["name"], alias, "DeformPercent"))
             curves += entry["curves"] if entry else 0
         if record["root_position_used"]:
-            entry = by_target.get((declared["root"], "Lcl Translation"))
+            entry = by_take_target.get(
+                (record["name"], declared["root"], "Lcl Translation"))
             curves += entry["curves"] if entry else 0
         out.append({"name": record["name"], "start_frame": start,
                     "end_frame": end, "duration_s": duration,

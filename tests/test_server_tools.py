@@ -2108,3 +2108,47 @@ class TestMultiTakeSurface:
         assert walk["end_frame"] == 91
         assert walk["duration_s"] == 2.0
         assert walk["curves"] == 8
+
+    def test_target_take_survives_the_round_trip(self):
+        # #718 Task 10b: AnimCurveTarget gained "take" - the name of the
+        # AnimationStack a curve record is attributed to. AnimCurveTarget
+        # declares model_config = ConfigDict(extra="ignore") (same as
+        # AnimFacts above), which is exactly why "take" had to be a
+        # DECLARED field: without it, pydantic would silently strip the
+        # attribution export_fbx's byte gate now depends on before any
+        # caller ever saw it (the same sibling-field trap "clips" hit).
+        # Pushed through the real maya_export_fbx tool end to end, the same
+        # path a real call takes, with one target attributed to a named
+        # take and one carrying no attribution at all.
+        conn = FakeConn(responses={"export_fbx": {
+            "path": "x.fbx", "bytes": 4321, "fbx_version": 7700,
+            "node_count": 5, "mesh_count": 1, "root_nodes": ["|pelvis"],
+            "unit_scale_factor": 100.0, "metres_per_unit": 1.0,
+            "animation": {
+                "stacks": 1, "layers": 1, "curves": 3, "curve_nodes": 2,
+                "takes": [], "clips": [],
+                "targets": [
+                    {"target": "L_hip", "property": "Lcl Rotation",
+                     "curves": 3, "key_count": 31, "duration_s": 1.0,
+                     "take": "idle"},
+                    {"target": "orphan", "property": "Lcl Rotation",
+                     "curves": 3, "key_count": None, "duration_s": None,
+                     "take": None},
+                ],
+            },
+        }})
+        mcp = server_mod.create_server(conn)
+        result = run(
+            mcp.call_tool(
+                "maya_export_fbx",
+                {"path": "x.fbx", "metres_per_unit": 1.0,
+                 "include_animation": True},
+            )
+        )
+        targets = result.structured_content["animation"]["targets"]
+        assert len(targets) == 2
+        attributed, orphan = targets
+        assert attributed["target"] == "L_hip"
+        assert attributed["take"] == "idle"
+        assert orphan["target"] == "orphan"
+        assert orphan["take"] is None

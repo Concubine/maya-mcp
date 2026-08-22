@@ -638,19 +638,39 @@ rig** bakes to per-frame curves over the whole rig's span
 (`FBXExportBakeComplexAnimation`, from frame `0` to `span_frames`, the
 highest `end_frame` among the rig's clips), and one
 `FBXExportSplitAnimationIntoTakes` call per clip carves that single baked
-range into that many named takes. The byte gate asserts, per declared clip:
-rotation curves per keyed joint at `span_frames + 1` keys (the WHOLE span's
-key count — one curve per plug spans the whole bake, not any single clip's
-range), root translation curves when `root_position` was used by any clip,
-DeformPercent curves per keyed weight channel, and — looked up **by name**
-among the file's takes — that take's start/stop against the declared
-clip's own `start_frame`/`end_frame` (converted through the rig's fps, half
-a frame of tolerance). With `include_animation=false` (the default) the
-gate asserts the file carries ZERO curve records even when the scene is
+range into that many named takes.
+
+**MEASURED (#718 Task 10): curve records are segmented PER TAKE, not one
+per plug over the whole file.** A two-clip file carries THREE
+`AnimationCurveNode` records for a plug any clip touches — one full-span
+record under the exporter's own always-present default take ("Take 001",
+keyed over the whole `0..span_frames` range), plus one per named take
+carrying that take's OWN range. A first-wins collapse across the three
+duplicates, keyed only by `(target, property)`, picks among them by an
+FBX-internal object UID that is **not stable across otherwise-identical
+exports**: 8 back-to-back exports of one correct scene measured 6 passes
+and 2 failures — the gate refused a correct file at random. The fix
+(#718 Task 10b) attributes each curve record to the take it belongs to:
+`fbxbytes.anim_facts`'s `targets` entries carry a `take` field — the name
+of the `AnimationStack` whose `AnimationLayer` owns that curve node,
+resolved structurally through the `AnimationCurveNode` ->
+`AnimationLayer` -> `AnimationStack` connection chain (never guessed from
+tick ranges; `None` when the chain is absent). The byte gate now asserts,
+per declared clip, against only THAT clip's own take's records: rotation
+curves per keyed joint at the take's own `end_frame - start_frame + 1`
+keys (not the whole file's span), root translation curves when
+`root_position` was used by any clip, DeformPercent curves per keyed
+weight channel, and — looked up **by name** among the file's takes —
+that take's start/stop against the declared clip's own
+`start_frame`/`end_frame` (converted through the rig's fps, half a frame
+of tolerance). Records attributed to "Take 001", or to no take at all,
+are ignored — not flagged — the same rule that already tolerates extra
+undeclared takes. With `include_animation=false` (the default) the gate
+asserts the file carries ZERO curve records even when the scene is
 animated. The result gains `animation`, whose `clips` field is a per-clip
 list — `{ name, start_frame, end_frame, duration_s, curves }` — read back
-from the take and curve records the bytes actually carry, not echoed from
-the scene.
+from the take and curve records the bytes actually carry for THAT clip's
+own take, not echoed from the scene.
 
 **MEASURED: the file always carries one MORE take than clips declared.**
 `FBXExportSplitAnimationIntoTakes` writes each named take *alongside* the

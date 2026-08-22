@@ -105,17 +105,37 @@ class FbxFacts:
     shape_geoms: dict = field(default_factory=dict)
     blend_channels: dict = field(default_factory=dict)
     blend_deformers: dict = field(default_factory=dict)
-    # Animation (#602 phase 6 / #695). anim_curves: AnimationCurve uid ->
-    # {"key_count", "first_tick", "last_tick"} - counts and endpoints only,
-    # never the arrays (a 61-frame bake x 60+ curves of floats is memory
-    # nothing asks about). anim_nodes: AnimationCurveNode uid -> {"name",
-    # "target" uid, "target_kind" "model"|"channel"|None, "property" (the
-    # OP-connection property string, e.g. "Lcl Rotation"), "curves": [uid]}.
-    # takes come from the Takes section: name + LocalTime endpoint ticks.
+    # Animation (#602 phase 6 / #695 / #718 Task 10b). anim_curves:
+    # AnimationCurve uid -> {"key_count", "first_tick", "last_tick"} - counts
+    # and endpoints only, never the arrays (a 61-frame bake x 60+ curves of
+    # floats is memory nothing asks about). anim_nodes: AnimationCurveNode
+    # uid -> {"name", "target" uid, "target_kind" "model"|"channel"|None,
+    # "property" (the OP-connection property string, e.g. "Lcl Rotation"),
+    # "curves": [uid], "layer": AnimationLayer uid or None}.
+    # anim_stacks_by_uid: AnimationStack uid -> its name (a "take" IS an
+    # AnimationStack; the Takes section below is a separate legacy record of
+    # the same data, kept for its LocalTime start/stop ticks).
+    # anim_layers_by_uid: AnimationLayer uid -> the AnimationStack uid that
+    # owns it. Resolving a curve node's layer to its stack's name is what
+    # lets anim_facts attribute a curve record to the take it belongs to.
+    #
+    # MEASURED (#718 Task 10, t718-10-report.md finding #3): a multi-take
+    # export writes THREE AnimationCurveNode records per animated plug, not
+    # one - one full-span node under Maya's own always-present default take
+    # ("Take 001"), plus one per named take carrying that take's own range.
+    # These used to be dropped as "membership adds nothing a violation would
+    # read"; that claim was false. Without the layer/stack chain there is no
+    # way to tell the three apart, and a first-wins collapse on an
+    # FBX-internal object UID (not stable across identical exports) measured
+    # 6 passes and 2 failures over 8 back-to-back exports of one correct
+    # scene. takes come from the Takes section: name + LocalTime endpoint
+    # ticks.
     anim_curves: dict = field(default_factory=dict)
     anim_nodes: dict = field(default_factory=dict)
     anim_stacks: int = 0
     anim_layers: set = field(default_factory=set)
+    anim_stacks_by_uid: dict = field(default_factory=dict)
+    anim_layers_by_uid: dict = field(default_factory=dict)
     takes: list = field(default_factory=list)
 
 
@@ -284,10 +304,15 @@ def read_fbx(path):
                     facts.anim_nodes[uid] = {
                         "name": _clean(strs[0]) if strs else "?",
                         "target": None, "target_kind": None,
-                        "property": None, "curves": []}
+                        "property": None, "curves": [], "layer": None}
                     child = ("anode", uid)
             elif name == "AnimationStack":
                 facts.anim_stacks += 1
+                uid = values[0] if values and isinstance(values[0], int) else None
+                if uid is not None:
+                    strs = [v for v in values if isinstance(v, str)]
+                    facts.anim_stacks_by_uid[uid] = (
+                        _clean(strs[0]) if strs else "?")
             elif name == "AnimationLayer":
                 uid = values[0] if values and isinstance(values[0], int) else None
                 if uid is not None:
@@ -361,9 +386,18 @@ def read_fbx(path):
             facts.anim_nodes[child]["target"] = parent
             facts.anim_nodes[child]["target_kind"] = "channel"
             facts.anim_nodes[child]["property"] = link_prop
-        # AnimationCurveNode->AnimationLayer and Layer->Stack connections
-        # fall through every arm and are dropped - the layer/stack COUNTS
-        # are the facts; membership adds nothing a violation would read.
+        elif child in facts.anim_nodes and parent in facts.anim_layers:
+            # AnimationCurveNode -> AnimationLayer. #718 Task 10 measured
+            # that membership is exactly what a violation needs: without it,
+            # a segmented multi-take file's three duplicate curve records
+            # per plug cannot be told apart, and a first-wins collapse on an
+            # FBX-internal UID is not stable across identical exports.
+            facts.anim_nodes[child]["layer"] = parent
+        elif child in facts.anim_layers and parent in facts.anim_stacks_by_uid:
+            # AnimationLayer -> AnimationStack. Combined with the arm above,
+            # this resolves a curve node to the take (stack NAME) that owns
+            # it - anim_facts does that resolution and reports it as "take".
+            facts.anim_layers_by_uid[child] = parent
     return facts
 
 
@@ -660,19 +694,37 @@ def anim_facts(facts):
     Per curve node: the Model (joint) or BlendShapeChannel it drives, the
     OP-connection property that says WHICH plug ("Lcl Rotation",
     "Lcl Translation", "DeformPercent" - measured under mayapy,
-    TestClipExportInMaya), the curve count and their agreed key count.
-    Structural failures - an orphan curve node, curves that disagree on key
-    count - are reasons, never guesses; POLICY (expected counts, take
-    naming, zero-when-off) lives in export.anim_violations.
+    TestClipExportInMaya), the curve count, their agreed key count, and -
+    #718 Task 10b - the "take" it is attributed to: the name of the
+    AnimationStack whose AnimationLayer owns this curve node, resolved
+    structurally through the connection chain read_fbx keeps (never a
+    guess from tick ranges - two takes can share a boundary, and this
+    reader reports what it read, not what it infers). `None` when the
+    chain is absent (an orphan curve node, or a file this reader could not
+    attribute for any reason).
+
+    MEASURED (t718-10-report.md finding #3): a multi-take file carries one
+    curve-node record per animated plug PER TAKE - a two-clip file holds
+    THREE for a plug any clip touches, not one. Without "take" there is no
+    way to tell them apart. Structural failures - an orphan curve node,
+    curves that disagree on key count - are reasons, never guesses; POLICY
+    (expected counts, take naming, zero-when-off) lives in
+    export.anim_violations.
     """
     reasons = []
     targets = []
     by_uid = {n.uid: n for n in facts.nodes if n.uid is not None}
     for uid, node in sorted(facts.anim_nodes.items()):
+        layer_uid = node.get("layer")
+        stack_uid = (facts.anim_layers_by_uid.get(layer_uid)
+                    if layer_uid is not None else None)
+        take_name = (facts.anim_stacks_by_uid.get(stack_uid)
+                    if stack_uid is not None else None)
         entry = {"target": None,
                  "property": (node["property"] or node["name"]),
                  "curves": len(node["curves"]),
-                 "key_count": None, "duration_s": None}
+                 "key_count": None, "duration_s": None,
+                 "take": take_name}
         if node["target_kind"] == "model" and node["target"] in by_uid:
             entry["target"] = by_uid[node["target"]].name
         elif (node["target_kind"] == "channel"

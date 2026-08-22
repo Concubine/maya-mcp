@@ -827,6 +827,15 @@ class AnimCurveTarget(BaseModel):
     curves: int
     key_count: Optional[int] = None
     duration_s: Optional[float] = None
+    take: Optional[str] = Field(default=None, description=(
+        "The name of the AnimationStack (take) this curve record is "
+        "attributed to, resolved structurally through the "
+        "AnimationCurveNode -> AnimationLayer -> AnimationStack connection "
+        "chain. A multi-take file carries a separate curve record per plug "
+        "PER TAKE (#718 Task 10b, MEASURED) - one full-span record under "
+        "Maya's own always-present default take (\"Take 001\"), plus one "
+        "per named take carrying that take's own range. None when the "
+        "chain is absent - never a guess."))
 
 
 class AnimClipFacts(BaseModel):

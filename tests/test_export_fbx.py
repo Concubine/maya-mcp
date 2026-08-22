@@ -975,18 +975,33 @@ class TestAnimViolations:
                 "stop_s": stop / 30.0, "duration_s": (stop - start) / 30.0}
 
     def _clean(self):
-        return {"stacks": 1, "layers": 1, "curves": 7, "curve_nodes": 3,
+        # MEASURED (#718 Task 10, t718-10-report.md finding #3): a two-clip
+        # file carries THREE AnimationCurveNode records per animated plug,
+        # not one - one full-span record under Maya's own always-present
+        # default take ("Take 001", 63 keys over the whole 0..62 range),
+        # plus one per named take carrying that take's own range (31 keys
+        # each for these two 31-frame clips). Every channel any clip
+        # declares (L_hip rotation, pelvis translation, blink) rides along
+        # in every take - the split-into-takes call crops the SAME baked
+        # channel set, it does not filter which channels a take carries.
+        targets = []
+        for take, keys in (("Take 001", 63), ("idle", 31), ("walk", 31)):
+            duration = (keys - 1) / 30.0
+            targets.append({"target": "L_hip", "property": "Lcl Rotation",
+                            "curves": 3, "key_count": keys,
+                            "duration_s": duration, "take": take})
+            targets.append({"target": "pelvis",
+                            "property": "Lcl Translation", "curves": 3,
+                            "key_count": keys, "duration_s": duration,
+                            "take": take})
+            targets.append({"target": "blink", "property": "DeformPercent",
+                            "curves": 1, "key_count": keys,
+                            "duration_s": duration, "take": take})
+        return {"stacks": 3, "layers": 3, "curves": 21, "curve_nodes": 9,
                 "takes": [self._take("Take 001", 0, 62),
                           self._take("idle", 0, 30),
                           self._take("walk", 32, 62)],
-                "targets": [
-                    {"target": "L_hip", "property": "Lcl Rotation",
-                     "curves": 3, "key_count": 63, "duration_s": 2.0666},
-                    {"target": "pelvis", "property": "Lcl Translation",
-                     "curves": 3, "key_count": 63, "duration_s": 2.0666},
-                    {"target": "blink", "property": "DeformPercent",
-                     "curves": 1, "key_count": 63, "duration_s": 2.0666},
-                ],
+                "targets": targets,
                 "unavailable_reason": None}
 
     def test_a_matching_file_passes(self):
@@ -1058,11 +1073,21 @@ class TestAnimViolations:
         out = export.anim_violations(afacts, self._declared())
         assert any("root translation" in v for v in out)
 
-    def test_keys_are_counted_over_the_whole_span(self):
+    def test_keys_are_counted_by_the_takes_own_span(self):
+        """#718 Task 10b: the expected key count is the TAKE's own span
+        (end_frame - start_frame + 1), never the file's whole span - the
+        old whole-span assumption this test used to pin is exactly the bug
+        that made the byte gate non-deterministic (t718-10-report.md
+        finding #3). "Take 001"'s own full-span record is excluded from
+        this check entirely (see anim_violations's docstring), so
+        corrupting IT must not be what this test catches - only a named
+        take's own record counts."""
         afacts = self._clean()
-        afacts["targets"][0]["key_count"] = 31    # one clip's worth
+        for t in afacts["targets"]:
+            if t["target"] == "L_hip" and t["take"] == "idle":
+                t["key_count"] = 30   # one short of idle's own 31-key span
         out = export.anim_violations(afacts, self._declared())
-        assert any("L_hip" in v and "63" in v for v in out)
+        assert any("L_hip" in v and "'idle'" in v and "31" in v for v in out)
 
     def test_include_animation_false_asserts_zero_curves(self):
         empty = {"stacks": 0, "layers": 0, "curves": 0, "curve_nodes": 0,
@@ -1108,11 +1133,17 @@ class TestAnimViolations:
         afacts["targets"] = [t for t in afacts["targets"]
                              if t["target"] != "L_hip"]
         out = export.anim_violations(afacts, self._declared())
-        assert any("L_hip" in v and "no rotation curves" in v for v in out)
+        assert any("L_hip" in v and "no rotation curves" in v
+                   and "'idle'" in v for v in out)
+        assert any("L_hip" in v and "no rotation curves" in v
+                   and "'walk'" in v for v in out)
         afacts = self._clean()
-        afacts["targets"][0]["curves"] = 2
+        for t in afacts["targets"]:
+            if t["target"] == "L_hip" and t["take"] == "idle":
+                t["curves"] = 2
         out = export.anim_violations(afacts, self._declared())
-        assert any("L_hip" in v and "2 curve" in v for v in out)
+        assert any("L_hip" in v and "2 curve" in v and "'idle'" in v
+                   for v in out)
 
     def test_root_translation_gates_only_when_a_clip_uses_it(self):
         afacts = self._clean()
@@ -1130,15 +1161,19 @@ class TestAnimViolations:
         # authored is a mayapy measurement (contract decision 10) - so the
         # gate is presence + >=2 keys, never a full frame count.
         afacts = self._clean()
-        afacts["targets"][2]["key_count"] = 1
+        for t in afacts["targets"]:
+            if t["target"] == "blink" and t["take"] == "idle":
+                t["key_count"] = 1
         out = export.anim_violations(afacts, self._declared())
-        assert any("blink" in v and "1 key" in v for v in out)
+        assert any("blink" in v and "1 key" in v and "'idle'" in v
+                   for v in out)
 
     def test_extra_targets_are_not_violations(self):
         afacts = self._clean()
         afacts["targets"].append(
             {"target": "hand_keyed", "property": "Lcl Rotation",
-             "curves": 3, "key_count": 63, "duration_s": 2.0666})
+             "curves": 3, "key_count": 31, "duration_s": 1.0,
+             "take": "idle"})
         assert export.anim_violations(afacts, self._declared()) == []
 
     def test_unreadable_records_fail(self):
@@ -1227,18 +1262,28 @@ class TestExportFbxReportsClips:
             return {"name": name, "start_s": start / 30.0,
                     "stop_s": stop / 30.0,
                     "duration_s": (stop - start) / 30.0}
-        return {"stacks": 1, "layers": 1, "curves": 7, "curve_nodes": 3,
+        # Same segmented-per-take shape as TestAnimViolations._clean() -
+        # MEASURED (#718 Task 10, t718-10-report.md finding #3): three
+        # AnimationCurveNode records per plug, not one.
+        targets = []
+        for take_name, keys in (("Take 001", 63), ("idle", 31),
+                                ("walk", 31)):
+            duration = (keys - 1) / 30.0
+            targets.append({"target": "L_hip", "property": "Lcl Rotation",
+                            "curves": 3, "key_count": keys,
+                            "duration_s": duration, "take": take_name})
+            targets.append({"target": "pelvis",
+                            "property": "Lcl Translation", "curves": 3,
+                            "key_count": keys, "duration_s": duration,
+                            "take": take_name})
+            targets.append({"target": "blink", "property": "DeformPercent",
+                            "curves": 1, "key_count": keys,
+                            "duration_s": duration, "take": take_name})
+        return {"stacks": 3, "layers": 3, "curves": 21, "curve_nodes": 9,
                 "takes": [take("Take 001", 0, 62),
                           take("idle", 0, 30),
                           take("walk", 32, 62)],
-                "targets": [
-                    {"target": "L_hip", "property": "Lcl Rotation",
-                     "curves": 3, "key_count": 63, "duration_s": 2.0666},
-                    {"target": "pelvis", "property": "Lcl Translation",
-                     "curves": 3, "key_count": 63, "duration_s": 2.0666},
-                    {"target": "blink", "property": "DeformPercent",
-                     "curves": 1, "key_count": 63, "duration_s": 2.0666},
-                ],
+                "targets": targets,
                 "unavailable_reason": None}
 
     def _export(self, monkeypatch, tmp_path, name, declared, clean):

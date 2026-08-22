@@ -3695,6 +3695,16 @@ class TestMultiTakeExportInMaya:
          means here (does the policy validate every duplicate, just the
          default take's, or something else) that is above this task's pay
          grade. Filed as a follow-up; see the task report.
+
+         FOLLOW-UP DONE (#718 Task 10b, t718-10b-report.md):
+         fbxbytes.anim_facts's targets now carry "take" - the owning
+         AnimationStack's name, resolved structurally through the
+         AnimationCurveNode -> AnimationLayer -> AnimationStack connection
+         chain read_fbx keeps. anim_violations/anim_clip_facts check each
+         declared clip against only ITS OWN take's records, at that take's
+         own span, ignoring records attributed to "Take 001" or to no
+         take. See test_the_real_gate_passes_a_two_clip_export below,
+         which calls the real gate (no bypass) and passes.
       4. "Take 001" (the exporter's default) spans the WHOLE bake range,
          0..62/30 s - it is not scoped to any one clip.
       5. mt_mid (keyed only in idle) reads back its rest value (0.0) at
@@ -3934,6 +3944,66 @@ class TestMultiTakeExportInMaya:
             assert abs(third - walk_ticks[0]) < 1000
             assert abs(third_last - walk_ticks[1]) < 1000
             assert third_n == 31
+        clip.delete_clip({"root": root})   # scene-persistence teardown
+
+    def test_the_real_gate_passes_a_two_clip_export(self, tmp_path):
+        """#718 Task 10b: the fix. Task 10 measured export.export_fbx()'s
+        own byte gate failing a genuinely correct two-clip export at
+        random - 6 passes and 2 failures over 8 back-to-back exports of
+        one scene in one process (t718-10-report.md finding #3), because
+        the gate used to collapse a segmented plug's three duplicate curve
+        records first-wins on an FBX-internal UID that is not stable run
+        to run. With curve records attributed to their take
+        (fbxbytes.anim_facts's "take" field, resolved structurally through
+        the AnimationCurveNode -> AnimationLayer -> AnimationStack chain)
+        and anim_violations/anim_clip_facts checking each declared clip
+        against its OWN take's records at its OWN span, the ambiguity is
+        gone: this calls the REAL export.export_fbx() - no bypass helper -
+        on a correct two-clip scene and it must pass.
+
+        WHY THIS TEST IS A SINGLE CALL, NOT A 6x LOOP: MEASURED (a new
+        finding of this task, not in Task 10's report) that export_fbx's
+        forced fbxmaya unloadPlugin/loadPlugin cycle (#695 - required so
+        the plugin re-reads the scene's fps before every animated export)
+        corrupts THIS PROCESS's heap when repeated too many times in one
+        mayapy process. This file's persistent, session-scoped mayapy
+        process (module docstring) already carries ONE such reload cycle
+        from TestClipExportInMaya::test_the_measurements before reaching
+        this class, and the RUNNING TOTAL across the WHOLE process - not
+        just one test's own count - is what matters: a running total of 3
+        reload cycles (that pre-existing one plus 2 more, whether from one
+        tight Python loop in a single test or spread across separate
+        parametrized test items - both were tried and both crashed
+        identically, reproduced 3/3) reliably crashes
+        `maya.standalone.uninitialize()` at session end (Windows
+        STATUS_HEAP_CORRUPTION, 0xc0000374); a running total of 2 (the
+        pre-existing one plus this test's single call) was reproduced
+        clean. This is an environmental fragility in the #695 reload
+        workaround under heavy repetition on this machine's
+        mayapy/fbxmaya build - orthogonal to this task's fix and out of
+        its scope to change - not a #718 defect: a standalone,
+        single-purpose mayapy process (no other test's accumulated plugin
+        churn) called this SAME real gate, with no bypass, on this SAME
+        scene 30 times in a row with zero failures and no crash, which is
+        the authoritative "at least 6 consecutive in one process" proof
+        this task's brief asks for (see the task report for that run's
+        full output, and for why a 6x loop cannot also live safely inside
+        this shared-process suite). This in-suite test is a standing
+        regression guard at the budget the shared process can carry
+        safely.
+        """
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import clip, export
+
+        base, root, idle, walk = self._two_clip_scene(cmds, "mx")
+        path = str(tmp_path / "deterministic.fbx").replace("\\", "/")
+        result = export.export_fbx({
+            "path": path, "metres_per_unit": 1.0,
+            "nodes": [base, root], "include_animation": True})
+        anim = result["animation"]
+        assert anim is not None
+        assert sorted(c["name"] for c in anim["clips"]) == ["idle", "walk"]
         clip.delete_clip({"root": root})   # scene-persistence teardown
 
     def test_a_named_delete_leaves_the_other_take_exportable(self, tmp_path):

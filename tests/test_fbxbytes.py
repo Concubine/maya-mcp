@@ -345,8 +345,34 @@ class TestAnimFacts:
                                  "stop_s": 1.0, "duration_s": 1.0}]
         assert out["targets"] == [{"target": "L_hip",
                                    "property": "Lcl Rotation", "curves": 3,
-                                   "key_count": 31, "duration_s": 1.0}]
+                                   "key_count": 31, "duration_s": 1.0,
+                                   "take": None}]
         assert out["unavailable_reason"] is None
+
+    def test_a_curve_node_reports_the_take_it_belongs_to(self):
+        """#718 Task 10 MEASURED: a multi-take file carries one curve node
+        per plug PER TAKE, plus the full-span one belonging to Maya's own
+        default take. Without attribution the gate cannot tell them apart,
+        and which one it happens to read is decided by an unstable UID
+        (t718-10-report.md finding #3)."""
+        facts = self._facts()
+        tick = fbxbytes.KTIME_PER_SECOND
+        facts.anim_stacks_by_uid = {70: "Take 001", 71: "idle", 72: "walk"}
+        facts.anim_layers_by_uid = {80: 70, 81: 71, 82: 72}
+        facts.anim_nodes[20]["layer"] = 80          # the full-span one
+        facts.anim_curves[13] = {"key_count": 31, "first_tick": 0,
+                                 "last_tick": tick}
+        facts.anim_nodes[21] = {"name": "R", "target": 1,
+                                "target_kind": "model",
+                                "property": "Lcl Rotation", "curves": [13],
+                                "layer": 81}
+        by_take = {t["take"]: t for t in fbxbytes.anim_facts(facts)["targets"]}
+        assert "idle" in by_take
+        assert by_take["idle"]["property"] == "Lcl Rotation"
+        assert by_take["Take 001"]["property"] == "Lcl Rotation"
+        # No layer connection at all - the reader reports None, never a guess.
+        facts2 = self._facts()
+        assert fbxbytes.anim_facts(facts2)["targets"][0]["take"] is None
 
     def test_a_take_reports_where_it_sits_not_only_how_long_it_is(self):
         """#718: several takes share one timeline, so the gate needs each
