@@ -52,10 +52,17 @@ class TestCleanCase:
         assert m.verify([_declared()], {"clips": [clip]}) == []
 
     def test_multiple_declared_clips_all_clean(self):
+        # A realistic measured payload: UNITY_MEASURE_CS samples every
+        # declared joint (not just the current clip's own) in every clip,
+        # so a clean sibling-clip joint must be present here too, held at
+        # rest - the completeness check (TestCompleteness) requires it.
+        rest = {"start": [0, 0, 0], "mid": [0, 0, 0], "end": [0, 0, 0]}
         declared = [_declared(name="idle"), _declared(name="wave",
                     joints=["R_shoulder"])]
-        measured = {"clips": [_measured_clip(name="idle"),
-                              _measured_clip(name="wave")]}
+        measured = {"clips": [
+            _measured_clip(name="idle", samples={"R_shoulder": rest}),
+            _measured_clip(name="wave", samples={"chest": rest,
+                                                  "spine_01": rest})]}
         assert m.verify(declared, measured) == []
 
 
@@ -71,15 +78,24 @@ class TestExtraUnityContentIsNotAViolation:
 
     def test_undeclared_but_present_joint_that_is_declared_by_ANOTHER_clip_here_is_still_checked(self):
         # Sanity: "extra content is fine" must not be confused with "any
-        # joint reading is fine" - a joint THIS clip doesn't declare must
-        # still be checked (see TestContamination below). This test only
-        # pins that an extra whole CLIP is what's exempt, not an extra
-        # joint reading within a declared clip.
-        clip = _measured_clip(samples={
-            "R_shoulder": {"start": [0, 0, 0], "mid": [0, 0, 40],
-                           "end": [0, 0, 0]}})
-        violations = m.verify([_declared()], {"clips": [clip]})
+        # joint reading is fine" - a joint THIS clip doesn't declare, but
+        # which ANOTHER declared clip in the same set legitimately owns
+        # (so it is part of the completeness universe too, see
+        # TestCompleteness), must still be contamination-checked here.
+        # Distinct from TestContamination.test_undeclared_joint_that_moves_is_flagged,
+        # whose offending joint (L_hip) isn't declared by ANY clip in that
+        # test's single-clip `declared` list.
+        rest = {"start": [0, 0, 0], "mid": [0, 0, 0], "end": [0, 0, 0]}
+        declared = [_declared(name="idle", joints=["chest"]),
+                    _declared(name="wave", joints=["R_shoulder"])]
+        measured = {"clips": [
+            _measured_clip(name="idle", samples={
+                "R_shoulder": {"start": [0, 0, 0], "mid": [0, 0, 40],
+                               "end": [0, 0, 0]}}),
+            _measured_clip(name="wave", samples={"chest": rest})]}
+        violations = m.verify(declared, measured)
         assert len(violations) == 1
+        assert "idle" in violations[0]
         assert "R_shoulder" in violations[0]
 
 
@@ -160,6 +176,17 @@ class TestContamination:
         assert len(violations) == 1
         assert "L_hip" in violations[0]
 
+    def test_exactly_at_epsilon_passes(self):
+        # The source uses a strict `>` (worst > STILLNESS_EPSILON_DEG) -
+        # exactly at the boundary must not be flagged, same as
+        # TestLengthTolerance.test_exactly_at_tolerance_passes pins for
+        # LENGTH_TOL_S.
+        eps = m.STILLNESS_EPSILON_DEG
+        clip = _measured_clip(samples={
+            "L_hip": {"start": [0, 0, 0], "mid": [0, 0, eps],
+                      "end": [0, 0, 0]}})
+        assert m.verify([_declared()], {"clips": [clip]}) == []
+
     def test_backward_hold_pattern_is_caught(self):
         # The design doc's specific failure shape: a curve holds a LATER
         # clip's first key BACKWARDS across an earlier clip's whole range
@@ -177,6 +204,62 @@ class TestContamination:
         violations = m.verify([_declared()], {"clips": [clip]})
         assert len(violations) == 1
         assert "L_hip" in violations[0]
+        assert "malformed" in violations[0]
+
+
+class TestCompleteness:
+    """A joint that SHOULD have been sampled - declared by ANOTHER clip in
+    the same DECLARED set, so UNITY_MEASURE_CS's declaredJoints includes it
+    - must actually show up in THIS clip's `samples`. The contamination
+    loop above only ever iterates over what IS present in `samples`: if
+    Unity's measurement produces no reading at all for a joint (a name
+    mismatch after import, a lookup miss, any gap), that joint is simply
+    absent, the contamination loop never sees it, contributes zero
+    violations, and the gate reports a clean PASS on exactly the defect it
+    exists to catch. This is the Important finding from wave 1 review."""
+
+    def test_joint_missing_entirely_from_samples_is_a_violation(self):
+        # idle declares chest only; wave declares R_shoulder. idle's own
+        # measured samples say NOTHING about R_shoulder - not "still",
+        # ABSENT. Today (pre-fix) this is invisible: verify() only walks
+        # samples.items(), and R_shoulder is not a key.
+        rest = {"start": [0, 0, 0], "mid": [0, 0, 0], "end": [0, 0, 0]}
+        declared = [_declared(name="idle", joints=["chest"]),
+                    _declared(name="wave", joints=["R_shoulder"])]
+        measured = {"clips": [
+            _measured_clip(name="idle", samples={}),
+            _measured_clip(name="wave", samples={
+                "R_shoulder": {"start": [0, 0, 0], "mid": [0, 0, 30],
+                               "end": [0, 0, 0]},
+                "chest": rest})]}
+        violations = m.verify(declared, measured)
+        assert len(violations) == 1
+        assert "idle" in violations[0]
+        assert "R_shoulder" in violations[0]
+        assert "missing" in violations[0]
+
+    def test_a_clips_own_declared_joints_are_exempt_from_completeness(self):
+        # chest is idle's OWN joint - it is supposed to move and is not
+        # what the completeness check is about, so its absence from
+        # `samples` here must not be flagged.
+        declared = [_declared(name="idle", joints=["chest"])]
+        measured = {"clips": [_measured_clip(name="idle", samples={})]}
+        assert m.verify(declared, measured) == []
+
+    def test_non_numeric_reading_is_flagged_not_a_crash(self):
+        # A malformed-but-present reading must produce a violation, not an
+        # uncaught TypeError from abs() on a non-numeric value.
+        rest = {"start": [0, 0, 0], "mid": [0, 0, 0], "end": [0, 0, 0]}
+        declared = [_declared(name="idle", joints=["chest"]),
+                    _declared(name="wave", joints=["R_shoulder"])]
+        measured = {"clips": [
+            _measured_clip(name="idle", samples={
+                "R_shoulder": {"start": ["oops", 0, 0], "mid": [0, 0, 0],
+                               "end": [0, 0, 0]}}),
+            _measured_clip(name="wave", samples={"chest": rest})]}
+        violations = m.verify(declared, measured)
+        assert len(violations) == 1
+        assert "R_shoulder" in violations[0]
         assert "malformed" in violations[0]
 
 

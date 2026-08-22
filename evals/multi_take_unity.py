@@ -255,7 +255,20 @@ def verify(declared, measured):
          NOT a violation").
       2. its `length` matches (end_frame - start_frame) / fps within
          LENGTH_TOL_S.
-      3. every joint sampled for that clip that this clip does NOT declare
+      3. every joint any DECLARED clip touches, other than this clip's own,
+         actually appears in this clip's `samples` with all three readings
+         (start/mid/end) present and numeric - the completeness check.
+         Without this, a joint Unity's measurement fails to produce ANY
+         reading for (a name mismatch after import, a lookup miss, any
+         gap) is simply absent from `samples`; check 4 below only ever
+         walks the joints THAT ARE PRESENT, so a missing joint contributes
+         zero violations and the gate reports a false clean PASS on
+         exactly the defect it exists to catch. "Every joint that should
+         have been sampled" is derived from the `declared` records
+         themselves (the union of every clip's `joints`, minus this
+         clip's own) - never a hardcoded list, so it tracks whatever the
+         live Maya gate actually authored.
+      4. every joint sampled for that clip that this clip does NOT declare
          sits at REST (0 degrees on every axis, every one of its three
          samples) within STILLNESS_EPSILON_DEG - the consumer-side
          contamination check.
@@ -282,6 +295,11 @@ def verify(declared, measured):
     measured_by_name = {c["name"]: c for c in measured.get("clips", [])
                         if "name" in c}
 
+    # The completeness universe: every joint ANY declared clip touches.
+    # Derived from `declared` itself - never hardcoded - so it always
+    # matches what the live Maya gate actually authored.
+    all_declared_joints = {j for r in declared for j in r.get("joints", [])}
+
     for record in declared:
         name = record["name"]
         m = measured_by_name.get(name)
@@ -306,17 +324,33 @@ def verify(declared, measured):
 
         declared_joints = set(record.get("joints", []))
         samples = m.get("samples", {})
+
+        # Check 3: completeness. A joint declared by ANOTHER clip must
+        # show up in THIS clip's samples at all - if it is simply absent
+        # (not malformed, not still, ABSENT), check 4 below would never
+        # see it and the gap would pass silently.
+        for joint in sorted(all_declared_joints - declared_joints):
+            if joint not in samples:
+                violations.append(
+                    "clip %r: joint %r should have been sampled (it is "
+                    "declared by another clip) but is missing from "
+                    "Unity's measurement entirely - a measurement gap is "
+                    "not proof of stillness" % (name, joint))
+
+        # Check 4: contamination, for every joint Unity's measurement DID
+        # produce a reading for.
         for joint, rows in samples.items():
             if joint in declared_joints:
                 continue
             try:
                 start, mid, end = rows["start"], rows["mid"], rows["end"]
-            except (KeyError, TypeError):
+                worst = max(abs(float(v)) for vec in (start, mid, end)
+                            for v in vec)
+            except (KeyError, TypeError, ValueError):
                 violations.append(
                     "clip %r: joint %r has a malformed samples entry (%r)"
                     % (name, joint, rows))
                 continue
-            worst = max(abs(v) for vec in (start, mid, end) for v in vec)
             if worst > STILLNESS_EPSILON_DEG:
                 violations.append(
                     "clip %r: joint %r is NOT declared by this clip but its "
