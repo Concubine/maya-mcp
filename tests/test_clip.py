@@ -108,10 +108,12 @@ class FakeCmds:
         return None
 
     # --- attributes ------------------------------------------------------
-    def getAttr(self, key):
-        if key.endswith(".mcp_clip"):
-            node = key.rsplit(".", 1)[0]
-            return self.string_attrs[node]["mcp_clip"]
+    def getAttr(self, key, time=None):
+        if key.endswith(".mcp_clip") or key.endswith(".mcp_clip_rest"):
+            node, attr = key.rsplit(".", 1)
+            return self.string_attrs[node][attr]
+        if time is not None:
+            return self.keys.get(key, {}).get(float(time), 0.0)
         return self.attrs.get(key, 0.0)
 
     def setAttr(self, key, *values, **kw):
@@ -394,6 +396,79 @@ class TestAuthor:
         # no attr at all is an empty list, not None
         fake.string_attrs["|root"].pop("mcp_clip")
         assert clip.clip_meta(fake, "|root") == []
+
+
+class TestSelfContainedTakes:
+    """#718's correctness rule: at its own first and last frame, every clip
+    keys EVERY channel any clip on the rig touches, at rest for the ones it
+    does not mention. Both contamination directions are under test."""
+
+    def _idle(self):
+        return [{"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+                {"time_s": 1.0, "rotations": {"mid": [0, 0, 45]}}]
+
+    def _walk(self):
+        return [{"time_s": 0.0, "rotations": {"tip": [0, 0, 0]}},
+                {"time_s": 1.0, "rotations": {"tip": [0, 0, 20]}}]
+
+    def test_a_clip_pins_the_channels_it_does_not_mention(self, fake):
+        _author(fake, name="idle", keys=self._idle())
+        out = _author(fake, name="walk", keys=self._walk())
+        assert out["padded_channels"] == ["mid"]
+        # mid is keyed at BOTH of walk's boundary frames, at rest (0.0)
+        keys = fake.keys["|root|mid.rotateZ"]
+        assert keys[32.0] == 0.0 and keys[62.0] == 0.0
+
+    def test_a_new_channel_back_fills_rest_at_every_earlier_boundary(self, fake):
+        _author(fake, name="idle", keys=self._idle())
+        out = _author(fake, name="walk", keys=self._walk())
+        assert out["back_filled"] == {"clips": ["idle"], "channels": ["tip"]}
+        # tip is pinned at rest across idle's whole range: idle measures
+        # exactly what it measured before walk existed
+        keys = fake.keys["|root|mid|tip.rotateZ"]
+        assert keys[0.0] == 0.0 and keys[30.0] == 0.0
+
+    def test_weight_channels_pin_at_zero_and_the_root_at_its_rest(self, fake):
+        _author(fake, name="blinky", keys=[
+            {"time_s": 0.0, "blend_weights": {"blink": 0.0},
+             "root_position": [0.0, 1.0, 0.0]},
+            {"time_s": 1.0, "blend_weights": {"blink": 1.0},
+             "root_position": [0.0, 1.4, 0.0]}])
+        _author(fake, name="still", keys=self._idle())
+        assert fake.keys["body_shapes.blink"][32.0] == 0.0
+        assert fake.keys["body_shapes.blink"][62.0] == 0.0
+        # the root's rest translate is the bind position, captured before
+        # the first clip keyed it
+        assert fake.keys["|root.translateY"][32.0] == pytest.approx(1.0)
+
+    def test_a_clip_that_mentions_a_channel_is_never_padded_over_it(self, fake):
+        _author(fake, name="idle", keys=self._idle())
+        out = _author(fake, name="more", keys=self._idle())
+        assert out["padded_channels"] == []
+        assert out["back_filled"] == {"clips": [], "channels": []}
+        # the second clip's own motion survives at its own frames
+        assert fake.keys["|root|mid.rotateZ"][62.0] == pytest.approx(45.0)
+
+    def test_a_vanished_joint_warns_instead_of_crashing(self, fake):
+        _author(fake, name="idle", keys=self._walk())      # keys 'tip'
+        fake.joints.remove("|root|mid|tip")
+        # renaming/deleting a keyed joint out of tool is not this tool's
+        # problem to fix, but it must be SAID
+        out = _author(fake, name="walk", keys=self._idle())
+        assert any("tip" in w and "not under this root any more" in w
+                   for w in out["warnings"]), out["warnings"]
+        assert out["padded_channels"] == []
+
+    def test_a_scene_with_no_rest_record_infers_it_and_says_so(self, fake):
+        """The compatibility case: a clip authored before #718 left curves
+        but no rest record, so the rest value is inferred from the earliest
+        keyed value - WARNED, never silent."""
+        _author(fake, name="old", keys=self._idle())
+        fake.string_attrs["|root"].pop("mcp_clip_rest")
+        out = _author(fake, name="new", keys=self._walk())
+        assert any("no rest value was recorded" in w and "mid.rotateZ" in w
+                   for w in out["warnings"]), out["warnings"]
+        assert fake.keys["|root|mid.rotateZ"][32.0] == pytest.approx(0.0)
 
 
 class TestDelete:

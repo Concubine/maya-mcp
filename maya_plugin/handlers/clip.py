@@ -28,6 +28,7 @@ from ..dispatcher import HandlerError
 from . import capture, clipmath, naming, render, sculpt, sculpt_math, session, units
 
 CLIP_ATTR = "mcp_clip"
+REST_ATTR = "mcp_clip_rest"
 NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 INTERPOLATIONS = {"linear": "linear", "smooth": "auto"}
 ROTATE_ATTRS = ("rotateX", "rotateY", "rotateZ")
@@ -179,6 +180,72 @@ def _clips_elsewhere(cmds, root_long: str) -> List[str]:
             and cmds.attributeQuery(CLIP_ATTR, node=j, exists=True)]
 
 
+def _rest_key(plug: str) -> str:
+    """The rest record's key for a plug: short node name plus attribute.
+    Long names carry the DAG path, which a reparent would invalidate."""
+    node, attr = plug.rsplit(".", 1)
+    return "%s.%s" % (_short(node), attr)
+
+
+def _rest_map(cmds, root_long: str) -> Dict[str, float]:
+    if not cmds.attributeQuery(REST_ATTR, node=root_long, exists=True):
+        return {}
+    try:
+        value = json.loads(cmds.getAttr("%s.%s" % (root_long, REST_ATTR)))
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _write_rest(cmds, root_long: str, rest: Dict[str, float]) -> None:
+    if not cmds.attributeQuery(REST_ATTR, node=root_long, exists=True):
+        cmds.addAttr(root_long, longName=REST_ATTR, dataType="string")
+    cmds.setAttr("%s.%s" % (root_long, REST_ATTR), json.dumps(rest),
+                 type="string")
+
+
+def _capture_rest(cmds, plug: str, rest: Dict[str, float]) -> None:
+    """Record a channel's rest value the moment it becomes curve-driven.
+
+    Read it later and a curve answers instead of the rest pose - which is
+    why this is captured here, before the keying, and not derived on
+    demand. A channel already driven (and already recorded) is left alone.
+    """
+    key = _rest_key(plug)
+    if key in rest:
+        return
+    if cmds.listConnections(plug, source=True, destination=False,
+                            type="animCurve"):
+        return
+    rest[key] = float(cmds.getAttr(plug))
+
+
+def _rest_value(cmds, plug: str, rest: Dict[str, float],
+                warnings: List[str]) -> float:
+    """The value to pin a channel at outside the clips that declare it.
+
+    Recorded at first touch (above). A scene authored before #718 has no
+    record, so the value is inferred from the existing clip's FIRST key -
+    for a self-contained clip that key IS its rest pose - and the
+    inference is WARNED, never silent.
+    """
+    key = _rest_key(plug)
+    if key in rest:
+        return float(rest[key])
+    times = cmds.keyframe(plug, query=True) or []
+    if times:
+        value = float(cmds.getAttr(plug, time=times[0]))
+        warnings.append(
+            "no rest value was recorded for %s (this scene predates the "
+            "multi-clip metadata) - pinned at %g, its earliest keyed value"
+            % (key, value))
+        rest[key] = value
+        return value
+    value = float(cmds.getAttr(plug))
+    rest[key] = value
+    return value
+
+
 def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     cmds = _cmds()
     from . import rigging  # noqa: PLC0415 - rigging imports clip for guards
@@ -280,6 +347,35 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
 
     session.auto_checkpoint("author_clip")
 
+    by_short: Dict[str, str] = {}
+    for j in joints:
+        by_short.setdefault(_short(j), j)
+
+    def _rot_plugs(short: str) -> List[str]:
+        long_name = by_short.get(short)
+        if long_name is None:
+            return []
+        return ["%s.%s" % (long_name, a) for a in ROTATE_ATTRS]
+
+    root_translate_plugs = ["%s.%s" % (root_long, a) for a in TRANSLATE_ATTRS]
+    mine = {
+        "joints": sorted({_short(j) for key in resolved_keys
+                          for j in key["rotations"]}),
+        "weight_channels": list(weight_channels),
+        "root_position_used": any(k["root_position"] is not None
+                                  for k in resolved_keys),
+    }
+    rest = _rest_map(cmds, root_long)
+    for short in mine["joints"]:
+        for plug in _rot_plugs(short):
+            _capture_rest(cmds, plug, rest)
+    if mine["root_position_used"]:
+        for plug in root_translate_plugs:
+            _capture_rest(cmds, plug, rest)
+    for alias in mine["weight_channels"]:
+        # By rule, not by capture: weights-all-zero IS the reset (phase 5).
+        rest.setdefault(_rest_key("%s.%s" % (alias_map[alias], alias)), 0.0)
+
     # Re-authoring a name RE-APPENDS it at the tail (#718 decision 4): its
     # old range is cut, and no other clip's motion moves. Take ORDER in the
     # file changes; each take is still independently named, which is all a
@@ -346,6 +442,88 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
         cmds.keyTangent(node, attribute=attr, edit=True,
                         inTangentType=tangent, outTangentType=tangent)
 
+    # --- the self-contained rule (#718) --------------------------------
+    # All clips share ONE curve per channel, so a channel this clip never
+    # mentions would hold whatever a neighbour left on it - forwards from
+    # the previous clip's last key, and BACKWARDS from a later clip's
+    # first key. Both are pinned here, at rest, and both are reported.
+    theirs = clipmath.channel_union(kept)
+    padded_channels: List[str] = []
+    back_filled_channels: List[str] = []
+
+    def _pin(plug: str, frames: List[int]) -> None:
+        node, attr = plug.rsplit(".", 1)
+        value = _rest_value(cmds, plug, rest, warnings)
+        for frame in frames:
+            cmds.setKeyframe(node, attribute=attr, time=frame, value=value)
+        cmds.keyTangent(node, attribute=attr, edit=True,
+                        inTangentType=tangent, outTangentType=tangent)
+
+    mine_frames = [start_frame, end_frame]
+    for short in theirs["joints"]:
+        if short in mine["joints"]:
+            continue
+        plugs = _rot_plugs(short)
+        if not plugs:
+            warnings.append(
+                "a clip declares joint %r, which is not under this root any "
+                "more - it cannot be pinned at rest, so takes that do not "
+                "declare it may inherit a neighbour's value" % short)
+            continue
+        for plug in plugs:
+            _pin(plug, mine_frames)
+        padded_channels.append(short)
+    for alias in theirs["weight_channels"]:
+        if alias in mine["weight_channels"]:
+            continue
+        node = alias_map.get(alias)
+        if node is None or isinstance(node, HandlerError):
+            warnings.append(
+                "a clip declares weight channel %r, which no mesh bound to "
+                "this skeleton carries any more - it cannot be pinned at "
+                "rest" % alias)
+            continue
+        _pin("%s.%s" % (node, alias), mine_frames)
+        padded_channels.append(alias)
+    if theirs["root_position_used"] and not mine["root_position_used"]:
+        for plug in root_translate_plugs:
+            _pin(plug, mine_frames)
+        padded_channels.append("root_position")
+
+    # BACKWARDS contamination: a curve holds its FIRST key's value
+    # backwards in time, so a channel this clip introduces would rewrite
+    # every earlier clip's pose for it. Pinning at rest across their
+    # ranges RESTORES what each of them measured when it was authored.
+    their_frames = [f for r in kept
+                    for f in (r["start_frame"], r["end_frame"])]
+    if their_frames:
+        for short in mine["joints"]:
+            if short in theirs["joints"]:
+                continue
+            for plug in _rot_plugs(short):
+                _pin(plug, their_frames)
+            back_filled_channels.append(short)
+        for alias in mine["weight_channels"]:
+            if alias in theirs["weight_channels"]:
+                continue
+            _pin("%s.%s" % (alias_map[alias], alias), their_frames)
+            back_filled_channels.append(alias)
+        if mine["root_position_used"] and not theirs["root_position_used"]:
+            for plug in root_translate_plugs:
+                _pin(plug, their_frames)
+            back_filled_channels.append("root_position")
+    back_filled = {
+        "clips": [r["name"] for r in kept] if back_filled_channels else [],
+        "channels": back_filled_channels,
+    }
+    if back_filled_channels:
+        warnings.append(
+            "pinned %d channel(s) (%s) at rest across %s so their motion is "
+            "unchanged by this clip"
+            % (len(back_filled_channels), ", ".join(back_filled_channels),
+               ", ".join(back_filled["clips"])))
+    _write_rest(cmds, root_long, rest)
+
     new_record = {
         "name": name, "fps": fps, "start_frame": start_frame,
         "end_frame": end_frame, "duration_s": duration_s, "loop": loop,
@@ -411,6 +589,8 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
         "start_frame": start_frame,
         "end_frame": end_frame,
         "clips": [r["name"] for r in all_records],
+        "padded_channels": padded_channels,
+        "back_filled": back_filled,
         "replaced": name if replaced is not None else None,
         "per_key": per_key,
         "warnings": warnings,
