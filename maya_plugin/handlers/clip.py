@@ -782,6 +782,15 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     cmds.setAttr("%s.%s" % (root_long, CLIP_ATTR), json.dumps(all_records),
                  type="string")
 
+    # De-duplicate warnings while preserving order and distinctness.
+    seen = set()
+    deduplicated = []
+    for w in warnings:
+        if w not in seen:
+            seen.add(w)
+            deduplicated.append(w)
+    warnings = deduplicated
+
     return {
         "root": root_long,
         "clip": name,

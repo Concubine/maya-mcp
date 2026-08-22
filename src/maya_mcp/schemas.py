@@ -771,10 +771,10 @@ class AuthorClipResult(BaseModel):
         "Channels other clips touch that this one does not - keyed at rest "
         "at this clip's own boundary frames so the take is self-contained."))
     held_channels: List[str] = Field(default_factory=list, description=(
-        "Channels other clips touch AND this one does too, but not at its "
-        "own boundary frame(s) - keyed at THIS clip's own held value there "
-        "(what its own range would already hold), never at rest. Rest would "
-        "invent motion this clip never authored; padded_channels is the "
+        "Channels this clip animates but does not key at one of its own "
+        "boundary frames - pinned at the clip's own held value there so its "
+        "authored motion is preserved, never at rest. Pinning rest would "
+        "invent motion this clip never authored. padded_channels is the "
         "sibling case where rest is the honest pin because this clip never "
         "keys the channel at all."))
     back_filled: BackFillReport = Field(default_factory=BackFillReport,
