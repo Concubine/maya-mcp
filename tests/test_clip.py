@@ -113,8 +113,31 @@ class FakeCmds:
             node, attr = key.rsplit(".", 1)
             return self.string_attrs[node][attr]
         if time is not None:
-            return self.keys.get(key, {}).get(float(time), 0.0)
+            return self.evaluate(key, float(time))
         return self.attrs.get(key, 0.0)
+
+    def evaluate(self, plug, t):
+        """What a real animCurve would report at time `t`: held at the
+        first key's value backwards in time, at the last key's value
+        forwards in time, linearly interpolated in between. The exact-key
+        lookup the old getAttr(time=...) did could never observe
+        contamination BETWEEN keys - which is the entire premise of the
+        self-contained-takes rule (#718 review Fix 5)."""
+        keys = self.keys.get(plug)
+        if not keys:
+            return self.attrs.get(plug, 0.0)
+        times = sorted(keys)
+        if t <= times[0]:
+            return keys[times[0]]
+        if t >= times[-1]:
+            return keys[times[-1]]
+        for lo, hi in zip(times, times[1:]):
+            if lo <= t <= hi:
+                if hi == lo:
+                    return keys[lo]
+                frac = (t - lo) / (hi - lo)
+                return keys[lo] + frac * (keys[hi] - keys[lo])
+        return keys[times[-1]]   # unreachable given the bounds above
 
     def setAttr(self, key, *values, **kw):
         if kw.get("type") == "string":
@@ -150,9 +173,10 @@ class FakeCmds:
         self.curves.setdefault(plug, plug.replace("|", "_") + "_crv")
         self.keys.setdefault(plug, {})[float(time)] = float(value)
 
-    def keyTangent(self, node, attribute=None, edit=False,
+    def keyTangent(self, node, attribute=None, edit=False, time=None,
                    inTangentType=None, outTangentType=None):
-        self.tangents.append((node, attribute, inTangentType, outTangentType))
+        self.tangents.append(
+            (node, attribute, time, inTangentType, outTangentType))
 
     def keyframe(self, plug, query=False, **kw):
         return sorted(self.keys.get(plug, {})) or None
@@ -357,13 +381,30 @@ class TestAuthor:
                    for w in out["warnings"]), out["warnings"]
 
     def test_tangent_mapping(self, fake):
-        _author(fake, interpolation="smooth")
-        assert fake.tangents and all(t[2] == "auto" and t[3] == "auto"
-                                     for t in fake.tangents)
-        fake2_keys = fake.tangents[:]
-        _author(fake, name="lin", interpolation="linear")
-        new = fake.tangents[len(fake2_keys):]
-        assert new and all(t[2] == "linear" for t in new)
+        """#718 review Fix 2: every keyTangent call is scoped to a `time`
+        (the whole tuple shape changed to carry it), so retangenting one
+        clip can never reach another clip's keys on a shared curve. The
+        MAIN pass is scoped to the clip's own [start, end] and carries its
+        interpolation; any boundary PIN (fired here because the fixture's
+        default keys only key root_position on the second key, so the
+        first clip's boundary needs padding on the second author) is
+        scoped to a single frame and always flat, regardless of
+        interpolation."""
+        first = _author(fake, interpolation="smooth")
+        main = [t for t in fake.tangents
+                if t[2] == (first["start_frame"], first["end_frame"])]
+        assert main and all(t[3] == "auto" and t[4] == "auto" for t in main)
+        assert len(main) == len(fake.tangents)   # idle is the first clip:
+        # theirs is empty, so nothing here can be a boundary pin
+        before = fake.tangents[:]
+        second = _author(fake, name="lin", interpolation="linear")
+        new = fake.tangents[len(before):]
+        main_new = [t for t in new
+                   if t[2] == (second["start_frame"], second["end_frame"])]
+        assert main_new and all(t[3] == "linear" for t in main_new)
+        pins = [t for t in new if t not in main_new]
+        assert pins and all(t[2][0] == t[2][1] for t in pins)   # one frame
+        assert all(t[3] == "flat" and t[4] == "flat" for t in pins)
 
     def test_fractional_frames_and_unbound_skeleton_warn(self, fake):
         fake.bound = False
@@ -469,6 +510,123 @@ class TestSelfContainedTakes:
         assert any("no rest value was recorded" in w and "mid.rotateZ" in w
                    for w in out["warnings"]), out["warnings"]
         assert fake.keys["|root|mid.rotateZ"][32.0] == pytest.approx(0.0)
+
+    def test_a_posed_rig_warns_that_rest_is_not_the_bind_pose(self, fake):
+        """#718 review Fix 4: _capture_rest reads the rig's CURRENT pose,
+        which is the bind pose only when nobody posed the rig first. A
+        create_skeleton rest pose reads zero, so a non-zero capture is the
+        measurable signal that this rig was posed (e.g. via pose_skeleton)
+        before its first clip - and that has to be said, loudly."""
+        fake.attrs["|root|mid.rotateZ"] = 10.0
+        out = _author(fake, name="idle", keys=self._idle())
+        assert any("CURRENT pose" in w and "mid" in w and "10" in w
+                   for w in out["warnings"]), out["warnings"]
+
+    def test_zero_rest_and_root_translation_never_warn(self, fake):
+        """The rest pose that create_skeleton actually produces (all
+        rotations zero) must not warn, and neither must root translation -
+        a rig legitimately sits anywhere - nor a weight channel, which is
+        recorded 0.0 by rule, never captured."""
+        out = _author(fake, name="blinky", keys=[
+            {"time_s": 0.0, "blend_weights": {"blink": 0.0},
+             "root_position": [0.0, 1.0, 0.0]},
+            {"time_s": 1.0, "blend_weights": {"blink": 1.0},
+             "root_position": [0.0, 1.4, 0.0]}])
+        assert not [w for w in out["warnings"] if "CURRENT pose" in w]
+
+    def test_two_joints_sharing_a_short_name_warn_instead_of_guessing(
+            self, fake):
+        """#718 review Fix 3: a collision under `by_short` used to resolve
+        to whichever joint happened to be seen first (`setdefault`),
+        silently pinning/back-filling the WRONG joint. `idle` is authored
+        while there is only one `mid`; a duplicate appears afterwards (an
+        artist duplicating a chain, say) - exactly the scenario where
+        clip metadata (short-name-keyed) can no longer tell the two
+        apart. `walk`, authored after the duplicate exists, must report
+        the ambiguity and skip the pin rather than guess."""
+        _author(fake, name="idle", keys=self._idle())
+        fake.joints.append("|root|mid|tip|mid")
+        out = _author(fake, name="walk", keys=self._walk())
+        assert "mid" not in out["padded_channels"]
+        assert any("mid" in w and "ambiguous" in w for w in out["warnings"]
+                  ), out["warnings"]
+
+    # -- #718 review Fix 5: evaluated-pose tests, not key-placement tests --
+    # FakeCmds.evaluate (above) models what a real animCurve reports between
+    # keys; these tests read THROUGH it, which is the only way to observe
+    # contamination rather than just where keys happen to sit.
+
+    def test_forwards_contamination_evaluates_to_rest_across_the_gap(
+            self, fake):
+        _author(fake, name="idle", keys=self._idle())
+        _author(fake, name="walk", keys=self._walk())
+        # walk owns frames 32..62; mid is not walk's channel, so at every
+        # frame across walk's own range it must read rest (0.0), not
+        # idle's ending pose (45 degrees) bleeding forward.
+        for frame in (32.0, 47.0, 62.0):
+            assert fake.evaluate("|root|mid.rotateZ", frame) == \
+                pytest.approx(0.0)
+
+    def test_backwards_contamination_never_moves_an_earlier_clips_pose(
+            self, fake):
+        _author(fake, name="idle", keys=self._idle())
+        before = [fake.evaluate("|root|mid.rotateZ", f)
+                  for f in (0.0, 10.0, 20.0, 30.0)]
+        _author(fake, name="walk", keys=self._walk())
+        after_walk = [fake.evaluate("|root|mid.rotateZ", f)
+                     for f in (0.0, 10.0, 20.0, 30.0)]
+        assert after_walk == pytest.approx(before)
+        # a third clip introducing a brand-new weight channel must not
+        # move idle's already-measured pose either.
+        _author(fake, name="blinky", keys=[
+            {"time_s": 0.0, "blend_weights": {"blink": 0.0}},
+            {"time_s": 1.0, "blend_weights": {"blink": 1.0}}])
+        after_blinky = [fake.evaluate("|root|mid.rotateZ", f)
+                       for f in (0.0, 10.0, 20.0, 30.0)]
+        assert after_blinky == pytest.approx(before)
+
+    def test_mid_clip_mention_alone_does_not_satisfy_the_boundary_rule(
+            self, fake):
+        """Fix 1's repro: `walk` keys `mid` ONLY at its middle frame, not
+        at either boundary. `mid` being in walk's `mine["joints"]` must
+        NOT exempt it from padding - a channel is only exempt when it
+        already carries a key at the boundary in question. This test must
+        fail (RED) against the pre-fix code, which skips any channel
+        merely because the clip mentions it anywhere."""
+        _author(fake, name="idle", keys=self._idle())
+        out = _author(fake, name="walk", keys=[
+            {"time_s": 0.0, "rotations": {"tip": [0, 0, 0]}},
+            {"time_s": 0.5, "rotations": {"mid": [0, 0, 30]}},
+            {"time_s": 1.0, "rotations": {"tip": [0, 0, 20]}}])
+        start, end = out["start_frame"], out["end_frame"]
+        assert fake.evaluate("|root|mid.rotateZ", float(start)) == \
+            pytest.approx(0.0)
+        assert fake.evaluate("|root|mid.rotateZ", float(end)) == \
+            pytest.approx(0.0)
+
+    def test_reauthor_preserves_a_later_clips_evaluated_pose_and_vacates_cleanly(
+            self, fake):
+        _author(fake, name="idle", keys=self._idle())
+        walk = _author(fake, name="walk", keys=self._walk())
+        start, end = walk["start_frame"], walk["end_frame"]
+        mid_frame = (start + end) / 2.0
+        before = {
+            plug: [fake.evaluate(plug, f)
+                   for f in (float(start), mid_frame, float(end))]
+            for plug in ("|root|mid|tip.rotateZ", "|root|mid.rotateZ")
+        }
+        _author(fake, name="idle", keys=self._idle())   # re-author, no-op for walk
+        after = {
+            plug: [fake.evaluate(plug, f)
+                   for f in (float(start), mid_frame, float(end))]
+            for plug in ("|root|mid|tip.rotateZ", "|root|mid.rotateZ")
+        }
+        assert after == before
+        # the vacated range (idle's original 0-30) carries no keys at all,
+        # on ANY plug.
+        for plug, times in fake.keys.items():
+            assert not any(0.0 <= t <= 30.0 for t in times), \
+                (plug, times)
 
 
 class TestDelete:
