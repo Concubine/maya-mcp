@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from ..dispatcher import HandlerError
 from . import capture, clipmath, naming, render, sculpt, sculpt_math, session, units
@@ -50,17 +50,24 @@ def _points(mesh_long: str) -> List[float]:
     return sculpt.vertex_positions(_cmds(), mesh_long)
 
 
-def clip_meta(cmds, root_long: str) -> Optional[Dict[str, Any]]:
-    """The clip this tool authored on `root_long`, or None. Read from the
-    mcp_clip string attr; a value that fails to parse is reported as name
-    only rather than crashing a guard."""
+def clip_meta(cmds, root_long: str) -> List[Dict[str, Any]]:
+    """The clips this tool authored on `root_long`, in timeline order.
+
+    An empty list when the rig carries none. Reads BOTH stored shapes: the
+    #718 list, and the bare object every scene authored before it (read as
+    one record starting at frame 0 - nothing migrates on disk). A value
+    that fails to parse is reported as name only rather than crashing a
+    guard.
+    """
     if not cmds.attributeQuery(CLIP_ATTR, node=root_long, exists=True):
-        return None
+        return []
     raw = cmds.getAttr("%s.%s" % (root_long, CLIP_ATTR))
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
     except (TypeError, ValueError):
-        return {"name": str(raw) if raw else None}
+        return clipmath.normalized_records(
+            {"name": str(raw)} if raw else None)
+    return clipmath.normalized_records(parsed)
 
 
 def _anim_curves(cmds, plugs: List[str]) -> Dict[str, List[str]]:
@@ -88,8 +95,10 @@ def guard_static_pose(cmds, root_long: str, joints: List[str],
     driven = _anim_curves(cmds, _joint_plugs(joints))
     if not driven:
         return
-    meta = clip_meta(cmds, root_long) or {}
-    label = (" (clip %r)" % meta["name"]) if meta.get("name") else ""
+    records = clip_meta(cmds, root_long)
+    label = ((" (clip%s %s)" % ("s" if len(records) > 1 else "",
+                                ", ".join(repr(r["name"]) for r in records)))
+             if records else "")
     raise HandlerError(
         "%s refuses while animation curves drive this skeleton%s - a static "
         "write here would be overridden on the next frame change"
@@ -215,18 +224,18 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
                      "on repeat in-engine; make the end key match the "
                      "start key, or drop loop")
 
-    meta = clip_meta(cmds, root_long)
+    records = clip_meta(cmds, root_long)
     weight_plugs = ["%s.%s" % (alias_map[a], a) for a in alias_map
                     if not isinstance(alias_map[a], HandlerError)]
     existing = _anim_curves(cmds, _joint_plugs(joints) + weight_plugs)
-    if existing and meta is None:
+    if existing and not records:
         raise HandlerError(
             "this skeleton carries %d hand-authored animation curve "
             "channel(s) this tool did not author (e.g. %s)"
             % (len(existing), sorted(existing)[0]),
             hint="replacing hand-authored animation silently would destroy "
                  "work; delete_clip removes it if that is intended")
-    replaced = meta.get("name") if meta else None
+    replaced = records[0]["name"] if records else None
 
     warnings: List[str] = []
     fractional = clipmath.fractional_frame_times(
@@ -361,19 +370,19 @@ def delete_clip(params: Dict[str, Any]) -> Dict[str, Any]:
 
     root_long = rigging._require_joint(cmds, params.get("root"))
     joints = rigging._hierarchy_joints(cmds, root_long)
-    meta = clip_meta(cmds, root_long)
+    records = clip_meta(cmds, root_long)
     meshes = rigging._bound_meshes(cmds, set(joints))
     alias_map = _weight_alias_map(cmds, meshes)
     weight_plugs = ["%s.%s" % (node, a) for a, node in alias_map.items()
                     if not isinstance(node, HandlerError)]
     driven = _anim_curves(cmds, _joint_plugs(joints) + weight_plugs)
-    if not driven and meta is None:
+    if not driven and not records:
         raise HandlerError(
             "no clip exists on %s" % root_long,
             hint="author_clip creates one; this tool removes it")
 
     warnings: List[str] = []
-    if meta is None and driven:
+    if not records and driven:
         warnings.append(
             "no clip metadata on %s - deleting %d hand-authored curve "
             "channel(s)" % (_short(root_long), len(driven)))
@@ -411,7 +420,7 @@ def delete_clip(params: Dict[str, Any]) -> Dict[str, Any]:
             before[mesh], _points(mesh)))
     return {
         "root": root_long,
-        "clip": meta.get("name") if meta else None,
+        "clip": records[0]["name"] if records else None,
         "deleted_curves": len(doomed),
         "max_displacement": max_disp,
         "warnings": warnings,
@@ -430,11 +439,12 @@ def preview_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     from . import rigging  # noqa: PLC0415
 
     root_long = rigging._require_joint(cmds, params.get("root"))
-    meta = clip_meta(cmds, root_long)
-    if meta is None or not meta.get("name"):
+    records = clip_meta(cmds, root_long)
+    if not records or not records[0].get("name"):
         raise HandlerError(
             "no clip exists on %s" % root_long,
             hint="author_clip creates one; preview_clip renders it")
+    meta = records[0]
     name = params.get("name")
     if name != meta["name"]:
         raise HandlerError(

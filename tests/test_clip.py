@@ -323,6 +323,29 @@ class TestAuthor:
         assert any("between frames" in w for w in out["warnings"])
         assert any("moves no mesh" in w for w in out["warnings"])
 
+    def test_clip_meta_reads_both_stored_shapes(self, fake):
+        """#718: the attr is a LIST now, and a bare object (every scene
+        authored before this change) reads as one record at frame 0."""
+        _author(fake, name="idle")
+        records = clip.clip_meta(fake, "|root")
+        assert [r["name"] for r in records] == ["idle"]
+        assert records[0]["start_frame"] == 0
+        assert records[0]["end_frame"] == 30
+        # the legacy shape, written by hand the way an old scene holds it
+        fake.string_attrs["|root"]["mcp_clip"] = json.dumps(
+            {"name": "old", "fps": 30, "duration_s": 1.0, "loop": False,
+             "interpolation": "linear", "joints": ["mid"],
+             "weight_channels": [], "root_position_used": False})
+        records = clip.clip_meta(fake, "|root")
+        assert [r["name"] for r in records] == ["old"]
+        assert records[0]["start_frame"] == 0 and records[0]["end_frame"] == 30
+        # unparseable is still name-only, still never a crash
+        fake.string_attrs["|root"]["mcp_clip"] = "{not json"
+        assert [r["name"] for r in clip.clip_meta(fake, "|root")] == ["{not json"]
+        # no attr at all is an empty list, not None
+        fake.string_attrs["|root"].pop("mcp_clip")
+        assert clip.clip_meta(fake, "|root") == []
+
 
 class TestDelete:
     def test_no_clip_refuses(self, fake):

@@ -335,7 +335,10 @@ def _scene_clip(cmds):
             "%d skeletons carry a clip (%s) - one file is one take"
             % (len(roots), ", ".join(r.split("|")[-1] for r in roots)),
             hint="delete_clip the skeletons not being exported")
-    meta = clip_mod.clip_meta(cmds, roots[0]) or {}
+    records = clip_mod.clip_meta(cmds, roots[0])
+    if not records:
+        return None
+    meta = dict(records[0])
     meta["root"] = roots[0].split("|")[-1]
     return meta
 
