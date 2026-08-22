@@ -444,11 +444,21 @@ def anim_violations(afacts, declared) -> List[str]:
     # attributed to "Take 001" or to no take are excluded on purpose: they
     # duplicate a named take's own channels at the whole-file span, and
     # letting them satisfy a per-take check would silently readmit the
-    # exact ambiguity attribution exists to remove.
+    # exact ambiguity attribution exists to remove. The "Take 001" half of
+    # this guard is belt-and-braces, not load-bearing: by_take_target is
+    # keyed on the DECLARED clip name below, and the clip-name regex
+    # forbids spaces, so no declared clip can ever be named "Take 001" and
+    # collide with it. .get, not [], so a targets dict from before
+    # attribution existed reports a violation instead of a KeyError.
     by_take_target = {}
     for t in afacts["targets"]:
-        if t["take"] is None or t["take"] == "Take 001":
+        if t.get("take") is None or t["take"] == "Take 001":
             continue
+        # setdefault collapses any remaining duplicate under one (take,
+        # target, property) key. Safe today because every AnimationStack
+        # this exporter writes owns exactly one AnimationLayer - two curve
+        # nodes can only land on the same key by genuinely being the same
+        # plug in the same take.
         by_take_target.setdefault((t["take"], t["target"], t["property"]), t)
     union = clipmath.channel_union(declared["clips"])
     for record in declared["clips"]:
@@ -502,15 +512,17 @@ def anim_clip_facts(afacts, declared) -> List[Dict[str, Any]]:
     Task 10b: a multi-take file carries a separate curve record per plug
     PER TAKE, not one collapsed record - see anim_violations's docstring
     for the measured shape). A clip whose take is absent reports a null
-    range and 0 curves rather than an invented count - anim_violations is
-    what fails the export for it."""
+    range - the curve count is looked up per channel from that same
+    (missing) take, so it comes out 0 for the identical reason, not from a
+    separate invented default. anim_violations is what fails the export
+    for it."""
     fps = float(declared["fps"])
     by_take = {}
     for take in afacts["takes"]:
         by_take.setdefault(take["name"], take)
     by_take_target = {}
     for t in afacts["targets"]:
-        if t["take"] is None:
+        if t.get("take") is None:
             continue
         by_take_target.setdefault((t["take"], t["target"], t["property"]), t)
     out = []

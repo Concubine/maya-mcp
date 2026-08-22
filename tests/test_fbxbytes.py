@@ -14,6 +14,7 @@ by evals/fbx_probe_live.py, which hands the same bytes to Maya and compares
 world-space vertex positions; nothing headless can establish that.
 """
 
+import collections
 import os
 
 import pytest
@@ -426,3 +427,43 @@ class TestAnimFacts:
         assert out == {"stacks": 0, "layers": 0, "curves": 0,
                        "curve_nodes": 0, "takes": [], "targets": [],
                        "unavailable_reason": None}
+
+
+class TestAnimFactsFromTheCommittedArtifact:
+    """#718 Task 10b: the two elif arms this fix added to read_fbx's
+    connection loop (curve node -> layer, layer -> stack) are what the
+    whole attribution fix rests on, and until now nothing exercised them -
+    TestAnimFacts above hand-builds FbxFacts and never calls read_fbx, and
+    the only fixture test_fbxbytes.py read (skinned_cylinder.fbx) carries
+    no animation at all. This reads a real multi-take FBX through the
+    actual binary parser, so a broken connection arm (wrong record name, a
+    swapped child/parent, a typo in the uid lookup) fails here even though
+    the synthetic tests above would stay green.
+    """
+
+    def _anim(self):
+        facts = fbxbytes.read_fbx(
+            os.path.join(REPO, "evals", "clip_live", "idle.fbx"))
+        return fbxbytes.anim_facts(facts)
+
+    def test_every_curve_node_is_fully_attributed(self):
+        out = self._anim()
+        assert out["curve_nodes"] > 0
+        assert out["unavailable_reason"] is None
+        # A None here means the layer/stack chain failed to resolve for
+        # that row - the exact failure this test exists to catch.
+        assert all(t["take"] is not None for t in out["targets"])
+
+    def test_the_take_names_are_read_from_the_bytes_not_assumed(self):
+        """Maya's own default take always rides along with the named one
+        (see clip_live.py's module docstring) - both must come out of the
+        AnimationCurveNode -> AnimationLayer -> AnimationStack chain, not
+        from a hardcoded guess."""
+        out = self._anim()
+        histogram = collections.Counter(t["take"] for t in out["targets"])
+        assert set(histogram) == {"Take 001", "idle"}
+        # Every plug is keyed once per take, so the two takes' curve-node
+        # counts must match exactly - a stray/missing connection would
+        # unbalance them.
+        assert histogram["Take 001"] == histogram["idle"] > 0
+        assert {t["name"] for t in out["takes"]} == {"Take 001", "idle"}

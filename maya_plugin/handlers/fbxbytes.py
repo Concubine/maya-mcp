@@ -775,6 +775,7 @@ def anim_facts(facts):
         "curve_nodes": len(facts.anim_nodes),
         "takes": takes,
         "targets": sorted(targets,
-                          key=lambda e: (e["target"] or "", e["property"])),
+                          key=lambda e: (e["target"] or "", e["property"],
+                                        e["take"] or "")),
         "unavailable_reason": "; ".join(reasons) or None,
     }

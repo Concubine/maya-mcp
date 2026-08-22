@@ -239,29 +239,46 @@ def out(name):
     return os.path.join(OUT_DIR, name)
 
 
-def by_target(anim, label):
-    """{(target, property): fact}, but only after the duplicates agree.
+def by_target(anim, take_name):
+    """{(target, property): fact} for `take_name`'s own rows, after checking
+    each one against Take 001's row for the same (target, property).
 
-    anim_facts emits one row per (target, property) PER STACK, and an
-    animated export carries two stacks - so every row appears twice (the
-    idle's 26 curves are 13 x 2). Collapsing into a dict keeps whichever
-    row came last and says nothing, which would hide a disagreement
-    between the stacks at exactly the place the byte gate reads its
-    numbers. Assert they agree, then collapse.
+    anim_facts emits one row per (target, property) PER TAKE (#718 Task
+    10b: a curve node exists once under the named take and again under
+    Maya's own always-present default "Take 001"), so every plug in a
+    single-clip export appears twice - the idle's 26 curves are 13 x 2.
+    The two rows now carry different "take" fields by construction, so
+    comparing them whole (as this used to) clashes on every duplicate -
+    measured 53/53 clashes reading the committed evals/clip_live/walk.fbx
+    fixture before this fix. The invariant that matters is that the named
+    take's row agrees with Take 001's on everything BUT which take it
+    belongs to (both single clips here span the same range), so compare
+    with "take" excluded and collapse only the named take's rows for
+    callers, which is what every caller here keys lookups on.
     """
-    by = {}
-    clashes = []
+    named = {}
+    take001 = {}
     for row in anim["targets"]:
         key = (row["target"], row["property"])
-        if key in by and by[key] != row:
-            clashes.append("%s: %s != %s" % (key, json.dumps(by[key]),
-                                             json.dumps(row)))
-        by[key] = row
-    check("%s: the duplicate per-stack target rows agree before collapsing"
-          % label, not clashes,
+        if row["take"] == take_name:
+            named[key] = row
+        elif row["take"] == "Take 001":
+            take001[key] = row
+    clashes = []
+    for key, row in named.items():
+        other = take001.get(key)
+        if other is None:
+            continue
+        stripped_row = {k: v for k, v in row.items() if k != "take"}
+        stripped_other = {k: v for k, v in other.items() if k != "take"}
+        if stripped_row != stripped_other:
+            clashes.append("%s: %s != %s" % (key, json.dumps(stripped_other),
+                                             json.dumps(stripped_row)))
+    check("%s: the named take's rows agree with Take 001's, take excluded"
+          % take_name, not clashes,
           "; ".join(clashes[:2]) or "%d rows -> %d (target, property) pairs"
-          % (len(anim["targets"]), len(by)))
-    return by
+          % (len(anim["targets"]), len(named)))
+    return named
 
 
 def take_named(anim, name):

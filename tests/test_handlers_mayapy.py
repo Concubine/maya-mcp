@@ -3797,19 +3797,35 @@ class TestMultiTakeExportInMaya:
                     (frame, attr)
 
     def _export_bypassing_the_gate(self, cmds, mel, path, nodes, declared):
-        """Writes the FBX exactly the way export_fbx does (same MEL, same
-        preamble constants, same bake-range/split-into-takes calls) but
-        WITHOUT export_fbx's anim_violations gate on top.
+        """Writes the FBX the way export_fbx does - same MEL, same preamble
+        constants, same bake-range/split-into-takes calls, reusing
+        export.py's own exposed constants (FBX_PREAMBLE_MEL etc. - the
+        same ones evals/maya_export.py composes from, per export.py's
+        module docstring) rather than re-deriving the MEL, so those parts
+        cannot silently drift from what export_fbx actually sends the
+        exporter - but WITHOUT export_fbx's anim_violations gate on top,
+        and without its forced fbxmaya unloadPlugin/loadPlugin reload
+        (export.py: the bundled FBX plugin caches the scene's frame rate at
+        LOAD time, so the reload exists to make it re-read a possibly-
+        changed fps before every animated export). Omitting the reload is
+        acceptable ONLY because every caller in this class shares one
+        session-scoped mayapy process (module docstring) in which a real,
+        reload-triggering export_fbx call has already run at 30 fps before
+        any of these bypass exports - TestClipExportInMaya::
+        test_the_measurements, earlier in this file, is that call - so the
+        plugin's cached fps already matches this class's own 30 fps
+        scenes. A bypass call run first, in a fresh process, or against a
+        scene at a different fps would bake at the wrong rate silently.
 
-        Exists only because the gate itself is what this class's item 3
-        measured as non-deterministic (see the class docstring): calling
-        the real export.export_fbx() on a multi-take scene sometimes
-        raises for a scene that is not actually wrong, so a test that
-        needs to inspect the RAW bytes reliably cannot go through it. This
-        reuses export.py's own exposed constants (FBX_PREAMBLE_MEL etc. -
-        the same ones evals/maya_export.py composes from, per export.py's
-        module docstring) rather than re-deriving the MEL, so it cannot
-        silently drift from what export_fbx actually sends the exporter.
+        Exists because export.anim_violations is what this class's item 3
+        originally measured as non-deterministic before #718 Task 10b's
+        take-attribution fix (see the class docstring): a test that needs
+        to inspect the RAW per-take curve records - the exact ambiguity
+        the gate now resolves - cannot go through the gate itself without
+        either depending on that fix already being correct or spending one
+        of the shared process's scarce reload-cycle budget (see
+        test_the_real_gate_passes_a_two_clip_export's docstring) on a call
+        whose gate outcome isn't what the test is checking.
         """
         from maya_plugin.handlers import export as export_mod, fbxbytes
 
@@ -4007,20 +4023,24 @@ class TestMultiTakeExportInMaya:
         clip.delete_clip({"root": root})   # scene-persistence teardown
 
     def test_a_named_delete_leaves_the_other_take_exportable(self, tmp_path):
-        """MEASURED CORRECTION: the brief's version of this test called
-        the real export.export_fbx() gate directly - and delete_clip does
-        NOT re-pack a surviving clip's frame range (clip.py: "Gaps are
-        NOT re-packed"), so walk keeps end_frame=62 and declared span_frames
-        stays 62 even with idle gone. That means mw_tip (walk's own
-        channel) STILL carries the same segmented duplicate-record
-        ambiguity item 3 measured - a "Take 001" duplicate spanning 0-62
-        (63 keys) and a "walk" duplicate spanning 32-62 (31 keys) - so this
-        exact call was measured to fail the gate too (mw_tip bakes 31,
-        expected 63), non-deterministically, on this task's whole-file
-        run. Rewritten on the bypass helper so this test verifies what it
-        is actually FOR - that a named delete leaves the surviving clip's
-        take in the file and the deleted one's name gone - without
-        depending on the gate's measured-broken first-wins pick.
+        """Stays on the bypass helper, but NOT because the gate is broken:
+        #718 Task 10b fixed export.anim_violations's non-deterministic
+        first-wins collapse in this same commit (see
+        test_the_real_gate_passes_a_two_clip_export, which calls the real
+        gate on a two-clip scene and passes). The reason left is budget,
+        not correctness: this shared mayapy process (module docstring)
+        only has room for ONE more `export_fbx` call whose
+        include_animation=True forces fbxmaya's unloadPlugin/loadPlugin
+        reload cycle (#695) before the running total of such cycles across
+        the whole process crashes `maya.standalone.uninitialize()` at
+        session end (see that same test's docstring for the measured
+        running-total budget: 2 clean, 3 crashes, reproduced 3/3). That one
+        remaining call is already spent by
+        test_the_real_gate_passes_a_two_clip_export earlier in this class,
+        so this test verifies what it is actually FOR - that a named
+        delete leaves the surviving clip's take in the file and the
+        deleted one's name gone - on the bypass helper instead of spending
+        a reload cycle the process does not have.
         """
         import maya.cmds as cmds
         import maya.mel as mel

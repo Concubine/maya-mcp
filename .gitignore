@@ -46,3 +46,7 @@ evals/image_tools_live/
 evals/golem_rerun_665/out/checkpoints/
 evals/golem_rerun_665/out_v3/checkpoints/
 evals/lizard_run/checkpoints/
+
+# #718 Task 10b determinism probe: the per-run FBXs it writes are throwaway,
+# rebuilt on every run of evals/clip_export_determinism_live.py
+evals/clip_export_determinism_live/
