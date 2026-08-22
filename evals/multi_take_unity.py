@@ -33,6 +33,15 @@ Usage:
     uv run python evals/multi_take_unity.py --measurements m.json
 Exit: 0 pass, 1 fail.
 
+THE SCRATCH PROJECT ALREADY EXISTS on this machine, at
+`D:\devel\unity-mt718-scratch` (Unity 6000.0.47f1, with
+`com.coplaydev.unity-mcp` pulled from the same git URL Demigol's manifest
+uses). Open it and its MCP bridge connects; there is no need to build a new
+one. Creating it from scratch is `Unity.exe -createProject <path> -batchmode
+-quit`, then adding that one dependency to `Packages/manifest.json`, then
+opening the project so the package resolves. Do NOT point this gate at
+Demigol - see above.
+
 MEASURED: run once against a real Unity editor (2026-08-22). Length check:
 Unity reported wave 1.500000s, idle 2.000000s, step 1.200000s against
 Maya's declared ranges, max delta 4.8e-07s - well inside LENGTH_TOL_S.
