@@ -2355,3 +2355,86 @@ git add evals/multi_take_unity.py && git commit -m "test(#718): consumer gate - 
 - Redmine #718: comment with the measured gate results, then Resolved.
 - Deploy the plugin and record the stamp; the user's Mayas hold the old modules until they restart (`ping` will say `restart_required`).
 - `evals/golem_rerun_665/out_v4/` is ANOTHER AGENT'S in-flight work: never commit, clean, or edit it.
+
+---
+
+### Task 10b: take attribution — the correction Task 10's measurement forced
+
+**Why this task exists.** Task 10 measured the real exporter and found the gate's core assumption false. Task 8 assumed ONE curve record per plug spanning the whole bake range. Reality: a two-clip file carries **three** `AnimationCurveNode` records per plug — one full-span record belonging to Maya's own `Take 001` (63 keys over frames 0-62), and one per named take carrying that take's own range (31 keys each). `export.anim_violations` collapses them with `by.setdefault((target, property), t)`, first-wins, and which record is "first" is decided by an FBX-internal UID that is **not stable across identical exports**: 8 back-to-back exports of one scene measured **6 passes and 2 failures**. The shipped gate randomly refuses correct files. This must be fixed before any live gate can mean anything.
+
+**The data needed is already parsed and thrown away.** `maya_plugin/handlers/fbxbytes.py:364` drops the `AnimationCurveNode`→`AnimationLayer` and `Layer`→`Stack` connections, with a comment claiming membership "adds nothing a violation would read". Task 10's measurement falsifies that comment: membership is exactly what a violation needs.
+
+**Files:**
+- Modify: `maya_plugin/handlers/fbxbytes.py` (`read_fbx`'s record walk and connection loop; `anim_facts`)
+- Modify: `maya_plugin/handlers/export.py` (`anim_violations`, `anim_clip_facts`)
+- Modify: `src/maya_mcp/schemas.py` (`AnimCurveTarget` gains the take field)
+- Modify: `docs/protocol.md` (the byte-gate paragraph)
+- Test: `tests/test_fbxbytes.py`, `tests/test_export_fbx.py`, `tests/test_handlers_mayapy.py`
+
+**Interfaces:**
+- Produces: every `anim_facts(...)["targets"]` entry gains `take: Optional[str]` — the name of the `AnimationStack` whose layer owns that curve node, or `None` when the file carries no attribution. Reading, not policy.
+- `anim_violations` checks, per declared clip, the curve records attributed to THAT take.
+- `anim_clip_facts` counts a clip's curves from its own take's records.
+
+**The per-take contract, from Task 10's measured numbers:** for a take spanning `start_frame..end_frame`, every channel ANY clip on the rig declares carries a curve record attributed to that take with `end_frame - start_frame + 1` keys. The self-contained rule guarantees every channel is keyed in every take's range, so the channel set is the union — what changes is that the key count is now the TAKE's own span, not the whole file's. Records attributed to `Take 001` or to no take remain non-violations, the same rule that already tolerates extra takes.
+
+- [ ] **Step 1: Write the failing reader test**
+
+In `tests/test_fbxbytes.py`, beside the existing anim tests:
+
+```python
+    def test_a_curve_node_reports_the_take_it_belongs_to(self):
+        """#718 Task 10 MEASURED: a multi-take file carries one curve node
+        per plug PER TAKE, plus the full-span one belonging to Maya's own
+        default take. Without attribution the gate cannot tell them apart,
+        and which one it happens to read is decided by an unstable UID."""
+        facts = self._facts()
+        tick = fbxbytes.KTIME_PER_SECOND
+        facts.anim_stacks_by_uid = {70: "Take 001", 71: "idle", 72: "walk"}
+        facts.anim_layers_by_uid = {80: 70, 81: 71, 82: 72}
+        facts.anim_curves[20] = {"key_count": 31, "first_tick": 0,
+                                 "last_tick": tick}
+        facts.anim_nodes[20]["layer"] = 80          # the full-span one
+        facts.anim_nodes[21] = {"name": "R", "target": 1,
+                                "target_kind": "model",
+                                "property": "Lcl Rotation", "curves": [20],
+                                "layer": 81}
+        by_take = {t["take"]: t for t in fbxbytes.anim_facts(facts)["targets"]}
+        assert "idle" in by_take
+        assert by_take["idle"]["property"] == "Lcl Rotation"
+```
+
+Adapt the fixture to whatever shape `read_fbx` actually produces once Step 3 lands — the point is that `targets` entries carry a `take` name, and that a node with no layer reports `None`.
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `uv run pytest tests/test_fbxbytes.py -k take_it_belongs -q`
+Expected: FAIL — `targets` entries have no `take` key.
+
+- [ ] **Step 3: Keep the attribution the reader already parses**
+
+In `read_fbx`: record each `AnimationStack`'s uid and name (it currently only increments a counter), each `AnimationLayer`'s uid, and in the connection loop keep the two arms that are currently dropped — curve-node→layer and layer→stack. Add the resolved layer/stack to each `anim_nodes` entry. Keep `anim_stacks` and `anim_layers` reporting exactly what they report today so existing assertions do not move.
+
+In `anim_facts`, resolve each curve node's layer to its stack's NAME and put it on the target entry as `take`. `None` when the chain is absent — never a guess, never a default.
+
+- [ ] **Step 4: Rework the policy to check per take**
+
+In `export.anim_violations`, replace the single `by[(target, property)]` map with a per-take map `by[(take, target, property)]`, and for each declared clip check its own take's records at `end_frame - start_frame + 1` keys. Records belonging to `Take 001` or to no take are ignored, not flagged. Keep every other check as it is: the by-name take lookup, the start/stop comparison at half-frame tolerance, the overlap and duplicate-name checks, and the zero-curves assertion when `include_animation` is false.
+
+In `anim_clip_facts`, count each clip's `curves` from its own take's records.
+
+Write the measured numbers from `.superpowers/sdd/t718-10-report.md` into the comments — the three-records-per-plug shape and the 6-pass/2-fail non-determinism are why this code looks the way it does.
+
+- [ ] **Step 5: Restore end-to-end gate coverage in the mayapy battery**
+
+Task 10 routed its measurements through `TestMultiTakeExportInMaya._export_bypassing_the_gate` because the real gate was non-deterministic. With the gate fixed, add a test that calls the REAL `export.export_fbx` on a two-clip scene and passes — and run it repeatedly (at least 6 consecutive exports in one process, the shape that exposed the 6/2 split) asserting every one passes. Keep the bypass helper for the raw-record measurements that genuinely need it.
+
+- [ ] **Step 6: Run both suites and commit**
+
+Run: `E:\Autodesk\Maya2027\bin\mayapy.exe -m pytest tests/test_handlers_mayapy.py -q --junitxml=%TEMP%\t10b-mayapy.xml`
+Run: `uv run pytest tests/ --junitxml=%TEMP%\t10b.xml -q`
+Expected: both green, headless at 1385+ and mayapy at 161+.
+
+```bash
+git add maya_plugin/handlers/fbxbytes.py maya_plugin/handlers/export.py src/maya_mcp/schemas.py docs/protocol.md tests/ && git commit -m "fix(#718): attribute curve records to their take so the gate stops guessing"
+```
