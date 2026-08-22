@@ -5,10 +5,14 @@ so a joint any clip does not declare would otherwise hold whatever a
 neighbour left on it. author_clip pins every channel at each clip's own
 boundary frames to prevent that, in BOTH directions:
 
-    idle  - spine/chest sway only, 2.0 s, loop
-    wave  - one arm only (R_shoulder/R_elbow), 1.5 s - touches NO joint
-            idle declares, which is what makes the contamination checks
-            below meaningful rather than accidental
+    idle  - spine/chest sway only, 2.0 s, loop closing on a NON-rest -3
+            degree base pose (not 0) - a rest-valued boundary would make
+            "idle's joints sit at rest in a later clip's range" pass
+            whether or not the forward pin ran
+    wave  - one arm only (R_shoulder/R_elbow), 1.5 s, starting MID-GESTURE
+            (not the rest T-pose) - touches NO joint idle or step
+            declares, and its non-rest first key is what a missing
+            backward pin would visibly leak into idle's range
     step  - hips/legs plus root_position, 1.2 s, loop - root_position is
             the BACKWARDS case: neither idle nor wave ever uses it, so its
             introduction here is what proves the backward pin actually
@@ -27,12 +31,20 @@ Measured checks (this script) + judged sheets (the acceptance):
        measured at rest (rest_probe) - the case clip_live's docstring
        calls "a channel this clip never mentions would hold whatever a
        neighbour left on it"
-    3  backward contamination: clip idle's per-frame vertex displacement,
-       measured by independently walking its OWN frames (probe_
-       displacement, not author_clip's sparse per_key sample) BEFORE step
-       exists and again AFTER - identical is the only correct answer,
-       because idle never used root_position and step is what introduces
-       it
+    3  backward contamination: clip idle's per-frame mesh state, measured
+       by independently walking its OWN frames (probe_displacement, not
+       author_clip's sparse per_key sample) BEFORE step exists and again
+       AFTER - idle never used root_position and step is what introduces
+       it. Two series are compared: max_displacement (against idle's own
+       first frame - a fine liveness check, but a CONSTANT offset cancels
+       out of it under linear blend skinning, so it cannot actually catch
+       a missing backward pin) and centroid (an ABSOLUTE per-frame
+       position - a constant offset does NOT cancel here, which is what
+       makes it the actual proof; #718 review Fix 1)
+    3b forward contamination's one un-probed direction: step's own last
+       key equals its first (loop close) at a NON-rest pose, so its hold
+       forward into whatever clip follows it (wave, in the final layout)
+       is checked the same way (#718 review Fix 2)
     4  re-authoring the MIDDLE clip (wave) moves it to the tail; idle's
        and step's own keyframe times AND values, read back independently
        (capture_keys), are byte-identical before and after
@@ -40,15 +52,18 @@ Measured checks (this script) + judged sheets (the acceptance):
        and step's own keys still byte-identical to the captured state;
        wave is then re-authored to restore all three clips for export
     6  export with include_animation=true: the three declared takes are
-       present by name with the right start_s/stop_s, EVERY joint of
-       EVERY declared clip carries a curve record attributed to that take
-       with the right key count for that take's OWN span (not a
-       two-channel spot check - #718 Task 11's review found that gap),
-       and an independent byte re-read (fbxbytes) agrees with the tool's
-       own report
-    7  preview_clip renders each of the three clips - JUDGED: idle's
-       sheet must show a still arm and still legs, wave's a still spine
-       and still legs, step's a still spine and still arm
+       present by name with the right start_s/stop_s, EVERY joint of the
+       RIG's channel UNION (clipmath.channel_union - every channel any
+       clip touches, not just each take's own declared joints - #718
+       review Fix 3) carries a curve record attributed to EVERY take with
+       the right key count for that take's OWN span, and an independent
+       byte re-read (fbxbytes) agrees with the tool's own report
+    7  preview_clip renders each of the three clips - JUDGED (idle's sheet
+       must show a still arm and still legs, wave's a still spine and
+       still legs, step's a still spine and still arm) AND ASSERTED: every
+       rendered frame lies inside that clip's own declared range (#718
+       review Fix 4 - on a shared timeline, rendering a NEIGHBOUR's frames
+       is exactly the multi-take failure mode)
 
 Rotation literals for the legs/hips/root reuse clip_live.WALK_KEYS'
 hip/knee/ankle/root_position table verbatim (arms/shoulders dropped) -
@@ -80,12 +95,12 @@ sys.path.insert(0, _HERE)
 
 from humanoid_live import JOINTS, MESH, PARTS  # noqa: E402
 from live_call import call, structured_result  # noqa: E402
-from maya_plugin.handlers import fbxbytes  # noqa: E402
+from maya_plugin.handlers import clipmath, fbxbytes  # noqa: E402
 from maya_plugin.handlers.clip import CLIP_ATTR  # noqa: E402
 
 PORT = int(os.environ.get("MAYA_MCP_PORT", "9878"))
 OUT_DIR = os.path.join(_HERE, "multi_take_live")
-JOINT_COUNT = 20
+JOINT_COUNT = len(JOINTS)
 
 # The rig's build-time root position (humanoid_live.JOINTS) - a joint's
 # rest pose before any clip poses it. Used as the expected value when a
@@ -125,23 +140,46 @@ STEP_FPS = 30
 # every number being green - a false pass this fix corrects two ways:
 # preview_clip's angle is "side" below (not "front"), and the amplitude is
 # widened to a clearly-legible lean.
+#
+# #718 review Fix 2: the loop closes on a -3 degree base pose, NOT on 0.
+# A loop only requires first key == last key (clipmath.loop_violations),
+# never that either equal rest - and rest (0) is exactly the value the
+# forward-contamination pins put on spine_01/chest inside wave's and
+# step's ranges. With idle's own boundary AT 0 too, "idle's joints sit at
+# rest in a later clip's range" passed whether or not the forward pin ran
+# (the curve would hold 0 forward regardless). Shifting the whole cycle by
+# a constant -3 degrees keeps every displacement-based assertion below
+# unchanged (each key's *relative* motion from the cycle's own base is
+# identical to before) while making idle's un-padded hold-forward value
+# (-3 degrees) provably different from the rest value (0 degrees) the pin
+# is required to write instead.
 IDLE_KEYS = [
     {"time_s": 0.0,
-     "rotations": {"spine_01": [0, 0, 0], "chest": [0, 0, 0]}},
+     "rotations": {"spine_01": [0, -3, 0], "chest": [0, -3, 0]}},
     {"time_s": 0.5,
-     "rotations": {"spine_01": [0, -10, 0], "chest": [0, -10, 0]}},
+     "rotations": {"spine_01": [0, -13, 0], "chest": [0, -13, 0]}},
     {"time_s": 1.0,
-     "rotations": {"spine_01": [0, 0, 0], "chest": [0, 0, 0]}},
+     "rotations": {"spine_01": [0, -3, 0], "chest": [0, -3, 0]}},
     {"time_s": 1.2,
-     "rotations": {"spine_01": [0, 4, 0], "chest": [0, 4, 0]}},
+     "rotations": {"spine_01": [0, 1, 0], "chest": [0, 1, 0]}},
     {"time_s": 2.0,
-     "rotations": {"spine_01": [0, 0, 0], "chest": [0, 0, 0]}},
+     "rotations": {"spine_01": [0, -3, 0], "chest": [0, -3, 0]}},
 ]
 
 # wave: one arm only. Deliberately touches no joint idle or step declare.
+#
+# #718 review Fix 2: the FIRST key starts mid-gesture (arm already
+# raised), not at the rest T-pose (0,0,0). wave's first key is the value
+# the BACKWARD pin must write across idle's whole range when wave
+# introduces R_shoulder/R_elbow - with a rest-valued first key, "idle's
+# range: wave's joints sit at rest" passed whether or not that pin ran (a
+# curve holds its first key backward in time regardless, and that key was
+# already rest). A non-rest first key ([0,0,-40]/[0,0,20]) makes the
+# un-pinned backward hold (a raised arm) measurably different from the
+# rest the pin is required to write instead.
 WAVE_KEYS = [
     {"time_s": 0.0,
-     "rotations": {"R_shoulder": [0, 0, 0], "R_elbow": [0, 0, 0]}},
+     "rotations": {"R_shoulder": [0, 0, -40], "R_elbow": [0, 0, 20]}},
     {"time_s": 0.5,
      "rotations": {"R_shoulder": [0, 0, -70], "R_elbow": [0, 0, 35]}},
     {"time_s": 1.0,
@@ -182,9 +220,23 @@ STEP_KEYS = [
      "root_position": [0.0, 0.97, 0.0]},
 ]
 
-IDLE_JOINTS = ["spine_01", "chest"]
-WAVE_JOINTS = ["R_shoulder", "R_elbow"]
-STEP_JOINTS = ["L_hip", "R_hip", "L_knee", "R_knee", "L_ankle", "R_ankle"]
+def _joints_of(keys):
+    return sorted({j for k in keys for j in k["rotations"]})
+
+
+# #718 review Fix 5: derived from the KEYS tables themselves, not
+# hand-duplicated - a joint added to one table without updating the
+# matching list here would silently go unprobed by rest_probe below.
+IDLE_JOINTS = _joints_of(IDLE_KEYS)
+WAVE_JOINTS = _joints_of(WAVE_KEYS)
+STEP_JOINTS = _joints_of(STEP_KEYS)
+
+# The gate's entire premise: each clip's declared joints are disjoint from
+# the other two, so a rest_probe reading joint X inside a clip that never
+# declares it is unambiguously testing contamination, not a shared channel.
+assert not set(IDLE_JOINTS) & set(WAVE_JOINTS), "idle/wave joints overlap"
+assert not set(IDLE_JOINTS) & set(STEP_JOINTS), "idle/step joints overlap"
+assert not set(WAVE_JOINTS) & set(STEP_JOINTS), "wave/step joints overlap"
 
 CHECKS = []
 
@@ -257,7 +309,8 @@ def check_layout(tag, records, require_exact_gap):
         check("%s: %d clips do not overlap" % (tag, len(ordered)),
               len(ordered) == 3 and disjoint, detail)
         return
-    exact_gap = all(ordered[i]["start_frame"] == ordered[i - 1]["end_frame"] + 2
+    exact_gap = all(ordered[i]["start_frame"]
+                    == ordered[i - 1]["end_frame"] + clipmath.GAP_FRAMES + 1
                     for i in range(1, len(ordered)))
     check("%s: %d clips are contiguous with a 1-frame gap and do not overlap"
           % (tag, len(ordered)), len(ordered) == 3 and exact_gap and disjoint,
@@ -304,12 +357,28 @@ def capture_keys(tag, joints, meta, root=None):
 
 
 def probe_displacement(tag, meta, stride=3):
-    """Per-frame max vertex displacement of MESH across `meta`'s OWN frame
-    range against its own first frame - the same measurement author_clip's
-    per_key makes, taken INDEPENDENTLY (a fresh currentTime walk, not a
-    read of anything the tool itself computed) and over every sampled
-    frame rather than just the authored key times, so a leak that only
-    shows up between keys is not invisible to it."""
+    """Per-frame measurement of MESH across `meta`'s OWN frame range,
+    independent of anything author_clip itself computed (a fresh
+    currentTime walk, over every sampled frame rather than just the
+    authored key times, so a leak that only shows up between keys is not
+    invisible to it). Two quantities per frame:
+
+      max_displacement - vertex movement against the range's OWN first
+        frame. The same measurement author_clip's per_key makes; a fine
+        liveness check, but NOT the backward-contamination proof (see
+        centroid below).
+
+      centroid - the mesh's ABSOLUTE average vertex position. #718 review
+      Fix 1: under linear blend skinning, P_f - P_0 = sum_i w_i(M_i(f) -
+      M_i(0)), so any transform that is CONSTANT across the whole range
+      (exactly what a curve holding a neighbour's key backward in time
+      produces) contributes zero to that difference - max_displacement
+      reads identical whether or not the backward pin ran, at every frame,
+      by construction. centroid is an ABSOLUTE quantity: a constant
+      offset does NOT cancel out of it, which is what makes comparing
+      centroid before/after a later clip is authored an actual proof of
+      the backward-pin guard, not a self-consistent-either-way check.
+    """
     start, end = int(meta["start_frame"]), int(meta["end_frame"])
     frames = list(range(start, end + 1, stride))
     if frames[-1] != end:
@@ -327,6 +396,8 @@ def probe_displacement(tag, meta, stride=3):
         "    _cur = cmds.xform(_mesh + '.vtx[*]', query=True,"
         " worldSpace=True, translation=True)\n"
         "    _worst = 0.0\n"
+        "    _n = len(_cur) // 3\n"
+        "    _cx = _cy = _cz = 0.0\n"
         "    for _i in range(0, len(_cur), 3):\n"
         "        _dx = _cur[_i] - _base[_i]\n"
         "        _dy = _cur[_i + 1] - _base[_i + 1]\n"
@@ -334,11 +405,21 @@ def probe_displacement(tag, meta, stride=3):
         "        _d = (_dx * _dx + _dy * _dy + _dz * _dz) ** 0.5\n"
         "        if _d > _worst:\n"
         "            _worst = _d\n"
-        "    _out.append({'frame': _f, 'max_displacement': round(_worst, 6)})\n"
+        "        _cx += _cur[_i]\n"
+        "        _cy += _cur[_i + 1]\n"
+        "        _cz += _cur[_i + 2]\n"
+        "    _out.append({'frame': _f, 'max_displacement': round(_worst, 6),"
+        " 'centroid': [round(_cx / _n, 6), round(_cy / _n, 6),"
+        " round(_cz / _n, 6)]})\n"
         "cmds.currentTime(0)\n"
         "_out"
     ) % {"mesh": "|" + MESH, "frames": frames, "start": start}
     return py(code, tag, timeout_s=600.0)
+
+
+def worst_centroid_delta(before, after):
+    return max(abs(a["centroid"][i] - b["centroid"][i])
+              for a, b in zip(before, after) for i in range(3))
 
 
 def rest_probe(tag, meta, samples, rot_joints, root=None):
@@ -412,7 +493,12 @@ def lit_stats(png_bytes):
     return lit, (total / lit if lit else 0.0)
 
 
-def save_preview(tag, result):
+def save_preview(tag, result, meta):
+    """`meta` is the clip's own DECLARED record (from declared_clips/
+    final_records, independent of this `result`) - #718 review Fix 4: a
+    shared timeline means rendering a NEIGHBOUR's frames is exactly the
+    multi-take failure mode, so the frames actually rendered are checked
+    against that independent ground truth, not merely counted."""
     saved = 0
     counts = []
     means = []
@@ -428,6 +514,12 @@ def save_preview(tag, result):
         means.append(mean)
     check("preview %s rendered %d frames" % (tag, saved), saved >= 4,
           "frames=%s" % [f["frame"] for f in result.get("frames", [])])
+    frames = [f["frame"] for f in result.get("frames", [])]
+    start, end = int(meta["start_frame"]), int(meta["end_frame"])
+    check("preview %s: every rendered frame lies inside %r's own declared "
+          "range [%d, %d]" % (tag, meta["name"], start, end),
+          bool(frames) and all(start <= f <= end for f in frames),
+          "frames=%s range=%d..%d" % (frames, start, end))
     lo, hi = LUMINANCE_BAND
     check("preview %s: every cell shows a lit, shaded figure" % tag,
           bool(counts) and min(counts) >= FIGURE_PIXELS_MIN
@@ -481,15 +573,18 @@ def main():
           idle["keyed_joints"] == 2 and idle["start_frame"] == 0,
           "keyed_joints=%d start=%d" % (idle["keyed_joints"],
                                         idle["start_frame"]))
-    # IDLE_KEYS' shape is rest -> sway -> rest -> small sway -> rest (loop
-    # close): keys 2 and 4 are LEGITIMATELY back at the frame-0 baseline
-    # (no blend weight rides along to keep them apart, unlike clip_live's
-    # idle), so only keys 1 and 3 are asserted nonzero; 2 and 4 are
-    # asserted near-zero on purpose - that near-zero IS the measured
-    # rest-return / loop closure, not a missed motion.
+    # IDLE_KEYS' shape is base -> sway -> base -> small sway -> base (loop
+    # close on the -3 degree cycle base, not on the skeleton's true rest -
+    # #718 review Fix 2): keys 2 and 4 are LEGITIMATELY back at the
+    # frame-0 baseline (no blend weight rides along to keep them apart,
+    # unlike clip_live's idle), so only keys 1 and 3 are asserted nonzero;
+    # 2 and 4 are asserted near-zero on purpose - that near-zero IS the
+    # measured return to the cycle's OWN base pose / loop closure (this is
+    # a displacement measured relative to key 0, not an absolute value -
+    # it reads near-zero however far key 0 itself sits from true rest).
     moved = [k["max_displacement"] for k in idle["per_key"]]
-    check("idle: the sway keys measured real motion, the rest keys "
-          "measured a return to rest",
+    check("idle: the sway keys measured real motion, the base-pose keys "
+          "measured a return to the cycle's own base",
           moved[0] == 0.0 and moved[1] > 0.01 and moved[2] < 1e-3
           and moved[3] > 0.001 and moved[4] < 1e-3,
           json.dumps([round(m, 4) for m in moved]))
@@ -499,7 +594,7 @@ def main():
                               "keys": WAVE_KEYS})
     check("wave appends after idle with the 1-frame gap",
           wave["replaced"] is None and wave["clips"] == ["idle", "wave"]
-          and wave["start_frame"] == idle["end_frame"] + 2,
+          and wave["start_frame"] == idle["end_frame"] + clipmath.GAP_FRAMES + 1,
           "start=%d idle_end=%d" % (wave["start_frame"], idle["end_frame"]))
     moved = [k["max_displacement"] for k in wave["per_key"]]
     check("wave: every interior key measured real motion",
@@ -515,7 +610,7 @@ def main():
                               "keys": STEP_KEYS})
     check("step appends after wave with the 1-frame gap, root keyed",
           step["replaced"] is None and step["clips"] == ["idle", "wave", "step"]
-          and step["start_frame"] == wave["end_frame"] + 2
+          and step["start_frame"] == wave["end_frame"] + clipmath.GAP_FRAMES + 1
           and step["root_position_keyed"] is True,
           "start=%d wave_end=%d root_keyed=%s"
           % (step["start_frame"], wave["end_frame"],
@@ -537,14 +632,39 @@ def main():
     probe_after = probe_displacement(
         "idle displacement AFTER step exists (root_position introduced)",
         idle)
-    check("authoring 'step' left idle's motion identical "
-          "(backward-contamination guard)",
+    # Liveness only - see probe_displacement's docstring (#718 review Fix
+    # 1): a constant offset (exactly what a missing backward pin would
+    # leave across idle's whole range) cancels out of a per-frame
+    # difference against idle's OWN first frame, so this check reads
+    # identical whether or not the backward pin ran. It still catches a
+    # measurement-plumbing regression (e.g. probe_displacement itself
+    # breaking), which is why it stays, just not labelled as the
+    # contamination proof.
+    check("authoring 'step' left idle's relative motion identical "
+          "(liveness check, not the contamination proof - see the next "
+          "check)",
           len(probe_before) == len(probe_after)
           and all(abs(a["max_displacement"] - b["max_displacement"]) < 1e-6
                   for a, b in zip(probe_before, probe_after)),
           "before=%s after=%s"
           % ([f["max_displacement"] for f in probe_before],
              [f["max_displacement"] for f in probe_after]))
+    # THE backward-contamination proof (#718 review Fix 1): centroid is an
+    # ABSOLUTE quantity, so a constant offset does not cancel here the way
+    # it does above. If the backward pin were skipped or scoped wrong, the
+    # pelvis translateY curve would hold step's first key (0.97, vs the
+    # 1.00 build-rest PELVIS_REST) backward across idle's whole range - a
+    # uniform (0, -0.03, 0) shift on every frame's centroid. See the t718
+    # report for the arithmetic proof (against these exact measured
+    # centroid values) that this check would fail under that regression,
+    # where max_displacement above would not.
+    centroid_delta = worst_centroid_delta(probe_before, probe_after)
+    check("authoring 'step' left idle's ABSOLUTE mesh position identical "
+          "(the backward-contamination guard)",
+          len(probe_before) == len(probe_after) and centroid_delta < 1e-6,
+          "worst_centroid_delta=%.6g before[0]=%s after[0]=%s"
+          % (centroid_delta, probe_before[0]["centroid"],
+             probe_after[0]["centroid"]))
 
     # ---- check 3 (forwards half) + bonus coverage: every OTHER clip's
     # foreign channels sit at rest inside each clip's own range.
@@ -583,7 +703,7 @@ def main():
     check("re-authoring 'wave' moved it to the tail, after 'step'",
           wave2["replaced"] == "wave"
           and wave2["clips"] == ["idle", "step", "wave"]
-          and wave2["start_frame"] == step["end_frame"] + 2,
+          and wave2["start_frame"] == step["end_frame"] + clipmath.GAP_FRAMES + 1,
           "start=%d step_end=%d clips=%s"
           % (wave2["start_frame"], step["end_frame"], wave2["clips"]))
     idle_after = capture_keys("idle keys after wave moved", IDLE_JOINTS, idle)
@@ -637,15 +757,33 @@ def main():
                                "loop": False, "keys": WAVE_KEYS})
     check("re-authored 'wave' lands back at the same tail position",
           wave3["clips"] == ["idle", "step", "wave"]
-          and wave3["start_frame"] == step["end_frame"] + 2,
+          and wave3["start_frame"] == step["end_frame"] + clipmath.GAP_FRAMES + 1,
           "start=%d clips=%s" % (wave3["start_frame"], wave3["clips"]))
     final_records = declared_clips(root)
+    records_by_name = {r["name"]: r for r in final_records}
     # Not require_exact_gap: idle and step's own ranges are unchanged, but
     # the space between them where 'wave' used to sit (before check 2
     # moved it to the tail) is a hole, by design (#718 decision 5) - see
     # check_layout's docstring.
     check_layout("final rebuilt layout", final_records,
                 require_exact_gap=False)
+
+    # #718 review Fix 2: the one contamination direction never probed
+    # numerically before this fix - step's FORWARD hold. step's own last
+    # key equals its first (the loop close), which is the hips/legs'
+    # active pose, NOT rest - so a curve holding it forward in time past
+    # step's own range is a value that visibly differs from rest, unlike
+    # the (pre-fix) trivially-rest idle/wave boundaries this same
+    # direction would otherwise have exercised. In the final layout 'wave'
+    # sits right after 'step', which is what makes this checkable now.
+    rows = rest_probe("forward: step's joints+root during wave's range",
+                      records_by_name["wave"], 3, STEP_JOINTS, root=root)
+    check("wave's range: step's undeclared joints and root_position sit "
+          "at rest (step's non-rest loop-close pose does not hold forward)",
+          worst_rotation(rows, STEP_JOINTS) < REST_ROT_TOL
+          and worst_root_delta(rows) < REST_POS_TOL,
+          "worst_rot=%.6g worst_root=%.6g"
+          % (worst_rotation(rows, STEP_JOINTS), worst_root_delta(rows)))
 
     # ---- check 5 (part 1): export, three named takes with the right span
     fbx_path = out("multi_take.fbx")
@@ -660,13 +798,17 @@ def main():
           and result["skin"]["clusters"] == JOINT_COUNT,
           json.dumps(result["skin"]))
     anim = result["animation"]
-    records_by_name = {r["name"]: r for r in final_records}
     for name in ("idle", "step", "wave"):
         record = records_by_name[name]
         take = take_named(anim, name)
         fps = float(record["fps"])
         want_start = record["start_frame"] / fps
         want_stop = record["end_frame"] / fps
+        # Half a frame, not a whole one - export.py's anim_violations uses
+        # the same tolerance for the same reason (see its comment): clears
+        # tick/second round-trip noise by ~15 orders of magnitude while
+        # still catching a whole-frame boundary slip, which matters here
+        # because clips sit only GAP_FRAMES+1 frames apart.
         tol = 0.5 / fps
         check("export: a take named %r spans the right frames" % name,
               take is not None
@@ -676,15 +818,25 @@ def main():
 
     # ---- check 5 (part 2, the added coverage requirement): EVERY channel
     # of EVERY declared take, at the byte level - not a two-channel spot
-    # check. A regression truncating keys on any one joint of any one clip
-    # fails here even if the two channels a narrower check would have
-    # picked are fine.
+    # check, and not even a per-take-own-joints check.
+    #
+    # #718 review Fix 3: the self-contained rule means every take carries
+    # EVERY channel the rig touches (author_clip pins each clip's channels
+    # it does not declare at its own boundary), so the requirement this
+    # gate is meant to corroborate is "every joint of the UNION, in every
+    # take" - matching export.py's own internal gate
+    # (clipmath.channel_union(...)), not "each take's own declared
+    # joints" (which only re-checks the same 11 rows the take-span check
+    # above already touched indirectly, and would miss a regression that
+    # drops one joint's PINNED rows from a take that never declared that
+    # joint itself).
+    union = clipmath.channel_union(final_records)
     btt = by_take_target(anim)
     coverage_failures = []
     channels_checked = 0
     for record in final_records:
         expected = record["end_frame"] - record["start_frame"] + 1
-        for joint in record["joints"]:
+        for joint in union["joints"]:
             channels_checked += 1
             entry = btt.get((record["name"], joint, "Lcl Rotation"))
             if entry is None:
@@ -696,7 +848,7 @@ def main():
                     "%s/%s: curves=%s key_count=%s (want 3/%d)"
                     % (record["name"], joint, entry["curves"],
                        entry["key_count"], expected))
-        if record.get("root_position_used"):
+        if union["root_position_used"]:
             channels_checked += 1
             entry = btt.get((record["name"], "pelvis", "Lcl Translation"))
             if entry is None:
@@ -708,9 +860,12 @@ def main():
                     "%s/pelvis: curves=%s key_count=%s (want 3/%d)"
                     % (record["name"], entry["curves"], entry["key_count"],
                        expected))
-    check("every channel of every declared take carries correct curves at "
-          "the byte level (%d channels checked across %d takes)"
-          % (channels_checked, len(final_records)),
+    check("every channel of the RIG (%d joints%s) carries correct curves "
+          "in every declared take, at the byte level (%d channels checked "
+          "across %d takes)"
+          % (len(union["joints"]),
+             " + root" if union["root_position_used"] else "",
+             channels_checked, len(final_records)),
           channels_checked > 0 and not coverage_failures,
           "; ".join(coverage_failures[:6]) or "all channels agree")
 
@@ -727,17 +882,17 @@ def main():
                                   "angle": "side",
                                   "resolution": PREVIEW_RESOLUTION,
                                   "zoom": IDLE_ZOOM}, timeout_s=900.0)
-    save_preview("idle", preview)
+    save_preview("idle", preview, records_by_name["idle"])
     preview = ok("preview_clip", {"root": root, "name": "wave",
                                   "angle": "front",
                                   "resolution": PREVIEW_RESOLUTION,
                                   "zoom": WAVE_ZOOM}, timeout_s=900.0)
-    save_preview("wave", preview)
+    save_preview("wave", preview, records_by_name["wave"])
     preview = ok("preview_clip", {"root": root, "name": "step",
                                   "angle": "side",
                                   "resolution": PREVIEW_RESOLUTION,
                                   "zoom": STEP_ZOOM}, timeout_s=900.0)
-    save_preview("step", preview)
+    save_preview("step", preview, records_by_name["step"])
 
     with open(out("baseline.json"), "w") as fh:
         json.dump({
