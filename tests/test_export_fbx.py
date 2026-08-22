@@ -996,22 +996,38 @@ class TestAnimViolations:
         afacts = self._clean()
         afacts["takes"] = [t for t in afacts["takes"] if t["name"] != "walk"]
         out = export.anim_violations(afacts, self._declared())
-        assert any("no take named 'walk'" in v for v in out)
-        # idle's own take is present and correct - it earns no violation
-        # of its own. (Not a bare "'idle' not in any v": the one violation
-        # about walk legitimately NAMES idle in its "has: ..." diagnostic
-        # listing of the takes the file DOES carry - the same pattern
+        # Exactly one violation, and it is walk's missing take - idle's own
+        # take is present and correct and earns no violation of its own.
+        # (Not a bare "'idle' not in any v": the one violation about walk
+        # legitimately NAMES idle in its "has: ..." diagnostic listing of
+        # the takes the file DOES carry - the same pattern
         # test_include_animation_false_asserts_zero_curves's "has: none"
-        # relies on - so a substring check would fail on that, not on a
-        # real defect.)
-        assert not any(v.startswith("the file carries no take named 'idle'")
-                       for v in out)
+        # relies on - so a substring check would pass even if idle's own
+        # take were silently broken too.)
+        assert (len(out) == 1
+                and out[0].startswith("the file carries no take named 'walk'"))
 
     def test_a_take_at_the_wrong_place_on_the_timeline_fails(self):
         afacts = self._clean()
         afacts["takes"][2] = self._take("walk", 0, 30)
         out = export.anim_violations(afacts, self._declared())
         assert any("'walk'" in v and "frames 32-62" in v for v in out)
+
+    def test_a_take_off_by_exactly_one_frame_fails(self):
+        # tol is half a frame, not a whole one (#718 review): a take that
+        # slips by exactly one frame - on either boundary - must still be
+        # caught. Clips sit two frames apart (one unowned gap frame), so a
+        # one-frame boundary error is exactly the mistake this gate exists
+        # to catch, and a whole-frame tolerance let it through undetected.
+        afacts = self._clean()
+        afacts["takes"][1] = self._take("idle", 1, 30)   # start slips by 1
+        out = export.anim_violations(afacts, self._declared())
+        assert any("'idle'" in v and "frames 0-30" in v for v in out)
+
+        afacts = self._clean()
+        afacts["takes"][1] = self._take("idle", 0, 29)   # stop slips by 1
+        out = export.anim_violations(afacts, self._declared())
+        assert any("'idle'" in v and "frames 0-30" in v for v in out)
 
     def test_overlapping_or_repeated_declarations_fail(self):
         declared = self._declared()
@@ -1021,8 +1037,14 @@ class TestAnimViolations:
 
     def test_extra_takes_are_not_violations(self):
         # Maya's own default take ("Take 001") rides along with every
-        # animated export this tool makes - MEASURED in phase 6.
-        assert export.anim_violations(self._clean(), self._declared()) == []
+        # animated export this tool makes - MEASURED in phase 6. An
+        # UNDECLARED extra take beyond that (e.g. a leftover from a
+        # previous author_clip) must not be flagged either - only a
+        # missing declared take is a violation, per the shape_violations
+        # precedent this docstring cites.
+        afacts = self._clean()
+        afacts["takes"].append(self._take("Take 002", 0, 30))
+        assert export.anim_violations(afacts, self._declared()) == []
 
     def test_curves_are_required_for_every_channel_any_clip_declared(self):
         afacts = self._clean()

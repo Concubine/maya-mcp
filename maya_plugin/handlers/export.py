@@ -379,7 +379,13 @@ def anim_violations(afacts, declared) -> List[str]:
                    % afacts["unavailable_reason"])
     out += clipmath.overlap_violations(declared["clips"])
     fps = float(declared["fps"])
-    tol = 1.0 / fps
+    # Half a frame, not a whole one: KTIME_PER_SECOND divides evenly by
+    # every fps this tool allows, so tick->second->tick round-tripping
+    # only ever leaves a ~1e-16 residual. 0.5/fps clears that residual by
+    # fifteen orders of magnitude while still catching every whole-frame
+    # boundary slip - a full frame of tolerance would let a one-frame
+    # error through, and clips sit only two frames apart.
+    tol = 0.5 / fps
     by_take = {}
     for take in afacts["takes"]:
         by_take.setdefault(take["name"], take)
@@ -730,11 +736,24 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
         "selection that lists only other nodes leaves them behind."
         if shape_bad else "")
     anim_block = fbxbytes.anim_facts(facts)
-    if include_animation:
-        anim_block["clips"] = anim_clip_facts(anim_block, declared_clip)
     anim_bad = anim_violations(anim_block,
                                declared_clip if include_animation else None)
     violations += anim_bad
+    # anim_facts's product is never mutated - not in place, and not by
+    # composing a "clips"-augmented copy for the result either. Two
+    # byte-honesty cross-checks (evals/clip_live.py,
+    # TestClipExportInMaya::test_the_measurements) re-read the file
+    # independently and assert fbxbytes.anim_facts(read_fbx(path)) == the
+    # tool's reported "animation" block; a fresh read never carries a
+    # "clips" key (anim_facts takes no declared-clip argument), so ANY key
+    # this tool adds - mutated in place or merged into a copy, the copy
+    # still ends up with the extra key - breaks that equality. The
+    # per-clip block anim_clip_facts produces is also not byte-only: it
+    # takes clip names/joints/channels from the SCENE-declared record, not
+    # the bytes, so folding it into "animation" would contradict the very
+    # invariant these cross-checks enforce. It stays a standalone reader
+    # (exercised directly by its own tests) until a later task decides
+    # where scene-derived per-clip reporting belongs in the result.
     anim_hint = (
         " For animation violations: the clip must exist (maya_author_clip) "
         "and a selected export ('nodes') must include the skeleton root - "
