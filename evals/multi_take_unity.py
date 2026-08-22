@@ -33,14 +33,24 @@ Usage:
     uv run python evals/multi_take_unity.py --measurements m.json
 Exit: 0 pass, 1 fail.
 
-THE SCRATCH PROJECT ALREADY EXISTS on this machine, at
-`D:/devel/unity-mt718-scratch` (Unity 6000.0.47f1, with
-`com.coplaydev.unity-mcp` pulled from the same git URL Demigol's manifest
-uses). Open it and its MCP bridge connects; there is no need to build a new
-one. Creating it from scratch is `Unity.exe -createProject <path> -batchmode
--quit`, then adding that one dependency to `Packages/manifest.json`, then
-opening the project so the package resolves. Do NOT point this gate at
-Demigol - see above.
+BUILDING THE SCRATCH PROJECT takes about five minutes and is the only setup
+this gate needs. One was built at `D:/devel/unity-mt718-scratch` for the
+2026-08-22 run below and deleted afterwards, so expect to make a fresh one:
+
+    Unity.exe -createProject <path> -batchmode -quit -nographics
+    # then add ONE dependency to <path>/Packages/manifest.json:
+    #   "com.coplaydev.unity-mcp":
+    #     "https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity#main"
+    # (the same git URL Demigol's own manifest uses)
+    # then open the project so Unity resolves the package and the bridge
+    # connects - it appears in mcpforunity://instances within a few seconds.
+
+Unity 6000.0.47f1 was used; nothing here depends on that exact version. Do
+NOT point this gate at Demigol - see above.
+
+To exercise the POLICY half without any Unity at all, run --measurements
+against the committed reading from that session:
+`evals/multi_take_live/unity_measurement_2026-08-22.json`.
 
 MEASURED: run once against a real Unity editor (2026-08-22). Length check:
 Unity reported wave 1.500000s, idle 2.000000s, step 1.200000s against
