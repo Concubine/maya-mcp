@@ -265,19 +265,29 @@ def by_target(anim, take_name):
         elif row["take"] == "Take 001":
             take001[key] = row
     clashes = []
+    compared = 0
     for key, row in named.items():
         other = take001.get(key)
         if other is None:
             continue
+        compared += 1
         stripped_row = {k: v for k, v in row.items() if k != "take"}
         stripped_other = {k: v for k, v in other.items() if k != "take"}
         if stripped_row != stripped_other:
             clashes.append("%s: %s != %s" % (key, json.dumps(stripped_other),
                                              json.dumps(stripped_row)))
+    # A clean pass with `named` empty (attribution lost entirely - every row
+    # take: None) or with no Take 001 rows to compare against (compared==0)
+    # would both slip through the "not clashes" check below having verified
+    # nothing at all. Assert real work happened before trusting silence.
+    check("%s: named-take rows exist to compare" % take_name, len(named) > 0,
+          "%d rows -> %d (target, property) pairs" % (len(anim["targets"]),
+                                                       len(named)))
+    check("%s: rows were actually compared against Take 001" % take_name,
+          compared > 0, "%d pairs compared" % compared)
     check("%s: the named take's rows agree with Take 001's, take excluded"
           % take_name, not clashes,
-          "; ".join(clashes[:2]) or "%d rows -> %d (target, property) pairs"
-          % (len(anim["targets"]), len(named)))
+          "; ".join(clashes[:2]) or "%d pairs compared" % compared)
     return named
 
 

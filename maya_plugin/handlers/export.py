@@ -511,11 +511,15 @@ def anim_clip_facts(afacts, declared) -> List[Dict[str, Any]]:
     channels that clip declared - counted from that clip's OWN take (#718
     Task 10b: a multi-take file carries a separate curve record per plug
     PER TAKE, not one collapsed record - see anim_violations's docstring
-    for the measured shape). A clip whose take is absent reports a null
-    range - the curve count is looked up per channel from that same
-    (missing) take, so it comes out 0 for the identical reason, not from a
-    separate invented default. anim_violations is what fails the export
-    for it."""
+    for the measured shape). The range and the curve count are INDEPENDENT
+    lookups keyed on the clip's declared name: the range comes from the
+    take record in afacts["takes"]; the count comes from the take-attributed
+    target rows in afacts["targets"] (by_take_target), which carry their own
+    "take" field per row and do not go through the take record at all. The
+    two can disagree - a clip whose take record is missing (start/end/
+    duration all null) can still report a non-zero curve count, because its
+    rows are still attributed and counted. That is deliberate: the count
+    stays informative on exactly the file anim_violations is refusing."""
     fps = float(declared["fps"])
     by_take = {}
     for take in afacts["takes"]:

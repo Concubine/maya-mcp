@@ -3767,11 +3767,18 @@ class TestMultiTakeExportInMaya:
         for frame in (32, 47, 62):
             cmds.currentTime(frame)
             assert abs(cmds.getAttr(mid + ".rotateZ")) < 1e-4, frame
-        # ...and idle still measures what it measured before walk existed
+        # ...and mu_tip (which only walk keys) still back-fills to rest
+        # through idle's own range - the pad runs in both directions, not
+        # just forward from idle into walk.
         tip = cmds.ls("mu_tip", long=True)[0]
         for frame in (0, 15, 30):
             cmds.currentTime(frame)
             assert abs(cmds.getAttr(tip + ".rotateZ")) < 1e-4, frame
+        # ...and idle's OWN keyed motion on mu_mid survived walk being
+        # authored afterward - this reaches the 30 degree peak idle itself
+        # keyed at frame 15 (0.5s), not a rest/back-fill value.
+        cmds.currentTime(15)
+        assert abs(cmds.getAttr(mid + ".rotateZ") - 30.0) < 1e-3
 
     def test_every_frame_of_a_padded_range_holds_rest(self):
         """Extends the brief's boundary-sample check (item 2 of the four
@@ -4087,9 +4094,9 @@ class TestMultiTakeExportInMaya:
 
         from maya_plugin.handlers import clip
 
-        base, root, idle, walk = self._two_clip_scene(cmds, "mx")
-        mid = cmds.ls("mx_mid", long=True)[0]
-        tip = cmds.ls("mx_tip", long=True)[0]
+        base, root, idle, walk = self._two_clip_scene(cmds, "my")
+        mid = cmds.ls("my_mid", long=True)[0]
+        tip = cmds.ls("my_tip", long=True)[0]
         mid_curves_before = set(cmds.listConnections(
             mid + ".rotateX", source=True, destination=False,
             type="animCurve") or [])

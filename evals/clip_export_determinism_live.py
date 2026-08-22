@@ -57,6 +57,10 @@ import sys
 
 import os
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(_HERE))
+sys.path.insert(0, _HERE)
+
 try:
     import maya.standalone
 except ImportError:
@@ -65,8 +69,7 @@ except ImportError:
           "mayapy invocation.")
     sys.exit(2)
 
-OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                       "clip_export_determinism_live")
+OUT_DIR = os.path.join(_HERE, "clip_export_determinism_live")
 
 
 def _two_clip_scene(cmds, prefix):
@@ -103,6 +106,53 @@ def _two_clip_scene(cmds, prefix):
     return base, skeleton["root"]
 
 
+def _run_negative_control(cmds, export):
+    """One deliberately-broken export, run and counted SEPARATELY from the
+    determinism loop below: it proves the two SUMMARY numbers mean "the real
+    anim_violations gate ran and passed N times", not "nothing was actually
+    checked". Builds the same two-clip scene, then tampers with the 'walk'
+    clip's declared record on the mcp_clip attribute so it claims a weight
+    channel ("phantom_bogus_channel") that does not exist anywhere in the
+    scene - this scene has no blendShape at all, so no such DeformPercent
+    plug can possibly appear in the exported bytes no matter how the bake
+    ranges get resampled. export.export_fbx() re-derives its OWN declared
+    clips from this same tampered attribute (export.py's `_scene_clips`),
+    so an end_frame-style mismatch would extend the bake to match itself
+    and stay self-consistent (tried first, measured to still pass - see
+    t718-10b-report.md); a channel the scene structurally cannot produce is
+    the one field the exporter's own bake step cannot accidentally satisfy.
+    If this is NOT refused, the gate is not running (or not wired to this
+    field) and that is exactly the discrepancy this control exists to
+    catch.
+    """
+    import json
+
+    from maya_plugin.handlers import clip as clip_mod
+
+    cmds.file(new=True, force=True)
+    base, root = _two_clip_scene(cmds, "ctrl")
+    records = json.loads(cmds.getAttr("%s.%s" % (root, clip_mod.CLIP_ATTR)))
+    for record in records:
+        if record["name"] == "walk":
+            record["weight_channels"] = list(record["weight_channels"]) + [
+                "phantom_bogus_channel"]
+    cmds.setAttr("%s.%s" % (root, clip_mod.CLIP_ATTR), json.dumps(records),
+                 type="string")
+    path = os.path.join(OUT_DIR, "control.fbx").replace("\\", "/")
+    try:
+        export.export_fbx({
+            "path": path, "metres_per_unit": 1.0,
+            "nodes": [base, root], "include_animation": True})
+        print("CONTROL: FAIL - a clip declared with a weight channel that "
+              "does not exist in the scene was NOT refused; the gate may "
+              "not be running")
+        return False
+    except Exception as exc:  # noqa: BLE001 - the refusal IS the pass here
+        print("CONTROL: OK - mismatched declaration correctly refused: %s"
+              % exc)
+        return True
+
+
 def main():
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 8
 
@@ -112,6 +162,9 @@ def main():
     from maya_plugin.handlers import export
 
     os.makedirs(OUT_DIR, exist_ok=True)
+
+    control_ok = _run_negative_control(cmds, export)
+
     ok = 0
     fail = 0
     for i in range(n):
@@ -133,9 +186,15 @@ def main():
             print("RUN %d: FAIL: %s" % (i, exc))
             fail += 1
 
-    print("SUMMARY ok=%d fail=%d" % (ok, fail))
+    print("SUMMARY ok=%d fail=%d control=%s" % (ok, fail, "ok" if control_ok
+                                                  else "FAIL"))
     sys.stdout.flush()
-    exit_code = 0 if fail == 0 else 1
+    # ok == n (not just fail == 0) so an N=0 run can't print a hollow
+    # "ok=0 fail=0" and exit clean - that would be a green result from a
+    # run that measured nothing. The negative control gates independently:
+    # a passing determinism loop is worthless as proof if the refusal path
+    # underneath it was never exercised.
+    exit_code = 0 if (ok == n and control_ok) else 1
 
     # See the module docstring: a crash from here on is the known #695
     # reload-cycle teardown fragility, not a result of the loop above -
