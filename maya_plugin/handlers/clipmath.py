@@ -206,12 +206,14 @@ def overlap_violations(records) -> List[str]:
     same keys, and a consumer looks a take up BY NAME."""
     out = []
     ordered = sorted(records, key=lambda r: r["start_frame"])
-    for prev, cur in zip(ordered, ordered[1:]):
-        if cur["start_frame"] <= prev["end_frame"]:
-            out.append(
-                "takes %r (%d-%d) and %r (%d-%d) overlap"
-                % (prev["name"], prev["start_frame"], prev["end_frame"],
-                   cur["name"], cur["start_frame"], cur["end_frame"]))
+    # Check every overlapping pair (not just adjacent ones)
+    for i, cur in enumerate(ordered):
+        for prev in ordered[:i]:
+            if cur["start_frame"] <= prev["end_frame"]:
+                out.append(
+                    "takes %r (%d-%d) and %r (%d-%d) overlap"
+                    % (prev["name"], prev["start_frame"], prev["end_frame"],
+                       cur["name"], cur["start_frame"], cur["end_frame"]))
     seen = set()
     for r in ordered:
         if r["name"] in seen:

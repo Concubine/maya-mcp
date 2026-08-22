@@ -183,3 +183,31 @@ class TestRecords:
         dupe[1]["name"] = "idle"
         assert any("more than one take named 'idle'" in v
                    for v in clipmath.overlap_violations(dupe))
+
+    def test_all_overlapping_pairs_are_reported(self):
+        """With three or more records, every overlapping pair must be named,
+        not just adjacent ones. A (0-100), B (50-60), C (70-200) overlaps
+        both A-B and A-C."""
+        records = [
+            {"name": "A", "fps": 30, "start_frame": 0, "end_frame": 100,
+             "duration_s": 3.33, "loop": False, "interpolation": "linear",
+             "joints": [], "weight_channels": [], "root_position_used": False},
+            {"name": "B", "fps": 30, "start_frame": 50, "end_frame": 60,
+             "duration_s": 0.33, "loop": False, "interpolation": "linear",
+             "joints": [], "weight_channels": [], "root_position_used": False},
+            {"name": "C", "fps": 30, "start_frame": 70, "end_frame": 200,
+             "duration_s": 4.33, "loop": False, "interpolation": "linear",
+             "joints": [], "weight_channels": [], "root_position_used": False},
+        ]
+        out = clipmath.overlap_violations(records)
+        # Should report both A-B and A-C overlaps
+        ab_overlap = any("takes 'A' (0-100) and 'B' (50-60) overlap" in v
+                         for v in out)
+        ac_overlap = any("takes 'A' (0-100) and 'C' (70-200) overlap" in v
+                         for v in out)
+        assert ab_overlap, "A-B overlap not reported"
+        assert ac_overlap, "A-C overlap not reported"
+        # B-C should not overlap
+        bc_overlap = any("'B'" in v and "'C'" in v and "overlap" in v
+                         for v in out)
+        assert not bc_overlap, "B-C should not overlap"
