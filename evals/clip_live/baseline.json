@@ -1,6 +1,15 @@
 {
   "idle": {
     "animation": {
+      "clips": [
+        {
+          "curves": 13,
+          "duration_s": 2.0,
+          "end_frame": 60,
+          "name": "idle",
+          "start_frame": 0
+        }
+      ],
       "curve_nodes": 66,
       "curves": 26,
       "layers": 2,
@@ -8,11 +17,15 @@
       "takes": [
         {
           "duration_s": 2.0,
-          "name": "Take 001"
+          "name": "Take 001",
+          "start_s": 0.0,
+          "stop_s": 2.0
         },
         {
           "duration_s": 2.0,
-          "name": "idle"
+          "name": "idle",
+          "start_s": 0.0,
+          "stop_s": 2.0
         }
       ],
       "targets": [
@@ -21,6 +34,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "L_ankle"
         },
         {
@@ -28,6 +42,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "L_ankle"
         },
         {
@@ -35,6 +50,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "L_elbow"
         },
         {
@@ -42,6 +58,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "L_elbow"
         },
         {
@@ -49,6 +66,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "L_hip"
         },
         {
@@ -56,6 +74,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "L_hip"
         },
         {
@@ -63,6 +82,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "L_knee"
         },
         {
@@ -70,6 +90,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "L_knee"
         },
         {
@@ -77,6 +98,7 @@
           "duration_s": 2.0,
           "key_count": 61,
           "property": "Lcl Rotation",
+          "take": "Take 001",
           "target": "L_shoulder"
         },
         {
@@ -84,6 +106,7 @@
           "duration_s": 2.0,
           "key_count": 61,
           "property": "Lcl Rotation",
+          "take": "idle",
           "target": "L_shoulder"
         },
         {
@@ -91,6 +114,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Scaling",
+          "take": "Take 001",
           "target": "L_shoulder"
         },
         {
@@ -98,6 +122,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Scaling",
+          "take": "idle",
           "target": "L_shoulder"
         },
         {
@@ -105,6 +130,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Translation",
+          "take": "Take 001",
           "target": "L_shoulder"
         },
         {
@@ -112,6 +138,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Translation",
+          "take": "idle",
           "target": "L_shoulder"
         },
         {
@@ -119,6 +146,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "L_shoulder"
         },
         {
@@ -126,6 +154,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "L_shoulder"
         },
         {
@@ -133,6 +162,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "L_toe"
         },
         {
@@ -140,6 +170,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "L_toe"
         },
         {
@@ -147,6 +178,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "L_wrist"
         },
         {
@@ -154,6 +186,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "L_wrist"
         },
         {
@@ -161,6 +194,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "R_ankle"
         },
         {
@@ -168,6 +202,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "R_ankle"
         },
         {
@@ -175,6 +210,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "R_elbow"
         },
         {
@@ -182,6 +218,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "R_elbow"
         },
         {
@@ -189,6 +226,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "R_hip"
         },
         {
@@ -196,6 +234,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "R_hip"
         },
         {
@@ -203,6 +242,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "R_knee"
         },
         {
@@ -210,6 +250,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "R_knee"
         },
         {
@@ -217,6 +258,7 @@
           "duration_s": 2.0,
           "key_count": 61,
           "property": "Lcl Rotation",
+          "take": "Take 001",
           "target": "R_shoulder"
         },
         {
@@ -224,6 +266,7 @@
           "duration_s": 2.0,
           "key_count": 61,
           "property": "Lcl Rotation",
+          "take": "idle",
           "target": "R_shoulder"
         },
         {
@@ -231,6 +274,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Scaling",
+          "take": "Take 001",
           "target": "R_shoulder"
         },
         {
@@ -238,6 +282,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Scaling",
+          "take": "idle",
           "target": "R_shoulder"
         },
         {
@@ -245,6 +290,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Translation",
+          "take": "Take 001",
           "target": "R_shoulder"
         },
         {
@@ -252,6 +298,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Translation",
+          "take": "idle",
           "target": "R_shoulder"
         },
         {
@@ -259,6 +306,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "R_shoulder"
         },
         {
@@ -266,6 +314,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "R_shoulder"
         },
         {
@@ -273,6 +322,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "R_toe"
         },
         {
@@ -280,6 +330,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "R_toe"
         },
         {
@@ -287,6 +338,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "R_wrist"
         },
         {
@@ -294,6 +346,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "R_wrist"
         },
         {
@@ -301,6 +354,7 @@
           "duration_s": 2.0,
           "key_count": 61,
           "property": "DeformPercent",
+          "take": "Take 001",
           "target": "blink"
         },
         {
@@ -308,6 +362,7 @@
           "duration_s": 2.0,
           "key_count": 61,
           "property": "DeformPercent",
+          "take": "idle",
           "target": "blink"
         },
         {
@@ -315,6 +370,7 @@
           "duration_s": 2.0,
           "key_count": 61,
           "property": "Lcl Rotation",
+          "take": "Take 001",
           "target": "chest"
         },
         {
@@ -322,6 +378,7 @@
           "duration_s": 2.0,
           "key_count": 61,
           "property": "Lcl Rotation",
+          "take": "idle",
           "target": "chest"
         },
         {
@@ -329,6 +386,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Scaling",
+          "take": "Take 001",
           "target": "chest"
         },
         {
@@ -336,6 +394,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Scaling",
+          "take": "idle",
           "target": "chest"
         },
         {
@@ -343,6 +402,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Translation",
+          "take": "Take 001",
           "target": "chest"
         },
         {
@@ -350,6 +410,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Translation",
+          "take": "idle",
           "target": "chest"
         },
         {
@@ -357,6 +418,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "chest"
         },
         {
@@ -364,6 +426,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "chest"
         },
         {
@@ -371,6 +434,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "head"
         },
         {
@@ -378,6 +442,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "head"
         },
         {
@@ -385,6 +450,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "neck"
         },
         {
@@ -392,6 +458,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "neck"
         },
         {
@@ -399,6 +466,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "pelvis"
         },
         {
@@ -406,6 +474,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "pelvis"
         },
         {
@@ -413,6 +482,7 @@
           "duration_s": 2.0,
           "key_count": 61,
           "property": "Lcl Rotation",
+          "take": "Take 001",
           "target": "spine_01"
         },
         {
@@ -420,6 +490,7 @@
           "duration_s": 2.0,
           "key_count": 61,
           "property": "Lcl Rotation",
+          "take": "idle",
           "target": "spine_01"
         },
         {
@@ -427,6 +498,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Scaling",
+          "take": "Take 001",
           "target": "spine_01"
         },
         {
@@ -434,6 +506,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Scaling",
+          "take": "idle",
           "target": "spine_01"
         },
         {
@@ -441,6 +514,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Translation",
+          "take": "Take 001",
           "target": "spine_01"
         },
         {
@@ -448,6 +522,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Translation",
+          "take": "idle",
           "target": "spine_01"
         },
         {
@@ -455,6 +530,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "spine_01"
         },
         {
@@ -462,6 +538,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "spine_01"
         },
         {
@@ -469,6 +546,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "spine_02"
         },
         {
@@ -476,6 +554,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "spine_02"
         }
       ],
@@ -510,26 +589,61 @@
   },
   "walk": {
     "animation": {
-      "curve_nodes": 106,
-      "curves": 66,
-      "layers": 2,
-      "stacks": 2,
-      "takes": [
+      "clips": [
         {
-          "duration_s": 1.2,
-          "name": "Take 001"
+          "curves": 13,
+          "duration_s": 2.0,
+          "end_frame": 60,
+          "name": "idle",
+          "start_frame": 0
         },
         {
-          "duration_s": 1.2,
-          "name": "walk"
+          "curves": 33,
+          "duration_s": 1.1999999999999997,
+          "end_frame": 98,
+          "name": "walk",
+          "start_frame": 62
+        }
+      ],
+      "curve_nodes": 180,
+      "curves": 120,
+      "layers": 3,
+      "stacks": 3,
+      "takes": [
+        {
+          "duration_s": 3.2666666666666666,
+          "name": "Take 001",
+          "start_s": 0.0,
+          "stop_s": 3.2666666666666666
+        },
+        {
+          "duration_s": 2.0,
+          "name": "idle",
+          "start_s": 0.0,
+          "stop_s": 2.0
+        },
+        {
+          "duration_s": 1.1999999999999997,
+          "name": "walk",
+          "start_s": 2.066666666666667,
+          "stop_s": 3.2666666666666666
         }
       ],
       "targets": [
         {
           "curves": 3,
-          "duration_s": 1.2,
-          "key_count": 37,
+          "duration_s": 3.2666666666666666,
+          "key_count": 99,
           "property": "Lcl Rotation",
+          "take": "Take 001",
+          "target": "L_ankle"
+        },
+        {
+          "curves": 3,
+          "duration_s": 2.0,
+          "key_count": 61,
+          "property": "Lcl Rotation",
+          "take": "idle",
           "target": "L_ankle"
         },
         {
@@ -537,6 +651,7 @@
           "duration_s": 1.2,
           "key_count": 37,
           "property": "Lcl Rotation",
+          "take": "walk",
           "target": "L_ankle"
         },
         {
@@ -544,6 +659,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Scaling",
+          "take": "Take 001",
           "target": "L_ankle"
         },
         {
@@ -551,6 +667,15 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Scaling",
+          "take": "idle",
+          "target": "L_ankle"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "take": "walk",
           "target": "L_ankle"
         },
         {
@@ -558,6 +683,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Translation",
+          "take": "Take 001",
           "target": "L_ankle"
         },
         {
@@ -565,6 +691,15 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Translation",
+          "take": "idle",
+          "target": "L_ankle"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "take": "walk",
           "target": "L_ankle"
         },
         {
@@ -572,6 +707,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "L_ankle"
         },
         {
@@ -579,13 +715,31 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
+          "target": "L_ankle"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "take": "walk",
           "target": "L_ankle"
         },
         {
           "curves": 3,
-          "duration_s": 1.2,
-          "key_count": 37,
+          "duration_s": 3.2666666666666666,
+          "key_count": 99,
           "property": "Lcl Rotation",
+          "take": "Take 001",
+          "target": "L_elbow"
+        },
+        {
+          "curves": 3,
+          "duration_s": 2.0,
+          "key_count": 61,
+          "property": "Lcl Rotation",
+          "take": "idle",
           "target": "L_elbow"
         },
         {
@@ -593,6 +747,7 @@
           "duration_s": 1.2,
           "key_count": 37,
           "property": "Lcl Rotation",
+          "take": "walk",
           "target": "L_elbow"
         },
         {
@@ -600,6 +755,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Scaling",
+          "take": "Take 001",
           "target": "L_elbow"
         },
         {
@@ -607,6 +763,15 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Scaling",
+          "take": "idle",
+          "target": "L_elbow"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "take": "walk",
           "target": "L_elbow"
         },
         {
@@ -614,6 +779,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Translation",
+          "take": "Take 001",
           "target": "L_elbow"
         },
         {
@@ -621,6 +787,15 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Translation",
+          "take": "idle",
+          "target": "L_elbow"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "take": "walk",
           "target": "L_elbow"
         },
         {
@@ -628,6 +803,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "L_elbow"
         },
         {
@@ -635,62 +811,31 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
+          "target": "L_elbow"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "take": "walk",
           "target": "L_elbow"
         },
         {
           "curves": 3,
-          "duration_s": 1.2,
-          "key_count": 37,
+          "duration_s": 3.2666666666666666,
+          "key_count": 99,
           "property": "Lcl Rotation",
+          "take": "Take 001",
           "target": "L_hip"
         },
         {
           "curves": 3,
-          "duration_s": 1.2,
-          "key_count": 37,
+          "duration_s": 2.0,
+          "key_count": 61,
           "property": "Lcl Rotation",
-          "target": "L_hip"
-        },
-        {
-          "curves": 0,
-          "duration_s": null,
-          "key_count": null,
-          "property": "Lcl Scaling",
-          "target": "L_hip"
-        },
-        {
-          "curves": 0,
-          "duration_s": null,
-          "key_count": null,
-          "property": "Lcl Scaling",
-          "target": "L_hip"
-        },
-        {
-          "curves": 0,
-          "duration_s": null,
-          "key_count": null,
-          "property": "Lcl Translation",
-          "target": "L_hip"
-        },
-        {
-          "curves": 0,
-          "duration_s": null,
-          "key_count": null,
-          "property": "Lcl Translation",
-          "target": "L_hip"
-        },
-        {
-          "curves": 0,
-          "duration_s": null,
-          "key_count": null,
-          "property": "lockInfluenceWeights",
-          "target": "L_hip"
-        },
-        {
-          "curves": 0,
-          "duration_s": null,
-          "key_count": null,
-          "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "L_hip"
         },
         {
@@ -698,6 +843,95 @@
           "duration_s": 1.2,
           "key_count": 37,
           "property": "Lcl Rotation",
+          "take": "walk",
+          "target": "L_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "take": "Take 001",
+          "target": "L_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "take": "idle",
+          "target": "L_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "take": "walk",
+          "target": "L_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "take": "Take 001",
+          "target": "L_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "take": "idle",
+          "target": "L_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "take": "walk",
+          "target": "L_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "take": "Take 001",
+          "target": "L_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "take": "idle",
+          "target": "L_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "take": "walk",
+          "target": "L_hip"
+        },
+        {
+          "curves": 3,
+          "duration_s": 3.2666666666666666,
+          "key_count": 99,
+          "property": "Lcl Rotation",
+          "take": "Take 001",
+          "target": "L_knee"
+        },
+        {
+          "curves": 3,
+          "duration_s": 2.0,
+          "key_count": 61,
+          "property": "Lcl Rotation",
+          "take": "idle",
           "target": "L_knee"
         },
         {
@@ -705,6 +939,7 @@
           "duration_s": 1.2,
           "key_count": 37,
           "property": "Lcl Rotation",
+          "take": "walk",
           "target": "L_knee"
         },
         {
@@ -712,6 +947,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Scaling",
+          "take": "Take 001",
           "target": "L_knee"
         },
         {
@@ -719,6 +955,15 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Scaling",
+          "take": "idle",
+          "target": "L_knee"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "take": "walk",
           "target": "L_knee"
         },
         {
@@ -726,6 +971,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Translation",
+          "take": "Take 001",
           "target": "L_knee"
         },
         {
@@ -733,6 +979,15 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Translation",
+          "take": "idle",
+          "target": "L_knee"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "take": "walk",
           "target": "L_knee"
         },
         {
@@ -740,6 +995,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "L_knee"
         },
         {
@@ -747,20 +1003,39 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "L_knee"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "take": "walk",
+          "target": "L_knee"
+        },
+        {
+          "curves": 3,
+          "duration_s": 3.2666666666666666,
+          "key_count": 99,
+          "property": "Lcl Rotation",
+          "take": "Take 001",
+          "target": "L_shoulder"
+        },
+        {
+          "curves": 3,
+          "duration_s": 2.0,
+          "key_count": 61,
+          "property": "Lcl Rotation",
+          "take": "idle",
+          "target": "L_shoulder"
         },
         {
           "curves": 3,
           "duration_s": 1.2,
           "key_count": 37,
           "property": "Lcl Rotation",
-          "target": "L_shoulder"
-        },
-        {
-          "curves": 3,
-          "duration_s": 1.2,
-          "key_count": 37,
-          "property": "Lcl Rotation",
+          "take": "walk",
           "target": "L_shoulder"
         },
         {
@@ -768,6 +1043,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Scaling",
+          "take": "Take 001",
           "target": "L_shoulder"
         },
         {
@@ -775,6 +1051,15 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Scaling",
+          "take": "idle",
+          "target": "L_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "take": "walk",
           "target": "L_shoulder"
         },
         {
@@ -782,6 +1067,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Translation",
+          "take": "Take 001",
           "target": "L_shoulder"
         },
         {
@@ -789,6 +1075,15 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Translation",
+          "take": "idle",
+          "target": "L_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "take": "walk",
           "target": "L_shoulder"
         },
         {
@@ -796,6 +1091,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "L_shoulder"
         },
         {
@@ -803,6 +1099,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "L_shoulder"
         },
         {
@@ -810,6 +1107,15 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "walk",
+          "target": "L_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "L_toe"
         },
         {
@@ -817,6 +1123,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "L_toe"
         },
         {
@@ -824,6 +1131,15 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "walk",
+          "target": "L_toe"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "L_wrist"
         },
         {
@@ -831,13 +1147,31 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
+          "target": "L_wrist"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "take": "walk",
           "target": "L_wrist"
         },
         {
           "curves": 3,
-          "duration_s": 1.2,
-          "key_count": 37,
+          "duration_s": 3.2666666666666666,
+          "key_count": 99,
           "property": "Lcl Rotation",
+          "take": "Take 001",
+          "target": "R_ankle"
+        },
+        {
+          "curves": 3,
+          "duration_s": 2.0,
+          "key_count": 61,
+          "property": "Lcl Rotation",
+          "take": "idle",
           "target": "R_ankle"
         },
         {
@@ -845,6 +1179,7 @@
           "duration_s": 1.2,
           "key_count": 37,
           "property": "Lcl Rotation",
+          "take": "walk",
           "target": "R_ankle"
         },
         {
@@ -852,6 +1187,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Scaling",
+          "take": "Take 001",
           "target": "R_ankle"
         },
         {
@@ -859,6 +1195,15 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Scaling",
+          "take": "idle",
+          "target": "R_ankle"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "take": "walk",
           "target": "R_ankle"
         },
         {
@@ -866,6 +1211,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Translation",
+          "take": "Take 001",
           "target": "R_ankle"
         },
         {
@@ -873,6 +1219,15 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Translation",
+          "take": "idle",
+          "target": "R_ankle"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "take": "walk",
           "target": "R_ankle"
         },
         {
@@ -880,6 +1235,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "R_ankle"
         },
         {
@@ -887,13 +1243,31 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
+          "target": "R_ankle"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "take": "walk",
           "target": "R_ankle"
         },
         {
           "curves": 3,
-          "duration_s": 1.2,
-          "key_count": 37,
+          "duration_s": 3.2666666666666666,
+          "key_count": 99,
           "property": "Lcl Rotation",
+          "take": "Take 001",
+          "target": "R_elbow"
+        },
+        {
+          "curves": 3,
+          "duration_s": 2.0,
+          "key_count": 61,
+          "property": "Lcl Rotation",
+          "take": "idle",
           "target": "R_elbow"
         },
         {
@@ -901,6 +1275,7 @@
           "duration_s": 1.2,
           "key_count": 37,
           "property": "Lcl Rotation",
+          "take": "walk",
           "target": "R_elbow"
         },
         {
@@ -908,6 +1283,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Scaling",
+          "take": "Take 001",
           "target": "R_elbow"
         },
         {
@@ -915,6 +1291,15 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Scaling",
+          "take": "idle",
+          "target": "R_elbow"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "take": "walk",
           "target": "R_elbow"
         },
         {
@@ -922,6 +1307,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Translation",
+          "take": "Take 001",
           "target": "R_elbow"
         },
         {
@@ -929,6 +1315,15 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Translation",
+          "take": "idle",
+          "target": "R_elbow"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "take": "walk",
           "target": "R_elbow"
         },
         {
@@ -936,6 +1331,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "R_elbow"
         },
         {
@@ -943,62 +1339,31 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
+          "target": "R_elbow"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "take": "walk",
           "target": "R_elbow"
         },
         {
           "curves": 3,
-          "duration_s": 1.2,
-          "key_count": 37,
+          "duration_s": 3.2666666666666666,
+          "key_count": 99,
           "property": "Lcl Rotation",
+          "take": "Take 001",
           "target": "R_hip"
         },
         {
           "curves": 3,
-          "duration_s": 1.2,
-          "key_count": 37,
+          "duration_s": 2.0,
+          "key_count": 61,
           "property": "Lcl Rotation",
-          "target": "R_hip"
-        },
-        {
-          "curves": 0,
-          "duration_s": null,
-          "key_count": null,
-          "property": "Lcl Scaling",
-          "target": "R_hip"
-        },
-        {
-          "curves": 0,
-          "duration_s": null,
-          "key_count": null,
-          "property": "Lcl Scaling",
-          "target": "R_hip"
-        },
-        {
-          "curves": 0,
-          "duration_s": null,
-          "key_count": null,
-          "property": "Lcl Translation",
-          "target": "R_hip"
-        },
-        {
-          "curves": 0,
-          "duration_s": null,
-          "key_count": null,
-          "property": "Lcl Translation",
-          "target": "R_hip"
-        },
-        {
-          "curves": 0,
-          "duration_s": null,
-          "key_count": null,
-          "property": "lockInfluenceWeights",
-          "target": "R_hip"
-        },
-        {
-          "curves": 0,
-          "duration_s": null,
-          "key_count": null,
-          "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "R_hip"
         },
         {
@@ -1006,6 +1371,95 @@
           "duration_s": 1.2,
           "key_count": 37,
           "property": "Lcl Rotation",
+          "take": "walk",
+          "target": "R_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "take": "Take 001",
+          "target": "R_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "take": "idle",
+          "target": "R_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "take": "walk",
+          "target": "R_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "take": "Take 001",
+          "target": "R_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "take": "idle",
+          "target": "R_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "take": "walk",
+          "target": "R_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "take": "Take 001",
+          "target": "R_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "take": "idle",
+          "target": "R_hip"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "take": "walk",
+          "target": "R_hip"
+        },
+        {
+          "curves": 3,
+          "duration_s": 3.2666666666666666,
+          "key_count": 99,
+          "property": "Lcl Rotation",
+          "take": "Take 001",
+          "target": "R_knee"
+        },
+        {
+          "curves": 3,
+          "duration_s": 2.0,
+          "key_count": 61,
+          "property": "Lcl Rotation",
+          "take": "idle",
           "target": "R_knee"
         },
         {
@@ -1013,6 +1467,7 @@
           "duration_s": 1.2,
           "key_count": 37,
           "property": "Lcl Rotation",
+          "take": "walk",
           "target": "R_knee"
         },
         {
@@ -1020,6 +1475,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Scaling",
+          "take": "Take 001",
           "target": "R_knee"
         },
         {
@@ -1027,6 +1483,15 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Scaling",
+          "take": "idle",
+          "target": "R_knee"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "take": "walk",
           "target": "R_knee"
         },
         {
@@ -1034,6 +1499,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Translation",
+          "take": "Take 001",
           "target": "R_knee"
         },
         {
@@ -1041,6 +1507,15 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Translation",
+          "take": "idle",
+          "target": "R_knee"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "take": "walk",
           "target": "R_knee"
         },
         {
@@ -1048,6 +1523,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "R_knee"
         },
         {
@@ -1055,20 +1531,39 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "R_knee"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "take": "walk",
+          "target": "R_knee"
+        },
+        {
+          "curves": 3,
+          "duration_s": 3.2666666666666666,
+          "key_count": 99,
+          "property": "Lcl Rotation",
+          "take": "Take 001",
+          "target": "R_shoulder"
+        },
+        {
+          "curves": 3,
+          "duration_s": 2.0,
+          "key_count": 61,
+          "property": "Lcl Rotation",
+          "take": "idle",
+          "target": "R_shoulder"
         },
         {
           "curves": 3,
           "duration_s": 1.2,
           "key_count": 37,
           "property": "Lcl Rotation",
-          "target": "R_shoulder"
-        },
-        {
-          "curves": 3,
-          "duration_s": 1.2,
-          "key_count": 37,
-          "property": "Lcl Rotation",
+          "take": "walk",
           "target": "R_shoulder"
         },
         {
@@ -1076,6 +1571,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Scaling",
+          "take": "Take 001",
           "target": "R_shoulder"
         },
         {
@@ -1083,6 +1579,15 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Scaling",
+          "take": "idle",
+          "target": "R_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "take": "walk",
           "target": "R_shoulder"
         },
         {
@@ -1090,6 +1595,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Translation",
+          "take": "Take 001",
           "target": "R_shoulder"
         },
         {
@@ -1097,6 +1603,15 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Translation",
+          "take": "idle",
+          "target": "R_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "take": "walk",
           "target": "R_shoulder"
         },
         {
@@ -1104,6 +1619,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "R_shoulder"
         },
         {
@@ -1111,6 +1627,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "R_shoulder"
         },
         {
@@ -1118,6 +1635,15 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "walk",
+          "target": "R_shoulder"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "R_toe"
         },
         {
@@ -1125,6 +1651,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "R_toe"
         },
         {
@@ -1132,6 +1659,15 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "walk",
+          "target": "R_toe"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "R_wrist"
         },
         {
@@ -1139,6 +1675,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "R_wrist"
         },
         {
@@ -1146,6 +1683,103 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "walk",
+          "target": "R_wrist"
+        },
+        {
+          "curves": 1,
+          "duration_s": 3.2666666666666666,
+          "key_count": 99,
+          "property": "DeformPercent",
+          "take": "Take 001",
+          "target": "blink"
+        },
+        {
+          "curves": 1,
+          "duration_s": 2.0,
+          "key_count": 61,
+          "property": "DeformPercent",
+          "take": "idle",
+          "target": "blink"
+        },
+        {
+          "curves": 1,
+          "duration_s": 1.2,
+          "key_count": 37,
+          "property": "DeformPercent",
+          "take": "walk",
+          "target": "blink"
+        },
+        {
+          "curves": 3,
+          "duration_s": 3.2666666666666666,
+          "key_count": 99,
+          "property": "Lcl Rotation",
+          "take": "Take 001",
+          "target": "chest"
+        },
+        {
+          "curves": 3,
+          "duration_s": 2.0,
+          "key_count": 61,
+          "property": "Lcl Rotation",
+          "take": "idle",
+          "target": "chest"
+        },
+        {
+          "curves": 3,
+          "duration_s": 1.2,
+          "key_count": 37,
+          "property": "Lcl Rotation",
+          "take": "walk",
+          "target": "chest"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "take": "Take 001",
+          "target": "chest"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "take": "idle",
+          "target": "chest"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "take": "walk",
+          "target": "chest"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "take": "Take 001",
+          "target": "chest"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "take": "idle",
+          "target": "chest"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Translation",
+          "take": "walk",
           "target": "chest"
         },
         {
@@ -1153,6 +1787,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "chest"
         },
         {
@@ -1160,6 +1795,23 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
+          "target": "chest"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "take": "walk",
+          "target": "chest"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "head"
         },
         {
@@ -1167,6 +1819,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
           "target": "head"
         },
         {
@@ -1174,6 +1827,15 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "walk",
+          "target": "head"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "neck"
         },
         {
@@ -1181,6 +1843,15 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
+          "target": "neck"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "take": "walk",
           "target": "neck"
         },
         {
@@ -1188,6 +1859,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Rotation",
+          "take": "Take 001",
           "target": "pelvis"
         },
         {
@@ -1195,6 +1867,15 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Rotation",
+          "take": "idle",
+          "target": "pelvis"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Rotation",
+          "take": "walk",
           "target": "pelvis"
         },
         {
@@ -1202,6 +1883,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Scaling",
+          "take": "Take 001",
           "target": "pelvis"
         },
         {
@@ -1209,6 +1891,31 @@
           "duration_s": null,
           "key_count": null,
           "property": "Lcl Scaling",
+          "take": "idle",
+          "target": "pelvis"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "take": "walk",
+          "target": "pelvis"
+        },
+        {
+          "curves": 3,
+          "duration_s": 3.2666666666666666,
+          "key_count": 99,
+          "property": "Lcl Translation",
+          "take": "Take 001",
+          "target": "pelvis"
+        },
+        {
+          "curves": 3,
+          "duration_s": 2.0,
+          "key_count": 61,
+          "property": "Lcl Translation",
+          "take": "idle",
           "target": "pelvis"
         },
         {
@@ -1216,34 +1923,103 @@
           "duration_s": 1.2,
           "key_count": 37,
           "property": "Lcl Translation",
+          "take": "walk",
           "target": "pelvis"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "take": "Take 001",
+          "target": "pelvis"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "take": "idle",
+          "target": "pelvis"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "take": "walk",
+          "target": "pelvis"
+        },
+        {
+          "curves": 3,
+          "duration_s": 3.2666666666666666,
+          "key_count": 99,
+          "property": "Lcl Rotation",
+          "take": "Take 001",
+          "target": "spine_01"
+        },
+        {
+          "curves": 3,
+          "duration_s": 2.0,
+          "key_count": 61,
+          "property": "Lcl Rotation",
+          "take": "idle",
+          "target": "spine_01"
         },
         {
           "curves": 3,
           "duration_s": 1.2,
           "key_count": 37,
+          "property": "Lcl Rotation",
+          "take": "walk",
+          "target": "spine_01"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "take": "Take 001",
+          "target": "spine_01"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "take": "idle",
+          "target": "spine_01"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "Lcl Scaling",
+          "take": "walk",
+          "target": "spine_01"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
           "property": "Lcl Translation",
-          "target": "pelvis"
+          "take": "Take 001",
+          "target": "spine_01"
         },
         {
           "curves": 0,
           "duration_s": null,
           "key_count": null,
-          "property": "lockInfluenceWeights",
-          "target": "pelvis"
+          "property": "Lcl Translation",
+          "take": "idle",
+          "target": "spine_01"
         },
         {
           "curves": 0,
           "duration_s": null,
           "key_count": null,
-          "property": "lockInfluenceWeights",
-          "target": "pelvis"
-        },
-        {
-          "curves": 0,
-          "duration_s": null,
-          "key_count": null,
-          "property": "lockInfluenceWeights",
+          "property": "Lcl Translation",
+          "take": "walk",
           "target": "spine_01"
         },
         {
@@ -1251,6 +2027,7 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "spine_01"
         },
         {
@@ -1258,6 +2035,23 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
+          "target": "spine_01"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "take": "walk",
+          "target": "spine_01"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "take": "Take 001",
           "target": "spine_02"
         },
         {
@@ -1265,6 +2059,15 @@
           "duration_s": null,
           "key_count": null,
           "property": "lockInfluenceWeights",
+          "take": "idle",
+          "target": "spine_02"
+        },
+        {
+          "curves": 0,
+          "duration_s": null,
+          "key_count": null,
+          "property": "lockInfluenceWeights",
+          "take": "walk",
           "target": "spine_02"
         }
       ],
@@ -1301,7 +2104,7 @@
       }
     ],
     "phase_world_positions": {
-      "0": {
+      "62": {
         "L_ankle": [
           0.1,
           0.1484,
@@ -1328,7 +2131,34 @@
           0.0
         ]
       },
-      "18": {
+      "71": {
+        "L_ankle": [
+          0.1,
+          0.0916,
+          -0.0366
+        ],
+        "L_wrist": [
+          0.6722,
+          1.5695,
+          0.0
+        ],
+        "R_ankle": [
+          -0.1,
+          0.19,
+          -0.2308
+        ],
+        "R_wrist": [
+          -0.6722,
+          1.5695,
+          0.0
+        ],
+        "pelvis": [
+          0.0,
+          1.01,
+          0.0
+        ]
+      },
+      "80": {
         "L_ankle": [
           0.1,
           0.2272,
@@ -1352,33 +2182,6 @@
         "pelvis": [
           0.0,
           0.97,
-          0.0
-        ]
-      },
-      "9": {
-        "L_ankle": [
-          0.1,
-          0.0916,
-          -0.0366
-        ],
-        "L_wrist": [
-          0.6722,
-          1.5695,
-          0.0
-        ],
-        "R_ankle": [
-          -0.1,
-          0.19,
-          -0.2308
-        ],
-        "R_wrist": [
-          -0.6722,
-          1.5695,
-          -0.0
-        ],
-        "pelvis": [
-          0.0,
-          1.01,
           0.0
         ]
       }

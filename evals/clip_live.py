@@ -5,8 +5,10 @@ Two clips, both loop=True (the field-informed check this phase added):
     1  idle - 2.0 s breathing sway with a BLINK keyed mid-clip
        (exercises blend-weight keying), judged front-on
     2  walk - 1.2 s stride cycle with pelvis bob via root_position
-       (exercises root translation), judged from the side; REPLACES the
-       idle (the one-clip-at-a-time contract, asserted)
+       (exercises root translation), judged from the side; APPENDS after
+       the idle on the shared timeline (#718: a rig carries N clips laid
+       end to end, not one - authoring walk no longer deletes idle, and
+       both export as named takes into the same FBX, asserted)
 
 Rotation literals start from humanoid_live.biped_pose's MEASURED axis
 table: create_skeleton aims local X down the bone, so the bend axis of a
@@ -31,11 +33,12 @@ curves, mirroring the mayapy test rather than the plan's stale literal.
 Measured checks (this script) + judged sheets (the acceptance):
     build humanoid + skeleton + bind + blink target -> author idle
     (loop) -> preview sheet -> export include_animation, byte-gated ->
-    author walk (replaces, warning asserted) -> preview sheet -> the
+    author walk (appends after idle, #718) -> preview sheet -> the
     stride's world-space PHASE measured (counter-swing and the half-cycle
     mirror, because run 1 scored 28/28 with the arms in phase and only the
-    pixels caught it) -> export -> static-mutator refusal probed live ->
-    delete_clip -> static export carries ZERO curves -> baseline.json.
+    pixels caught it) -> export (both takes present, byte-gated) ->
+    static-mutator refusal probed live -> delete_clip -> static export
+    carries ZERO curves -> baseline.json.
 
 DESTRUCTIVE: calls new_scene. Port 9878, the agent-launched Maya, per the
 two-Maya policy - never point this at the user's 9877.
@@ -239,9 +242,10 @@ def out(name):
     return os.path.join(OUT_DIR, name)
 
 
-def by_target(anim, take_name):
+def by_target(anim, take_name, expect_whole_file=True):
     """{(target, property): fact} for `take_name`'s own rows, after checking
-    each one against Take 001's row for the same (target, property).
+    each one against Take 001's row for the same (target, property) - but
+    only when `expect_whole_file` holds (see below).
 
     anim_facts emits one row per (target, property) PER TAKE (#718 Task
     10b: a curve node exists once under the named take and again under
@@ -252,9 +256,26 @@ def by_target(anim, take_name):
     measured 53/53 clashes reading the committed evals/clip_live/walk.fbx
     fixture before this fix. The invariant that matters is that the named
     take's row agrees with Take 001's on everything BUT which take it
-    belongs to (both single clips here span the same range), so compare
-    with "take" excluded and collapse only the named take's rows for
-    callers, which is what every caller here keys lookups on.
+    belongs to, so compare with "take" excluded and collapse only the
+    named take's rows for callers, which is what every caller here keys
+    lookups on.
+
+    `expect_whole_file` is true only when `take_name` is the ONLY clip on
+    the rig's timeline - the case that invariant above actually holds for,
+    because "Take 001" (the exporter's own default) always spans the WHOLE
+    bake range, which then happens to equal the one clip's own range.
+    MEASURED (#718 Task 11, t718-11-report.md): once a SECOND clip shares
+    the timeline, "Take 001" still spans the whole multi-clip range while
+    each NAMED take is cropped to its own clip's range only - a genuinely
+    different span, not a defect - so a shared channel's key_count/
+    duration_s clash on every field (measured: L_ankle 99 keys/3.267s
+    under "Take 001" vs 37 keys/1.2s under "walk"). Comparing against Take
+    001 is therefore only valid for a file with exactly one clip; callers
+    exporting a multi-clip file pass expect_whole_file=False, which skips
+    the cross-check and returns just the named rows - the per-channel
+    key_count/duration checks the caller runs afterward, against literals
+    derived from that clip's OWN declared range, are what validate the
+    take's data in that case.
     """
     named = {}
     take001 = {}
@@ -264,6 +285,14 @@ def by_target(anim, take_name):
             named[key] = row
         elif row["take"] == "Take 001":
             take001[key] = row
+    # A clean pass with `named` empty (attribution lost entirely - every row
+    # take: None) would slip through every check below having verified
+    # nothing at all. Assert real work happened before trusting silence.
+    check("%s: named-take rows exist" % take_name, len(named) > 0,
+          "%d rows -> %d (target, property) pairs" % (len(anim["targets"]),
+                                                       len(named)))
+    if not expect_whole_file:
+        return named
     clashes = []
     compared = 0
     for key, row in named.items():
@@ -276,13 +305,6 @@ def by_target(anim, take_name):
         if stripped_row != stripped_other:
             clashes.append("%s: %s != %s" % (key, json.dumps(stripped_other),
                                              json.dumps(stripped_row)))
-    # A clean pass with `named` empty (attribution lost entirely - every row
-    # take: None) or with no Take 001 rows to compare against (compared==0)
-    # would both slip through the "not clashes" check below having verified
-    # nothing at all. Assert real work happened before trusting silence.
-    check("%s: named-take rows exist to compare" % take_name, len(named) > 0,
-          "%d rows -> %d (target, property) pairs" % (len(anim["targets"]),
-                                                       len(named)))
     check("%s: rows were actually compared against Take 001" % take_name,
           compared > 0, "%d pairs compared" % compared)
     check("%s: the named take's rows agree with Take 001's, take excluded"
@@ -471,13 +493,18 @@ def main():
           fbxbytes.anim_facts(facts)
           == {k: v for k, v in anim.items() if k != "clips"})
 
-    # ---- 6. the walk REPLACES the idle; previewed from the side; exported
+    # ---- 6. walk APPENDS after idle (#718); previewed from the side; exported
     walk = ok("author_clip", {"root": root, "name": "walk",
                               "fps": WALK_FPS, "interpolation": "smooth",
                               "loop": True, "keys": WALK_KEYS})
-    check("walk: replacing the idle is stated",
-          walk["replaced"] == "idle"
-          and any("replaced clip 'idle'" in w for w in walk["warnings"]))
+    # #718: authoring a second name APPENDS - it no longer replaces. The
+    # phase-6 assertion (walk["replaced"] == "idle") tested a contract that
+    # has been withdrawn; what must hold now is that idle survives and walk
+    # takes the range after it.
+    check("walk appends after idle instead of replacing it",
+          walk["replaced"] is None
+          and walk["clips"] == ["idle", "walk"]
+          and walk["start_frame"] == idle["end_frame"] + 2)
     check("walk: root bob keyed", walk["root_position_keyed"] is True)
     moved = [k["max_displacement"] for k in walk["per_key"]]
     check("walk: every interior stride key measured real motion",
@@ -492,7 +519,14 @@ def main():
                  timeout_s=900.0)
     save_preview("walk", preview)
     # World-space limb phase and the pelvis bob, measured off the EVALUATED
-    # scene at contact (f0), passing (f9) and the half cycle (f18).
+    # scene at contact (f0), passing (f9) and the half cycle (f18) - OF
+    # WALK'S OWN RANGE. #718: walk no longer starts at absolute frame 0 (it
+    # APPENDS after idle, at walk["start_frame"]), so the probe times are
+    # offset by that - probing absolute frames 0/9/18 unchanged would land
+    # inside IDLE's own range instead (idle keys no leg/arm/root channel,
+    # so every reading there is a flat 0.0 - not a sign error, just the
+    # wrong clip's frames, which is what run 1 of THIS task's rebase
+    # actually measured before this fix).
     #
     # The phase checks below exist because run 1 of this gate scored 28/28
     # with the hips inverted: the legs alternated, every duration, key count
@@ -503,10 +537,12 @@ def main():
     # sign error and a green run. Forward is +Z (the toe joints sit at
     # z=+0.14); the thresholds sit far off zero and well inside the measured
     # +-0.40 m ankle travel, so they pin the SIGN without pinning the style.
+    w0 = walk["start_frame"]
+    f_contact, f_passing, f_half = w0, w0 + 9, w0 + 18
     phase = py(
         "import maya.cmds as cmds\n"
         "_out = {}\n"
-        "for _f in (0, 9, 18):\n"
+        "for _f in %(frames)r:\n"
         "    cmds.currentTime(_f)\n"
         "    _row = {}\n"
         "    for _j in ('L_ankle', 'R_ankle', 'L_wrist', 'R_wrist', %(r)r):\n"
@@ -515,8 +551,9 @@ def main():
         "        _row[_j.split('|')[-1]] = [round(_v, 4) for _v in _p]\n"
         "    _out[_f] = _row\n"
         "cmds.currentTime(0)\n"
-        "_out" % {"r": root}, "walk phase probe")
-    contact, passing, half = phase[0], phase[9], phase[18]
+        "_out" % {"r": root, "frames": (f_contact, f_passing, f_half)},
+        "walk phase probe")
+    contact, passing, half = phase[f_contact], phase[f_passing], phase[f_half]
     bob = {"contact_y": contact["pelvis"][1], "passing_y": passing["pelvis"][1]}
     check("walk: the pelvis bobs (contact %.3f -> passing %.3f)"
           % (bob["contact_y"], bob["passing_y"]),
@@ -544,8 +581,23 @@ def main():
                                "include_skins": True,
                                "include_animation": True}, timeout_s=900.0)
     anim_w = result["animation"]
-    by_w = by_target(anim_w, "walk")
+    # #718: this export now carries TWO clips on one timeline (idle was
+    # never deleted), so "Take 001" spans both and can no longer be
+    # expected to match either named take's own span - see by_target's
+    # docstring. Both takes are looked up BY NAME (module docstring): the
+    # walk one for the per-channel checks below, and idle's presence
+    # confirmed here directly - the measurable proof that authoring walk
+    # appended rather than replacing.
+    by_w = by_target(anim_w, "walk", expect_whole_file=False)
     walk_take = take_named(anim_w, "walk")
+    idle_take_still_here = take_named(anim_w, "idle")
+    check("walk export: idle's take is STILL present by name (append, "
+          "not replace)",
+          idle_take_still_here is not None
+          and abs(idle_take_still_here["duration_s"] - 2.0) <= 1.0 / 30,
+          "takes=%s duration_s=%s"
+          % ([t["name"] for t in anim_w["takes"]],
+             (idle_take_still_here or {}).get("duration_s")))
     check("walk: a take named 'walk', 37-key joint curves",
           walk_take is not None
           and by_w.get(("L_hip", "Lcl Rotation"), {}).get("key_count") == 37,
@@ -561,9 +613,20 @@ def main():
                       if k[1] == "Lcl Translation"}))
 
     # ---- 7. delete_clip returns the skeleton to static land
+    # #718: the rig now carries TWO clips (idle, walk), so omitting `name`
+    # is a FULL teardown of both, not "the" clip - delete_clip reports the
+    # representative name as the first record in clip_meta's stored order
+    # (authoring order: idle, then walk), not "walk". The assertion this
+    # replaces (gone["clip"] == "walk") silently assumed the single-clip
+    # layout where walk was the only clip left to remove; "clips" == []
+    # is what actually proves BOTH clips (and every curve either one
+    # authored) are gone.
     gone = ok("delete_clip", {"root": root})
-    check("delete_clip removed the walk and measured the return",
-          gone["clip"] == "walk" and gone["deleted_curves"] > 0)
+    check("delete_clip (no name) tears down every clip on the rig",
+          gone["clip"] == "idle" and gone["clips"] == []
+          and gone["deleted_curves"] > 0,
+          "clip=%r clips=%r deleted_curves=%s"
+          % (gone.get("clip"), gone.get("clips"), gone.get("deleted_curves")))
     reposed = ok("pose_skeleton", {"root": root,
                                    "rotations": {"chest": [0, -10, 0]}})
     check("static posing works again after delete_clip",
