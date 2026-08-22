@@ -955,7 +955,7 @@ class TestPreviewClip:
         with pytest.raises(HandlerError, match="no clip"):
             clip.preview_clip({"root": "root", "name": "idle"})
         self._wire(fake, monkeypatch)
-        with pytest.raises(HandlerError, match="live clip is 'idle'"):
+        with pytest.raises(HandlerError, match="no clip named 'walk'"):
             clip.preview_clip({"root": "root", "name": "walk"})
         with pytest.raises(HandlerError, match="unknown angle"):
             clip.preview_clip({"root": "root", "name": "idle",
@@ -963,6 +963,23 @@ class TestPreviewClip:
         with pytest.raises(HandlerError, match="every_nth"):
             clip.preview_clip({"root": "root", "name": "idle",
                                "every_nth": 0})
+
+    def test_a_later_clip_renders_its_own_absolute_frames(self, fake,
+                                                          monkeypatch):
+        calls = self._wire(fake, monkeypatch)      # authors 'idle', 0..60
+        _author(fake, name="walk", fps=30, keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [0, 0, 20]}}])
+        out = clip.preview_clip({"root": "root", "name": "walk"})
+        assert (out["start_frame"], out["end_frame"]) == (62, 92)
+        # absolute frames drive the scene...
+        assert [s["time"] for s in calls["shots"]][0] == 62
+        assert [s["time"] for s in calls["shots"]][-1] == 92
+        # ...clip-relative seconds are what the caller reads
+        assert out["frames"][0] == {"frame": 62, "time_s": 0.0}
+        assert out["frames"][-1]["time_s"] == pytest.approx(1.0)
+        assert calls["shots"][0]["label"] == "t=0.00s"
+        assert out["clip"] == "walk"
 
     def test_default_stride_fits_the_cap_and_keeps_the_ends(self, fake,
                                                             monkeypatch):

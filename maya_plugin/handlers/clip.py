@@ -876,19 +876,21 @@ def preview_clip(params: Dict[str, Any]) -> Dict[str, Any]:
 
     root_long = rigging._require_joint(cmds, params.get("root"))
     records = clip_meta(cmds, root_long)
-    if not records or not records[0].get("name"):
+    if not records:
         raise HandlerError(
             "no clip exists on %s" % root_long,
             hint="author_clip creates one; preview_clip renders it")
-    meta = records[0]
     name = params.get("name")
-    if name != meta["name"]:
+    meta = next((r for r in records if r["name"] == name), None)
+    if meta is None:
         raise HandlerError(
-            "the live clip is %r, not %r" % (meta["name"], name),
-            hint="pass the clip's own name - previewing a stale assumption "
-                 "judges the wrong motion")
+            "no clip named %r on %s (has: %s)"
+            % (name, _short(root_long),
+               ", ".join(repr(r["name"]) for r in records)),
+            hint="a rig carries several clips now - pass the one to judge")
     fps = int(meta.get("fps", 30))
-    duration_frames = int(round(float(meta.get("duration_s", 0.0)) * fps))
+    start_frame = int(meta["start_frame"])
+    duration_frames = int(meta["end_frame"]) - start_frame
     if duration_frames <= 0:
         raise HandlerError("the clip has zero duration",
                            hint="re-author it; this is a broken metadata "
@@ -953,19 +955,21 @@ def preview_clip(params: Dict[str, Any]) -> Dict[str, Any]:
         "zoom": params.get("zoom", 1.0),
     }
     shots = []
-    for i, frame in enumerate(frames):
+    for i, offset in enumerate(frames):
         shots.append({
-            "label": "t=%.2fs" % (frame / float(fps)),
+            "label": "t=%.2fs" % (offset / float(fps)),
             "angle": angle,
             "isolate": None,
             "frame_on": meshes,
-            "time": frame,
+            "time": start_frame + offset,
             "reuse_camera": i > 0,
         })
     result = render._run_shots(cmds, shots, render_params)
     result["clip"] = meta["name"]
     result["fps"] = fps
-    result["frames"] = [{"frame": f, "time_s": f / float(fps)}
+    result["start_frame"] = start_frame
+    result["end_frame"] = start_frame + duration_frames
+    result["frames"] = [{"frame": start_frame + f, "time_s": f / float(fps)}
                         for f in frames]
     return result
 
