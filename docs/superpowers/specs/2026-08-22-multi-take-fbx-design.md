@@ -34,8 +34,9 @@ key data had to ride in a `golem_takes.json` sidecar to stay reconstructable.
    other clip's MOTION ever changes, so re-authoring cannot disturb a take
    already judged. (The one thing authoring may add to another clip is a
    rest-value pin on a channel that clip never declared — see the
-   self-contained rule; that preserves its motion, it does not alter it.) Take ORDER in the file changes; each take is still independently
-   named, which is all a consumer reads.
+   self-contained rule; that preserves its motion, it does not alter it.)
+   Take ORDER in the file changes; each take is still independently named,
+   which is all a consumer reads.
 5. **`delete_clip` takes an optional `name`.** With a name: that clip only.
    Without: every clip, plus the bind-pose restore that exists today (the
    current single-clip behaviour, unchanged for existing callers). Gaps left
