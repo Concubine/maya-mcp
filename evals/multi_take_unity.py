@@ -70,6 +70,58 @@ fixed now:
     undeclared joint's readings against ITS OWN measured rest, cyclically
     (mod 360, shortest signed distance - a 359.999 reading against a rest
     of 0 is 0.001 degrees away, not 359.999), never a hardcoded 0.
+
+A second live run (2026-08-22) proved even that "rest" reference is wrong.
+UNITY_MEASURE_CS measured the model's instantiated transform BEFORE
+`SampleAnimation` ever ran on it - but that transform is the FBX's node
+DEFAULT pose, which is Maya's EXPORT-TIME SCENE POSE, not the rig's rest
+pose. Confirmed from both sides: evals/multi_take_live.py deliberately
+authors `idle`'s loop with `spine_01`/`chest` NOT at rest (a -3 degree
+lean, chosen precisely so the contamination checks would not be vacuous),
+while Maya's own rest for those joints is 0. The exported FBX's node
+defaults reflect whatever pose the scene held at export time - idle's -3
+degree opening pose - which round-trips through Unity's Y-up sign flip to
++3 degrees. Meanwhile `wave` and `step` correctly pin `chest`/`spine_01` to
+[0,0,0] (Maya's true rest). The second run flagged that CORRECT pinning as
+4 false violations, all on `chest`/`spine_01`, because it compared against
+the export-time scene pose instead of the rig's rest.
+
+verify() no longer needs an absolute reference pose at all - Unity's own
+clips are each other's reference. Two checks replace the old rest-relative
+one, reported as distinguishable messages because they mean different
+things:
+
+  A. MOVEMENT - a joint a clip does not declare must not move within that
+     clip: its start, mid and end samples must agree (cyclically) within
+     STILLNESS_EPSILON_DEG. Catches a joint sweeping through the clip.
+
+  B. AGREEMENT - the value a joint holds while undeclared must agree,
+     cyclically, across every clip that does not declare it. Each joint in
+     this rig is declared by exactly one clip, so at least two others hold
+     it un-animated; if one of them inherited a neighbour's pose, the two
+     would disagree. This needs no reference pose at all - the clips are
+     each other's reference. With fewer than two non-declaring clips to
+     compare, B cannot be evaluated, and verify() says so rather than
+     passing silently.
+
+Verified against the real measurements: `chest` (declared by idle) holds
+[0,0,0] in both wave and step; `R_shoulder` (declared by wave) holds
+[~0,180,270] in both idle and step; `L_hip` (declared by step) holds
+[~0,180,~0] in both idle and wave - all three pairs agree, so all three
+pass, which is the correct result. R_shoulder's [0,180,270] is exactly the
+non-zero value the FIRST run's hardcoded-0 assumption got wrong, and
+chest/spine_01's [0,0,0] is exactly what the SECOND run's export-time-pose
+assumption got wrong (it expected +3, not 0) - checks A/B get both right
+without needing to know either number up front, because they never consult
+an assumed or measured "rest" at all.
+
+The C#'s emitted default-pose block is kept - genuinely useful diagnostic
+context, what a consumer's prefab shows before any clip plays - but renamed
+from "rest" to "model_default_pose", and is printed only as context
+alongside a violation, never read by verify() for correctness. Its comment
+says explicitly that it is the export-time scene pose and NOT the rig's
+rest pose, citing this exact chest/spine_01 case, so nobody wires it back
+into a correctness check.
 """
 
 from __future__ import annotations
@@ -93,31 +145,43 @@ BASELINE_PATH = os.path.join(_HERE, "multi_take_live", "baseline.json")
 # tick read.
 LENGTH_TOL_S = 1e-3
 
-# A joint NOT declared by a clip must sit within this many degrees of ITS
-# OWN measured rest pose (the "rest" block UNITY_MEASURE_CS emits from the
-# joint's bind-pose local rotation - NOT an assumed 0 on every axis; a
-# joint orientation baked at import time means Unity's `localRotation` at
-# bind is generally non-zero, e.g. L_ankle measured at [270, 293.1986, 0])
-# at every one of its three samples for that clip to pass - an absolute
-# distance-from-rest check, not "does it vary between the three samples"
-# (see verify()'s docstring for why the latter cannot catch the documented
-# failure shape; verify() keeps a separate movement check too, since it is
-# cheap and catches a different failure - a joint that sweeps through its
-# own rest value rather than holding a constant wrong one). Justification,
-# not a guess: Unity's FBX import converts Maya's per-axis rotation curves into
-# its own internal representation (quaternion component curves for a
-# Generic-rigged import) and back to Euler angles when `SampleAnimation` is
-# read via `localRotation.eulerAngles` - that round trip alone can move a
+# The tolerance, in degrees, for BOTH checks verify() runs on a joint a clip
+# does not declare - neither one needs, or consults, any absolute reference
+# pose:
+#
+#   A. MOVEMENT - within one clip, that joint's start/mid/end samples must
+#      agree (cyclically) within this many degrees. A larger spread means
+#      the joint is sweeping through the clip's range.
+#   B. AGREEMENT - across every OTHER clip that also does not declare that
+#      joint, the value it holds (compared cyclically) must agree within
+#      this many degrees. A larger spread means at least one of those
+#      clips inherited a neighbour's pose - the actual contamination
+#      defect. This is deliberately a clip-vs-clip comparison, not a
+#      clip-vs-rest one: an earlier version of this gate compared every
+#      undeclared joint against an assumed or measured "rest" pose, and
+#      both attempts were wrong on real Unity data (module docstring's
+#      MEASURED paragraphs) - a hardcoded 0 ignores joint orientation, and
+#      the model's export-time default pose is the SCENE pose at export,
+#      not the rig's rest. Two non-contaminated clips agreeing with each
+#      other is proof enough, and needs neither number.
+#
+# Justification for the tolerance value, not a guess: Unity's FBX import
+# converts Maya's per-axis rotation curves into its own internal
+# representation (quaternion component curves for a Generic-rigged import)
+# and back to Euler angles when `SampleAnimation` is read via
+# `localRotation.eulerAngles` - that round trip alone can move a
 # truly-constant value by floating-point noise, empirically well under 1e-3
-# degrees in Unity's own quaternion math. The smallest REAL motion any of
-# the three authored clips contains is idle's spine/chest sway, a 10 degree
-# swing (multi_take_live.IDLE_KEYS); wave's arm and step's hips move 30-45
-# degrees. 0.01 degrees sits three orders of magnitude below the smallest
-# authored motion and roughly two above plausible round-trip noise - the
-# same gap multi_take_live.py's own REST_ROT_TOL (1e-4 degrees) exploits on
-# the Maya side, widened here because this measurement crosses one more
-# lossy conversion (Maya bytes -> Unity's internal quaternion curves ->
-# sampled Euler) that the Maya-side probe never goes through.
+# degrees in Unity's own quaternion math (measured: L_hip/R_hip's x and z
+# axes at 7.0e-15 degrees off an exact multiple of 360). The smallest REAL
+# motion any of the three authored clips contains is idle's spine/chest
+# sway, a 10 degree swing (multi_take_live.IDLE_KEYS); wave's arm and
+# step's hips move 30-45 degrees. 0.01 degrees sits three orders of
+# magnitude below the smallest authored motion and roughly two above
+# plausible round-trip noise - the same gap multi_take_live.py's own
+# REST_ROT_TOL (1e-4 degrees) exploits on the Maya side, widened here
+# because this measurement crosses one more lossy conversion (Maya bytes ->
+# Unity's internal quaternion curves -> sampled Euler) that the Maya-side
+# probe never goes through.
 STILLNESS_EPSILON_DEG = 0.01
 
 # Where the scratch project should receive the exported FBX. A plain
@@ -182,7 +246,7 @@ _UNITY_MEASURE_TEMPLATE = r"""
 //
 // Writes ONE JSON object to outputPath (see below), exactly the shape
 // evals/multi_take_unity.py's verify() parses:
-//   {"rest": {"<declared joint>": [x,y,z], ...},
+//   {"model_default_pose": {"<declared joint>": [x,y,z], ...},
 //    "clips": [
 //     {"name": str, "length": float, "frameRate": float,
 //      "curves": [{"path": str, "property": str}, ...],
@@ -190,13 +254,15 @@ _UNITY_MEASURE_TEMPLATE = r"""
 //                    {"start": [x,y,z], "mid": [x,y,z], "end": [x,y,z]}}}
 //   ]}
 //
-// "rest" is measured ONCE, on the freshly instantiated model BEFORE
-// SampleAnimation is ever called on it - that is each declared joint's
-// true bind pose (its import-time joint orientation), not an assumed
-// [0,0,0]: the first live run measured L_ankle's rest at
-// [270, 293.1986, 0] and flagged 10 false violations by assuming 0
-// instead. verify() compares every undeclared joint's readings against
-// THIS rig's own "rest" block, never a hardcoded zero.
+// "model_default_pose" is measured ONCE, on the freshly instantiated model
+// BEFORE SampleAnimation is ever called on it. DIAGNOSTIC ONLY - it is the
+// FBX node's default transform, i.e. Maya's EXPORT-TIME SCENE POSE, NOT the
+// rig's rest pose (two earlier attempts to use it, or a hardcoded [0,0,0],
+// as a correctness reference were both wrong on real Unity data - see the
+// module docstring's MEASURED paragraphs: chest/spine_01's true Maya rest
+// is 0, but the FBX default carries idle's authored -3-degree opening pose
+// instead). verify() never reads this block for correctness - only prints
+// it as context alongside a violation.
 //
 // "samples" covers every DECLARED joint across ALL three clips (not just
 // this clip's own), sampled at this clip's own start/mid/end - that is
@@ -241,22 +307,23 @@ foreach (UnityEngine.Transform t in instance.GetComponentsInChildren<UnityEngine
     if (!jointLookup.ContainsKey(t.name)) jointLookup[t.name] = t;
 }
 
-// The bind pose, BEFORE SampleAnimation touches this instance for the
-// first time - each declared joint's true rest orientation.
-System.Text.StringBuilder restSb = new System.Text.StringBuilder();
-restSb.Append("{");
-bool firstRestJoint = true;
+// The model's default pose, BEFORE SampleAnimation touches this instance
+// for the first time - the FBX node defaults (Maya's export-time scene
+// pose, NOT the rig's rest - diagnostic only, see the header comment).
+System.Text.StringBuilder defaultPoseSb = new System.Text.StringBuilder();
+defaultPoseSb.Append("{");
+bool firstDefaultJoint = true;
 foreach (string jointName in declaredJoints) {
-    UnityEngine.Transform restJt;
-    if (!jointLookup.TryGetValue(jointName, out restJt)) continue;
-    if (!firstRestJoint) restSb.Append(",");
-    firstRestJoint = false;
-    restSb.Append("\"" + Esc(jointName) + "\":" + Vec3(restJt.localRotation.eulerAngles));
+    UnityEngine.Transform defaultJt;
+    if (!jointLookup.TryGetValue(jointName, out defaultJt)) continue;
+    if (!firstDefaultJoint) defaultPoseSb.Append(",");
+    firstDefaultJoint = false;
+    defaultPoseSb.Append("\"" + Esc(jointName) + "\":" + Vec3(defaultJt.localRotation.eulerAngles));
 }
-restSb.Append("}");
+defaultPoseSb.Append("}");
 
 System.Text.StringBuilder sb = new System.Text.StringBuilder();
-sb.Append("{\"rest\":" + restSb.ToString() + ",\"clips\":[");
+sb.Append("{\"model_default_pose\":" + defaultPoseSb.ToString() + ",\"clips\":[");
 for (int ci = 0; ci < clips.Length; ci++) {
     UnityEngine.AnimationClip clip = clips[ci];
     if (ci > 0) sb.Append(",");
@@ -353,22 +420,19 @@ def verify(declared, measured):
     """Pure. No Unity, no I/O. `declared` is DECLARED (or an equivalent
     list of {name, fps, start_frame, end_frame, joints} records);
     `measured` is the JSON object UNITY_MEASURE_CS writes to its output
-    file, already parsed - {"rest": {...}, "clips": [...]}.
+    file, already parsed - {"model_default_pose": {...}, "clips": [...]}.
 
-    Returns a list of violation strings (empty = pass). Checks:
+    Returns a list of violation strings (empty = pass). No absolute
+    reference pose is ever consulted - two earlier versions of this gate
+    tried that (a hardcoded [0,0,0], then the model's export-time default
+    pose from `measured["model_default_pose"]`) and both were wrong on real
+    Unity data (module docstring's MEASURED paragraphs: a joint orientation
+    is generally non-zero, and the FBX default reflects whatever pose the
+    scene held at EXPORT time, not the rig's rest). `model_default_pose` is
+    diagnostic only now - never read below, only printed as context by
+    main() alongside a violation.
 
-      0. `measured` carries a top-level "rest" block at all. Without it,
-         checks 4b below have no reference value to compare a joint's
-         reading to - and falling back to an assumed [0,0,0] is exactly
-         the bug this gate shipped with on its first live run (see the
-         module docstring's MEASURED paragraph): every one of Unity's 10
-         false violations was a joint sitting, perfectly still, at its own
-         non-zero import-time joint orientation (L_ankle measured at
-         [270, 293.1986, 0]) compared against a hardcoded 0. A missing
-         "rest" block is reported once, here, rather than silently
-         skipped or silently defaulted.
-
-      Then, per declared clip:
+    Checks, per declared clip:
 
       1. it exists by name in `measured` (a clip present in Unity but NOT
          declared is NOT a violation - same rule the byte gate's
@@ -382,43 +446,42 @@ def verify(declared, measured):
          (start/mid/end) present and numeric - the completeness check.
          Without this, a joint Unity's measurement fails to produce ANY
          reading for (a name mismatch after import, a lookup miss, any
-         gap) is simply absent from `samples`; checks 4a/4b below only
-         ever walk the joints THAT ARE PRESENT, so a missing joint
-         contributes zero violations and the gate reports a false clean
-         PASS on exactly the defect it exists to catch. "Every joint that
-         should have been sampled" is derived from the `declared` records
+         gap) is simply absent from `samples`; check A below only ever
+         walks the joints THAT ARE PRESENT, so a missing joint contributes
+         zero violations and the gate reports a false clean PASS on
+         exactly the defect it exists to catch. "Every joint that should
+         have been sampled" is derived from the `declared` records
          themselves (the union of every clip's `joints`, minus this
          clip's own) - never a hardcoded list, so it tracks whatever the
          live Maya gate actually authored.
-      4. every joint sampled for that clip that this clip does NOT declare
-         is checked TWO ways, reported as distinguishable messages because
-         they mean different things:
+      A. MOVEMENT - every joint sampled for that clip that this clip does
+         NOT declare must not move within the clip: its start/mid/end
+         readings must agree, cyclically, within STILLNESS_EPSILON_DEG.
+         Catches a joint sweeping through the clip's own range.
 
-         4a. MOVEMENT - does the reading vary across the three samples
-             (cyclically) by more than STILLNESS_EPSILON_DEG? Catches a
-             joint that sweeps THROUGH its own rest value rather than
-             holding a constant wrong one - cheap to add, and a shape the
-             at-rest check below (4b) cannot see if the sweep happens to
-             start and end exactly at rest.
+    Then, once per joint rather than per clip:
 
-         4b. AT-REST - does every one of the three samples sit within
-             STILLNESS_EPSILON_DEG of the joint's OWN measured rest value
-             (from `measured["rest"]`), cyclically? This is the actual
-             contamination check. Deliberately an ABSOLUTE distance-from-
-             rest check, not "does the reading vary" (a plausible first
-             reading of the brief's wording, and this script's own first
-             draft's check 4a taken alone): the design doc's failure shape
-             is a curve holding "whatever value its last key left on it" -
-             a CONSTANT, not a sweep. A joint on the wrong side of a
-             missing backward pin reads the SAME wrong value at start, mid
-             and end alike (proven here by
-             TestContamination.test_backward_hold_pattern_is_caught in
-             tests/test_multi_take_unity.py), so 4a alone sees zero
-             movement and would pass the exact defect this gate exists to
-             catch. A joint missing from `measured["rest"]` (and "rest"
-             itself present, i.e. check 0 above did not already fire) is
-             its own violation, same reasoning as check 3: a missing
-             reference is not proof the joint is at rest.
+      B. AGREEMENT - the value an undeclared joint holds (its "mid" sample,
+         which check A above already established agrees with start/end to
+         within epsilon whenever A did not already fire) must agree,
+         cyclically within STILLNESS_EPSILON_DEG, across EVERY clip that
+         does not declare that joint. This is the actual contamination
+         check, and it needs no reference pose at all - the clips are each
+         other's reference. Each joint in this rig is declared by exactly
+         one clip, so at least two others hold it un-animated; if one of
+         them inherited a neighbour's pose instead of the correct constant,
+         the two would disagree, regardless of what that correct constant
+         is (proven here by
+         TestContamination.test_backward_hold_pattern_is_caught and
+         TestNoRestNeeded.test_correct_nonzero_constant_across_all_clips_is_not_flagged
+         in tests/test_multi_take_unity.py - the latter is the exact shape
+         both of this gate's earlier reference-pose attempts got wrong).
+         When fewer than two clips leave a joint undeclared AND measurable,
+         B cannot be evaluated - reported as its own message (a check that
+         cannot run is not a check that passed), not a silent pass. A
+         joint declared by every clip, or missing entirely from every
+         other clip's samples (already caught by check 3), naturally lands
+         here as "fewer than two."
     """
     violations = []
     measured_by_name = {c["name"]: c for c in measured.get("clips", [])
@@ -429,29 +492,26 @@ def verify(declared, measured):
     # matches what the live Maya gate actually authored.
     all_declared_joints = {j for r in declared for j in r.get("joints", [])}
 
-    # Check 0: the rest reference itself. See docstring - never silently
-    # fall back to an assumed [0,0,0], that is the bug this file shipped
-    # with.
-    rest = measured.get("rest")
-    rest_missing = rest is None
-    if rest_missing:
-        violations.append(
-            "measurement has no top-level 'rest' block (each declared "
-            "joint's bind-pose local rotation) - the at-rest contamination "
-            "check compares every undeclared joint's reading against ITS "
-            "OWN rest value, never an assumed [0,0,0], so it did not run "
-            "for any clip")
-        rest = {}
+    # Per-clip bookkeeping check B needs after the per-clip loop below:
+    # which joints each clip declares (so B knows which clips to compare),
+    # and each found clip's own samples (so B can read the "mid" value
+    # without re-deriving it from `measured`).
+    clip_declared_joints = {}
+    clip_samples = {}
+    clip_found = {}
 
     for record in declared:
         name = record["name"]
+        clip_declared_joints[name] = set(record.get("joints", []))
         m = measured_by_name.get(name)
         if m is None:
             violations.append(
                 "clip %r is declared but was not found among Unity's "
                 "imported clips (found: %s)"
                 % (name, sorted(measured_by_name)))
+            clip_found[name] = False
             continue
+        clip_found[name] = True
 
         fps = float(record["fps"])
         expected_length = (record["end_frame"] - record["start_frame"]) / fps
@@ -465,13 +525,14 @@ def verify(declared, measured):
                    record["start_frame"], record["end_frame"], diff,
                    LENGTH_TOL_S))
 
-        declared_joints = set(record.get("joints", []))
+        declared_joints = clip_declared_joints[name]
         samples = m.get("samples", {})
+        clip_samples[name] = samples
 
         # Check 3: completeness. A joint declared by ANOTHER clip must
         # show up in THIS clip's samples at all - if it is simply absent
-        # (not malformed, not still, ABSENT), checks 4a/4b below would
-        # never see it and the gap would pass silently.
+        # (not malformed, not still, ABSENT), check A below would never
+        # see it and the gap would pass silently.
         for joint in sorted(all_declared_joints - declared_joints):
             if joint not in samples:
                 violations.append(
@@ -480,8 +541,8 @@ def verify(declared, measured):
                     "Unity's measurement entirely - a measurement gap is "
                     "not proof of stillness" % (name, joint))
 
-        # Checks 4a/4b, for every joint Unity's measurement DID produce a
-        # reading for.
+        # Check A: movement across the three samples, cyclic, for every
+        # joint Unity's measurement DID produce a reading for.
         for joint, rows in samples.items():
             if joint in declared_joints:
                 continue
@@ -495,41 +556,71 @@ def verify(declared, measured):
                     % (name, joint, rows))
                 continue
 
-            # 4a: movement across the three samples, cyclic.
             move_worst = max(_vec3_cyclic_worst(start, mid),
                               _vec3_cyclic_worst(mid, end),
                               _vec3_cyclic_worst(start, end))
             if move_worst > STILLNESS_EPSILON_DEG:
                 violations.append(
                     "clip %r: joint %r is NOT declared by this clip but its "
-                    "sampled rotation MOVES %.6f degrees across the clip's "
+                    "sampled rotation MOVES %.6f degrees within the clip's "
                     "own range (start=%s mid=%s end=%s) > epsilon=%.g "
-                    "degrees - it should be perfectly still"
+                    "degrees - it should be perfectly still (check A: "
+                    "movement)"
                     % (name, joint, move_worst, start, mid, end,
                        STILLNESS_EPSILON_DEG))
 
-            # 4b: distance from the joint's OWN measured rest pose, cyclic.
-            if joint not in rest:
-                if not rest_missing:
-                    violations.append(
-                        "clip %r: joint %r has no rest measurement in the "
-                        "'rest' block to compare against - a missing "
-                        "reference is not proof the joint is at rest"
-                        % (name, joint))
+    # Check B: cross-clip agreement, once per joint. Uses each non-
+    # declaring clip's "mid" sample as that clip's held value - check A
+    # above already confirms start/mid/end agree within epsilon whenever it
+    # did not itself fire, so "mid" alone represents the held pose without
+    # any circular-averaging pitfalls (a plain arithmetic mean of, say,
+    # 359.999 and 0.001 would wrongly land near 180).
+    for joint in sorted(all_declared_joints):
+        held = {}
+        for record in declared:
+            name = record["name"]
+            if joint in clip_declared_joints[name]:
                 continue
-            rest_vec = rest[joint]
-            rest_worst = max(_vec3_cyclic_worst(start, rest_vec),
-                              _vec3_cyclic_worst(mid, rest_vec),
-                              _vec3_cyclic_worst(end, rest_vec))
-            if rest_worst > STILLNESS_EPSILON_DEG:
-                violations.append(
-                    "clip %r: joint %r is NOT declared by this clip but its "
-                    "sampled rotation reaches %.6f degrees away from its "
-                    "OWN rest pose %s (start=%s mid=%s end=%s) > "
-                    "epsilon=%.g degrees - contamination from a "
-                    "neighbouring clip"
-                    % (name, joint, rest_worst, rest_vec, start, mid, end,
-                       STILLNESS_EPSILON_DEG))
+            if not clip_found.get(name):
+                continue
+            rows = clip_samples.get(name, {}).get(joint)
+            if not rows:
+                continue  # already flagged by check 3
+            try:
+                held[name] = [float(v) for v in rows["mid"]]
+            except (KeyError, TypeError, ValueError):
+                continue  # already flagged by check A's malformed-entry case
+
+        if len(held) < 2:
+            violations.append(
+                "joint %r: only %d clip(s) leave it undeclared and "
+                "measurable (%s) - check B (cross-clip agreement) needs at "
+                "least two to compare and cannot be evaluated here; a "
+                "check that cannot run is not a check that passed"
+                % (joint, len(held), sorted(held)))
+            continue
+
+        names = sorted(held)
+        worst_diff = -1.0
+        worst_pair = None
+        for i in range(len(names)):
+            for j in range(i + 1, len(names)):
+                d = _vec3_cyclic_worst(held[names[i]], held[names[j]])
+                if d > worst_diff:
+                    worst_diff = d
+                    worst_pair = (names[i], names[j])
+
+        if worst_diff > STILLNESS_EPSILON_DEG:
+            detail = ", ".join(
+                "%r held %s" % (n, held[n]) for n in names)
+            violations.append(
+                "joint %r is undeclared by %d clip(s) but they do not hold "
+                "the same value: %r vs %r differ by %.6f degrees > "
+                "epsilon=%.g degrees (check B: agreement) - one of these "
+                "clips inherited a neighbour's pose instead of the joint's "
+                "own constant value: %s"
+                % (joint, len(names), worst_pair[0], worst_pair[1],
+                   worst_diff, STILLNESS_EPSILON_DEG, detail))
 
     return violations
 
@@ -619,6 +710,19 @@ def main(argv=None):
         print("FAIL: %d violation(s):" % len(violations))
         for v in violations:
             print("  - %s" % v)
+        default_pose = measured.get("model_default_pose")
+        if default_pose:
+            print()
+            print("Diagnostic context (NOT part of the check above - see "
+                  "verify()'s docstring): the model's export-time default "
+                  "pose per joint, i.e. the pose a consumer's prefab shows "
+                  "before any clip plays. This is Maya's SCENE pose at "
+                  "export time, not the rig's rest pose (chest/spine_01 "
+                  "measured non-zero here even though Maya's true rest for "
+                  "both is 0 - see module docstring).")
+            for joint in sorted(default_pose):
+                print("  model_default_pose[%r] = %s"
+                      % (joint, default_pose[joint]))
         return 1
 
     found = sorted(measured_name for measured_name in
