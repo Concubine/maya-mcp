@@ -480,13 +480,13 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     # start, re-read from the curves. Nothing above start_frame can belong
     # to another clip - this clip is always appended at the tail, and a
     # re-author cut its old range first.
-    end_frame = start_frame
+    measured_end = start_frame
     for node, attr in set(keyed):
         times = cmds.keyframe("%s.%s" % (node, attr), query=True) or []
         later = [t for t in times if t >= start_frame]
         if later:
-            end_frame = max(end_frame, max(later))
-    end_frame = int(round(end_frame))
+            measured_end = max(measured_end, max(later))
+    end_frame = int(round(measured_end))
     duration_s = (end_frame - start_frame) / float(fps)
     frames = end_frame - start_frame + 1
     if replaced is not None:
@@ -503,7 +503,15 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
         # on the curve, including an earlier clip's - silently changing
         # its motion between its own keys, which this feature must never
         # do.
-        cmds.keyTangent(node, attribute=attr, time=(start_frame, end_frame),
+        # #718 review wave 2 Fix 3: the upper bound is `measured_end`, the
+        # UNROUNDED keyed maximum, not the rounded `end_frame`. A
+        # fractional last key (e.g. 42.01 with end_frame=42) sits outside
+        # (start_frame, end_frame) and would silently keep Maya's default
+        # tangent instead of this clip's interpolation. The lower bound
+        # stays start_frame, which is exact by construction (frames are
+        # integers and every clip starts on one).
+        cmds.keyTangent(node, attribute=attr,
+                        time=(start_frame, measured_end),
                         edit=True, inTangentType=tangent,
                         outTangentType=tangent)
 
@@ -511,48 +519,74 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     # All clips share ONE curve per channel, so a channel this clip never
     # mentions would hold whatever a neighbour left on it - forwards from
     # the previous clip's last key, and BACKWARDS from a later clip's
-    # first key. Both are pinned here, at rest, and both are reported.
+    # first key. Both are pinned here, and both are reported.
     theirs = clipmath.channel_union(kept)
     padded_channels: List[str] = []
+    held_channels: List[str] = []
     back_filled_channels: List[str] = []
 
-    def _pin(plug: str, frames: List[int]) -> None:
+    def _pin(plug: str, frames: List[int], value: float) -> None:
         node, attr = plug.rsplit(".", 1)
-        value = _rest_value(cmds, plug, rest, warnings)
         for frame in frames:
             cmds.setKeyframe(node, attribute=attr, time=frame, value=value)
-            # #718 review Fix 2: a pinned rest key is scoped to its own
-            # frame, and FLAT - not the clip's interpolation. A rest pin is
-            # not motion; flat is the honest type, and it keeps a
-            # rest-to-rest span genuinely flat regardless of what
-            # interpolation this clip was authored with.
+            # #718 review Fix 2: a pinned key is scoped to its own frame,
+            # and FLAT - not the clip's interpolation. A pin is not
+            # authored motion; flat is the honest type, and it keeps a
+            # pinned span genuinely flat regardless of what interpolation
+            # this clip was authored with.
             cmds.keyTangent(node, attribute=attr, time=(frame, frame),
                             edit=True, inTangentType="flat",
                             outTangentType="flat")
 
-    # #718 review Fix 1: pad by BOUNDARY-KEY PRESENCE, not by mention. A
-    # clip may declare a channel in `mine` (it names it on SOME key) while
-    # never keying it at its OWN first/last frame - `mine` alone can't tell
-    # whether the boundary is actually covered, so skipping a channel just
-    # because it's in `mine` let a neighbour's pose bleed across the
-    # boundary the clip never keyed. Iterating `theirs` (not `theirs u
-    # mine`) is still right: a channel only THIS clip touches has no other
-    # clip's keys on its curve to bleed in, and padding it would change a
-    # single-clip rig's authored motion.
+    # #718 review wave 2 Fix 1+2 (one helper, not three copies): the pin
+    # VALUE, not just the condition. A missing boundary is pinned at rest
+    # ONLY when this clip never keyed the plug at all anywhere in its own
+    # [start_frame, end_frame] - the isolation case. When it DID key the
+    # plug somewhere in its own range (a sparse declared channel, or a
+    # fractional-time key that rounds short of the boundary), pinning rest
+    # there would invent motion the clip never authored: rewrite a flat
+    # hold into a rise-and-fall, or rewrite an authored final pose into a
+    # rest pose 0.01 frames later. So the missing start pins at the value
+    # the plug held at its OWN earliest key (min(own)), and the missing
+    # end pins at the value it held at its OWN latest key (max(own)) -
+    # exactly what a lone clip's curve would already hold there, read the
+    # same way `_rest_value` reads any evaluated value: `getAttr(time=t)`.
+    def _pad_boundaries(plug: str) -> str:
+        """Pin `plug`'s missing boundary frame(s) of THIS clip's own
+        [start_frame, end_frame]. Returns "held", "rest", or "" (nothing
+        was missing)."""
+        times = set(cmds.keyframe(plug, query=True) or [])
+        missing = [f for f in (start_frame, end_frame)
+                  if float(f) not in times]
+        if not missing:
+            return ""
+        own = sorted(t for t in times if start_frame <= t <= end_frame)
+        if not own:
+            _pin(plug, missing, _rest_value(cmds, plug, rest, warnings))
+            return "rest"
+        for frame in missing:
+            source = own[0] if frame == start_frame else own[-1]
+            _pin(plug, [frame], float(cmds.getAttr(plug, time=source)))
+        return "held"
+
+    # #718 review Fix 1 (wave 1): pad by BOUNDARY-KEY PRESENCE, not by
+    # mention. A clip may declare a channel in `mine` (it names it on SOME
+    # key) while never keying it at its OWN first/last frame - `mine`
+    # alone can't tell whether the boundary is actually covered, so
+    # skipping a channel just because it's in `mine` let a neighbour's
+    # pose bleed across the boundary the clip never keyed. Iterating
+    # `theirs` (not `theirs u mine`) is still right: a channel only THIS
+    # clip touches has no other clip's keys on its curve to bleed in, and
+    # padding it would change a single-clip rig's authored motion.
     for short in theirs["joints"]:
         plugs, warning = _pin_plugs(short)
         if not plugs:
             warnings.append(warning)
             continue
-        channel_padded = False
-        for plug in plugs:
-            times = set(cmds.keyframe(plug, query=True) or [])
-            missing = [f for f in (start_frame, end_frame)
-                      if float(f) not in times]
-            if missing:
-                _pin(plug, missing)
-                channel_padded = True
-        if channel_padded:
+        kinds = {kind for kind in (_pad_boundaries(p) for p in plugs) if kind}
+        if "held" in kinds:
+            held_channels.append(short)
+        elif "rest" in kinds:
             padded_channels.append(short)
     for alias in theirs["weight_channels"]:
         node = alias_map.get(alias)
@@ -562,29 +596,38 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
                 "this skeleton carries any more - it cannot be pinned at "
                 "rest" % alias)
             continue
-        plug = "%s.%s" % (node, alias)
-        times = set(cmds.keyframe(plug, query=True) or [])
-        missing = [f for f in (start_frame, end_frame)
-                  if float(f) not in times]
-        if missing:
-            _pin(plug, missing)
+        kind = _pad_boundaries("%s.%s" % (node, alias))
+        if kind == "held":
+            held_channels.append(alias)
+        elif kind == "rest":
             padded_channels.append(alias)
     if theirs["root_position_used"]:
-        channel_padded = False
-        for plug in root_translate_plugs:
-            times = set(cmds.keyframe(plug, query=True) or [])
-            missing = [f for f in (start_frame, end_frame)
-                      if float(f) not in times]
-            if missing:
-                _pin(plug, missing)
-                channel_padded = True
-        if channel_padded:
+        kinds = {kind for kind in (_pad_boundaries(p)
+                                   for p in root_translate_plugs) if kind}
+        if "held" in kinds:
+            held_channels.append("root_position")
+        elif "rest" in kinds:
             padded_channels.append("root_position")
+    if padded_channels:
+        warnings.append(
+            "pinned %d channel(s) (%s) at rest at this clip's own boundary "
+            "frame(s) - it never keys them anywhere in its own range"
+            % (len(padded_channels), ", ".join(padded_channels)))
+    if held_channels:
+        warnings.append(
+            "pinned %d channel(s) (%s) at this clip's OWN held value at "
+            "its boundary frame(s) - it keys them elsewhere in its own "
+            "range, so the boundary is pinned at what that range would "
+            "hold there anyway, not at rest"
+            % (len(held_channels), ", ".join(held_channels)))
 
     # BACKWARDS contamination: a curve holds its FIRST key's value
     # backwards in time, so a channel this clip introduces would rewrite
     # every earlier clip's pose for it. Pinning at rest across their
-    # ranges RESTORES what each of them measured when it was authored.
+    # ranges RESTORES what each of them measured when it was authored -
+    # this clip has no keys of its own inside an EARLIER clip's range (by
+    # construction: clips are always appended at the tail), so there is no
+    # "own held value" to prefer here - rest is always right.
     their_frames = [f for r in kept
                     for f in (r["start_frame"], r["end_frame"])]
     if their_frames:
@@ -600,16 +643,19 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
                 warnings.append(warning)
                 continue
             for plug in plugs:
-                _pin(plug, their_frames)
+                _pin(plug, their_frames, _rest_value(cmds, plug, rest,
+                                                      warnings))
             back_filled_channels.append(short)
         for alias in mine["weight_channels"]:
             if alias in theirs["weight_channels"]:
                 continue
-            _pin("%s.%s" % (alias_map[alias], alias), their_frames)
+            plug = "%s.%s" % (alias_map[alias], alias)
+            _pin(plug, their_frames, _rest_value(cmds, plug, rest, warnings))
             back_filled_channels.append(alias)
         if mine["root_position_used"] and not theirs["root_position_used"]:
             for plug in root_translate_plugs:
-                _pin(plug, their_frames)
+                _pin(plug, their_frames, _rest_value(cmds, plug, rest,
+                                                      warnings))
             back_filled_channels.append("root_position")
     back_filled = {
         "clips": [r["name"] for r in kept] if back_filled_channels else [],
@@ -689,6 +735,7 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
         "end_frame": end_frame,
         "clips": [r["name"] for r in all_records],
         "padded_channels": padded_channels,
+        "held_channels": held_channels,
         "back_filled": back_filled,
         "replaced": name if replaced is not None else None,
         "per_key": per_key,

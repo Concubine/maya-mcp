@@ -406,6 +406,23 @@ class TestAuthor:
         assert pins and all(t[2][0] == t[2][1] for t in pins)   # one frame
         assert all(t[3] == "flat" and t[4] == "flat" for t in pins)
 
+    def test_tangent_pass_widens_to_the_measured_span_for_a_fractional_key(
+            self, fake):
+        """#718 review wave 2 Fix 3: end_frame is ROUNDED (#636) - a
+        fractional last key (0.333s at 30fps = frame 9.99) rounds UP to
+        end_frame=10, which sits past the actual key. A main tangent pass
+        scoped to (start_frame, end_frame) would then miss the 9.99 key
+        entirely and silently leave Maya's default tangent instead of this
+        clip's interpolation. The pass must widen to the unrounded
+        MEASURED span instead - the lower bound stays start_frame, which
+        is exact by construction."""
+        out = _author(fake, keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 0.333, "rotations": {"mid": [0, 0, 10]}}])
+        assert out["end_frame"] == 10   # rounds up from 9.99
+        main = [t for t in fake.tangents if t[0] == "|root|mid"]
+        assert main and all(t[2] == pytest.approx((0.0, 9.99)) for t in main)
+
     def test_fractional_frames_and_unbound_skeleton_warn(self, fake):
         fake.bound = False
         fake.blend_aliases = []
@@ -585,14 +602,17 @@ class TestSelfContainedTakes:
                        for f in (0.0, 10.0, 20.0, 30.0)]
         assert after_blinky == pytest.approx(before)
 
-    def test_mid_clip_mention_alone_does_not_satisfy_the_boundary_rule(
+    def test_a_sparse_declared_channel_holds_its_own_value_not_rest(
             self, fake):
-        """Fix 1's repro: `walk` keys `mid` ONLY at its middle frame, not
-        at either boundary. `mid` being in walk's `mine["joints"]` must
-        NOT exempt it from padding - a channel is only exempt when it
-        already carries a key at the boundary in question. This test must
-        fail (RED) against the pre-fix code, which skips any channel
-        merely because the clip mentions it anywhere."""
+        """Fix 1 (wave 2): `walk` keys `mid` ONLY at its middle frame, not
+        at either boundary. Wave 1 got the pin CONDITION right - `mid`
+        being in walk's `mine["joints"]` does NOT exempt it from padding,
+        since neither boundary carries a key. But the pin VALUE must not
+        invent motion: `mid`'s only authored value inside walk's range is
+        30 degrees, so both missing boundaries pin at 30 (flat across
+        walk's whole range), not at rest - rest would rewrite walk's own
+        sparse key into a rise-and-fall nobody authored. This was filed as
+        RED against the wave-1 code, which pinned rest here."""
         _author(fake, name="idle", keys=self._idle())
         out = _author(fake, name="walk", keys=[
             {"time_s": 0.0, "rotations": {"tip": [0, 0, 0]}},
@@ -600,9 +620,63 @@ class TestSelfContainedTakes:
             {"time_s": 1.0, "rotations": {"tip": [0, 0, 20]}}])
         start, end = out["start_frame"], out["end_frame"]
         assert fake.evaluate("|root|mid.rotateZ", float(start)) == \
-            pytest.approx(0.0)
+            pytest.approx(30.0)
         assert fake.evaluate("|root|mid.rotateZ", float(end)) == \
-            pytest.approx(0.0)
+            pytest.approx(30.0)
+        assert "mid" in out["held_channels"]
+        assert "mid" not in out["padded_channels"]
+
+    def test_a_channel_never_mentioned_still_pins_at_rest(self, fake):
+        """The isolation case is unchanged by Fix 1: a channel `walk`
+        never keys at all (no key anywhere in its own range, as opposed
+        to the sparse case above) still pins at rest across walk's own
+        range - only a channel walk DOES key somewhere in its range gets
+        the own-held-value treatment. Guards against the fix
+        over-reaching to channels with no authored value to hold."""
+        _author(fake, name="idle", keys=self._idle())
+        out = _author(fake, name="walk", keys=self._walk())   # never keys 'mid'
+        for frame in (float(out["start_frame"]), float(out["end_frame"])):
+            assert fake.evaluate("|root|mid.rotateZ", frame) == \
+                pytest.approx(0.0)
+        assert "mid" in out["padded_channels"]
+        assert "mid" not in out["held_channels"]
+
+    def test_the_fixture_default_keys_hold_their_own_value_not_rest(
+            self, fake):
+        """The repo's own `_author` default keys carry root_position only
+        on the SECOND key, so a second clip authored with those defaults
+        has root translate keyed at its own end boundary but not its
+        start. Pinning REST there (the pre-fix behaviour) rewrites the
+        clip's authored motion into a dip-then-climb; pinning at its own
+        held value (1.05, the default key's value) keeps the span flat -
+        exactly what a lone clip's curve would already hold there."""
+        _author(fake)                      # idle, module defaults
+        second = _author(fake, name="second")   # also module defaults
+        start, end = second["start_frame"], second["end_frame"]
+        mid_frame = (start + end) / 2.0
+        for frame in (float(start), mid_frame, float(end)):
+            assert fake.evaluate("|root.translateY", frame) == \
+                pytest.approx(1.05)
+        assert "root_position" in second["held_channels"]
+        assert "root_position" not in second["padded_channels"]
+
+    def test_padded_and_held_channels_partition_correctly(self, fake):
+        """padded_channels (rest) and held_channels (own value) are
+        reported separately, and a channel lands in exactly one: `walk`
+        holds `mid` at its own sparse value but pins `root_position` -
+        which it never mentions at all - at rest."""
+        _author(fake, name="idle", keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]},
+             "root_position": [0.0, 1.0, 0.0]},
+            {"time_s": 1.0, "rotations": {"mid": [0, 0, 45]},
+             "root_position": [0.0, 1.4, 0.0]}])
+        out = _author(fake, name="walk", keys=[
+            {"time_s": 0.0, "rotations": {"tip": [0, 0, 0]}},
+            {"time_s": 0.5, "rotations": {"mid": [0, 0, 30]}},
+            {"time_s": 1.0, "rotations": {"tip": [0, 0, 20]}}])
+        assert set(out["held_channels"]) == {"mid"}
+        assert set(out["padded_channels"]) == {"root_position"}
+        assert not (set(out["held_channels"]) & set(out["padded_channels"]))
 
     def test_reauthor_preserves_a_later_clips_evaluated_pose_and_vacates_cleanly(
             self, fake):
