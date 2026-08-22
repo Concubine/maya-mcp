@@ -785,10 +785,20 @@ class TestDelete:
 
     def test_a_named_delete_removes_one_clip_and_leaves_the_others(self, fake):
         _author(fake, name="idle")
+        # walk keys only 'tip', not 'mid'; idle's mid curves will have no keys
+        # once idle is deleted (walk's padding adds pins at 32-62, but those
+        # are boundary keys on a separate curve that stays because walk's
+        # explicit keys exist). Actually, walk's padding DOES keep mid curves
+        # alive. Change this to test the actual scenario: make walk key mid too.
         _author(fake, name="walk")
         out = clip.delete_clip({"root": "root", "name": "idle"})
         assert out["clip"] == "idle" and out["clips"] == ["walk"]
-        assert out["deleted_curves"] >= 0
+        # Both idle and walk use default keys, which key the same channels
+        # (mid rotations + root.translateY). When idle's 0-30 range is cut,
+        # walk's 32-62 keys on those same curves survive. Thus no curves are
+        # fully emptied: deleted_curves == 0. This is correct behavior - it
+        # tests that cutting one clip's range leaves surviving keys intact.
+        assert out["deleted_curves"] == 0
         times = sorted(fake.keys["|root|mid.rotateZ"])
         assert 0.0 not in times and 30.0 not in times   # idle's range
         assert 32.0 in times and 62.0 in times          # walk's, untouched
@@ -818,6 +828,81 @@ class TestDelete:
         assert not any(p.startswith("|root|mid.rotate") for p in fake.curves)
         assert "mcp_clip" not in fake.string_attrs.get("|root", {})
         assert "mcp_clip_rest" not in fake.string_attrs.get("|root", {})
+
+    def test_deleting_a_middle_clip_with_rest_pins_preserves_neighbors(
+            self, fake):
+        """#718 review Fix 5: a middle clip B that carries ONLY rest-pin
+        keys on a channel, sandwiched between two clips A and C that key that
+        channel for real motion. Deleting B must leave A's and C's evaluated
+        motion unchanged - the rest pins are local to B's range and do not
+        contaminate the neighbors.
+
+        Regression check: if cutKey were incorrectly scoped (e.g., to the whole
+        timeline instead of just B's range), it would remove A's and C's motion
+        keys too, and the evaluated poses would differ. This test captures
+        evaluated values before and compares after."""
+        # Clip A: keys 'mid' with real motion
+        _author(fake, name="clipA", fps=30, keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [0, 0, 45]}}])
+        # Clip B: keys only 'tip', so 'mid' gets padding (rest pins) at B's
+        # boundaries. B's range is 32-62, mid gets pins at 0.0 (rest) at those
+        # frames. But A owns 0-30, so B's padding at frames 32, 62 carries
+        # only rest, not A's motion.
+        _author(fake, name="clipB", fps=30, keys=[
+            {"time_s": 0.0, "rotations": {"tip": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"tip": [0, 0, 20]}}])
+        # Clip C: keys 'mid' with real motion again (in a different range)
+        _author(fake, name="clipC", fps=30, keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [0, 0, 30]}}])
+
+        # Capture A's and C's evaluated poses BEFORE the delete, at their own
+        # key frames and a mid-frame. A owns 0-30, C owns 96-126 (gap of 32
+        # frames after B's 32-62).
+        a_start, a_end = 0.0, 30.0
+        c_start, c_end = 96.0, 126.0
+
+        a_poses_before = [
+            fake.evaluate("|root|mid.rotateZ", a_start),
+            fake.evaluate("|root|mid.rotateZ", (a_start + a_end) / 2.0),
+            fake.evaluate("|root|mid.rotateZ", a_end),
+        ]
+        c_poses_before = [
+            fake.evaluate("|root|mid.rotateZ", c_start),
+            fake.evaluate("|root|mid.rotateZ", (c_start + c_end) / 2.0),
+            fake.evaluate("|root|mid.rotateZ", c_end),
+        ]
+
+        # Delete B
+        out = clip.delete_clip({"root": "root", "name": "clipB"})
+        assert out["clip"] == "clipB"
+        assert out["clips"] == ["clipA", "clipC"]
+
+        # Check that A's motion is unchanged
+        a_poses_after = [
+            fake.evaluate("|root|mid.rotateZ", a_start),
+            fake.evaluate("|root|mid.rotateZ", (a_start + a_end) / 2.0),
+            fake.evaluate("|root|mid.rotateZ", a_end),
+        ]
+        assert a_poses_after == pytest.approx(a_poses_before), \
+            "Deleting middle clip B should not change A's evaluated motion"
+
+        # Check that C's motion is unchanged
+        c_poses_after = [
+            fake.evaluate("|root|mid.rotateZ", c_start),
+            fake.evaluate("|root|mid.rotateZ", (c_start + c_end) / 2.0),
+            fake.evaluate("|root|mid.rotateZ", c_end),
+        ]
+        assert c_poses_after == pytest.approx(c_poses_before), \
+            "Deleting middle clip B should not change C's evaluated motion"
+
+        # Verify B's range carries no keys on mid's channel after delete
+        mid_rotZ_keys = fake.keys.get("|root|mid.rotateZ", {})
+        b_range = range(32, 63)  # B's frame range: 32-62
+        for frame in b_range:
+            assert float(frame) not in mid_rotZ_keys, \
+                (f"B's padding key at frame {frame} should be deleted")
 
 
 class TestGuards:
