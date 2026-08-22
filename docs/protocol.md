@@ -594,7 +594,11 @@ passed:
   named the LAST clip still on the rig, the effect is the same full
   teardown as before #718: every curve deleted, every keyed weight channel
   zeroed, the bind pose restored. `clips` in the result is then always
-  `[]`.
+  `[]`. When `name` was omitted and several clips existed before the call,
+  every one of them was torn down, but `clip` in the result names only the
+  FIRST of them (the pre-delete list, index 0) — it does not enumerate the
+  delete. Read `clips` (now empty) and `warnings` for the full story; treat
+  `clip` here as naming one clip, not the scope of what was removed.
 
 Both report the measured displacement of the return.
 

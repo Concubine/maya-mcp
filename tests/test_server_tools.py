@@ -2060,3 +2060,51 @@ class TestMultiTakeSurface:
         assert "stop_s" in TakeRecord.model_fields
         assert "clips" in AnimFacts.model_fields
         assert "clips" in DeleteClipResult.model_fields
+
+    def test_export_result_clips_survive_the_round_trip(self):
+        # AnimFacts declares model_config = ConfigDict(extra="ignore"), which
+        # is exactly why "clips" had to be a DECLARED field on it: without
+        # the declaration, pydantic silently strips the per-clip block the
+        # export handler composes and no caller ever sees it. A bare
+        # `"clips" in AnimFacts.model_fields` check cannot catch that
+        # regression if the handler and the schema drift apart under a
+        # renamed key - this test pushes a realistic payload through the
+        # real maya_export_fbx tool (FakeConn -> call_tool ->
+        # ExportFbxResult.model_validate, the same path a real call takes)
+        # and asserts the two clips come out with every field intact.
+        conn = FakeConn(responses={"export_fbx": {
+            "path": "x.fbx", "bytes": 4321, "fbx_version": 7700,
+            "node_count": 5, "mesh_count": 1, "root_nodes": ["|pelvis"],
+            "unit_scale_factor": 100.0, "metres_per_unit": 1.0,
+            "animation": {
+                "stacks": 1, "layers": 1, "curves": 14, "curve_nodes": 14,
+                "takes": [], "targets": [],
+                "clips": [
+                    {"name": "idle", "start_frame": 0, "end_frame": 30,
+                     "duration_s": 1.0, "curves": 6},
+                    {"name": "walk", "start_frame": 31, "end_frame": 91,
+                     "duration_s": 2.0, "curves": 8},
+                ],
+            },
+        }})
+        mcp = server_mod.create_server(conn)
+        result = run(
+            mcp.call_tool(
+                "maya_export_fbx",
+                {"path": "x.fbx", "metres_per_unit": 1.0,
+                 "include_animation": True},
+            )
+        )
+        clips = result.structured_content["animation"]["clips"]
+        assert len(clips) == 2
+        idle, walk = clips
+        assert idle["name"] == "idle"
+        assert idle["start_frame"] == 0
+        assert idle["end_frame"] == 30
+        assert idle["duration_s"] == 1.0
+        assert idle["curves"] == 6
+        assert walk["name"] == "walk"
+        assert walk["start_frame"] == 31
+        assert walk["end_frame"] == 91
+        assert walk["duration_s"] == 2.0
+        assert walk["curves"] == 8

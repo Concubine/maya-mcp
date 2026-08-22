@@ -734,23 +734,6 @@ class ClipKeyMeasure(BaseModel):
         "the scene's time was driven there and the vertices re-read."))
 
 
-class ClipRecord(BaseModel):
-    """One clip on a rig: a named frame range on the shared timeline."""
-
-    model_config = ConfigDict(extra="ignore")
-
-    name: str
-    fps: int
-    start_frame: int
-    end_frame: int
-    duration_s: float
-    loop: bool = False
-    interpolation: str = "linear"
-    joints: List[str] = Field(default_factory=list)
-    weight_channels: List[str] = Field(default_factory=list)
-    root_position_used: bool = False
-
-
 class BackFillReport(BaseModel):
     """Channels this clip introduced, pinned at rest across the clips that
     predate them - so those clips measure exactly what they measured when
@@ -810,7 +793,13 @@ class DeleteClipResult(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     root: str
-    clip: Optional[str] = None
+    clip: Optional[str] = Field(default=None, description=(
+        "Names ONE clip - the one removed on a named partial delete. When "
+        "`name` was omitted and several clips existed, every one of them "
+        "was torn down, but `clip` names only the FIRST of them (the "
+        "pre-delete list, index 0); it does not enumerate the delete. Read "
+        "`clips` (empty after a bulk delete) and `warnings` for the full "
+        "story."))
     clips: List[str] = Field(default_factory=list, description=(
         "The clips left on the rig, in timeline order."))
     deleted_curves: int
