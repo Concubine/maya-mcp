@@ -707,12 +707,15 @@ def anim_facts(facts):
         targets.append(entry)
     takes = []
     for take in facts.takes:
-        duration = None
-        if (take["start_tick"] is not None
-                and take["stop_tick"] is not None):
-            duration = ((take["stop_tick"] - take["start_tick"])
-                        / float(KTIME_PER_SECOND))
-        takes.append({"name": take["name"], "duration_s": duration})
+        start = stop = duration = None
+        if take["start_tick"] is not None:
+            start = take["start_tick"] / float(KTIME_PER_SECOND)
+        if take["stop_tick"] is not None:
+            stop = take["stop_tick"] / float(KTIME_PER_SECOND)
+        if start is not None and stop is not None:
+            duration = stop - start
+        takes.append({"name": take["name"], "start_s": start,
+                      "stop_s": stop, "duration_s": duration})
     return {
         "stacks": facts.anim_stacks,
         "layers": len(facts.anim_layers),

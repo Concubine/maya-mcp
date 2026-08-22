@@ -341,11 +341,33 @@ class TestAnimFacts:
         out = fbxbytes.anim_facts(self._facts())
         assert out["stacks"] == 1 and out["layers"] == 1
         assert out["curves"] == 3 and out["curve_nodes"] == 1
-        assert out["takes"] == [{"name": "walk", "duration_s": 1.0}]
+        assert out["takes"] == [{"name": "walk", "start_s": 0.0,
+                                 "stop_s": 1.0, "duration_s": 1.0}]
         assert out["targets"] == [{"target": "L_hip",
                                    "property": "Lcl Rotation", "curves": 3,
                                    "key_count": 31, "duration_s": 1.0}]
         assert out["unavailable_reason"] is None
+
+    def test_a_take_reports_where_it_sits_not_only_how_long_it_is(self):
+        """#718: several takes share one timeline, so the gate needs each
+        take's own start and stop, not just its length."""
+        facts = self._facts()
+        tick = fbxbytes.KTIME_PER_SECOND
+        facts.takes = [
+            {"name": "idle", "start_tick": 0, "stop_tick": 2 * tick},
+            {"name": "walk", "start_tick": 62 * tick // 30,
+             "stop_tick": 98 * tick // 30},
+            {"name": "nolocaltime", "start_tick": None, "stop_tick": None},
+        ]
+        takes = {t["name"]: t for t in fbxbytes.anim_facts(facts)["takes"]}
+        assert takes["idle"]["start_s"] == 0.0
+        assert takes["idle"]["stop_s"] == 2.0
+        assert takes["walk"]["start_s"] == pytest.approx(62 / 30.0, abs=1e-6)
+        assert takes["walk"]["duration_s"] == pytest.approx(36 / 30.0,
+                                                            abs=1e-6)
+        assert takes["nolocaltime"] == {"name": "nolocaltime",
+                                        "start_s": None, "stop_s": None,
+                                        "duration_s": None}
 
     def test_a_channel_target_reads_by_alias(self):
         facts = self._facts()
