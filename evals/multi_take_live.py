@@ -59,8 +59,10 @@ Measured checks (this script) + judged sheets (the acceptance):
        the right key count for that take's OWN span, and an independent
        byte re-read (fbxbytes) agrees with the tool's own report
     7  preview_clip renders each of the three clips - JUDGED (idle's sheet
-       must show a still arm and still legs, wave's a still spine and
-       still legs, step's a still spine and still arm) AND ASSERTED: every
+       shows spine/chest sway with still legs; the arm stillness is not
+       visible from the side camera angle but is proven numerically in
+       checks 3 and 3b; wave's sheet shows a still spine and still legs;
+       step's sheet shows a still spine and still arm) AND ASSERTED: every
        rendered frame lies inside that clip's own declared range (#718
        review Fix 4 - on a shared timeline, rendering a NEIGHBOUR's frames
        is exactly the multi-take failure mode)
@@ -234,9 +236,14 @@ STEP_JOINTS = _joints_of(STEP_KEYS)
 # The gate's entire premise: each clip's declared joints are disjoint from
 # the other two, so a rest_probe reading joint X inside a clip that never
 # declares it is unambiguously testing contamination, not a shared channel.
-assert not set(IDLE_JOINTS) & set(WAVE_JOINTS), "idle/wave joints overlap"
-assert not set(IDLE_JOINTS) & set(STEP_JOINTS), "idle/step joints overlap"
-assert not set(WAVE_JOINTS) & set(STEP_JOINTS), "wave/step joints overlap"
+# Explicit checks that raise SystemExit instead of bare asserts (which vanish
+# under `python -O`).
+if set(IDLE_JOINTS) & set(WAVE_JOINTS):
+    raise SystemExit("GATE PREMISE VIOLATED: idle/wave joints overlap")
+if set(IDLE_JOINTS) & set(STEP_JOINTS):
+    raise SystemExit("GATE PREMISE VIOLATED: idle/step joints overlap")
+if set(WAVE_JOINTS) & set(STEP_JOINTS):
+    raise SystemExit("GATE PREMISE VIOLATED: wave/step joints overlap")
 
 CHECKS = []
 
@@ -566,11 +573,16 @@ def main():
     idle = ok("author_clip", {"root": root, "name": "idle", "fps": IDLE_FPS,
                               "interpolation": "smooth", "loop": True,
                               "keys": IDLE_KEYS})
+    # Derive expected frame count from IDLE_KEYS' last time and fps:
+    # 2.0 s * 30 fps + 1 (frame 0) = 61 frames
+    expected_idle_frames = int(IDLE_KEYS[-1]["time_s"] * IDLE_FPS) + 1
     check("idle: duration and frames measured back",
-          abs(idle["duration_s"] - 2.0) < 1e-6 and idle["frames"] == 61,
+          abs(idle["duration_s"] - 2.0) < 1e-6 and idle["frames"] == expected_idle_frames,
           "duration=%.3f frames=%d" % (idle["duration_s"], idle["frames"]))
+    # Derive keyed joint count from IDLE_JOINTS (defined from _joints_of(IDLE_KEYS))
+    expected_idle_keyed_joints = len(IDLE_JOINTS)
     check("idle: only spine/chest keyed, starts at frame 0",
-          idle["keyed_joints"] == 2 and idle["start_frame"] == 0,
+          idle["keyed_joints"] == expected_idle_keyed_joints and idle["start_frame"] == 0,
           "keyed_joints=%d start=%d" % (idle["keyed_joints"],
                                         idle["start_frame"]))
     # IDLE_KEYS' shape is base -> sway -> base -> small sway -> base (loop
