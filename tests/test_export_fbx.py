@@ -951,29 +951,96 @@ def test_the_tool_is_exposed():
 
 
 class TestAnimViolations:
-    """#695: the include_animation contract, judged from the BYTES against
-    what the SCENE's clip metadata declared."""
+    """#695/#718: the include_animation contract, judged from the BYTES
+    against what the SCENE's clip metadata declared - now per clip."""
+
+    def _record(self, name, start, end, **kw):
+        record = {"name": name, "fps": 30, "start_frame": start,
+                  "end_frame": end, "duration_s": (end - start) / 30.0,
+                  "loop": False, "interpolation": "linear",
+                  "joints": ["L_hip"], "weight_channels": [],
+                  "root_position_used": False}
+        record.update(kw)
+        return record
 
     def _declared(self):
-        return {"name": "walk", "fps": 30, "duration_s": 1.0,
-                "root": "pelvis", "joints": ["L_hip"],
-                "weight_channels": ["blink"], "root_position_used": True}
+        return {"root": "pelvis", "fps": 30, "span_frames": 62,
+                "clips": [
+                    self._record("idle", 0, 30, weight_channels=["blink"]),
+                    self._record("walk", 32, 62, root_position_used=True),
+                ]}
+
+    def _take(self, name, start, stop):
+        return {"name": name, "start_s": start / 30.0,
+                "stop_s": stop / 30.0, "duration_s": (stop - start) / 30.0}
 
     def _clean(self):
         return {"stacks": 1, "layers": 1, "curves": 7, "curve_nodes": 3,
-                "takes": [{"name": "walk", "duration_s": 1.0}],
+                "takes": [self._take("Take 001", 0, 62),
+                          self._take("idle", 0, 30),
+                          self._take("walk", 32, 62)],
                 "targets": [
                     {"target": "L_hip", "property": "Lcl Rotation",
-                     "curves": 3, "key_count": 31, "duration_s": 1.0},
+                     "curves": 3, "key_count": 63, "duration_s": 2.0666},
                     {"target": "pelvis", "property": "Lcl Translation",
-                     "curves": 3, "key_count": 31, "duration_s": 1.0},
+                     "curves": 3, "key_count": 63, "duration_s": 2.0666},
                     {"target": "blink", "property": "DeformPercent",
-                     "curves": 1, "key_count": 5, "duration_s": 1.0},
+                     "curves": 1, "key_count": 63, "duration_s": 2.0666},
                 ],
                 "unavailable_reason": None}
 
     def test_a_matching_file_passes(self):
         assert export.anim_violations(self._clean(), self._declared()) == []
+
+    def test_every_declared_clip_needs_its_own_take(self):
+        afacts = self._clean()
+        afacts["takes"] = [t for t in afacts["takes"] if t["name"] != "walk"]
+        out = export.anim_violations(afacts, self._declared())
+        assert any("no take named 'walk'" in v for v in out)
+        # idle's own take is present and correct - it earns no violation
+        # of its own. (Not a bare "'idle' not in any v": the one violation
+        # about walk legitimately NAMES idle in its "has: ..." diagnostic
+        # listing of the takes the file DOES carry - the same pattern
+        # test_include_animation_false_asserts_zero_curves's "has: none"
+        # relies on - so a substring check would fail on that, not on a
+        # real defect.)
+        assert not any(v.startswith("the file carries no take named 'idle'")
+                       for v in out)
+
+    def test_a_take_at_the_wrong_place_on_the_timeline_fails(self):
+        afacts = self._clean()
+        afacts["takes"][2] = self._take("walk", 0, 30)
+        out = export.anim_violations(afacts, self._declared())
+        assert any("'walk'" in v and "frames 32-62" in v for v in out)
+
+    def test_overlapping_or_repeated_declarations_fail(self):
+        declared = self._declared()
+        declared["clips"][1]["start_frame"] = 30
+        out = export.anim_violations(self._clean(), declared)
+        assert any("overlap" in v for v in out)
+
+    def test_extra_takes_are_not_violations(self):
+        # Maya's own default take ("Take 001") rides along with every
+        # animated export this tool makes - MEASURED in phase 6.
+        assert export.anim_violations(self._clean(), self._declared()) == []
+
+    def test_curves_are_required_for_every_channel_any_clip_declared(self):
+        afacts = self._clean()
+        afacts["targets"] = [t for t in afacts["targets"]
+                             if t["target"] != "blink"]
+        out = export.anim_violations(afacts, self._declared())
+        assert any("blink" in v for v in out)
+        afacts = self._clean()
+        afacts["targets"] = [t for t in afacts["targets"]
+                             if t["target"] != "pelvis"]
+        out = export.anim_violations(afacts, self._declared())
+        assert any("root translation" in v for v in out)
+
+    def test_keys_are_counted_over_the_whole_span(self):
+        afacts = self._clean()
+        afacts["targets"][0]["key_count"] = 31    # one clip's worth
+        out = export.anim_violations(afacts, self._declared())
+        assert any("L_hip" in v and "63" in v for v in out)
 
     def test_include_animation_false_asserts_zero_curves(self):
         empty = {"stacks": 0, "layers": 0, "curves": 0, "curve_nodes": 0,
@@ -982,71 +1049,64 @@ class TestAnimViolations:
         out = export.anim_violations(self._clean(), None)
         assert any("include_animation" in v for v in out)
 
-    def test_take_name_and_duration_gate(self):
+    def test_the_per_clip_block_is_read_back_from_the_bytes(self):
+        """#718: the result grows a per-clip list - name, the frame range
+        the FILE says the take spans, its duration and the curve count
+        measured back from the records, never echoed from the scene."""
+        clips = export.anim_clip_facts(self._clean(), self._declared())
+        assert [c["name"] for c in clips] == ["idle", "walk"]
+        assert (clips[0]["start_frame"], clips[0]["end_frame"]) == (0, 30)
+        assert (clips[1]["start_frame"], clips[1]["end_frame"]) == (32, 62)
+        assert clips[0]["duration_s"] == pytest.approx(1.0)
+        # idle declares L_hip (3 curves) and blink (1)
+        assert clips[0]["curves"] == 4
+        # walk declares L_hip (3) and the root's translation (3)
+        assert clips[1]["curves"] == 6
+        # a take the file does not carry reports its range as None, and
+        # says so rather than inventing one
         afacts = self._clean()
-        afacts["takes"] = [{"name": "Take 001", "duration_s": 1.0}]
-        out = export.anim_violations(afacts, self._declared())
-        assert any("Take 001" in v and "'walk'" in v for v in out)
-        afacts = self._clean()
-        afacts["takes"][0]["duration_s"] = 0.5
-        out = export.anim_violations(afacts, self._declared())
-        assert any("duration" in v for v in out)
-        afacts = self._clean()
-        afacts["takes"] = []
-        out = export.anim_violations(afacts, self._declared())
-        # MEASURED under mayapy (TestClipExportInMaya, #695 battery item 3):
-        # FBXExportSplitAnimationIntoTakes ADDS the named take alongside the
-        # exporter's own always-present default take ("Take 001"); it never
-        # replaces it, so a correct file legitimately carries 2+ takes. The
-        # gate therefore looks up the DECLARED name among however many takes
-        # exist, rather than requiring exactly one - see export.py's
-        # FBX_ANIM_MEL and anim_violations comments for what was tried.
-        assert any("no take named 'walk'" in v and "has: none" in v
-                   for v in out)
+        afacts["takes"] = [t for t in afacts["takes"] if t["name"] != "walk"]
+        clips = export.anim_clip_facts(afacts, self._declared())
+        assert clips[1]["start_frame"] is None
+        assert clips[1]["curves"] == 6
 
-    def test_extra_takes_are_not_violations(self):
-        # MEASURED (see test_take_name_and_duration_gate above): Maya's own
-        # default take ("Take 001") rides along with every animated export
-        # this tool makes; it is not a defect and must not fail the gate as
-        # long as the declared clip's own take is present and correct.
-        afacts = self._clean()
-        afacts["takes"] = ([{"name": "Take 001", "duration_s": 1.0}]
-                           + afacts["takes"])
-        assert export.anim_violations(afacts, self._declared()) == []
+    # --- pre-#718 behaviour that must survive, updated to the per-clip
+    # `declared` shape (a dict of clips, not a single clip dict). The
+    # take-name/duration case is now covered above by
+    # test_every_declared_clip_needs_its_own_take (a missing take) and
+    # test_a_take_at_the_wrong_place_on_the_timeline_fails (a take whose
+    # start_s/stop_s do not match the declared range, which is how a wrong
+    # duration surfaces now that a take's range is read from LocalTime
+    # instead of compared as a bare duration); the "blink" presence half of
+    # the old weight-channel test is likewise already covered above by
+    # test_curves_are_required_for_every_channel_any_clip_declared.
 
-    def test_missing_and_miscounted_joint_curves_fail(self):
+    def test_missing_or_miscounted_joint_curves_fail(self):
         afacts = self._clean()
         afacts["targets"] = [t for t in afacts["targets"]
                              if t["target"] != "L_hip"]
         out = export.anim_violations(afacts, self._declared())
         assert any("L_hip" in v and "no rotation curves" in v for v in out)
         afacts = self._clean()
-        afacts["targets"][0]["key_count"] = 30
-        out = export.anim_violations(afacts, self._declared())
-        assert any("L_hip" in v and "31" in v and "30" in v for v in out)
-        afacts = self._clean()
         afacts["targets"][0]["curves"] = 2
         out = export.anim_violations(afacts, self._declared())
         assert any("L_hip" in v and "2 curve" in v for v in out)
 
-    def test_root_translation_gates_only_when_used(self):
+    def test_root_translation_gates_only_when_a_clip_uses_it(self):
         afacts = self._clean()
         afacts["targets"] = [t for t in afacts["targets"]
                              if t["property"] != "Lcl Translation"]
         out = export.anim_violations(afacts, self._declared())
         assert any("root" in v and "translation" in v for v in out)
-        declared = dict(self._declared(), root_position_used=False)
+        declared = self._declared()
+        for record in declared["clips"]:
+            record["root_position_used"] = False
         assert export.anim_violations(afacts, declared) == []
 
-    def test_weight_channels_gate_presence_not_count(self):
+    def test_weight_channel_short_key_count_fails(self):
         # Whether Maya bakes DeformPercent curves or carries them as
         # authored is a mayapy measurement (contract decision 10) - so the
         # gate is presence + >=2 keys, never a full frame count.
-        afacts = self._clean()
-        afacts["targets"] = [t for t in afacts["targets"]
-                             if t["property"] != "DeformPercent"]
-        out = export.anim_violations(afacts, self._declared())
-        assert any("blink" in v for v in out)
         afacts = self._clean()
         afacts["targets"][2]["key_count"] = 1
         out = export.anim_violations(afacts, self._declared())
@@ -1056,7 +1116,7 @@ class TestAnimViolations:
         afacts = self._clean()
         afacts["targets"].append(
             {"target": "hand_keyed", "property": "Lcl Rotation",
-             "curves": 3, "key_count": 31, "duration_s": 1.0})
+             "curves": 3, "key_count": 63, "duration_s": 2.0666})
         assert export.anim_violations(afacts, self._declared()) == []
 
     def test_unreadable_records_fail(self):
@@ -1082,3 +1142,28 @@ class TestAnimViolations:
             # unchanged) took every curve's key_count from 3 to 31.
             "FBXExportBakeResampleAnimation -v true",
         )
+
+
+class TestSceneClips:
+    def test_two_rigs_carrying_clips_refuse_with_the_corrected_message(self):
+        import json
+
+        from maya_plugin.dispatcher import HandlerError
+
+        class Cmds:
+            def ls(self, type=None, long=False):
+                return ["|rig_a", "|rig_b"]
+
+            def attributeQuery(self, attr, node=None, exists=False):
+                return True
+
+            def getAttr(self, plug):
+                return json.dumps([{"name": "idle", "fps": 30,
+                                    "start_frame": 0, "end_frame": 30,
+                                    "duration_s": 1.0}])
+
+        with pytest.raises(HandlerError) as excinfo:
+            export._scene_clips(Cmds())
+        message = str(excinfo.value)
+        assert "rig_a" in message and "rig_b" in message
+        assert "several clips" in message and "two skeletons" in message

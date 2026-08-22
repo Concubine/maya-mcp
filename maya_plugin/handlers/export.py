@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..dispatcher import HandlerError
 from . import clip as clip_mod
+from . import clipmath
 from . import fbxbytes
 
 # The five statements, in order, with FBXResetExport first so no setting from a
@@ -322,25 +323,31 @@ def shape_violations(sfacts, declared: List[str]) -> List[str]:
     return out
 
 
-def _scene_clip(cmds):
-    """The clip metadata maya_author_clip stamped, or None. More than one
-    clip-carrying root refuses: one clip at a time is per-skeleton, and one
-    FILE is one take - exporting two at once has no honest take name."""
+def _scene_clips(cmds):
+    """The clips maya_author_clip stamped, and the span they occupy.
+
+    Multi-CLIP is supported (#718): one rig, N takes on one timeline. Two
+    SKELETONS carrying clips still refuses - a take is a frame range over
+    the WHOLE file, so a multi-rig file needs a timeline policy of its own.
+    """
     roots = [j for j in cmds.ls(type="joint", long=True) or []
              if cmds.attributeQuery(clip_mod.CLIP_ATTR, node=j, exists=True)]
     if not roots:
         return None
     if len(roots) > 1:
         raise HandlerError(
-            "%d skeletons carry a clip (%s) - one file is one take"
+            "%d skeletons carry clips (%s) - one rig may carry several "
+            "clips and they all export as named takes, but two skeletons "
+            "cannot: a take is a frame range over the whole file"
             % (len(roots), ", ".join(r.split("|")[-1] for r in roots)),
             hint="delete_clip the skeletons not being exported")
     records = clip_mod.clip_meta(cmds, roots[0])
     if not records:
         return None
-    meta = dict(records[0])
-    meta["root"] = roots[0].split("|")[-1]
-    return meta
+    return {"root": roots[0].split("|")[-1],
+            "fps": records[0]["fps"],
+            "span_frames": max(r["end_frame"] for r in records),
+            "clips": records}
 
 
 def anim_violations(afacts, declared) -> List[str]:
@@ -351,6 +358,13 @@ def anim_violations(afacts, declared) -> List[str]:
     assertion that keeps static exports of animated scenes byte-honest.
     Extra targets are NOT violations (the shape_violations precedent);
     missing declared ones are.
+
+    Otherwise declared is the dict _scene_clips returns: one rig, N clips
+    laid end to end on one baked timeline (#718). Every declared clip is
+    its own named take, looked up BY NAME among however many takes the
+    file carries - joint/weight-channel curves are asserted once each,
+    over the UNION of every clip's declared channels, because one curve
+    per plug spans the whole bake range rather than being cut per take.
     """
     out: List[str] = []
     if declared is None:
@@ -363,33 +377,47 @@ def anim_violations(afacts, declared) -> List[str]:
     if afacts["unavailable_reason"]:
         out.append("animation records unreadable: %s"
                    % afacts["unavailable_reason"])
-    # MEASURED under mayapy (TestClipExportInMaya, see the FBX_ANIM_MEL
-    # comment above): FBXExportSplitAnimationIntoTakes adds the named take
-    # alongside the exporter's own always-present default take ("Take
-    # 001"), so a correct file legitimately carries 2+ takes, not exactly
-    # 1. Only the DECLARED one is required - extra takes are not a
-    # violation, the same rule shape_violations applies to undeclared
-    # blendShape channels.
-    named = [t for t in afacts["takes"] if t["name"] == declared["name"]]
-    if not named:
-        out.append(
-            "the file carries no take named %r (has: %s)"
-            % (declared["name"],
-               ", ".join(repr(t["name"]) for t in afacts["takes"]) or "none"))
-    else:
-        take = named[0]
-        tol = 1.0 / declared["fps"]
-        if (take["duration_s"] is None
-                or abs(take["duration_s"] - declared["duration_s"]) > tol):
+    out += clipmath.overlap_violations(declared["clips"])
+    fps = float(declared["fps"])
+    tol = 1.0 / fps
+    by_take = {}
+    for take in afacts["takes"]:
+        by_take.setdefault(take["name"], take)
+    for record in declared["clips"]:
+        take = by_take.get(record["name"])
+        if take is None:
+            # MEASURED under mayapy (phase 6): the exporter's own default
+            # take ("Take 001") is always present alongside the ones
+            # FBXExportSplitAnimationIntoTakes names, so takes are looked
+            # up BY NAME and extras are not violations - the same rule
+            # shape_violations applies to undeclared blendShape channels.
             out.append(
-                "the take %r's duration is %s s, the clip declares %g s"
-                % (declared["name"], take["duration_s"],
-                   declared["duration_s"]))
-    expected = int(round(declared["duration_s"] * declared["fps"])) + 1
+                "the file carries no take named %r (has: %s)"
+                % (record["name"],
+                   ", ".join(repr(t["name"]) for t in afacts["takes"])
+                   or "none"))
+            continue
+        want_start = record["start_frame"] / fps
+        want_stop = record["end_frame"] / fps
+        if (take["start_s"] is None or take["stop_s"] is None
+                or abs(take["start_s"] - want_start) > tol
+                or abs(take["stop_s"] - want_stop) > tol):
+            out.append(
+                "the take %r spans %s..%s s, the clip declares frames "
+                "%d-%d (%g..%g s)"
+                % (record["name"], take["start_s"], take["stop_s"],
+                   record["start_frame"], record["end_frame"],
+                   want_start, want_stop))
+    # One curve per plug spans the WHOLE bake range, so the key count is
+    # the span's, not any single clip's, and the channel set is the union
+    # of every clip's declarations - which is exactly what the
+    # self-contained rule keys at every clip boundary.
+    expected = int(declared["span_frames"]) + 1
+    union = clipmath.channel_union(declared["clips"])
     by = {}
     for t in afacts["targets"]:
         by.setdefault((t["target"], t["property"]), t)
-    for joint in declared["joints"]:
+    for joint in union["joints"]:
         t = by.get((joint, "Lcl Rotation"))
         if t is None:
             out.append("joint %r has no rotation curves in the file" % joint)
@@ -400,21 +428,59 @@ def anim_violations(afacts, declared) -> List[str]:
         if t["key_count"] != expected:
             out.append("joint %r bakes %s keys, expected %d"
                        % (joint, t["key_count"], expected))
-    if declared.get("root_position_used"):
+    if union["root_position_used"]:
         t = by.get((declared["root"], "Lcl Translation"))
         if t is None:
-            out.append("the clip keys the root's position but the file "
+            out.append("a clip keys the root's position but the file "
                        "carries no root translation curves")
         elif t["key_count"] != expected:
             out.append("root translation bakes %s keys, expected %d"
                        % (t["key_count"], expected))
-    for alias in declared.get("weight_channels", []):
+    for alias in union["weight_channels"]:
         t = by.get((alias, "DeformPercent"))
         if t is None:
             out.append("weight channel %r has no curves in the file" % alias)
         elif (t["key_count"] or 0) < 2:
             out.append("weight channel %r carries %s key(s), expected at "
                        "least 2" % (alias, t["key_count"]))
+    return out
+
+
+def anim_clip_facts(afacts, declared) -> List[Dict[str, Any]]:
+    """Per declared clip, what the FILE holds for it: the frame range its
+    take spans (converted back from the take's own LocalTime, not echoed
+    from the scene), its duration, and the curve records driving the
+    channels that clip declared. A clip whose take is absent reports a
+    null range rather than an invented one - anim_violations is what
+    fails the export for it."""
+    fps = float(declared["fps"])
+    by_take = {}
+    for take in afacts["takes"]:
+        by_take.setdefault(take["name"], take)
+    by_target = {}
+    for t in afacts["targets"]:
+        by_target.setdefault((t["target"], t["property"]), t)
+    out = []
+    for record in declared["clips"]:
+        take = by_take.get(record["name"])
+        start = end = duration = None
+        if take and take["start_s"] is not None and take["stop_s"] is not None:
+            start = int(round(take["start_s"] * fps))
+            end = int(round(take["stop_s"] * fps))
+            duration = take["duration_s"]
+        curves = 0
+        for joint in record["joints"]:
+            entry = by_target.get((joint, "Lcl Rotation"))
+            curves += entry["curves"] if entry else 0
+        for alias in record["weight_channels"]:
+            entry = by_target.get((alias, "DeformPercent"))
+            curves += entry["curves"] if entry else 0
+        if record["root_position_used"]:
+            entry = by_target.get((declared["root"], "Lcl Translation"))
+            curves += entry["curves"] if entry else 0
+        out.append({"name": record["name"], "start_frame": start,
+                    "end_frame": end, "duration_s": duration,
+                    "curves": curves})
     return out
 
 
@@ -543,7 +609,7 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
                      "the scene actually contains")
 
     declared_shapes = _scene_shape_aliases(cmds, nodes)
-    declared_clip = _scene_clip(cmds) if include_animation else None
+    declared_clip = _scene_clips(cmds) if include_animation else None
     if include_animation and declared_clip is None:
         raise HandlerError(
             "include_animation=true but no clip exists",
@@ -585,29 +651,19 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
                       + FBX_ANIM_MEL[include_animation]):
         mel.eval(statement)
     if include_animation:
-        end_frame = int(round(declared_clip["duration_s"]
-                              * declared_clip["fps"]))
+        span = int(declared_clip["span_frames"])
         mel.eval("FBXExportBakeComplexStart -v 0")
-        mel.eval("FBXExportBakeComplexEnd -v %d" % end_frame)
-        # The take is NAMED AFTER THE CLIP - but MEASURED under mayapy
-        # (TestClipExportInMaya): FBXExportSplitAnimationIntoTakes ADDS the
-        # named take alongside the exporter's OWN always-present default
-        # take (written "Take 001", spanning the same bake range); it does
-        # not replace it. Tried and rejected: reordering split vs the bake
-        # flags (no effect), an empty split name (renames the ADDED take to
-        # '', default still present), a 4th call argument (MEL error - the
-        # command is fixed at name/start/end), and FBXExportUseSceneName
-        # (does rename the single default take to the Maya scene's own file
-        # name, but coupling a clip's take name to the working scene's file
-        # name is a far bigger, riskier change than this tool should make
-        # for one field). So a correct animated export legitimately carries
-        # 2+ takes; anim_violations below looks up the DECLARED name among
-        # them rather than requiring exactly one - the same "extra
-        # structure is not a violation" rule shape_violations already
-        # applies to blendShape channels the scene did not declare.
+        mel.eval("FBXExportBakeComplexEnd -v %d" % span)
+        # One take per clip, all on ONE baked timeline (#718). The split
+        # ADDS takes alongside the exporter's own always-present default
+        # take ("Take 001") (MEASURED, phase 6) - a correct multi-take file
+        # therefore carries len(clips) + 1 takes, and the gate looks each
+        # declared one up by name.
         mel.eval("FBXExportSplitAnimationIntoTakes -clear")
-        mel.eval('FBXExportSplitAnimationIntoTakes -v "%s" 0 %d'
-                 % (declared_clip["name"], end_frame))
+        for record in declared_clip["clips"]:
+            mel.eval('FBXExportSplitAnimationIntoTakes -v "%s" %d %d'
+                     % (record["name"], record["start_frame"],
+                        record["end_frame"]))
     # A bare float. The `-v` form raises, and both delivery generators used to
     # swallow that inside `except Exception: pass`.
     mel.eval("FBXExportScaleFactor %g" % EXPORT_SCALE_FACTOR)
@@ -674,6 +730,8 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
         "selection that lists only other nodes leaves them behind."
         if shape_bad else "")
     anim_block = fbxbytes.anim_facts(facts)
+    if include_animation:
+        anim_block["clips"] = anim_clip_facts(anim_block, declared_clip)
     anim_bad = anim_violations(anim_block,
                                declared_clip if include_animation else None)
     violations += anim_bad

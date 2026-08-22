@@ -3565,11 +3565,12 @@ class TestClipExportInMaya:
                                "include_animation": True})
 
     def test_two_clip_carrying_roots_refuse_naming_the_take(self, tmp_path):
-        """CONTROLLER-ADDED SCOPE (Task 6 review gap): export._scene_clip
-        refuses to pick a take name when more than one skeleton root in the
-        exported selection carries an authored clip - one FBX file is one
-        take, and two roots have no honest single name. Untested anywhere
-        before this."""
+        """CONTROLLER-ADDED SCOPE (Task 6 review gap; message updated #718):
+        export._scene_clips refuses to pick a take name when more than one
+        skeleton root in the exported selection carries an authored clip -
+        multi-CLIP is supported (N takes on one timeline), but two roots
+        still have no honest single-file timeline. Untested anywhere before
+        this."""
         import maya.cmds as cmds
 
         from maya_plugin.dispatcher import HandlerError
@@ -3599,7 +3600,7 @@ class TestClipExportInMaya:
         path = str(tmp_path / "two_roots.fbx").replace("\\", "/")
         try:
             with pytest.raises(HandlerError,
-                                match=r"2 skeletons carry a clip") as excinfo:
+                                match=r"2 skeletons carry clips") as excinfo:
                 export.export_fbx({
                     "path": path, "metres_per_unit": 1.0,
                     "nodes": [base_a, root_a, base_b, root_b],
