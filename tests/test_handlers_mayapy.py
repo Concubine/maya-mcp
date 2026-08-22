@@ -3527,8 +3527,15 @@ class TestClipExportInMaya:
         # stays loose.
         blink = by[("cd_blink", "DeformPercent")]
         assert blink["key_count"] >= 2
-        # an independent read of the bytes agrees with the tool
-        assert fbxbytes.anim_facts(fbxbytes.read_fbx(path)) == anim
+        # an independent read of the bytes agrees with the tool, on the
+        # keys a bare re-read can produce. "clips" is excluded: it is
+        # composed by export_fbx from anim_facts's own output PLUS the
+        # scene's declared clip names/joints/channels (anim_clip_facts),
+        # so it is not something fbxbytes.anim_facts() on its own ever
+        # returns - comparing it here would fail on a key mismatch that
+        # has nothing to do with byte-honesty.
+        assert (fbxbytes.anim_facts(fbxbytes.read_fbx(path))
+                == {k: v for k, v in anim.items() if k != "clips"})
         # skins and shapes still green alongside animation
         assert result["skin"]["deformers"] == 1
         assert result["shapes"]["shapes"][0]["name"] == "cd_blink"

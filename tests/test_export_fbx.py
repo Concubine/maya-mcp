@@ -1189,3 +1189,113 @@ class TestSceneClips:
         message = str(excinfo.value)
         assert "rig_a" in message and "rig_b" in message
         assert "several clips" in message and "two skeletons" in message
+
+
+class TestExportFbxReportsClips:
+    """#718 fix wave 2: fix wave 1 fixed a real mutation bug (export_fbx used
+    to write anim_clip_facts's output onto the SAME dict fbxbytes.anim_facts
+    returned, which breaks the byte-honesty cross-checks in
+    tests/test_handlers_mayapy.py and evals/clip_live.py) but over-corrected
+    by dropping the "clips" field from the result entirely. The design spec
+    (docs/superpowers/specs/2026-08-22-multi-take-fbx-design.md:151) still
+    requires it: "animation in the result grows a per-clip list: name, frame
+    range, duration and the curve count measured back from the bytes." These
+    two tests pin the restored behaviour end to end through export_fbx,
+    using the same declared/clean fixture shapes TestAnimViolations already
+    proved pass the gate cleanly (test_a_matching_file_passes)."""
+
+    def _declared(self):
+        # Identical in shape and values to TestAnimViolations._declared() -
+        # proven by test_a_matching_file_passes to earn zero violations
+        # against _clean() below, so this export takes the "gate passed"
+        # path all the way to the return statement.
+        return {"root": "pelvis", "fps": 30, "span_frames": 62,
+                "clips": [
+                    {"name": "idle", "fps": 30, "start_frame": 0,
+                     "end_frame": 30, "duration_s": 1.0, "loop": False,
+                     "interpolation": "linear", "joints": ["L_hip"],
+                     "weight_channels": ["blink"],
+                     "root_position_used": False},
+                    {"name": "walk", "fps": 30, "start_frame": 32,
+                     "end_frame": 62, "duration_s": 1.0, "loop": False,
+                     "interpolation": "linear", "joints": ["L_hip"],
+                     "weight_channels": [], "root_position_used": True},
+                ]}
+
+    def _clean(self):
+        def take(name, start, stop):
+            return {"name": name, "start_s": start / 30.0,
+                    "stop_s": stop / 30.0,
+                    "duration_s": (stop - start) / 30.0}
+        return {"stacks": 1, "layers": 1, "curves": 7, "curve_nodes": 3,
+                "takes": [take("Take 001", 0, 62),
+                          take("idle", 0, 30),
+                          take("walk", 32, 62)],
+                "targets": [
+                    {"target": "L_hip", "property": "Lcl Rotation",
+                     "curves": 3, "key_count": 63, "duration_s": 2.0666},
+                    {"target": "pelvis", "property": "Lcl Translation",
+                     "curves": 3, "key_count": 63, "duration_s": 2.0666},
+                    {"target": "blink", "property": "DeformPercent",
+                     "curves": 1, "key_count": 63, "duration_s": 2.0666},
+                ],
+                "unavailable_reason": None}
+
+    def _export(self, monkeypatch, tmp_path, name, declared, clean):
+        node = fbxbytes.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1)
+        facts = _facts([node])
+
+        class AnimFakeCmds(FakeCmds):
+            def pluginInfo(self, plugin, query=False, loaded=False):
+                # False skips the unload/reload branch (mayapy-only
+                # behaviour, irrelevant to what this test pins).
+                return False
+
+        cmds = AnimFakeCmds()
+        _install(monkeypatch, cmds, facts)
+        monkeypatch.setattr(export, "_scene_clips", lambda _cmds: declared)
+        monkeypatch.setattr(export.fbxbytes, "anim_facts", lambda _f: clean)
+        return export.export_fbx({"path": str(tmp_path / name),
+                                  "metres_per_unit": 1.0,
+                                  "include_animation": True})
+
+    def test_animated_export_reports_a_clips_list(self, monkeypatch, tmp_path):
+        declared = self._declared()
+        clean = self._clean()
+        out = self._export(monkeypatch, tmp_path, "clip.fbx", declared, clean)
+
+        anim = out["animation"]
+        assert anim is not None
+        clips = anim["clips"]
+        assert [c["name"] for c in clips] == ["idle", "walk"]
+        assert (clips[0]["start_frame"], clips[0]["end_frame"]) == (0, 30)
+        assert (clips[1]["start_frame"], clips[1]["end_frame"]) == (32, 62)
+        assert clips[0]["duration_s"] == pytest.approx(1.0)
+        # idle declares L_hip (3 curves) + blink (1); walk declares L_hip
+        # (3) + the root's translation (3) - same measured counts
+        # test_the_per_clip_block_is_read_back_from_the_bytes pins directly
+        # against anim_clip_facts, now proven to survive the trip through
+        # export_fbx's result too.
+        assert clips[0]["curves"] == 4
+        assert clips[1]["curves"] == 6
+        # the reader's own keys ride along untouched, alongside "clips"
+        assert anim["takes"] == clean["takes"]
+        assert anim["targets"] == clean["targets"]
+
+    def test_the_reported_block_is_not_the_readers_object(
+            self, monkeypatch, tmp_path):
+        """Fix wave 1's good half must survive: result["animation"] is a
+        NEW dict, never fbxbytes.anim_facts's own return value with "clips"
+        spliced into it in place. A regression back to `anim_block["clips"]
+        = ...; return {"animation": anim_block}` would pass the previous
+        test on VALUE alone (dict equality doesn't care how the dict was
+        built) but is caught here: it would leave "clips" sitting on `clean`
+        itself (the exact object monkeypatched in as anim_facts's return
+        value) and make `out["animation"]` the same object as `clean`,
+        both of which this test asserts against."""
+        declared = self._declared()
+        clean = self._clean()
+        out = self._export(monkeypatch, tmp_path, "clip2.fbx", declared, clean)
+
+        assert out["animation"] is not clean
+        assert "clips" not in clean

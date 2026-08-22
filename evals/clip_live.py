@@ -435,8 +435,14 @@ def main():
           and result["shapes"]["shapes"][0]["name"] == "blink",
           json.dumps(result["skin"]))
     facts = fbxbytes.read_fbx(idle_fbx)
+    # "clips" excluded: export_fbx composes it from anim_facts's output PLUS
+    # the scene's declared clip names/joints/channels (anim_clip_facts), so
+    # a bare re-read of the file - which knows nothing about the scene's
+    # declarations - never produces it. Comparing it here would fail on a
+    # key mismatch unrelated to byte-honesty.
     check("idle: an independent byte read agrees with the tool",
-          fbxbytes.anim_facts(facts) == anim)
+          fbxbytes.anim_facts(facts)
+          == {k: v for k, v in anim.items() if k != "clips"})
 
     # ---- 6. the walk REPLACES the idle; previewed from the side; exported
     walk = ok("author_clip", {"root": root, "name": "walk",

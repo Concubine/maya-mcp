@@ -739,21 +739,25 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
     anim_bad = anim_violations(anim_block,
                                declared_clip if include_animation else None)
     violations += anim_bad
-    # anim_facts's product is never mutated - not in place, and not by
-    # composing a "clips"-augmented copy for the result either. Two
-    # byte-honesty cross-checks (evals/clip_live.py,
-    # TestClipExportInMaya::test_the_measurements) re-read the file
-    # independently and assert fbxbytes.anim_facts(read_fbx(path)) == the
-    # tool's reported "animation" block; a fresh read never carries a
-    # "clips" key (anim_facts takes no declared-clip argument), so ANY key
-    # this tool adds - mutated in place or merged into a copy, the copy
-    # still ends up with the extra key - breaks that equality. The
-    # per-clip block anim_clip_facts produces is also not byte-only: it
-    # takes clip names/joints/channels from the SCENE-declared record, not
-    # the bytes, so folding it into "animation" would contradict the very
-    # invariant these cross-checks enforce. It stays a standalone reader
-    # (exercised directly by its own tests) until a later task decides
-    # where scene-derived per-clip reporting belongs in the result.
+    # anim_violations runs on anim_block exactly as fbxbytes.anim_facts()
+    # produced it - never mutated in place. The result's "animation" field
+    # is a SEPARATE dict, composed fresh from anim_block plus the per-clip
+    # "clips" list (maya-mcp #718 design spec: "animation in the result
+    # grows a per-clip list: name, frame range, duration and the curve
+    # count measured back from the bytes"). anim_clip_facts takes clip
+    # names/joints/channels from the SCENE-declared record, not the bytes,
+    # so "clips" is not itself byte-only - but composing a new dict here
+    # (rather than mutating anim_block) keeps anim_block itself pure for
+    # anim_violations and for anything else that might read it upstream of
+    # this point. The two byte-honesty cross-checks that re-read the file
+    # independently (evals/clip_live.py, TestClipExportInMaya::
+    # test_the_measurements) compare against this reported block with
+    # "clips" excluded - see the comments at both sites - since a bare
+    # re-read of the file has no scene-declared names/joints to build
+    # "clips" from.
+    reported_anim = dict(anim_block,
+                         clips=anim_clip_facts(anim_block, declared_clip)
+                         ) if include_animation else None
     anim_hint = (
         " For animation violations: the clip must exist (maya_author_clip) "
         "and a selected export ('nodes') must include the skeleton root - "
@@ -809,5 +813,5 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
         "skin": skin_block,
         "shapes": (shapes_block
                    if declared_shapes or shapes_block["channels"] else None),
-        "animation": anim_block if include_animation else None,
+        "animation": reported_anim,
     }
