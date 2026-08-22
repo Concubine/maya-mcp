@@ -33,13 +33,43 @@ Usage:
     uv run python evals/multi_take_unity.py --measurements m.json
 Exit: 0 pass, 1 fail.
 
-MEASURED: not yet run against a real Unity editor. This script has been
-exercised only as pure Python (verify()'s own test suite,
-tests/test_multi_take_unity.py) and by reading UNITY_MEASURE_CS as text -
-see .superpowers/sdd/t718-13-report.md for exactly what was and was not
-checked. The steps below have not executed against a live Unity instance;
-whoever runs them next should replace this paragraph with the measured
-clip count, per-clip length, and the stillness epsilon actually observed.
+MEASURED: run once against a real Unity editor (2026-08-22). Length check:
+Unity reported wave 1.500000s, idle 2.000000s, step 1.200000s against
+Maya's declared ranges, max delta 4.8e-07s - well inside LENGTH_TOL_S.
+`importAnimation` was already ON by default for this FBX, so the
+`manage_asset(action="modify")` step in the procedure below was a no-op
+(harmless - still worth doing, since Demigol's own project forces it off
+and nothing here can assume a scratch project starts the same way). The
+model imports as `animationType=Generic` with 4 default clips: the three
+named takes plus Maya's own `Take 001`.
+
+The first run's C#, and its contamination check, were both wrong and are
+fixed now:
+
+  - UNITY_MEASURE_CS runs as a METHOD BODY under unityMCP's CodeDom/C# 6
+    backend, where a `using` directive is a syntax error ("Line 1:
+    Unexpected symbol 'System', expecting '('") and LINQ is unavailable
+    for the same reason. Every type below is fully qualified instead
+    (`System.Func`, `UnityEngine.GameObject`, `UnityEditor.AssetDatabase`,
+    ...) and the LINQ `.OfType<AnimationClip>()` filter is a plain loop.
+    `LoadAllAssetsAtPath` also returns Unity's own internal preview clips
+    (named `__preview__<clipname>`) alongside the real ones - filtered out
+    by name prefix, or they would show up as extra, confusing "clips."
+
+  - The contamination check (verify()'s check 4) compared every
+    undeclared joint's sampled rotation against a hardcoded rest of
+    [0,0,0]. That is wrong: a joint's `localRotation` in Unity carries its
+    import-time joint ORIENTATION, which is not zero (measured: L_ankle's
+    true rest is [270, 293.1986, 0], not [0,0,0]). The first run's 10
+    "violations" were all this - every one of them had identical
+    start/mid/end readings (the signature of a joint that never moved at
+    all), just compared against the wrong reference. UNITY_MEASURE_CS now
+    measures each declared joint's true rest pose once, on the freshly
+    instantiated model BEFORE `SampleAnimation` is ever called on it, and
+    emits it as a top-level "rest" block; verify() compares every
+    undeclared joint's readings against ITS OWN measured rest, cyclically
+    (mod 360, shortest signed distance - a 359.999 reading against a rest
+    of 0 is 0.001 degrees away, not 359.999), never a hardcoded 0.
 """
 
 from __future__ import annotations
@@ -63,12 +93,18 @@ BASELINE_PATH = os.path.join(_HERE, "multi_take_live", "baseline.json")
 # tick read.
 LENGTH_TOL_S = 1e-3
 
-# A joint NOT declared by a clip must sit within this many degrees of REST
-# (0 on every axis) at every one of its three samples for that clip to
-# pass - an absolute distance-from-rest check, not "does it vary between
-# the three samples" (see verify()'s docstring for why the latter cannot
-# catch the documented failure shape). Justification, not a
-# guess: Unity's FBX import converts Maya's per-axis rotation curves into
+# A joint NOT declared by a clip must sit within this many degrees of ITS
+# OWN measured rest pose (the "rest" block UNITY_MEASURE_CS emits from the
+# joint's bind-pose local rotation - NOT an assumed 0 on every axis; a
+# joint orientation baked at import time means Unity's `localRotation` at
+# bind is generally non-zero, e.g. L_ankle measured at [270, 293.1986, 0])
+# at every one of its three samples for that clip to pass - an absolute
+# distance-from-rest check, not "does it vary between the three samples"
+# (see verify()'s docstring for why the latter cannot catch the documented
+# failure shape; verify() keeps a separate movement check too, since it is
+# cheap and catches a different failure - a joint that sweeps through its
+# own rest value rather than holding a constant wrong one). Justification,
+# not a guess: Unity's FBX import converts Maya's per-axis rotation curves into
 # its own internal representation (quaternion component curves for a
 # Generic-rigged import) and back to Euler angles when `SampleAnimation` is
 # read via `localRotation.eulerAngles` - that round trip alone can move a
@@ -132,71 +168,111 @@ def _cs_string_array(names):
 # literal '{' '}' braces (blocks, dictionaries, string interpolation-free
 # concatenation), which .format() would treat as fields and choke on. The
 # two placeholders are deliberately un-brace-shaped so they cannot collide.
+#
+# Runs as a METHOD BODY under unityMCP's execute_code (CodeDom/C# 6
+# backend) - a `using` directive there is a syntax error ("Line 1:
+# Unexpected symbol 'System', expecting '('", measured on the first live
+# run) and LINQ is unavailable for the same reason. Every type below is
+# therefore fully qualified, and the one LINQ-shaped filter the first
+# draft used (`.OfType<AnimationClip>().ToArray()`) is a plain loop.
 _UNITY_MEASURE_TEMPLATE = r"""
 // #718 consumer gate measurement. Run via mcp__unityMCP__execute_code
 // against the multi-take FBX imported at __ASSET_PATH__ (importAnimation
 // must already be ON and the asset reimported before this runs).
 //
-// Prints ONE JSON object, exactly the shape evals/multi_take_unity.py's
-// verify() parses:
-//   {"clips": [
+// Writes ONE JSON object to outputPath (see below), exactly the shape
+// evals/multi_take_unity.py's verify() parses:
+//   {"rest": {"<declared joint>": [x,y,z], ...},
+//    "clips": [
 //     {"name": str, "length": float, "frameRate": float,
 //      "curves": [{"path": str, "property": str}, ...],
 //      "samples": {"<declared joint>":
 //                    {"start": [x,y,z], "mid": [x,y,z], "end": [x,y,z]}}}
 //   ]}
 //
+// "rest" is measured ONCE, on the freshly instantiated model BEFORE
+// SampleAnimation is ever called on it - that is each declared joint's
+// true bind pose (its import-time joint orientation), not an assumed
+// [0,0,0]: the first live run measured L_ankle's rest at
+// [270, 293.1986, 0] and flagged 10 false violations by assuming 0
+// instead. verify() compares every undeclared joint's readings against
+// THIS rig's own "rest" block, never a hardcoded zero.
+//
 // "samples" covers every DECLARED joint across ALL three clips (not just
 // this clip's own), sampled at this clip's own start/mid/end - that is
 // what lets verify() catch a joint a clip did NOT declare holding a
 // neighbouring clip's pose through this clip's whole range.
-using System;
-using System.Collections.Generic;
-using System.Globalization;
-using System.Linq;
-using System.Text;
-using UnityEditor;
-using UnityEngine;
-
+//
+// The C# returns a short one-line-per-clip summary, not the JSON itself -
+// the JSON alone runs to 30KB+ of curve-binding data, and returning that
+// through the tool call is worse than writing it to disk (outputPath,
+// declared as a variable up front) and reading the file directly.
 string modelPath = "__ASSET_PATH__";
+string outputPath = System.IO.Path.Combine(
+    System.IO.Path.GetDirectoryName(UnityEngine.Application.dataPath),
+    "multi_take_unity_measurement.json");
 string[] declaredJoints = new string[] { __JOINTS_CSV__ };
 
-Func<string, string> Esc = s => s.Replace("\\", "\\\\").Replace("\"", "\\\"");
-Func<float, string> Num = v => v.ToString("R", CultureInfo.InvariantCulture);
-Func<Vector3, string> Vec3 = v => "[" + Num(v.x) + "," + Num(v.y) + "," + Num(v.z) + "]";
+System.Func<string, string> Esc = s => s.Replace("\\", "\\\\").Replace("\"", "\\\"");
+System.Func<float, string> Num = v => v.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+System.Func<UnityEngine.Vector3, string> Vec3 = v => "[" + Num(v.x) + "," + Num(v.y) + "," + Num(v.z) + "]";
 
-GameObject mainAsset = AssetDatabase.LoadMainAssetAtPath(modelPath) as GameObject;
+UnityEngine.GameObject mainAsset = UnityEditor.AssetDatabase.LoadMainAssetAtPath(modelPath) as UnityEngine.GameObject;
 if (mainAsset == null) {
     return "{\"error\":\"no root GameObject at " + Esc(modelPath) + "\"}";
 }
 
-UnityEngine.Object[] allAssets = AssetDatabase.LoadAllAssetsAtPath(modelPath);
-AnimationClip[] clips = allAssets.OfType<AnimationClip>().ToArray();
+UnityEngine.Object[] allAssets = UnityEditor.AssetDatabase.LoadAllAssetsAtPath(modelPath);
+System.Collections.Generic.List<UnityEngine.AnimationClip> clipList = new System.Collections.Generic.List<UnityEngine.AnimationClip>();
+for (int ai = 0; ai < allAssets.Length; ai++) {
+    UnityEngine.AnimationClip candidate = allAssets[ai] as UnityEngine.AnimationClip;
+    if (candidate == null) continue;
+    // LoadAllAssetsAtPath also returns Unity's own internal preview clips
+    // (named "__preview__<clipname>") - duplicates of the real clips, not
+    // takes Maya authored.
+    if (candidate.name.StartsWith("__preview__")) continue;
+    clipList.Add(candidate);
+}
+UnityEngine.AnimationClip[] clips = clipList.ToArray();
 
-GameObject instance = UnityEngine.Object.Instantiate(mainAsset);
-Dictionary<string, Transform> jointLookup = new Dictionary<string, Transform>();
-foreach (Transform t in instance.GetComponentsInChildren<Transform>(true)) {
+UnityEngine.GameObject instance = UnityEngine.Object.Instantiate(mainAsset);
+System.Collections.Generic.Dictionary<string, UnityEngine.Transform> jointLookup = new System.Collections.Generic.Dictionary<string, UnityEngine.Transform>();
+foreach (UnityEngine.Transform t in instance.GetComponentsInChildren<UnityEngine.Transform>(true)) {
     if (!jointLookup.ContainsKey(t.name)) jointLookup[t.name] = t;
 }
 
-StringBuilder sb = new StringBuilder();
-sb.Append("{\"clips\":[");
+// The bind pose, BEFORE SampleAnimation touches this instance for the
+// first time - each declared joint's true rest orientation.
+System.Text.StringBuilder restSb = new System.Text.StringBuilder();
+restSb.Append("{");
+bool firstRestJoint = true;
+foreach (string jointName in declaredJoints) {
+    UnityEngine.Transform restJt;
+    if (!jointLookup.TryGetValue(jointName, out restJt)) continue;
+    if (!firstRestJoint) restSb.Append(",");
+    firstRestJoint = false;
+    restSb.Append("\"" + Esc(jointName) + "\":" + Vec3(restJt.localRotation.eulerAngles));
+}
+restSb.Append("}");
+
+System.Text.StringBuilder sb = new System.Text.StringBuilder();
+sb.Append("{\"rest\":" + restSb.ToString() + ",\"clips\":[");
 for (int ci = 0; ci < clips.Length; ci++) {
-    AnimationClip clip = clips[ci];
+    UnityEngine.AnimationClip clip = clips[ci];
     if (ci > 0) sb.Append(",");
 
-    UnityEditor.EditorCurveBinding[] bindings = AnimationUtility.GetCurveBindings(clip);
+    UnityEditor.EditorCurveBinding[] bindings = UnityEditor.AnimationUtility.GetCurveBindings(clip);
 
     // One SampleAnimation call per TIME (not per joint), so every joint's
     // reading at a given time comes from the same applied pose.
     float[] times = new float[] { 0f, clip.length * 0.5f, clip.length };
-    Dictionary<string, Vector3[]> perJoint = new Dictionary<string, Vector3[]>();
+    System.Collections.Generic.Dictionary<string, UnityEngine.Vector3[]> perJoint = new System.Collections.Generic.Dictionary<string, UnityEngine.Vector3[]>();
     foreach (string jointName in declaredJoints) {
-        if (jointLookup.ContainsKey(jointName)) perJoint[jointName] = new Vector3[3];
+        if (jointLookup.ContainsKey(jointName)) perJoint[jointName] = new UnityEngine.Vector3[3];
     }
     for (int ti = 0; ti < times.Length; ti++) {
         clip.SampleAnimation(instance, times[ti]);
-        foreach (KeyValuePair<string, Vector3[]> kv in perJoint) {
+        foreach (System.Collections.Generic.KeyValuePair<string, UnityEngine.Vector3[]> kv in perJoint) {
             kv.Value[ti] = jointLookup[kv.Key].localRotation.eulerAngles;
         }
     }
@@ -216,7 +292,7 @@ for (int ci = 0; ci < clips.Length; ci++) {
     sb.Append("\"samples\":{");
     bool firstJoint = true;
     string[] labels = new string[] { "start", "mid", "end" };
-    foreach (KeyValuePair<string, Vector3[]> kv in perJoint) {
+    foreach (System.Collections.Generic.KeyValuePair<string, UnityEngine.Vector3[]> kv in perJoint) {
         if (!firstJoint) sb.Append(",");
         firstJoint = false;
         sb.Append("\"" + Esc(kv.Key) + "\":{");
@@ -231,8 +307,17 @@ for (int ci = 0; ci < clips.Length; ci++) {
 sb.Append("]}");
 
 UnityEngine.Object.DestroyImmediate(instance);
-Debug.Log(sb.ToString());
-return sb.ToString();
+
+System.IO.File.WriteAllText(outputPath, sb.ToString());
+
+System.Text.StringBuilder summary = new System.Text.StringBuilder();
+summary.Append("wrote " + clips.Length + " clip(s) to " + outputPath + ": ");
+for (int ci = 0; ci < clips.Length; ci++) {
+    if (ci > 0) summary.Append(", ");
+    summary.Append(clips[ci].name + "=" + Num(clips[ci].length) + "s");
+}
+UnityEngine.Debug.Log(summary.ToString());
+return summary.ToString();
 """.strip("\n")
 
 UNITY_MEASURE_CS = (_UNITY_MEASURE_TEMPLATE
@@ -240,13 +325,50 @@ UNITY_MEASURE_CS = (_UNITY_MEASURE_TEMPLATE
                      .replace("__JOINTS_CSV__", _cs_string_array(ALL_JOINTS)))
 
 
+def _angle_cyclic_diff(a, b):
+    """Shortest signed distance in degrees from angle `b` to angle `a`,
+    treating both as points on a 360-degree cycle - so a reading of
+    359.999 against a rest of 0.0 is 0.001 degrees away, not 359.999.
+    `a - b` alone (what the first draft used) is wrong at that wraparound;
+    a plain `% 360` without re-centring into [-180, 180] is ALSO wrong for
+    a slightly-negative value (Python's `%` returns a positive remainder,
+    so -1e-15 % 360 comes back near +360, not near 0) - exactly the kind
+    of float noise Unity's quaternion round trip leaves on a value that
+    should read as an exact multiple of 360 (measured: L_hip/R_hip's x and
+    z axes at 7.0e-15). Re-centring after the modulo handles both."""
+    d = (a - b) % 360.0
+    if d > 180.0:
+        d -= 360.0
+    return d
+
+
+def _vec3_cyclic_worst(vec, ref):
+    """Largest per-component cyclic distance (degrees) between two
+    3-vectors of angles."""
+    return max(abs(_angle_cyclic_diff(float(v), float(r)))
+               for v, r in zip(vec, ref))
+
+
 def verify(declared, measured):
     """Pure. No Unity, no I/O. `declared` is DECLARED (or an equivalent
     list of {name, fps, start_frame, end_frame, joints} records);
-    `measured` is the JSON object UNITY_MEASURE_CS printed, already parsed.
+    `measured` is the JSON object UNITY_MEASURE_CS writes to its output
+    file, already parsed - {"rest": {...}, "clips": [...]}.
 
-    Returns a list of violation strings (empty = pass). Checks, per
-    declared clip:
+    Returns a list of violation strings (empty = pass). Checks:
+
+      0. `measured` carries a top-level "rest" block at all. Without it,
+         checks 4b below have no reference value to compare a joint's
+         reading to - and falling back to an assumed [0,0,0] is exactly
+         the bug this gate shipped with on its first live run (see the
+         module docstring's MEASURED paragraph): every one of Unity's 10
+         false violations was a joint sitting, perfectly still, at its own
+         non-zero import-time joint orientation (L_ankle measured at
+         [270, 293.1986, 0]) compared against a hardcoded 0. A missing
+         "rest" block is reported once, here, rather than silently
+         skipped or silently defaulted.
+
+      Then, per declared clip:
 
       1. it exists by name in `measured` (a clip present in Unity but NOT
          declared is NOT a violation - same rule the byte gate's
@@ -260,36 +382,43 @@ def verify(declared, measured):
          (start/mid/end) present and numeric - the completeness check.
          Without this, a joint Unity's measurement fails to produce ANY
          reading for (a name mismatch after import, a lookup miss, any
-         gap) is simply absent from `samples`; check 4 below only ever
-         walks the joints THAT ARE PRESENT, so a missing joint contributes
-         zero violations and the gate reports a false clean PASS on
-         exactly the defect it exists to catch. "Every joint that should
-         have been sampled" is derived from the `declared` records
+         gap) is simply absent from `samples`; checks 4a/4b below only
+         ever walk the joints THAT ARE PRESENT, so a missing joint
+         contributes zero violations and the gate reports a false clean
+         PASS on exactly the defect it exists to catch. "Every joint that
+         should have been sampled" is derived from the `declared` records
          themselves (the union of every clip's `joints`, minus this
          clip's own) - never a hardcoded list, so it tracks whatever the
          live Maya gate actually authored.
       4. every joint sampled for that clip that this clip does NOT declare
-         sits at REST (0 degrees on every axis, every one of its three
-         samples) within STILLNESS_EPSILON_DEG - the consumer-side
-         contamination check.
+         is checked TWO ways, reported as distinguishable messages because
+         they mean different things:
 
-         Deliberately an ABSOLUTE distance-from-rest check, not "does the
-         reading vary across the three samples" (a plausible first reading
-         of the brief's wording, and this script's own first draft): the
-         design doc's failure shape is a curve holding "whatever value its
-         last key left on it" - a CONSTANT, not a sweep. A joint on the
-         wrong side of a missing backward pin reads the SAME wrong value at
-         start, mid and end alike (proven here by
-         TestContamination.test_backward_hold_pattern_is_caught in
-         tests/test_multi_take_unity.py), so a spread-based check sees zero
-         variance and passes the exact defect this gate exists to catch.
-         Comparing every sample to the joint's known rest value (0 - the
-         same assumption multi_take_live.py's rest_probe/worst_rotation
-         make on the Maya side, valid because create_skeleton bakes
-         orientation into jointOrient, leaving local rotate at bind = 0)
-         catches both shapes: a constant wrong hold (every sample equally
-         far from 0) and an actual leaked sweep (at least one sample far
-         from 0).
+         4a. MOVEMENT - does the reading vary across the three samples
+             (cyclically) by more than STILLNESS_EPSILON_DEG? Catches a
+             joint that sweeps THROUGH its own rest value rather than
+             holding a constant wrong one - cheap to add, and a shape the
+             at-rest check below (4b) cannot see if the sweep happens to
+             start and end exactly at rest.
+
+         4b. AT-REST - does every one of the three samples sit within
+             STILLNESS_EPSILON_DEG of the joint's OWN measured rest value
+             (from `measured["rest"]`), cyclically? This is the actual
+             contamination check. Deliberately an ABSOLUTE distance-from-
+             rest check, not "does the reading vary" (a plausible first
+             reading of the brief's wording, and this script's own first
+             draft's check 4a taken alone): the design doc's failure shape
+             is a curve holding "whatever value its last key left on it" -
+             a CONSTANT, not a sweep. A joint on the wrong side of a
+             missing backward pin reads the SAME wrong value at start, mid
+             and end alike (proven here by
+             TestContamination.test_backward_hold_pattern_is_caught in
+             tests/test_multi_take_unity.py), so 4a alone sees zero
+             movement and would pass the exact defect this gate exists to
+             catch. A joint missing from `measured["rest"]` (and "rest"
+             itself present, i.e. check 0 above did not already fire) is
+             its own violation, same reasoning as check 3: a missing
+             reference is not proof the joint is at rest.
     """
     violations = []
     measured_by_name = {c["name"]: c for c in measured.get("clips", [])
@@ -299,6 +428,20 @@ def verify(declared, measured):
     # Derived from `declared` itself - never hardcoded - so it always
     # matches what the live Maya gate actually authored.
     all_declared_joints = {j for r in declared for j in r.get("joints", [])}
+
+    # Check 0: the rest reference itself. See docstring - never silently
+    # fall back to an assumed [0,0,0], that is the bug this file shipped
+    # with.
+    rest = measured.get("rest")
+    rest_missing = rest is None
+    if rest_missing:
+        violations.append(
+            "measurement has no top-level 'rest' block (each declared "
+            "joint's bind-pose local rotation) - the at-rest contamination "
+            "check compares every undeclared joint's reading against ITS "
+            "OWN rest value, never an assumed [0,0,0], so it did not run "
+            "for any clip")
+        rest = {}
 
     for record in declared:
         name = record["name"]
@@ -327,8 +470,8 @@ def verify(declared, measured):
 
         # Check 3: completeness. A joint declared by ANOTHER clip must
         # show up in THIS clip's samples at all - if it is simply absent
-        # (not malformed, not still, ABSENT), check 4 below would never
-        # see it and the gap would pass silently.
+        # (not malformed, not still, ABSENT), checks 4a/4b below would
+        # never see it and the gap would pass silently.
         for joint in sorted(all_declared_joints - declared_joints):
             if joint not in samples:
                 violations.append(
@@ -337,27 +480,55 @@ def verify(declared, measured):
                     "Unity's measurement entirely - a measurement gap is "
                     "not proof of stillness" % (name, joint))
 
-        # Check 4: contamination, for every joint Unity's measurement DID
-        # produce a reading for.
+        # Checks 4a/4b, for every joint Unity's measurement DID produce a
+        # reading for.
         for joint, rows in samples.items():
             if joint in declared_joints:
                 continue
             try:
-                start, mid, end = rows["start"], rows["mid"], rows["end"]
-                worst = max(abs(float(v)) for vec in (start, mid, end)
-                            for v in vec)
+                start = [float(v) for v in rows["start"]]
+                mid = [float(v) for v in rows["mid"]]
+                end = [float(v) for v in rows["end"]]
             except (KeyError, TypeError, ValueError):
                 violations.append(
                     "clip %r: joint %r has a malformed samples entry (%r)"
                     % (name, joint, rows))
                 continue
-            if worst > STILLNESS_EPSILON_DEG:
+
+            # 4a: movement across the three samples, cyclic.
+            move_worst = max(_vec3_cyclic_worst(start, mid),
+                              _vec3_cyclic_worst(mid, end),
+                              _vec3_cyclic_worst(start, end))
+            if move_worst > STILLNESS_EPSILON_DEG:
                 violations.append(
                     "clip %r: joint %r is NOT declared by this clip but its "
-                    "sampled rotation reaches %.6f degrees away from rest "
-                    "(start=%s mid=%s end=%s) > epsilon=%.g degrees - "
-                    "contamination from a neighbouring clip"
-                    % (name, joint, worst, start, mid, end,
+                    "sampled rotation MOVES %.6f degrees across the clip's "
+                    "own range (start=%s mid=%s end=%s) > epsilon=%.g "
+                    "degrees - it should be perfectly still"
+                    % (name, joint, move_worst, start, mid, end,
+                       STILLNESS_EPSILON_DEG))
+
+            # 4b: distance from the joint's OWN measured rest pose, cyclic.
+            if joint not in rest:
+                if not rest_missing:
+                    violations.append(
+                        "clip %r: joint %r has no rest measurement in the "
+                        "'rest' block to compare against - a missing "
+                        "reference is not proof the joint is at rest"
+                        % (name, joint))
+                continue
+            rest_vec = rest[joint]
+            rest_worst = max(_vec3_cyclic_worst(start, rest_vec),
+                              _vec3_cyclic_worst(mid, rest_vec),
+                              _vec3_cyclic_worst(end, rest_vec))
+            if rest_worst > STILLNESS_EPSILON_DEG:
+                violations.append(
+                    "clip %r: joint %r is NOT declared by this clip but its "
+                    "sampled rotation reaches %.6f degrees away from its "
+                    "OWN rest pose %s (start=%s mid=%s end=%s) > "
+                    "epsilon=%.g degrees - contamination from a "
+                    "neighbouring clip"
+                    % (name, joint, rest_worst, rest_vec, start, mid, end,
                        STILLNESS_EPSILON_DEG))
 
     return violations
@@ -410,10 +581,16 @@ Destination in the scratch project: %s
     first to find the property's exact reflected name before retrying.
 
  6. mcp__unityMCP__execute_code(action="execute", code=UNITY_MEASURE_CS)
-    Runs the measurement (this module's UNITY_MEASURE_CS constant). Its
-    return value is the JSON object described in verify()'s docstring.
+    Runs the measurement (this module's UNITY_MEASURE_CS constant). It
+    WRITES the JSON object described in verify()'s docstring to a file
+    (outputPath inside the C#, computed as
+    "<project root>/multi_take_unity_measurement.json" - a sibling of the
+    project's Assets/ folder) and returns only a short one-line-per-clip
+    summary; the full JSON is 30KB+ of curve-binding data and not worth
+    returning through the tool call.
 
- 7. Save that JSON to a file, then verify it:
+ 7. Copy that file locally (if the scratch project is remote) and verify
+    it:
     uv run python evals/multi_take_unity.py --measurements <path to the JSON>
 """ % (os.path.basename(BASELINE_PATH), clip_names, FBX_PATH, ASSET_PATH,
        FBX_PATH, ASSET_PATH, ASSET_PATH, ASSET_PATH)
