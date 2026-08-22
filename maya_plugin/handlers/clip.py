@@ -2,10 +2,14 @@
 delete_clip.
 
 The currency is the phase-1 pose map, keyed: each key is {time_s, rotations,
-blend_weights?, root_position?}. ONE clip exists per skeleton at a time -
-authoring under a new name replaces the old one (with a warning), export
-bakes the current clip as one take, and delete_clip returns the skeleton to
-static land. While a clip exists, static pose mutators REFUSE (the guards
+blend_weights?, root_position?}. A skeleton carries a LIST of clips laid end
+to end on one shared timeline (#718): author_clip APPENDS a new name after
+the last clip, with one unowned gap frame between them. Re-authoring an
+existing name cuts that clip's old range and re-appends it at the tail - no
+other clip's motion moves, only its position in take order. Every clip on a
+rig shares one fps; a second rate refuses (one file is one timeline). export
+bakes each clip as its own named take, and delete_clip returns the skeleton
+to static land. While a clip exists, static pose mutators REFUSE (the guards
 below): curves own the channels, and a static write a curve overrides on the
 next frame change is the quietest way to lie about a pose.
 
@@ -165,6 +169,16 @@ def _resolve_weight_channels(alias_map: Dict[str, Any],
     return used
 
 
+def _clips_elsewhere(cmds, root_long: str) -> List[str]:
+    """Short names of OTHER skeleton roots carrying clips. export_fbx
+    refuses such a scene (a take is a frame range over the whole file, so a
+    multi-rig file needs a timeline policy of its own) - and that ceiling
+    should be discovered while authoring, not at write time (#718)."""
+    return [_short(j) for j in cmds.ls(type="joint", long=True) or []
+            if j != root_long
+            and cmds.attributeQuery(CLIP_ATTR, node=j, exists=True)]
+
+
 def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     cmds = _cmds()
     from . import rigging  # noqa: PLC0415 - rigging imports clip for guards
@@ -225,6 +239,13 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
                      "start key, or drop loop")
 
     records = clip_meta(cmds, root_long)
+    conflict = clipmath.fps_conflict(records, fps)
+    if conflict:
+        raise HandlerError(
+            conflict,
+            hint="delete_clip the clips at the other rate, or author this "
+                 "one at theirs")
+
     weight_plugs = ["%s.%s" % (alias_map[a], a) for a in alias_map
                     if not isinstance(alias_map[a], HandlerError)]
     existing = _anim_curves(cmds, _joint_plugs(joints) + weight_plugs)
@@ -235,7 +256,6 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
             % (len(existing), sorted(existing)[0]),
             hint="replacing hand-authored animation silently would destroy "
                  "work; delete_clip removes it if that is intended")
-    replaced = records[0]["name"] if records else None
 
     warnings: List[str] = []
     fractional = clipmath.fractional_frame_times(
@@ -250,15 +270,27 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
             "this skeleton moves no mesh (no skinned bind, no mesh parented "
             "under its joints) - the clip moves bare joints only; the "
             "displacement below is measured against nothing")
+    elsewhere = _clips_elsewhere(cmds, root_long)
+    if elsewhere:
+        warnings.append(
+            "another skeleton carries clips (%s) - export_fbx REFUSES a "
+            "scene where two rigs carry clips, because a take is a frame "
+            "range over the whole file; delete_clip the rig not being "
+            "exported" % ", ".join(elsewhere))
 
     session.auto_checkpoint("author_clip")
 
-    if existing:
-        doomed = sorted({c for curves in existing.values() for c in curves})
-        cmds.delete(*doomed)
-        if replaced:
-            warnings.append("replaced clip %r (%d curves deleted)"
-                            % (replaced, len(doomed)))
+    # Re-authoring a name RE-APPENDS it at the tail (#718 decision 4): its
+    # old range is cut, and no other clip's motion moves. Take ORDER in the
+    # file changes; each take is still independently named, which is all a
+    # consumer reads.
+    replaced, kept = clipmath.drop_record(records, name)
+    if replaced is not None:
+        for plug in sorted(set(_joint_plugs(joints) + weight_plugs)):
+            cmds.cutKey(plug, time=(replaced["start_frame"],
+                                    replaced["end_frame"]), clear=True)
+
+    start_frame = clipmath.next_start_frame(kept)
 
     prev_unit = cmds.currentUnit(query=True, time=True)
     unit = clipmath.FPS_UNITS[fps]
@@ -269,7 +301,7 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
 
     keyed: List[tuple] = []   # (node, attr) pairs, for tangents
     for key in resolved_keys:
-        frame = key["time_s"] * fps
+        frame = start_frame + key["time_s"] * fps
         for joint, triple in key["rotations"].items():
             for attr, value in zip(ROTATE_ATTRS, triple):
                 cmds.setKeyframe(joint, attribute=attr, time=frame,
@@ -289,22 +321,47 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
                              value=value)
             keyed.append((alias_map[alias], alias))
 
+    # MEASURED end frame (#636): the latest key at or after this clip's
+    # start, re-read from the curves. Nothing above start_frame can belong
+    # to another clip - this clip is always appended at the tail, and a
+    # re-author cut its old range first.
+    end_frame = start_frame
+    for node, attr in set(keyed):
+        times = cmds.keyframe("%s.%s" % (node, attr), query=True) or []
+        later = [t for t in times if t >= start_frame]
+        if later:
+            end_frame = max(end_frame, max(later))
+    end_frame = int(round(end_frame))
+    duration_s = (end_frame - start_frame) / float(fps)
+    frames = end_frame - start_frame + 1
+    if replaced is not None:
+        warnings.append(
+            "re-authored clip %r: vacated frames %d-%d and re-appended it "
+            "at %d-%d - no other clip's motion changed"
+            % (name, replaced["start_frame"], replaced["end_frame"],
+               start_frame, end_frame))
+
     tangent = INTERPOLATIONS[interpolation]
     for node, attr in sorted(set(keyed)):
         cmds.keyTangent(node, attribute=attr, edit=True,
                         inTangentType=tangent, outTangentType=tangent)
 
-    # MEASURED duration (#636): the latest key on any authored plug, re-read
-    # from the curves, never echoed from the input.
-    last_frame = 0.0
-    for node, attr in set(keyed):
-        times = cmds.keyframe("%s.%s" % (node, attr), query=True) or []
-        if times:
-            last_frame = max(last_frame, max(times))
-    duration_s = last_frame / fps
-    frames = int(round(last_frame)) + 1
-    cmds.playbackOptions(edit=True, minTime=0, maxTime=last_frame,
-                         animationStartTime=0, animationEndTime=last_frame)
+    new_record = {
+        "name": name, "fps": fps, "start_frame": start_frame,
+        "end_frame": end_frame, "duration_s": duration_s, "loop": loop,
+        "interpolation": interpolation,
+        "joints": sorted({_short(j) for key in resolved_keys
+                          for j in key["rotations"]}),
+        "weight_channels": weight_channels,
+        "root_position_used": any(k["root_position"] is not None
+                                  for k in resolved_keys),
+    }
+    all_records = kept + [new_record]
+    span_end = max(r["end_frame"] for r in all_records)
+    # The playback range is the FULL span, so opening the .ma and scrubbing
+    # shows every clip - not just the one authored last.
+    cmds.playbackOptions(edit=True, minTime=0, maxTime=span_end,
+                         animationStartTime=0, animationEndTime=span_end)
 
     # MEASURED per key: drive the time to each key's frame and read the
     # bound meshes against the evaluated FIRST key. Key 0 is 0 by
@@ -312,11 +369,11 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     per_key: List[Dict[str, Any]] = []
     baselines: Dict[str, List[float]] = {}
     worst = 0.0
-    cmds.currentTime(0)
+    cmds.currentTime(start_frame)
     for mesh in meshes:
         baselines[mesh] = _points(mesh)
     for key in resolved_keys:
-        cmds.currentTime(key["time_s"] * fps)
+        cmds.currentTime(start_frame + key["time_s"] * fps)
         disp = 0.0
         for mesh in meshes:
             disp = max(disp, sculpt_math.max_displacement(
@@ -335,15 +392,8 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
 
     if not cmds.attributeQuery(CLIP_ATTR, node=root_long, exists=True):
         cmds.addAttr(root_long, longName=CLIP_ATTR, dataType="string")
-    cmds.setAttr("%s.%s" % (root_long, CLIP_ATTR), json.dumps({
-        "name": name, "fps": fps, "duration_s": duration_s, "loop": loop,
-        "interpolation": interpolation,
-        "joints": sorted({_short(j) for key in resolved_keys
-                          for j in key["rotations"]}),
-        "weight_channels": weight_channels,
-        "root_position_used": any(k["root_position"] is not None
-                                  for k in resolved_keys),
-    }), type="string")
+    cmds.setAttr("%s.%s" % (root_long, CLIP_ATTR), json.dumps(all_records),
+                 type="string")
 
     return {
         "root": root_long,
@@ -358,7 +408,10 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
                                    for k in resolved_keys),
         "interpolation": interpolation,
         "loop": loop,
-        "replaced": replaced,
+        "start_frame": start_frame,
+        "end_frame": end_frame,
+        "clips": [r["name"] for r in all_records],
+        "replaced": name if replaced is not None else None,
         "per_key": per_key,
         "warnings": warnings,
     }

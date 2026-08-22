@@ -155,6 +155,21 @@ class FakeCmds:
     def keyframe(self, plug, query=False, **kw):
         return sorted(self.keys.get(plug, {})) or None
 
+    def cutKey(self, plug, time=None, clear=False, **kw):
+        keys = self.keys.get(plug)
+        if not keys:
+            return 0
+        lo, hi = time
+        doomed = [t for t in keys if lo <= t <= hi]
+        for t in doomed:
+            del keys[t]
+        if not keys:
+            curve = self.curves.pop(plug, None)
+            if curve:
+                self.deleted.append(curve)
+            self.keys.pop(plug, None)
+        return len(doomed)
+
     def listConnections(self, plug, source=False, destination=True,
                         type=None):
         curve = self.curves.get(plug)
@@ -281,7 +296,7 @@ class TestAuthor:
         assert fake.time_unit == "ntsc"
         assert fake.playback["minTime"] == 0
         assert fake.playback["maxTime"] == 30
-        meta = json.loads(fake.string_attrs["|root"]["mcp_clip"])
+        meta = json.loads(fake.string_attrs["|root"]["mcp_clip"])[0]
         assert meta["name"] == "idle" and meta["fps"] == 30
         assert meta["loop"] is False
         assert fake.checkpoints == ["author_clip"]
@@ -297,13 +312,47 @@ class TestAuthor:
         assert disp[1] == pytest.approx(0.25)
         assert disp[2] == pytest.approx(0.0)
 
-    def test_replacing_warns_and_deletes_the_old_curves(self, fake):
+    def test_a_second_clip_appends_after_the_first(self, fake):
+        first = _author(fake, name="idle")
+        assert (first["start_frame"], first["end_frame"]) == (0, 30)
+        assert first["clips"] == ["idle"] and first["replaced"] is None
+        second = _author(fake, name="walk")
+        # frame 31 is the gap; walk owns 32..62
+        assert (second["start_frame"], second["end_frame"]) == (32, 62)
+        assert second["clips"] == ["idle", "walk"]
+        assert second["replaced"] is None
+        # idle's keys are untouched
+        assert sorted(fake.keys["|root|mid.rotateZ"]) == [0.0, 30.0, 32.0, 62.0]
+        # the playback range spans everything
+        assert fake.playback["maxTime"] == 62
+
+    def test_re_authoring_a_name_moves_it_to_the_tail(self, fake):
         _author(fake, name="idle")
-        old = set(fake.deleted)
-        out = _author(fake, name="walk")
-        assert out["replaced"] == "idle"
-        assert any("replaced clip 'idle'" in w for w in out["warnings"])
-        assert len(fake.deleted) > len(old)
+        _author(fake, name="walk")
+        again = _author(fake, name="idle")
+        assert again["replaced"] == "idle"
+        assert (again["start_frame"], again["end_frame"]) == (64, 94)
+        assert again["clips"] == ["walk", "idle"]
+        assert any("vacated" in w and "0-30" in w and "64-94" in w
+                   for w in again["warnings"]), again["warnings"]
+        # the vacated range holds no keys any more, walk's are untouched
+        times = sorted(fake.keys["|root|mid.rotateZ"])
+        assert 0.0 not in times and 30.0 not in times
+        assert 32.0 in times and 62.0 in times
+
+    def test_a_second_fps_refuses_and_names_the_one_in_use(self, fake):
+        _author(fake, name="idle", fps=30)
+        with pytest.raises(HandlerError, match="one rig is one frame rate"):
+            _author(fake, name="walk", fps=24)
+        # the refusal cost nothing: no checkpoint beyond the first author
+        assert fake.checkpoints == ["author_clip"]
+
+    def test_a_clip_on_another_rig_warns_because_export_will_refuse(self, fake):
+        fake.string_attrs["|other_root"] = {"mcp_clip": "[]"}
+        fake.joints.append("|other_root")
+        out = _author(fake, name="idle")
+        assert any("other_root" in w and "export_fbx" in w
+                   for w in out["warnings"]), out["warnings"]
 
     def test_tangent_mapping(self, fake):
         _author(fake, interpolation="smooth")
