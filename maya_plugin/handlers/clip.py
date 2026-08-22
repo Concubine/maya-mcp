@@ -774,6 +774,22 @@ def delete_clip(params: Dict[str, Any]) -> Dict[str, Any]:
             "no clip exists on %s" % root_long,
             hint="author_clip creates one; this tool removes it")
 
+    name = params.get("name")
+    if name is not None and not isinstance(name, str):
+        raise HandlerError("name must be a string, or omitted to delete "
+                           "every clip on this rig")
+    doomed_record = None
+    kept: List[Dict[str, Any]] = []
+    if name is not None:
+        doomed_record, kept = clipmath.drop_record(records, name)
+        if doomed_record is None:
+            raise HandlerError(
+                "no clip named %r on %s (has: %s)"
+                % (name, _short(root_long),
+                   ", ".join(repr(r["name"]) for r in records) or "none"),
+                hint="omit `name` to delete every clip and return the "
+                     "skeleton to static posing")
+
     warnings: List[str] = []
     if not records and driven:
         warnings.append(
@@ -783,29 +799,54 @@ def delete_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     session.auto_checkpoint("delete_clip")
     before = {m: _points(m) for m in meshes}
 
-    doomed = sorted({c for curves in driven.values() for c in curves})
-    if doomed:
-        cmds.delete(*doomed)
-    # Weights back to 0 (weights-all-0 IS the reset, the P5 rule), then the
-    # skeleton back to bind - reset_pose's exact logic inline so this call
-    # holds ONE checkpoint.
-    for plug in weight_plugs:
-        if plug in driven:
-            cmds.setAttr(plug, 0.0)
-    poses = cmds.dagPose(root_long, query=True, bindPose=True) or []
-    if poses:
-        cmds.dagPose(poses[0], restore=True, g=True)
-        if len(poses) > 1:
-            warnings.append("%d bind poses exist; restored %s"
-                            % (len(poses), poses[0]))
+    deleted_curves = 0
+    if kept:
+        # ONE clip out of several: cut its range only. Gaps are NOT
+        # re-packed (#718 decision 5) - a take is an explicit range, so a
+        # gap costs nothing, and re-packing would move keys the caller did
+        # not touch.
+        for plug in sorted(driven):
+            cmds.cutKey(plug, time=(doomed_record["start_frame"],
+                                    doomed_record["end_frame"]), clear=True)
+        remaining = _anim_curves(cmds, _joint_plugs(joints) + weight_plugs)
+        deleted_curves = len({c for curves in driven.values() for c in curves}
+                             - {c for curves in remaining.values()
+                                for c in curves})
+        cmds.setAttr("%s.%s" % (root_long, CLIP_ATTR), json.dumps(kept),
+                     type="string")
+        span_end = max(r["end_frame"] for r in kept)
+        cmds.playbackOptions(edit=True, minTime=0, maxTime=span_end,
+                             animationStartTime=0, animationEndTime=span_end)
     else:
-        for joint in joints:
-            cmds.setAttr(joint + ".rotate", 0.0, 0.0, 0.0)
-        warnings.append(
-            "no bind pose exists (nothing is bound); rotations zeroed, "
-            "which is the create_skeleton rest pose")
-    if cmds.attributeQuery(CLIP_ATTR, node=root_long, exists=True):
-        cmds.deleteAttr("%s.%s" % (root_long, CLIP_ATTR))
+        if name is not None:
+            warnings.append(
+                "%r was the last clip on this rig - the full teardown ran: "
+                "weight channels zeroed, bind pose restored" % name)
+        doomed = sorted({c for curves in driven.values() for c in curves})
+        if doomed:
+            cmds.delete(*doomed)
+        deleted_curves = len(doomed)
+        # Weights back to 0 (weights-all-0 IS the reset, the P5 rule), then
+        # the skeleton back to bind - reset_pose's exact logic inline so
+        # this call holds ONE checkpoint.
+        for plug in weight_plugs:
+            if plug in driven:
+                cmds.setAttr(plug, 0.0)
+        poses = cmds.dagPose(root_long, query=True, bindPose=True) or []
+        if poses:
+            cmds.dagPose(poses[0], restore=True, g=True)
+            if len(poses) > 1:
+                warnings.append("%d bind poses exist; restored %s"
+                                % (len(poses), poses[0]))
+        else:
+            for joint in joints:
+                cmds.setAttr(joint + ".rotate", 0.0, 0.0, 0.0)
+            warnings.append(
+                "no bind pose exists (nothing is bound); rotations zeroed, "
+                "which is the create_skeleton rest pose")
+        for attr in (CLIP_ATTR, REST_ATTR):
+            if cmds.attributeQuery(attr, node=root_long, exists=True):
+                cmds.deleteAttr("%s.%s" % (root_long, attr))
 
     max_disp = 0.0
     for mesh in meshes:
@@ -813,8 +854,10 @@ def delete_clip(params: Dict[str, Any]) -> Dict[str, Any]:
             before[mesh], _points(mesh)))
     return {
         "root": root_long,
-        "clip": records[0]["name"] if records else None,
-        "deleted_curves": len(doomed),
+        "clip": (doomed_record["name"] if doomed_record
+                 else (records[0]["name"] if records else None)),
+        "clips": [r["name"] for r in kept],
+        "deleted_curves": deleted_curves,
         "max_displacement": max_disp,
         "warnings": warnings,
     }

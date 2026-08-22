@@ -783,6 +783,42 @@ class TestDelete:
         assert out["clip"] is None
         assert any("no clip metadata" in w for w in out["warnings"])
 
+    def test_a_named_delete_removes_one_clip_and_leaves_the_others(self, fake):
+        _author(fake, name="idle")
+        _author(fake, name="walk")
+        out = clip.delete_clip({"root": "root", "name": "idle"})
+        assert out["clip"] == "idle" and out["clips"] == ["walk"]
+        assert out["deleted_curves"] >= 0
+        times = sorted(fake.keys["|root|mid.rotateZ"])
+        assert 0.0 not in times and 30.0 not in times   # idle's range
+        assert 32.0 in times and 62.0 in times          # walk's, untouched
+        meta = json.loads(fake.string_attrs["|root"]["mcp_clip"])
+        assert [r["name"] for r in meta] == ["walk"]
+        # gaps are NOT re-packed: walk keeps the range it was authored at
+        assert meta[0]["start_frame"] == 32
+
+    def test_an_unknown_name_refuses_and_lists_what_is_there(self, fake):
+        _author(fake, name="idle")
+        with pytest.raises(HandlerError, match="no clip named 'nope'"):
+            clip.delete_clip({"root": "root", "name": "nope"})
+        assert fake.checkpoints == ["author_clip"]
+
+    def test_deleting_the_last_named_clip_completes_the_teardown(self, fake):
+        _author(fake, name="idle")
+        out = clip.delete_clip({"root": "root", "name": "idle"})
+        assert out["clips"] == []
+        assert "mcp_clip" not in fake.string_attrs.get("|root", {})
+        assert any("last clip" in w for w in out["warnings"])
+
+    def test_deleting_without_a_name_still_removes_everything(self, fake):
+        _author(fake, name="idle")
+        _author(fake, name="walk")
+        out = clip.delete_clip({"root": "root"})
+        assert out["clips"] == []
+        assert not any(p.startswith("|root|mid.rotate") for p in fake.curves)
+        assert "mcp_clip" not in fake.string_attrs.get("|root", {})
+        assert "mcp_clip_rest" not in fake.string_attrs.get("|root", {})
+
 
 class TestGuards:
     def test_static_pose_guard_names_the_clip(self, fake):
