@@ -68,11 +68,10 @@ skeletons; it has only ever seen a humanoid, where nothing sits on the symmetry
 plane except a spine that is excluded rather than self-paired. A joint that is
 its own mirror pair is a case it has never met. Whatever it does is a finding.
 
-**Eight tendrils meet the bell margin.** That makes vertices with five or more
-influences likely rather than merely possible. Unity truncates to four
-influences per vertex and renormalises, so this is the density at which the
-truncation question gets a real answer instead of a clean distribution and a
-shrug.
+**Eight tendrils meet the bell margin.** That crowds the margin with competing
+influences, which is the precondition for the truncation question — but see
+§4.1: density alone does not create the case, because `bind_skin` caps
+influences by parameter. The two work together.
 
 ### 3.3 Vertex budget — stated, not discovered
 
@@ -92,10 +91,25 @@ divisions coupling that ticket describes applies directly.
 
 ## 4. Deformers
 
-### 4.1 Skinning
+### 4.1 Skinning — and the truncation case must be created on purpose
 
 Smooth bind, then `smooth_weights`. Weights are authored as a whole table with
 `normalize=False` through the single `MFnSkinCluster` write path.
+
+**Correction to an earlier draft.** I wrote that eight tendrils crowding the
+bell margin would make five-or-more influences per vertex emerge on their own.
+That is wrong: `bind_skin` takes `max_influences` (1–8, **default 4**, documented
+as "4 is the game-engine convention"). Bound at the default, the asset can never
+exceed Unity's limit and the truncation question cannot arise at all.
+
+So the fixture **binds at `max_influences=8` deliberately**, to construct the
+case rather than hope for it. Geometry crowding still matters — it is what makes
+the extra influences meaningful rather than negligible — but the cap is what
+allows them to exist.
+
+This also gives the run a second, cheaper question worth recording: whether
+`smooth_weights` respects the cap or can push a vertex past it. Nothing states
+that it does.
 
 `weight_report` gets a job it has not had before: reading the
 **influences-per-vertex distribution before export**. Knowing that distribution
@@ -103,6 +117,10 @@ in Maya tells us whether Unity's four-influence truncation will occur *before* w
 go looking for its effects in the consumer. If deformation then diverges in
 Unity, we already know whether truncation is the cause rather than having to
 work it out backwards.
+
+A run that binds at 8 is deliberately *not* shipping best practice. That is the
+point of a fixture: the spec's own §12 keeps the fix out of scope, and a second
+bind at 4 is available as a control if the measured difference needs isolating.
 
 ### 4.2 Blend shapes — two targets, deliberately
 
@@ -154,17 +172,29 @@ around** — the gate records it and the ticket carries it.
 Because rotation is the only joint channel, IK targets must sit inside the
 chain's reach: the tendril reaches by curling, not by stretching.
 
-### 5.2 Loop continuity gets asserted
+### 5.2 Loop continuity — authoring side is already covered
 
-#718 measured clip *lengths* to 4.8e-07 and never looked at loop seams. A loop
-whose first and last frames disagree pops visibly in-engine — a real defect for
-a game asset that our gates are currently blind to.
+**Correction to an earlier draft of this spec.** I wrote that our gates are
+blind to loop seams. They are not, on the authoring side: `author_clip` takes a
+`loop` flag that validates the last key closes onto the first across rotations,
+weights *and* root position, and refuses with the measured difference — "a cycle
+that does not close pops on repeat in-engine"
+(`src/maya_mcp/server.py`, `maya_author_clip`). #718 measured clip lengths and
+did not exercise this, but the check exists.
 
-**Assertion:** on both looping takes, first-frame and last-frame values match on
-every keyed channel, joints and blend weights alike — within 1e-4 degrees for
-rotations and 1e-4 for blend weights. Both tolerances are named constants in the
-gate and are written into `baseline.json`, so the consumer gate judges the seam
-by the same numbers rather than its own.
+So both looping takes are authored with `loop=True` and the authoring-side
+assertion costs nothing.
+
+**What remains genuinely unchecked is the seam as the consumer reconstructs
+it.** Maya refusing a clip that does not close says nothing about what Unity
+holds after import, resampling and its own tangent handling. The consumer gate
+therefore samples the deformation metrics of §8 at the first and last frame of
+each looping clip **in Unity** and requires them to agree within 1e-4 (rim
+diameter and apex-to-tip, in metres). That tolerance is a named constant written
+into `baseline.json`, so both gates judge the seam by the same number.
+
+`tendril_reach` is authored with `loop=False` and is exempt from the seam check
+in both places.
 
 ## 6. Material — scope deliberately narrow
 
