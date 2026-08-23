@@ -437,6 +437,46 @@ git commit -m "test(#743): declared-vs-measured, seam and influence-histogram po
 
 ---
 
+### REVISION B (2026-08-23): build order inverted — geometry first, then fit the skeleton
+
+**Measured, and it invalidates Task 3's original ordering.** Giving the tendrils rest-pose curvature with `bend` moved the geometry off the joint chains, which stayed straight. The bones ended up running through empty space beside each tendril:
+
+| tendril | tube radius | top joint → nearest vertex | ratio |
+|---|---|---|---|
+| 1 | 0.055 | 0.253 m | 4.6× |
+| 3 | 0.045 | 0.296 m | 6.6× |
+| 7 | 0.043 | 0.276 m | 6.4× |
+
+A joint inside its tube measures roughly one radius. These are 4–7×. `closestDistance` binding would have handed each tendril's vertices to whatever bone happened to be nearest — possibly a neighbouring tendril's — and a turntable would have looked perfectly fine.
+
+**So the shape defines the skeleton now, not the other way round:**
+
+1. Build the bell and the eight tendrils, applying every deformer, and combine.
+2. **Before combining**, per tendril, fit its ten joints to the tube's actual centreline: sample vertex rings along the tube's length, take each ring's centroid, and place joints at equal intervals along that polyline.
+3. Rib joints keep their analytic positions — the bell is not bent, so they never left their geometry.
+4. Then `create_skeleton` with the fitted positions, then bind.
+
+**A new assertion, permanent, in every run from here:**
+
+```python
+JOINT_INSIDE_TOL_RATIO = 2.0
+
+
+def assert_joints_inside(mesh: str, radius_of) -> dict:
+    """Every joint must lie INSIDE the mesh it drives.
+
+    A joint outside its geometry produces a bind that looks plausible,
+    exports clean, imports clean, and deforms the wrong vertices. Nothing
+    else in this fixture catches it - the defect that motivated this check
+    put every tendril bone 4-7 tube radii out into empty space and the
+    turntable looked correct.
+    """
+```
+
+Fail the gate on any joint whose nearest-vertex distance exceeds `JOINT_INSIDE_TOL_RATIO` times its local tube radius, and report the worst offenders.
+
+---
+
 ### Task 3: Preflight and the rig layout
 
 **Files:**
