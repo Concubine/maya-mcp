@@ -141,6 +141,99 @@ def build_skeleton() -> dict:
     return res
 
 
+def measure_cylinder_coupling() -> dict:
+    """The #669 datapoint: what a cylinder costs per unit of LENGTH detail.
+
+    Recorded, not routed around. A tendril needs >=10 loops along its
+    length; this says what that would cost in vertices if a cylinder
+    supplied them. `divisions` multiplies BOTH axis subdivisions on a
+    cylinder, which is #669 exactly - there is no way to ask a cylinder
+    for more length loops without also paying for more around-the-axis
+    loops.
+    """
+    out = []
+    for d in (1, 4, 8, 12):
+        create_res = call("create_primitive",
+                          {"kind": "cylinder", "name": "drifter_probe_cyl",
+                           "divisions": d})
+        if create_res.get("status") != "ok":
+            raise SystemExit("create_primitive(cylinder, divisions=%d) "
+                             "failed: %r" % (d, create_res.get("error")))
+        res = create_res.get("result") or {}
+        name = res.get("name")
+        info_res = call("get_object_info", {"name": name})
+        if info_res.get("status") != "ok":
+            raise SystemExit("get_object_info(%r) failed: %r"
+                             % (name, info_res.get("error")))
+        stats = (info_res.get("result") or {}).get("mesh_stats") or {}
+        out.append({"divisions": d, "vertices": stats.get("verts"),
+                    "faces": stats.get("faces")})
+        delete_res = call("delete_objects", {"names": [name]})
+        if delete_res.get("status") != "ok":
+            raise SystemExit("delete_objects(%r) failed: %r"
+                             % (name, delete_res.get("error")))
+    return {"cylinder_divisions": out}
+
+
+BELL_DIVISIONS = 4          # sphere: 400*d^2 faces -> ~6.4k
+TENDRIL_DIVISIONS = 12      # cube: 6*d^2 faces -> ~864, 12 loops of length
+BELL_SCALE = [1.2, 0.9, 1.2]
+TENDRIL_SCALE = [0.08, TENDRIL_SPAN, 0.08]
+
+
+def build_geometry() -> dict:
+    """One bell plus eight tendrils, combined into ONE mesh.
+
+    One mesh means one skinCluster means one SkinnedMeshRenderer in Unity,
+    which is the shape a game character actually takes. Tendrils are
+    CUBES, not cylinders - see measure_cylinder_coupling's docstring and
+    the #669 datapoint it records.
+    """
+    parts = []
+    bell_res = call("create_primitive",
+                    {"kind": "sphere", "name": "drifter_bell",
+                     "divisions": BELL_DIVISIONS,
+                     "translate": [0.0, (APEX_Y + RIM_Y) / 2.0, 0.0],
+                     "scale": BELL_SCALE})
+    if bell_res.get("status") != "ok":
+        raise SystemExit("create_primitive(bell) failed: %r"
+                         % (bell_res.get("error"),))
+    bell = (bell_res.get("result") or {})["name"]
+    parts.append(bell)
+
+    for t in range(1, TENDRILS + 1):
+        theta = _rib_ring(t)
+        tendril_res = call("create_primitive",
+                           {"kind": "cube", "name": "drifter_tendril_geo%d" % t,
+                            "divisions": TENDRIL_DIVISIONS,
+                            "translate": [RIM_R * math.cos(theta),
+                                          (RIM_Y + TENDRIL_BOTTOM_Y) / 2.0,
+                                          RIM_R * math.sin(theta)],
+                            "scale": TENDRIL_SCALE})
+        if tendril_res.get("status") != "ok":
+            raise SystemExit("create_primitive(tendril %d) failed: %r"
+                             % (t, tendril_res.get("error")))
+        name = (tendril_res.get("result") or {})["name"]
+        parts.append(name)
+
+    combine_res = call("combine", {"names": parts, "name": "drifter_body"})
+    if combine_res.get("status") != "ok":
+        raise SystemExit("combine failed: %r" % (combine_res.get("error"),))
+    combined = (combine_res.get("result") or {})["name"]
+    info_res = call("get_object_info", {"name": combined})
+    if info_res.get("status") != "ok":
+        raise SystemExit("get_object_info(%r) failed: %r"
+                         % (combined, info_res.get("error")))
+    stats = (info_res.get("result") or {}).get("mesh_stats") or {}
+    verts = int(stats.get("verts") or 0)
+    if verts > VERTEX_CEILING:
+        raise SystemExit(
+            "drifter_body has %d vertices, ceiling is %d - lower "
+            "BELL_DIVISIONS or TENDRIL_DIVISIONS rather than raising the "
+            "ceiling" % (verts, VERTEX_CEILING))
+    return {"mesh": combined, "vertices": verts, "parts": parts}
+
+
 if __name__ == "__main__":
     preflight()
     result = build_skeleton()
