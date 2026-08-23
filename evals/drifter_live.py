@@ -255,6 +255,14 @@ def bind_and_weight(mesh: str) -> dict:
             % bind.get("unweighted_vertices"))
 
     before = call("weight_report", {"mesh": mesh}).get("result") or {}
+    # The bind above already saturates max_influences at the cap (8), so
+    # smoothing has no headroom left to exceed it here. A False on the flag
+    # below is therefore inconclusive, not reassuring - it does not show that
+    # smoothing RESPECTS the cap, only that this particular smoothing pass
+    # never got a chance to test it. Answering the real question needs a
+    # separate bind at a LOWER max_influences (leaving headroom), then
+    # smoothing that, then checking whether the post-smooth max stays under
+    # the cap it was bound at.
     smooth_res = call("smooth_weights", {"mesh": mesh, "iterations": 2})
     if smooth_res.get("status") != "ok":
         raise SystemExit("smooth_weights failed: %r" % (smooth_res.get("error"),))
@@ -267,8 +275,8 @@ def bind_and_weight(mesh: str) -> dict:
             "histogram": after.get("histogram", []),
             "facts_before_smoothing": facts_before,
             "facts": facts_after,
-            "smoothing_raised_max": (facts_after["max_influences"]
-                                     > facts_before["max_influences"])}
+            "smoothing_changed_observed_max": (facts_after["max_influences"]
+                                               > facts_before["max_influences"])}
 
 
 def probe_mirror(mesh: str) -> dict:
@@ -282,7 +290,100 @@ def probe_mirror(mesh: str) -> dict:
     res = call("mirror_weights", {"mesh": mesh, "root": ROOT})
     return {"status": res.get("status"),
             "error": res.get("error"),
-            "result": res.get("result")}
+            "result": res.get("result"),
+            # This probe never reads per-vertex influences before/after the
+            # call, so "status: ok" / "unpaired_vertices: 0" cannot tell a
+            # correct self-mirror apart from a silent overwrite on the
+            # self-paired ribs (see docstring). Recorded explicitly so a
+            # reader of the JSON alone does not mistake this for a
+            # correctness signal.
+            "not_a_correctness_signal": True}
+
+
+BLEND_TARGETS = ("bell_crease", "tendril_flare")
+
+
+def build_blendshapes(mesh: str) -> dict:
+    """Two targets so each clip must PIN the other's channel to rest.
+
+    That padding rule (maya_plugin/handlers/clip.py:537) is today only ever
+    checked against itself. With two targets it becomes consumer-visible:
+    if padding fails, Unity plays drift_idle with a crease stuck on.
+
+    Targets are duplicates of the COMBINED, BOUND mesh (topology-identical,
+    as create_blendshape requires), each sculpted with maya_deform and then
+    baked (delete_history_after=True) so the target is a static shape with
+    no live deformer coupling it to a handle someone could move later.
+
+    `deform`'s real signature is (mesh, deformer, params, delete_history_after)
+    - not the (name, kind, amount, axis) the plan guessed. There is no
+    "taper" deformer; the whitelist is bend/flare/lattice/sculpt/sine/
+    squash/twist/wave (maya_plugin/handlers/sculpt.py DEFORMER_WHITELIST).
+    Both deformers below were tuned live against the actual mesh (see
+    task-6-report.md for the measured max_displacement of each trial):
+
+    - bell_crease: `squash`, factor=-0.6, bounded to a narrow band
+      (+-0.15 m) centred on the rim (world Y=RIM_Y). Squash's negative
+      factor pinches the cross-section inward; narrowing the bound keeps
+      the pinch localised to the rim instead of squeezing the whole bell -
+      visually a fold where the dome meets the tendril tops, which a
+      linear skin blend cannot produce.
+    - tendril_flare: `flare`, startFlare{X,Z}=1.4 at the tendril TIPS
+      (world Y=TENDRIL_BOTTOM_Y) tapering to endFlare{X,Z}=1.0 at the rim,
+      bounded +-1.5 m around the tendril span's midpoint so it covers the
+      full RIM_Y..TENDRIL_BOTTOM_Y range without reaching into the bell.
+    """
+    crease_dup = (call("duplicate", {"name": mesh,
+                                     "new_name": "drifter_tgt_bell_crease"})
+                  .get("result") or {})
+    crease = crease_dup.get("name")
+    if not crease:
+        raise SystemExit("duplicate(bell_crease) failed: %r" % (crease_dup,))
+    crease_deform = call("deform", {
+        "mesh": crease, "deformer": "squash",
+        "params": {"factor": -0.6, "lowBound": -0.15, "highBound": 0.15,
+                   "translate": [0.0, RIM_Y, 0.0]},
+        "delete_history_after": True,
+    })
+    if crease_deform.get("status") != "ok":
+        raise SystemExit("deform(bell_crease) failed: %r"
+                         % (crease_deform.get("error"),))
+    crease_moved = (crease_deform.get("result") or {}).get("max_displacement")
+
+    flare_mid_y = (RIM_Y + TENDRIL_BOTTOM_Y) / 2.0
+    flare_dup = (call("duplicate", {"name": mesh,
+                                    "new_name": "drifter_tgt_tendril_flare"})
+                 .get("result") or {})
+    flare = flare_dup.get("name")
+    if not flare:
+        raise SystemExit("duplicate(tendril_flare) failed: %r" % (flare_dup,))
+    flare_deform = call("deform", {
+        "mesh": flare, "deformer": "flare",
+        "params": {"startFlareX": 1.4, "startFlareZ": 1.4,
+                   "endFlareX": 1.0, "endFlareZ": 1.0,
+                   "lowBound": -1.5, "highBound": 1.5,
+                   "translate": [0.0, flare_mid_y, 0.0]},
+        "delete_history_after": True,
+    })
+    if flare_deform.get("status") != "ok":
+        raise SystemExit("deform(tendril_flare) failed: %r"
+                         % (flare_deform.get("error"),))
+    flare_moved = (flare_deform.get("result") or {}).get("max_displacement")
+
+    res = call("create_blendshape",
+               {"mesh": mesh,
+                "targets": [{"name": BLEND_TARGETS[0], "target_mesh": crease},
+                            {"name": BLEND_TARGETS[1], "target_mesh": flare}]})
+    if res.get("status") != "ok":
+        raise SystemExit("create_blendshape failed: %r" % (res.get("error"),))
+    result = res.get("result") or {}
+    aliases = result.get("aliases") or result.get("targets") or []
+    if len(aliases) != 2:
+        raise SystemExit("expected 2 blendshape aliases, got %r" % (aliases,))
+    return {"node": result.get("blend_shape"), "aliases": list(BLEND_TARGETS),
+            "target_build_displacement": {"bell_crease": crease_moved,
+                                          "tendril_flare": flare_moved},
+            "raw": result}
 
 
 if __name__ == "__main__":
