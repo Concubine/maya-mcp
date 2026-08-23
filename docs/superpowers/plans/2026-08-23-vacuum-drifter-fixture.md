@@ -1051,22 +1051,41 @@ def _tendril_wave(phase: float, amp_deg: float,
     not run cloth or dynamic bones - the same curve applied down the chain
     with a phase LAG, so the bend propagates from the bell to the tip.
 
-    Rotation is about local X, which for a tendril joint IS world X: Task 3
-    measured drifter_tendril2_05 jointOrient = [0,0,0], so tendril local
-    frames are the world frame. A tendril hangs along -Y, so rotating about
-    X swings it in the YZ plane - along the swim axis, which is what makes
-    it read as drag rather than as a twist.
+    NEVER rotate a tendril joint about local X. Its child sits at
+    translate [0.3, 0, 0] - along local X - because create_skeleton aims X
+    down the bone. Rotation about X is a pure TWIST and bends nothing:
+    measured 0.00 degrees of segment turn at 25 degrees of rotateX, against
+    25.0 degrees for either Y or Z. On a square-section tendril that twist
+    is nearly invisible, so it produced perfect-looking curves, a passing
+    byte gate, and zero deformation.
 
-    per_tendril_offset=True gives each tendril its own phase (an organic,
-    non-uniform shimmer - right for idle). False keeps all eight in phase
-    so they trail TOGETHER, which is what drag looks like.
+    Local Z swings the tendril RADIALLY (in/out from the bell axis) and
+    local Y swings it TANGENTIALLY, both relative to that tendril's own
+    ring angle. To make all eight trail the SAME world direction - which
+    is what drag is - the desired world swing must be decomposed into each
+    tendril's own Y and Z by its ring angle.
+
+    per_tendril_offset=True gives each tendril its own phase and lets it
+    swing radially (an organic, non-uniform shimmer - right for idle).
+    False decomposes a single world-space drag direction per tendril, so
+    the eight trail together.
     """
     out = {}
     for t in range(1, TENDRILS + 1):
-        ring = _rib_ring(t) if per_tendril_offset else 0.0
+        ring = _rib_ring(t)
         for j in range(1, TENDRIL_JOINTS + 1):
-            angle = amp_deg * math.sin(phase - WAVE_K * j + ring)
-            out[tendril_name(t, j)] = [angle, 0.0, 0.0]
+            if per_tendril_offset:
+                # Idle: radial shimmer, each tendril phase-offset.
+                angle = amp_deg * math.sin(phase - WAVE_K * j + ring)
+                out[tendril_name(t, j)] = [0.0, 0.0, angle]
+            else:
+                # Swim: one world direction (-Z, opposing travel) resolved
+                # into this tendril's radial (local Z) and tangential
+                # (local Y) components.
+                angle = amp_deg * math.sin(phase - WAVE_K * j)
+                out[tendril_name(t, j)] = [0.0,
+                                           -angle * math.cos(ring),
+                                           -angle * math.sin(ring)]
     return out
 
 
@@ -1185,7 +1204,17 @@ def author_takes() -> dict:
 **The bend axis must be MEASURED, not assumed.** Task 3 measured the real orientations and they are not uniform:
 
 - **Rib joints carry non-trivial per-joint frames** — `drifter_rib2_01` reports `jointOrient = [39.762159, -23.093469, -8.450666]`. Local Z on a rib is *not* a world axis and *not* the same axis on every rib.
-- **Tendril joints are identity** — `drifter_tendril2_05` reports `jointOrient = [0, 0, 0]`, so their local axes are world axes.
+- **Tendril joints report `jointOrient = [0, 0, 0]` — and this DOES NOT mean their local axes are world axes.** `jointOrient` is relative to the **parent**, and the tendril chain inherits the rib tip's frame. Zero means "no further reorientation needed", not "identity in world". An earlier draft of this plan drew the wrong conclusion here and the travelling wave inherited it; see the axis table below.
+
+**MEASURED axis behaviour (2026-08-23), and it is the opposite of what that draft assumed.** Every tendril joint's `translate` to its child is **`[0.3, 0, 0]` — along local X**, because `create_skeleton` aims X down the bone exactly as documented. Rotating a tendril joint by 25° and measuring the worst segment-to-segment turn:
+
+| axis | worst segment turn | tip movement |
+|---|---|---|
+| local **X** | **0.00°** | none — a pure TWIST about the bone's own axis |
+| local **Y** | 25.0° | 0.63 m, **tangential** to the tendril's ring position |
+| local **Z** | 25.0° | 0.63 m, **radial** (in/out from the bell axis) |
+
+**A twist on a square-section tendril is nearly invisible**, so authoring the wave about X produced curves with perfect-looking values, a passing byte gate, and zero deformation. That is #737's shape exactly: a self-consistent artifact that measures correct while being wrong in the consumer. Bend axes must be measured per rig, never inferred from `jointOrient`.
 
 The `_rib_sway` / `_bell_contract` helpers below rotate about local Z as a **starting hypothesis only**. Before authoring any clip, derive the real axis empirically:
 
