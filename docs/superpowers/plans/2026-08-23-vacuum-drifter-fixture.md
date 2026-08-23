@@ -729,6 +729,12 @@ BELL_SCALE = [1.2, 0.9, 1.2]
 # read as a creature's appendages rather than eight copies of one prop.
 TENDRIL_THICKNESS = (0.11, 0.06, 0.09, 0.05, 0.10, 0.07, 0.085, 0.055)
 
+# Rest-pose curvature per tendril, in DEGREES, and a per-tendril yaw for
+# the bend handle so no two curve the same way. Mixed signs on purpose -
+# eight tendrils all bowing outward is as uniform as eight straight ones.
+TENDRIL_BEND_DEG = (34.0, -22.0, 41.0, -30.0, 26.0, -38.0, 45.0, -25.0)
+TENDRIL_BEND_YAW = (0.0, 38.0, -25.0, 61.0, -47.0, 14.0, -66.0, 29.0)
+
 
 def build_geometry() -> dict:
     """One shaped bell plus eight varied tendrils, combined into ONE mesh.
@@ -782,22 +788,37 @@ def build_geometry() -> dict:
             raise SystemExit("tendril %d: %r" % (t, res.get("error")))
         name = res["result"]["name"]
 
-        # Taper: full thickness at the attachment, drawn to a fine tip.
+        # Taper: full thickness at the attachment, ending BLUNT-ish. An
+        # earlier build used endFlare 0.18 and the tendrils came out as
+        # needle points - the creature read as an urchin, not as something
+        # soft that trails. 0.45 keeps the taper visible without the spike.
         f = call("deform", {"mesh": name, "deformer": "flare",
                             "delete_history_after": True,
                             "params": {"startFlareX": 1.0, "startFlareZ": 1.0,
-                                       "endFlareX": 0.18, "endFlareZ": 0.18,
+                                       "endFlareX": 0.45, "endFlareZ": 0.45,
                                        "curve": 0.5}})
         if f.get("status") != "ok":
             raise SystemExit("tendril %d flare: %r" % (t, f.get("error")))
 
-        if t % 2 == 0:      # every other one corkscrews
-            tw = call("deform", {"mesh": name, "deformer": "twist",
-                                 "delete_history_after": True,
-                                 "params": {"startAngle": 0.0,
-                                            "endAngle": 110.0}})
-            if tw.get("status") != "ok":
-                raise SystemExit("tendril %d twist: %r" % (t, tw.get("error")))
+        # Rest-pose SLACK. This replaces a `twist` that measurably moved
+        # vertices and changed the silhouette not at all: flare keeps the
+        # cross-section perfectly circular, and twisting a circle yields
+        # the same circle. A deformer that "works" and shows nothing is
+        # the failure mode this fixture keeps producing - bend changes the
+        # silhouette, so it can be judged by looking.
+        #
+        # Curvature is in DEGREES (#636): "a visible hunch is 20-60".
+        # The handle is rotated per tendril so each curves its own way
+        # rather than all eight bowing in parallel.
+        b = call("deform", {"mesh": name, "deformer": "bend",
+                            "delete_history_after": True,
+                            "params": {"curvature": TENDRIL_BEND_DEG[t - 1],
+                                       "rotate": [0.0,
+                                                  math.degrees(theta)
+                                                  + TENDRIL_BEND_YAW[t - 1],
+                                                  0.0]}})
+        if b.get("status") != "ok":
+            raise SystemExit("tendril %d bend: %r" % (t, b.get("error")))
         parts.append(name)
 
     combined = call("combine", {"names": parts, "name": "drifter_body"})
