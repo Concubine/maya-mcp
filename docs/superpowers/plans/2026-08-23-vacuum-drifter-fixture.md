@@ -1149,7 +1149,13 @@ uv run python -c "import sys,json; sys.path.insert(0,'evals'); import drifter_li
 # append to evals/drifter_live.py
 
 BEND_AXIS = None            # set from the Step 1b measurement, per rib
-TENDRIL_KEYS = 9            # keys per looping clip - the wave needs samples
+TENDRIL_KEYS = 5            # keys per looping clip. Was 9; MEASURED cost.
+# author_clip returns per_key displacement measurements, so it evaluates the
+# DEFORMED MESH at every key - its cost scales with vertices x keys x joints.
+# Nine keys authored fine at 13,250 verts (~12 min for three clips). At
+# 23,922 verts with blend shapes it wedged Maya twice: one core pegged at
+# 100% for 40+ minutes with memory dead flat at 4.4 GB, which is a spin, not
+# progress. Five keys still carries a full 2*pi of travelling wave.
 IDLE_WAVE_DEG = 7.0
 SWIM_WAVE_DEG = 16.0
 WAVE_K = 0.55               # radians of phase LAG per joint down the chain
