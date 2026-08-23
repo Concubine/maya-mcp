@@ -32,10 +32,10 @@ Every task's requirements implicitly include this section.
 
 | Thing | Value | Consequence |
 |---|---|---|
-| Live Maya | **pid 70704, port 9879**, the only one running | `export MAYA_MCP_PORT=9879` and `MAYA_MCP_EXPECT_PID=70704` for every gate run |
+| Live Maya | **pid 28116, port 9877** (relaunched 2026-08-23 19:49 after pid 70704 hung inside `new_scene`) | `export MAYA_MCP_PORT=9877` and `MAYA_MCP_EXPECT_PID=28116`. **The port MOVED** — earlier tasks in this plan correctly used 9879; that instance is gone |
 | Maya plugin | digest `74d1cbae…`, stamp `257d2ac`, `restart_required: false` | Current. `git diff 257d2ac..HEAD -- maya_plugin src` is empty, so the deployed copy is not behind |
 | Maya cwd | `C:\Users\plotk` | Neutral — no repo-import bypass (#604) |
-| MCP server to use | **`mcp__maya9879__*`** | `mcp__maya__*` points at 9877, where **nothing is listening**. It reports Connected because the MCP process connects lazily |
+| MCP server to use | **`mcp__maya__*`** (port 9877) | This REVERSED on 2026-08-23. `mcp__maya9879__*` is now the dead one. Either server reports Connected regardless — it describes the MCP process, not Maya. Verify with a `ping`, never with the health list |
 | Unity, ours | **`My project (2)@3da4345997c84a8b`**, `C:/Users/plotk/devX/fluidics/My project (2)` | The scratch project. `set_active_instance` to this **first**, every session |
 | Unity, Demigol | **`unity@2d62d9f1db5a806c`**, `D:/devel/Demigol/unity` | **Never** target this. Named here so it can be avoided by hash rather than by guesswork |
 | Unity version | 6000.0.47f1, not playing, not compiling | — |
