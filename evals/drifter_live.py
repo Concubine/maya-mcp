@@ -202,6 +202,12 @@ BELL_SCALE = [1.2, 0.9, 1.2]
 # read as a creature's appendages rather than eight copies of one prop.
 TENDRIL_THICKNESS = (0.11, 0.06, 0.09, 0.05, 0.10, 0.07, 0.085, 0.055)
 
+# Rest-pose curvature per tendril, in DEGREES, and a per-tendril yaw for
+# the bend handle so no two curve the same way. Mixed signs on purpose -
+# eight tendrils all bowing outward is as uniform as eight straight ones.
+TENDRIL_BEND_DEG = (34.0, -22.0, 41.0, -30.0, 26.0, -38.0, 45.0, -25.0)
+TENDRIL_BEND_YAW = (0.0, 38.0, -25.0, 61.0, -47.0, 14.0, -66.0, 29.0)
+
 
 def build_geometry() -> dict:
     """One shaped bell plus eight varied tendrils, combined into ONE mesh.
@@ -213,8 +219,13 @@ def build_geometry() -> dict:
     gives a square cross-section that reads as a rod however it is
     textured, and cross-section is geometry, not material. Each one is
     tapered with `flare` - the deformer's own docs call it "THE taper, for
-    a limb thick at one end and thin at the other" - and every other one
-    gets a `twist` so they do not read as clones.
+    a limb thick at one end and thin at the other" - and every one also
+    gets a `bend`, replacing an earlier per-tendril `twist`. twist reported
+    a genuine non-zero max_displacement but changed the silhouette not at
+    all: flare keeps the cross-section perfectly circular, and twisting a
+    circle yields the same circle. `bend` changes the silhouette, so its
+    effect can be judged by looking rather than by trusting a displacement
+    number.
     """
     parts = []
     tendril_diagnostics = []
@@ -278,46 +289,51 @@ def build_geometry() -> dict:
                              % (t, tendril_res.get("error")))
         name = (tendril_res.get("result") or {})["name"]
 
-        # Taper: full thickness at the attachment, drawn to a fine tip.
+        # Taper: full thickness at the attachment, ending BLUNT-ish. An
+        # earlier build used endFlare 0.18 and the tendrils came out as
+        # needle points - the creature read as an urchin, not as something
+        # soft that trails. 0.45 keeps the taper visible without the spike.
         flare_res = call("deform", {"mesh": name, "deformer": "flare",
                                     "delete_history_after": True,
                                     "params": {"startFlareX": 1.0,
                                                "startFlareZ": 1.0,
-                                               "endFlareX": 0.18,
-                                               "endFlareZ": 0.18,
+                                               "endFlareX": 0.45,
+                                               "endFlareZ": 0.45,
                                                "curve": 0.5}})
         if flare_res.get("status") != "ok":
             raise SystemExit("deform(tendril %d flare) failed: %r"
                              % (t, flare_res.get("error")))
         flare_displacement = (flare_res.get("result") or {}).get(
             "max_displacement")
+        flare_warnings = (flare_res.get("result") or {}).get("warnings") or []
 
-        twist_displacement = None
-        if t % 2 == 0:      # every other one corkscrews
-            # NOTE (measured live): twist reports a non-zero
-            # max_displacement (it genuinely rotates the decagon's facet
-            # vertices around the axis - this is not a no-op deformer call)
-            # but on a flare-tapered cylinder whose cross-section stays
-            # circular (startFlareX == startFlareZ, endFlareX == endFlareZ
-            # at every point along the length) that rotation is invisible in
-            # a plain grey shaded capture - there is no texture seam or
-            # asymmetric silhouette for the eye to read as a corkscrew. See
-            # task-3-4-rebuild-report.md for the isolated-probe capture that
-            # confirms this.
-            twist_res = call("deform", {"mesh": name, "deformer": "twist",
-                                        "delete_history_after": True,
-                                        "params": {"startAngle": 0.0,
-                                                   "endAngle": 110.0}})
-            if twist_res.get("status") != "ok":
-                raise SystemExit("deform(tendril %d twist) failed: %r"
-                                 % (t, twist_res.get("error")))
-            twist_displacement = (twist_res.get("result") or {}).get(
-                "max_displacement")
+        # Rest-pose SLACK. This replaces the twist above: curvature is in
+        # DEGREES (#636) - "a visible hunch is 20-60" - and the handle is
+        # rotated per tendril (radial angle + its own yaw offset) so each
+        # one curves its own way rather than all eight bowing in parallel.
+        bend_res = call("deform", {"mesh": name, "deformer": "bend",
+                                   "delete_history_after": True,
+                                   "params": {"curvature":
+                                                  TENDRIL_BEND_DEG[t - 1],
+                                              "rotate": [
+                                                  0.0,
+                                                  math.degrees(theta)
+                                                  + TENDRIL_BEND_YAW[t - 1],
+                                                  0.0]}})
+        if bend_res.get("status") != "ok":
+            raise SystemExit("deform(tendril %d bend) failed: %r"
+                             % (t, bend_res.get("error")))
+        bend_displacement = (bend_res.get("result") or {}).get(
+            "max_displacement")
+        bend_warnings = (bend_res.get("result") or {}).get("warnings") or []
         tendril_diagnostics.append({
             "tendril": t, "length": length, "thickness": thick,
-            "twisted": t % 2 == 0,
+            "bend_deg": TENDRIL_BEND_DEG[t - 1],
+            "bend_yaw_deg": TENDRIL_BEND_YAW[t - 1],
             "flare_max_displacement": flare_displacement,
-            "twist_max_displacement": twist_displacement,
+            "flare_warnings": flare_warnings,
+            "bend_max_displacement": bend_displacement,
+            "bend_warnings": bend_warnings,
         })
         parts.append(name)
 
