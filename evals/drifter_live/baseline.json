@@ -1,0 +1,421 @@
+{
+  "blend_targets": [
+    "bell_crease",
+    "tendril_flare"
+  ],
+  "clips": [
+    {
+      "end_frame": 30,
+      "loop": true,
+      "name": "pulse_swim",
+      "start_frame": 0
+    },
+    {
+      "end_frame": 92,
+      "loop": true,
+      "name": "drift_idle",
+      "start_frame": 32
+    },
+    {
+      "end_frame": 130,
+      "loop": false,
+      "name": "tendril_reach",
+      "start_frame": 94
+    }
+  ],
+  "fbx": {
+    "bytes": 6099072,
+    "metres_per_unit": 1.0,
+    "path": "D:\\devel\\maya-mcp\\evals\\drifter_live\\drifter.fbx",
+    "shapes": {
+      "blend_deformers": 1,
+      "channels": 2,
+      "shapes": [
+        {
+          "indexes": 23921,
+          "name": "bell_crease",
+          "points": 23921
+        },
+        {
+          "indexes": 23920,
+          "name": "tendril_flare",
+          "points": 23920
+        }
+      ],
+      "unavailable_reason": null
+    },
+    "skin": {
+      "bind_pose_present": true,
+      "clusters": 105,
+      "deformers": 1,
+      "influenced_models": 105,
+      "max_weight_sum_error": 0.0029050084039327073,
+      "unavailable_reason": null,
+      "unweighted_file_vertices": 0
+    },
+    "take_names": [
+      "Take 001",
+      "pulse_swim",
+      "drift_idle",
+      "tendril_reach"
+    ],
+    "texture_facts": {
+      "file_texture_basename_found": true,
+      "procedural_node_names_found": {
+        "mcpTex_bump_003": false,
+        "mcpTex_noise_003": false
+      },
+      "procedural_survived_names": [],
+      "texture_objects": 1,
+      "video_objects": 1
+    }
+  },
+  "fps": 30,
+  "ik": {
+    "achieved": [
+      1.7000000845755174,
+      1.3999998794505153,
+      -1.0358970536469363e-08
+    ],
+    "not_remeasured_reason": "pose_ik refuses once clips exist on the root - this value is carried forward from the solve that produced tendril_reach's keys, not re-measured in this run",
+    "residual": 1.476228e-07,
+    "target": [
+      1.7,
+      1.4,
+      0.0
+    ],
+    "warnings": [
+      "keep=false: the solved pose was measured, then the pose the call found was restored - apply rotations via pose_skeleton to commit it"
+    ]
+  },
+  "joints": 105,
+  "landmarks": {
+    "apex": 6321,
+    "count": 23922,
+    "rim": [
+      10701,
+      17206
+    ],
+    "rim_candidates": 774,
+    "rim_diameter_at_pick": 1.5484949186813473,
+    "tip": 6404
+  },
+  "looping_clips": [
+    "pulse_swim",
+    "drift_idle"
+  ],
+  "material": {
+    "file_texture": {
+      "mesh": "|drifter_body",
+      "nodes": [
+        "mcpTex_file_003"
+      ],
+      "recipe": "file_texture",
+      "slot": "color",
+      "warnings": []
+    },
+    "material": {
+      "material": "drifter_mat",
+      "mesh": "|drifter_body",
+      "shader": "standardSurface",
+      "shading_group": "drifter_matSG",
+      "warnings": [
+        "reused existing material drifter_mat"
+      ]
+    },
+    "procedural_probe": {
+      "mesh": "|drifter_body",
+      "nodes": [
+        "mcpTex_noise_003",
+        "mcpTex_bump_003"
+      ],
+      "recipe": "noise_bump",
+      "slot": "normal",
+      "warnings": []
+    },
+    "texture_path": "D:\\devel\\maya-mcp\\evals\\drifter_live\\drifter_basecolor.png",
+    "uv": {
+      "all_inside": true,
+      "atlas": [
+        4,
+        4
+      ],
+      "margin": 0.02,
+      "meshes": [
+        {
+          "inside_patch": true,
+          "name": "|drifter_body",
+          "uv_bounds": [
+            0.004939,
+            0.754986,
+            0.245057,
+            0.995024
+          ]
+        }
+      ],
+      "normalized": true,
+      "patch": [
+        0,
+        0
+      ],
+      "patch_rect": [
+        0.005,
+        0.755,
+        0.245,
+        0.995
+      ],
+      "projection": "box",
+      "uv_per_metre": 1.0,
+      "world_scale": null
+    },
+    "uv_all_inside": true
+  },
+  "max_influences_bound": 8,
+  "maya_pid": 71008,
+  "mesh": "drifter_body",
+  "mirror_probe": {
+    "error": {
+      "hint": "mirroring needs a bilaterally symmetric skeleton - a joint on one side must have a positional twin on the other",
+      "message": "78 influence(s) have no mirror partner across x: drifter_tendril1_01, drifter_tendril1_02, drifter_tendril1_03, drifter_tendril1_04, drifter_tendril1_05, drifter_tendril1_06, drifter_tendril1_07, drifter_tendril1_08",
+      "type": "HandlerError"
+    },
+    "not_a_correctness_signal": true,
+    "result": null,
+    "status": "error"
+  },
+  "plugin_digest": "74d1cbae7bdbd12778821c5556a515eb2ada2acecf78644f36050ba096058bf6",
+  "prebuilt_scene_probe": {
+    "blend_aliases": [
+      "bell_crease",
+      "weight[0]",
+      "tendril_flare",
+      "weight[1]"
+    ],
+    "blendshapes": [
+      "drifter_body_shapes"
+    ],
+    "joint_count": 105,
+    "mesh_exists": true,
+    "root_key_times": [
+      0.0,
+      7.5,
+      15.0,
+      22.5,
+      30.0,
+      32.0,
+      92.0,
+      94.0,
+      130.0
+    ],
+    "skin_clusters": [
+      "drifter_body_skin"
+    ],
+    "tendril_key_times": [
+      0.0,
+      7.5,
+      15.0,
+      22.5,
+      30.0,
+      32.0,
+      47.0,
+      62.0,
+      77.0,
+      92.0,
+      94.0,
+      130.0
+    ],
+    "vtx_count": 23922
+  },
+  "samples": [
+    {
+      "apex_to_tip": 3.939596798443647,
+      "clip": "pulse_swim",
+      "frame": 0,
+      "rim_diameter": 1.548494918681347,
+      "time_s": 0.0
+    },
+    {
+      "apex_to_tip": 3.5931756918965334,
+      "clip": "pulse_swim",
+      "frame": 5,
+      "rim_diameter": 2.0687461909978486,
+      "time_s": 0.16666666666666666
+    },
+    {
+      "apex_to_tip": 3.619595963816073,
+      "clip": "pulse_swim",
+      "frame": 10,
+      "rim_diameter": 2.0661157444050775,
+      "time_s": 0.3333333333333333
+    },
+    {
+      "apex_to_tip": 3.9299772169366487,
+      "clip": "pulse_swim",
+      "frame": 15,
+      "rim_diameter": 1.539905248071474,
+      "time_s": 0.5
+    },
+    {
+      "apex_to_tip": 3.891162680292558,
+      "clip": "pulse_swim",
+      "frame": 20,
+      "rim_diameter": 1.5402399731276806,
+      "time_s": 0.6666666666666666
+    },
+    {
+      "apex_to_tip": 3.9445490411092123,
+      "clip": "pulse_swim",
+      "frame": 25,
+      "rim_diameter": 1.5438431263864565,
+      "time_s": 0.8333333333333334
+    },
+    {
+      "apex_to_tip": 3.939596798443647,
+      "clip": "pulse_swim",
+      "frame": 30,
+      "rim_diameter": 1.548494918681347,
+      "time_s": 1.0
+    },
+    {
+      "apex_to_tip": 3.983253774810382,
+      "clip": "drift_idle",
+      "frame": 32,
+      "rim_diameter": 1.547764965965139,
+      "time_s": 0.0
+    },
+    {
+      "apex_to_tip": 3.969956577372675,
+      "clip": "drift_idle",
+      "frame": 42,
+      "rim_diameter": 1.558898733841788,
+      "time_s": 0.3333333333333333
+    },
+    {
+      "apex_to_tip": 3.9301564895810808,
+      "clip": "drift_idle",
+      "frame": 52,
+      "rim_diameter": 1.55825671737978,
+      "time_s": 0.6666666666666666
+    },
+    {
+      "apex_to_tip": 3.912025396525913,
+      "clip": "drift_idle",
+      "frame": 62,
+      "rim_diameter": 1.540916747806852,
+      "time_s": 1.0
+    },
+    {
+      "apex_to_tip": 3.9607092348581077,
+      "clip": "drift_idle",
+      "frame": 72,
+      "rim_diameter": 1.5278885223065817,
+      "time_s": 1.3333333333333333
+    },
+    {
+      "apex_to_tip": 3.973700259168264,
+      "clip": "drift_idle",
+      "frame": 82,
+      "rim_diameter": 1.5314856238943106,
+      "time_s": 1.6666666666666667
+    },
+    {
+      "apex_to_tip": 3.983253774810382,
+      "clip": "drift_idle",
+      "frame": 92,
+      "rim_diameter": 1.547764965965139,
+      "time_s": 2.0
+    },
+    {
+      "apex_to_tip": 3.9663650914456814,
+      "clip": "tendril_reach",
+      "frame": 94,
+      "rim_diameter": 1.5443698695260966,
+      "time_s": 0.0
+    },
+    {
+      "apex_to_tip": 3.920126634572885,
+      "clip": "tendril_reach",
+      "frame": 100,
+      "rim_diameter": 1.5557109674182228,
+      "time_s": 0.2
+    },
+    {
+      "apex_to_tip": 3.82400589184002,
+      "clip": "tendril_reach",
+      "frame": 106,
+      "rim_diameter": 1.5840638923301662,
+      "time_s": 0.4
+    },
+    {
+      "apex_to_tip": 3.62480323314408,
+      "clip": "tendril_reach",
+      "frame": 112,
+      "rim_diameter": 1.620922858447712,
+      "time_s": 0.6
+    },
+    {
+      "apex_to_tip": 3.339324773267922,
+      "clip": "tendril_reach",
+      "frame": 118,
+      "rim_diameter": 1.657782157811205,
+      "time_s": 0.8
+    },
+    {
+      "apex_to_tip": 3.0683773346270073,
+      "clip": "tendril_reach",
+      "frame": 124,
+      "rim_diameter": 1.6861356678473054,
+      "time_s": 1.0
+    },
+    {
+      "apex_to_tip": 2.9497034454506825,
+      "clip": "tendril_reach",
+      "frame": 130,
+      "rim_diameter": 1.697477091349259,
+      "time_s": 1.2
+    }
+  ],
+  "skin": {
+    "facts": {
+      "max_influences": 8,
+      "over_four": 22716,
+      "vertices": 23922
+    },
+    "histogram": [
+      {
+        "influences": 1,
+        "vertices": 81
+      },
+      {
+        "influences": 4,
+        "vertices": 1125
+      },
+      {
+        "influences": 5,
+        "vertices": 942
+      },
+      {
+        "influences": 6,
+        "vertices": 7287
+      },
+      {
+        "influences": 7,
+        "vertices": 871
+      },
+      {
+        "influences": 8,
+        "vertices": 13616
+      }
+    ],
+    "note": "read from the already-bound scene; bind_skin/smooth_weights were NOT re-run in Task 8",
+    "skin_cluster": "drifter_body_skin",
+    "unweighted": 0
+  },
+  "ticket": 743,
+  "tolerances": {
+    "compare": 0.001,
+    "seam": 0.0001
+  },
+  "vertex_ceiling": 30000,
+  "vertices": 23922
+}

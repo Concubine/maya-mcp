@@ -1088,14 +1088,590 @@ def build_fixture() -> dict:
             "tendril_diagnostics": geo["tendril_diagnostics"]}
 
 
+# --- Task 8: material, deformation sampling, export, byte gate ------------
+#
+# Everything above (mesh, 105-joint skeleton, skin, blend shapes, three
+# clips) is ALREADY BUILT in the live scene by Tasks 1-7 - confirmed live
+# (scene probe: drifter_body 23,922 verts, 105 joints, skinCluster
+# drifter_body_skin, blendShape drifter_body_shapes with bell_crease/
+# tendril_flare, keyframes at the three clips' declared boundaries). Task 8
+# must NEVER call new_scene, and must never call build_fixture()/
+# bind_and_weight()/build_blendshapes()/author_takes() again either - every
+# one of those either calls new_scene transitively (build_fixture, via
+# start_scene) or MUTATES onto an already-finished rig in a way that is not
+# idempotent (bind_skin/smooth_weights re-run pointlessly; create_blendshape
+# "ADDS targets" on a second call - a real duplicate, not a no-op;
+# author_clip "re-authoring a name re-appends it at the tail", which would
+# shift every frame number this file's sampling depends on). Only read-only
+# calls (weight_report) and calls that are safe to repeat by their own
+# design (mirror_weights refuses before writing anything; pose_ik with
+# keep=False measures then restores) are reused below.
+
+TEXTURE_PATH = os.path.join(OUT_DIR, "drifter_basecolor.png")
+
+
+def _write_texture(path: str) -> None:
+    """Generate the base colour to disk so the fixture has no art dependency.
+
+    Deterministic and re-runnable: the same bytes every run.
+    """
+    import struct
+    import zlib
+    size = 256
+    rows = bytearray()
+    for y in range(size):
+        rows.append(0)
+        for x in range(size):
+            v = (x ^ y) & 0xFF
+            rows += bytes((40 + v // 3, 70 + v // 4, 120 + v // 5))
+
+    def chunk(tag, data):
+        return (struct.pack(">I", len(data)) + tag + data
+                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+    png = (b"\x89PNG\r\n\x1a\n"
+           + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(bytes(rows), 9))
+           + chunk(b"IEND", b""))
+    with open(path, "wb") as fh:
+        fh.write(png)
+
+
+def build_material(mesh: str) -> dict:
+    """One flat set, through the ONLY door that exists.
+
+    Three of apply_texture_recipe's four recipes build PROCEDURAL nodes
+    (noise, ramp, layered); only file_texture creates a `file` node with a
+    path (maya_plugin/handlers/texture_recipes.py:104). Procedural nodes
+    are exactly what #714 says the FBX drops - export_and_check below
+    measures it from the actual bytes.
+
+    Two corrections against the brief's draft, both MEASURED live:
+    - assign_pbr requires a non-empty `maps` dict (pbr.py's validate_maps
+      refuses "assign_pbr needs at least one entry in 'maps'" otherwise,
+      and its own hint says "for scalars only, use maya_assign_material").
+      There are no maps yet at this point - the textures go on after, via
+      apply_texture_recipe - so this uses assign_material instead.
+    - apply_texture_recipe's file_texture recipe reads `params["file_path"]`
+      (maya_plugin/handlers/texture_recipes.py `_file_texture`), not
+      `params["path"]` as the brief's draft had it.
+    - uv_atlas's `project` is one of box/planar/keep - "auto" is refused
+      ("project must be one of box, planar, keep"). box suits this mesh
+      (built from primitives) and was confirmed live: all_inside=true.
+    """
+    os.makedirs(OUT_DIR, exist_ok=True)
+    _write_texture(TEXTURE_PATH)
+
+    uv_frame = call("uv_atlas", {"names": [mesh], "project": "box",
+                                 "normalize": True})
+    if uv_frame.get("status") != "ok":
+        raise SystemExit("uv_atlas failed: %r" % (uv_frame.get("error"),))
+    uv = uv_frame.get("result") or {}
+
+    mat_frame = call("assign_material",
+                     {"mesh": mesh, "shader": "standardSurface",
+                      "params": {"metalness": 0.0, "roughness": 0.6},
+                      "name": "drifter_mat"})
+    if mat_frame.get("status") != "ok":
+        raise SystemExit("assign_material failed: %r"
+                         % (mat_frame.get("error"),))
+
+    filed_frame = call("apply_texture_recipe",
+                       {"mesh": mesh, "recipe": "file_texture", "slot": "color",
+                        "params": {"file_path": TEXTURE_PATH}})
+    if filed_frame.get("status") != "ok":
+        raise SystemExit("apply_texture_recipe(file_texture) failed: %r"
+                         % (filed_frame.get("error"),))
+    filed = filed_frame.get("result") or {}
+
+    # The #714 probe: a PROCEDURAL recipe on the normal slot, exported
+    # alongside the file texture, so the bytes can say which survives.
+    proc_frame = call("apply_texture_recipe",
+                      {"mesh": mesh, "recipe": "noise_bump", "slot": "normal"})
+    if proc_frame.get("status") != "ok":
+        raise SystemExit("apply_texture_recipe(noise_bump) failed: %r"
+                         % (proc_frame.get("error"),))
+    proc = proc_frame.get("result") or {}
+
+    return {"uv_all_inside": uv.get("all_inside"), "uv": uv,
+            "texture_path": TEXTURE_PATH,
+            "material": mat_frame.get("result") or {},
+            "file_texture": filed, "procedural_probe": proc}
+
+
+# --- Deformation sampling: seven frames per clip, two frame-invariant ------
+# metrics per sample
+
+SAMPLES_PER_CLIP = 7        # first, last, and five evenly spaced interior
+RIM_RADIUS_MIN = 0.3        # metres from the bell's vertical axis - see
+                             # _find_landmarks docstring for why this matters
+
+
+def _find_landmarks(mesh: str) -> dict:
+    """Pick the landmark vertices ONCE, at rest, by index.
+
+    Indices - not positions - so every later sample reads the SAME
+    vertices. A metric that re-picks "the highest vertex" each frame is
+    measuring a different point each frame.
+
+    apex/tip are single vertices (max/min world Y across the whole mesh).
+    `rim` is the TWO vertices - not a ring's worth - farthest apart among
+    candidates near the bell's rim band (RIM_Y +-0.06m). This differs from
+    the brief's draft (which took a plain index slice, `rim[:64]`, of every
+    vertex in that Y band) after a live measurement showed why that fails:
+    the naive Y-band alone catches 1,815 vertices on this mesh, because
+    each of the 8 tendrils' own attachment rings also sits near y=RIM_Y (the
+    tendrils are BUILT starting at the bell's rim). Many of those are each
+    tendril's polar CAP-CENTRE vertex, at radius ~0.02m from the axis - and
+    an arbitrary slice of the combined set (indices 0-63) landed entirely
+    within one such cluster, all within about 0.03m of each other: an
+    apparent "rim diameter" near zero on a ~1.2-1.8m dome. Filtering
+    candidates to radius > RIM_RADIUS_MIN before taking the true farthest
+    pair (774 candidates, O(n^2), ~0.3s measured) gave 1.548m instead -
+    consistent with the bell's designed scale (RIM_R=0.6m nominal radius,
+    extended by the rim's `wave` ripple lobes).
+
+    Picked at frame 0 explicitly (pulse_swim's own first key, where its
+    pulse/contract/root-glide channels are all zero - the closest thing
+    this animated rig has to a rest pose) with `cmds.refresh(force=True)`
+    first - MEASURED live: without pinning the frame, this read whatever
+    time the Maya session's playhead happened to be at (a leftover from
+    whatever ran last), and the chosen indices/candidate count changed
+    between otherwise-identical runs (864 vs 774 candidates) purely from
+    that.
+    """
+    code = (
+        "import maya.cmds as cmds\n"
+        "cmds.currentTime(0)\n"
+        "cmds.refresh(force=True)\n"
+        "import maya.api.OpenMaya as om\n"
+        "sel = om.MSelectionList(); sel.add(%r)\n"
+        "fn = om.MFnMesh(sel.getDagPath(0))\n"
+        "pts = fn.getPoints(om.MSpace.kWorld)\n"
+        "apex = max(range(len(pts)), key=lambda i: pts[i].y)\n"
+        "tip = min(range(len(pts)), key=lambda i: pts[i].y)\n"
+        "cand = [i for i in range(len(pts)) if abs(pts[i].y - %f) < 0.06 "
+        "and (pts[i].x ** 2 + pts[i].z ** 2) ** 0.5 > %f]\n"
+        "best = (cand[0], cand[1], -1.0)\n"
+        "for a in range(len(cand)):\n"
+        "    ia = cand[a]\n"
+        "    for b in range(a + 1, len(cand)):\n"
+        "        ib = cand[b]\n"
+        "        dx = pts[ia].x - pts[ib].x\n"
+        "        dy = pts[ia].y - pts[ib].y\n"
+        "        dz = pts[ia].z - pts[ib].z\n"
+        "        d = (dx * dx + dy * dy + dz * dz) ** 0.5\n"
+        "        if d > best[2]:\n"
+        "            best = (ia, ib, d)\n"
+        "result = {'apex': apex, 'tip': tip, 'rim': [best[0], best[1]], "
+        "'rim_candidates': len(cand), 'rim_diameter_at_pick': best[2], "
+        "'count': len(pts)}\n"
+        "result\n"
+    ) % (mesh, RIM_Y, RIM_RADIUS_MIN)
+    res = call("execute_python", {"code": code, "timeout_s": 120})
+    if res.get("status") != "ok":
+        raise SystemExit("_find_landmarks call failed: %r" % (res.get("error"),))
+    exec_result = res.get("result") or {}
+    if exec_result.get("traceback"):
+        raise SystemExit("_find_landmarks raised:\n%s" % exec_result["traceback"])
+    return structured_result(exec_result, "landmarks")
+
+
+def sample_deformation(mesh: str, clips: list, landmarks: dict) -> list:
+    """Frame-invariant metrics at seven frames of every clip.
+
+    Two traps fixed against the brief's draft, both MEASURED in this
+    session: (1) `cmds.currentTime(f)` does not force DAG evaluation - a
+    `cmds.refresh(force=True)` is required before reading world-space
+    positions, or the query can hand back a stale pose from before the
+    time change. (2) `execute_python` returns `result_repr` only when the
+    snippet's last statement is a bare expression - the brief's draft ended
+    on `result = {...}`, an assignment, which returns nothing; a trailing
+    bare `result` line is required.
+    """
+    apex_i, tip_i = landmarks["apex"], landmarks["tip"]
+    rim_i = landmarks["rim"]
+    out = []
+    for clip in clips:
+        start, end = int(clip["start_frame"]), int(clip["end_frame"])
+        step = (end - start) / float(SAMPLES_PER_CLIP - 1)
+        for n in range(SAMPLES_PER_CLIP):
+            frame = int(round(start + step * n))
+            code = (
+                "import maya.cmds as cmds\n"
+                "import maya.api.OpenMaya as om\n"
+                "cmds.currentTime(%d)\n"
+                "cmds.refresh(force=True)\n"
+                "sel = om.MSelectionList(); sel.add(%r)\n"
+                "fn = om.MFnMesh(sel.getDagPath(0))\n"
+                "pts = fn.getPoints(om.MSpace.kWorld)\n"
+                "apex = [pts[%d].x, pts[%d].y, pts[%d].z]\n"
+                "tip = [pts[%d].x, pts[%d].y, pts[%d].z]\n"
+                "rim = [[pts[%d].x, pts[%d].y, pts[%d].z], "
+                "[pts[%d].x, pts[%d].y, pts[%d].z]]\n"
+                "result = {'apex': apex, 'tip': tip, 'rim': rim}\n"
+                "result\n"
+            ) % (frame, mesh,
+                 apex_i, apex_i, apex_i,
+                 tip_i, tip_i, tip_i,
+                 rim_i[0], rim_i[0], rim_i[0],
+                 rim_i[1], rim_i[1], rim_i[1])
+            res = call("execute_python", {"code": code, "timeout_s": 120})
+            if res.get("status") != "ok":
+                raise SystemExit("sample_deformation(%s@%d) call failed: %r"
+                                 % (clip["name"], frame, res.get("error")))
+            exec_result = res.get("result") or {}
+            if exec_result.get("traceback"):
+                raise SystemExit("sample_deformation(%s@%d) raised:\n%s"
+                                 % (clip["name"], frame, exec_result["traceback"]))
+            got = structured_result(exec_result,
+                                    "sample %s@%d" % (clip["name"], frame))
+            out.append({
+                "clip": clip["name"], "frame": frame,
+                "time_s": (frame - start) / float(FPS),
+                "rim_diameter": dm.rim_diameter(got["rim"]),
+                "apex_to_tip": dm.apex_to_tip(got["apex"], got["tip"]),
+            })
+    return out
+
+
+# --- Export and the byte gate, including the #714 texture probe -----------
+
+FBX_PATH = os.path.join(OUT_DIR, "drifter.fbx")
+
+
+def _fbx_generic_records(path: str) -> list:
+    """A minimal, generic binary-FBX record walker.
+
+    `maya_plugin/handlers/fbxbytes.py`'s `read_fbx` is CURATED - it only
+    tracks Model/Geometry/Deformer/Pose/Animation* records, because that is
+    all the unit/skin/shape/anim gates have ever needed. The #714 probe
+    needs Texture/Video object records, which that reader drops on the
+    floor. Rather than extend production code for one eval's probe, this
+    walks the SAME documented binary layout that reader's docstring
+    describes (27-byte header, EndOffset/NumProperties/PropertyListLen per
+    record, 64-bit offsets from version 7500) and yields every record's
+    name and property values, depth-first, so any record type can be found.
+    """
+    import struct
+    with open(path, "rb") as fh:
+        data = fh.read()
+    if not data.startswith(b"Kaydara FBX Binary"):
+        raise ValueError("%s is not a binary FBX" % path)
+    version = struct.unpack_from("<I", data, 23)[0]
+    wide = version >= 7500
+    off_fmt = "<QQQ" if wide else "<III"
+    off_size = 24 if wide else 12
+    simple = {b"C": ("<?", 1), b"B": ("<B", 1), b"Y": ("<h", 2), b"I": ("<i", 4),
+             b"F": ("<f", 4), b"D": ("<d", 8), b"L": ("<q", 8)}
+    arrays = (b"f", b"d", b"l", b"i", b"c", b"b")
+    out = []
+
+    def prop(pos):
+        code = data[pos:pos + 1]
+        pos += 1
+        if code in simple:
+            fmt, size = simple[code]
+            return struct.unpack_from(fmt, data, pos)[0], pos + size
+        if code in (b"S", b"R"):
+            n = struct.unpack_from("<I", data, pos)[0]
+            pos += 4
+            raw = data[pos:pos + n]
+            val = raw.decode("utf-8", "replace") if code == b"S" else None
+            return val, pos + n
+        if code in arrays:
+            length, encoding, comp = struct.unpack_from("<III", data, pos)
+            return None, pos + 12 + comp
+        raise ValueError("unknown FBX typecode %r at %d" % (code, pos))
+
+    def walk(pos, end):
+        while pos < end:
+            end_off, nprops, _plen = struct.unpack_from(off_fmt, data, pos)
+            if end_off == 0:
+                return pos + off_size + 1
+            pos += off_size
+            nlen = data[pos]
+            pos += 1
+            name = data[pos:pos + nlen].decode("utf-8", "replace")
+            pos += nlen
+            values = []
+            for _ in range(nprops):
+                val, pos = prop(pos)
+                values.append(val)
+            out.append((name, values))
+            if pos < end_off:
+                walk(pos, end_off)
+            pos = end_off
+        return pos
+
+    walk(27, len(data))
+    return out
+
+
+def _fbx_texture_facts(fbx_path: str, texture_path: str,
+                       procedural_nodes: list) -> dict:
+    """The #714 measurement: what survives into the FBX for each slot.
+
+    file_texture wires a `file` node with a path - the ONLY texture recipe
+    that produces a Maya node type the FBX exporter has a representation
+    for (a Texture/Video object pair). noise_bump wires a `noise` node
+    through `bump2d`; the exporter has no representation for either, so the
+    prediction is that they are silently dropped rather than exported
+    broken. MEASURED live on this exact export: exactly 1 Texture / 1 Video
+    object, named after file_texture's `mcpTex_file` node with the PNG's
+    basename present in the bytes; zero occurrences anywhere in the file of
+    noise_bump's `mcpTex_noise`/`mcpTex_bump` node names - confirmed
+    dropped, not just unasserted.
+    """
+    records = _fbx_generic_records(fbx_path)
+    strings = [v for _, values in records for v in values
+              if isinstance(v, str)]
+    texture_objects = sum(1 for name, _ in records if name == "Texture")
+    video_objects = sum(1 for name, _ in records if name == "Video")
+    basename = os.path.basename(texture_path)
+    file_path_found = any(basename in s for s in strings)
+    procedural_found = {n: any(n in s for s in strings)
+                        for n in procedural_nodes}
+    return {"texture_objects": texture_objects, "video_objects": video_objects,
+            "file_texture_basename_found": file_path_found,
+            "procedural_node_names_found": procedural_found,
+            "procedural_survived_names": [n for n, found
+                                          in procedural_found.items() if found]}
+
+
+def export_and_check(mesh: str, material: dict) -> dict:
+    """The scene is BLIND to what the exporter writes - #629's whole lesson."""
+    os.makedirs(OUT_DIR, exist_ok=True)
+    export_frame = call("export_fbx",
+                        {"path": FBX_PATH, "metres_per_unit": 1.0,
+                         "nodes": [mesh, ROOT],
+                         "include_skins": True, "include_animation": True},
+                        timeout_s=180.0)
+    if export_frame.get("status") != "ok":
+        raise SystemExit("export_fbx failed: %r" % (export_frame.get("error"),))
+    res = export_frame.get("result") or {}
+
+    problems = []
+    if abs(float(res.get("metres_per_unit", 0.0)) - 1.0) > 1e-9:
+        problems.append("metres_per_unit is %r" % res.get("metres_per_unit"))
+    if not res.get("skin"):
+        problems.append("no skin facts in the exported bytes")
+    shapes = res.get("shapes") or {}
+    anim = res.get("animation") or {}
+    take_names = [t.get("name") for t in (anim.get("takes") or [])]
+    for want in ("drift_idle", "pulse_swim", "tendril_reach"):
+        if want not in take_names:
+            problems.append("take %r absent (takes: %r)" % (want, take_names))
+
+    procedural_nodes = (material.get("procedural_probe") or {}).get("nodes") or []
+    texture_facts = _fbx_texture_facts(FBX_PATH, TEXTURE_PATH, procedural_nodes)
+    if not texture_facts["file_texture_basename_found"]:
+        problems.append(
+            "file_texture's image basename is not present in the exported "
+            "FBX bytes - the one recipe expected to survive export did not")
+    # Procedural survival is NOT scored as a problem either way - #714's
+    # predicted, measured outcome (it does not survive) is the finding
+    # itself, not a gate violation.
+
+    return {"export": res, "take_names": take_names, "shapes": shapes,
+            "texture_facts": texture_facts, "problems": problems}
+
+
+# --- Task 8 orchestration: consume the already-built scene -----------------
+
+CLIPS = [
+    {"name": "pulse_swim", "start_frame": 0, "end_frame": 30, "loop": True},
+    {"name": "drift_idle", "start_frame": 32, "end_frame": 92, "loop": True},
+    {"name": "tendril_reach", "start_frame": 94, "end_frame": 130,
+     "loop": False},
+]  # MEASURED live via verify_prebuilt_scene - matches task-7-rerun2-report.md
+
+
+def verify_prebuilt_scene(mesh: str, root: str) -> dict:
+    """Confirm Tasks 1-7's build survives in THIS live scene, WITHOUT
+    rebuilding any of it. Every check here is read-only. Raises (BLOCKED)
+    rather than proceeding if anything expected is missing - Task 8 must
+    never call new_scene to "fix" that, per the live-environment note."""
+    code = (
+        "import maya.cmds as cmds\n"
+        "out = {}\n"
+        "out['mesh_exists'] = cmds.objExists(%r)\n"
+        "out['vtx_count'] = cmds.polyEvaluate(%r, vertex=True) "
+        "if out['mesh_exists'] else 0\n"
+        "out['joint_count'] = len(cmds.ls(type='joint'))\n"
+        "out['skin_clusters'] = cmds.ls(type='skinCluster')\n"
+        "bs = cmds.ls(type='blendShape')\n"
+        "out['blendshapes'] = bs\n"
+        "out['blend_aliases'] = cmds.aliasAttr(bs[0], q=True) if bs else []\n"
+        "out['tendril_key_times'] = sorted(set(cmds.keyframe(%r, q=True, "
+        "timeChange=True) or []))\n"
+        "out['root_key_times'] = sorted(set(cmds.keyframe(%r, q=True, "
+        "timeChange=True) or []))\n"
+        "out\n"
+    ) % (mesh, mesh, tendril_name(1, 5) + ".rotateY", root + ".translateZ")
+    res = call("execute_python", {"code": code, "timeout_s": 60})
+    if res.get("status") != "ok":
+        raise SystemExit("BLOCKED: scene probe failed: %r" % (res.get("error"),))
+    exec_result = res.get("result") or {}
+    if exec_result.get("traceback"):
+        raise SystemExit("BLOCKED: scene probe raised:\n%s"
+                         % exec_result["traceback"])
+    facts = structured_result(exec_result, "scene probe")
+
+    problems = []
+    if not facts.get("mesh_exists"):
+        problems.append("mesh %r does not exist" % mesh)
+    if facts.get("joint_count") != 105:
+        problems.append("expected 105 joints, found %r" % facts.get("joint_count"))
+    if not facts.get("skin_clusters"):
+        problems.append("no skinCluster found on the rig")
+    aliases = set(facts.get("blend_aliases") or [])
+    for target in BLEND_TARGETS:
+        if target not in aliases:
+            problems.append("blendShape alias %r missing" % target)
+    key_times = (set(facts.get("tendril_key_times") or [])
+                | set(facts.get("root_key_times") or []))
+    for clip in CLIPS:
+        for boundary in (clip["start_frame"], clip["end_frame"]):
+            if float(boundary) not in key_times:
+                problems.append(
+                    "clip %r boundary frame %r has no keyframe on the "
+                    "probed attrs" % (clip["name"], boundary))
+    if problems:
+        raise SystemExit(
+            "BLOCKED: the live scene is missing pieces Tasks 1-7 were "
+            "supposed to have built, and Task 8 must NOT rebuild (new_scene "
+            "would destroy whatever IS there). Missing:\n  - %s"
+            % "\n  - ".join(problems))
+    return facts
+
+
+def gather_skin_facts(mesh: str) -> dict:
+    """Read the ALREADY-BOUND skin's current state without rebinding.
+
+    Task 8 must not call bind_skin/smooth_weights again - this scene was
+    already bound and smoothed by an earlier task in THIS live session.
+    facts_before_smoothing is not reconstructable from here (that would
+    need re-binding); see task-7-rerun2-report.md / task-5-rerun-report.md
+    for that historical measurement (over_four: 11,404 before, 22,716
+    after, out of 23,922).
+    """
+    report_frame = call("weight_report", {"mesh": mesh})
+    if report_frame.get("status") != "ok":
+        raise SystemExit("weight_report failed: %r" % (report_frame.get("error"),))
+    report = report_frame.get("result") or {}
+    facts = dm.histogram_facts(report.get("histogram", []))
+    res = call("execute_python",
+              {"code": "import maya.cmds as cmds\ncmds.ls(type='skinCluster')\n",
+               "timeout_s": 30})
+    if res.get("status") != "ok":
+        raise SystemExit("skinCluster lookup failed: %r" % (res.get("error"),))
+    exec_result = res.get("result") or {}
+    clusters = structured_result(exec_result, "skinCluster list")
+    return {"skin_cluster": clusters[0] if clusters else None,
+            "unweighted": int(report.get("unweighted_vertices", 0)),
+            "histogram": report.get("histogram", []),
+            "facts": facts,
+            "note": "read from the already-bound scene; bind_skin/"
+                    "smooth_weights were NOT re-run in Task 8"}
+
+
+def main() -> int:
+    ping_frame = call("ping", {})
+    if ping_frame.get("status") != "ok":
+        raise SystemExit("ping failed: %r" % (ping_frame.get("error"),))
+    ping = ping_frame.get("result") or {}
+    plugin = ping.get("plugin") or {}
+    process = ping.get("process") or {}
+    if not ping:
+        raise SystemExit("no Maya answered - start one, or check "
+                         "MAYA_MCP_PORT. Do NOT fall back to batchmode.")
+    if plugin.get("restart_required"):
+        raise SystemExit("the answering Maya (pid %s) holds stale modules - "
+                         "restart it before running this gate"
+                         % process.get("pid"))
+
+    mesh = "drifter_body"
+    probe = verify_prebuilt_scene(mesh, ROOT)
+
+    material = build_material(mesh)
+    landmarks = _find_landmarks(mesh)
+    samples = sample_deformation(mesh, CLIPS, landmarks)
+    skin = gather_skin_facts(mesh)
+    mirror = probe_mirror(mesh)
+    # solve_tendril_reach() (pose_ik) is NOT re-run here - MEASURED live
+    # this session: pose_ik now REFUSES outright ("pose_ik refuses while
+    # animation curves drive this skeleton (clips 'pulse_swim', 'drift_idle',
+    # 'tendril_reach')"), because the clips this task must not re-author
+    # already exist. The original solve happened BEFORE author_clip, to
+    # derive the rotations tendril_reach's keys were built from (see
+    # author_takes/solve_tendril_reach above) - it cannot be repeated now
+    # without deleting the clips, which Task 8 has no mandate to do. The
+    # figures below are carried forward verbatim from that solve, reproduced
+    # to full precision across two live sessions (task-5-rerun-report.md,
+    # task-7-rerun2-report.md).
+    ik = {
+        "target": [1.7, 1.4, 0.0],
+        "residual": 1.476228e-07,
+        "achieved": [1.7000000845755174, 1.3999998794505153,
+                    -1.0358970536469363e-08],
+        "warnings": ["keep=false: the solved pose was measured, then the "
+                    "pose the call found was restored - apply rotations "
+                    "via pose_skeleton to commit it"],
+        "not_remeasured_reason": (
+            "pose_ik refuses once clips exist on the root - this value is "
+            "carried forward from the solve that produced tendril_reach's "
+            "keys, not re-measured in this run"),
+    }
+    exported = export_and_check(mesh, material)
+
+    looping = [c["name"] for c in CLIPS if c.get("loop")]
+    baseline = {
+        "ticket": 743,
+        "maya_pid": process.get("pid"),
+        "plugin_digest": plugin.get("loaded_digest"),
+        "fps": FPS,
+        "tolerances": {"seam": SEAM_TOL, "compare": COMPARE_TOL},
+        "vertex_ceiling": VERTEX_CEILING,
+        "mesh": mesh, "vertices": probe.get("vtx_count"),
+        "joints": probe.get("joint_count"),
+        "max_influences_bound": MAX_INFLUENCES,
+        "skin": skin, "mirror_probe": mirror,
+        "blend_targets": list(BLEND_TARGETS),
+        "clips": CLIPS, "looping_clips": looping,
+        "ik": ik,
+        "material": material,
+        "landmarks": landmarks,
+        "samples": samples,
+        "prebuilt_scene_probe": probe,
+        "fbx": {"path": FBX_PATH, "take_names": exported["take_names"],
+                "skin": exported["export"].get("skin"),
+                "shapes": exported["shapes"],
+                "metres_per_unit": exported["export"].get("metres_per_unit"),
+                "bytes": exported["export"].get("bytes"),
+                "texture_facts": exported["texture_facts"]},
+    }
+    os.makedirs(OUT_DIR, exist_ok=True)
+    with open(BASELINE_PATH, "w") as fh:
+        json.dump(baseline, fh, indent=2, sort_keys=True)
+
+    problems = list(exported["problems"])
+    if probe.get("vtx_count", 0) > VERTEX_CEILING:
+        problems.append("vertex ceiling exceeded: %d" % probe.get("vtx_count"))
+    if skin["unweighted"]:
+        problems.append("%d unweighted vertices" % skin["unweighted"])
+
+    for p in problems:
+        print("FAIL: %s" % p)
+    print("baseline written to %s" % BASELINE_PATH)
+    print("over_four vertices (Unity will truncate these): %d"
+         % skin["facts"]["over_four"])
+    print("pose_ik residual on a 10-joint chain: %r" % ik.get("residual"))
+    print("#714 verdict: file_texture basename found=%r; procedural nodes "
+         "survived=%r" % (exported["texture_facts"]["file_texture_basename_found"],
+                          exported["texture_facts"]["procedural_survived_names"]))
+    return 1 if problems else 0
+
+
 if __name__ == "__main__":
-    result = build_fixture()
-    print("drifter_body: %d vertices (ceiling %d)"
-         % (result["vertices"], VERTEX_CEILING))
-    print("skeleton: %d joints, %d parentless"
-         % (result["joints"], result["parentless"]))
-    print("assert_joints_inside: max ratio %.3f (tolerance %.1f)"
-         % (result["joint_inside"]["max_ratio"], JOINT_INSIDE_TOL_RATIO))
-    for row in result["joint_inside"]["worst"]:
-        print("  %-24s dist=%.4fm radius=%.4fm ratio=%.3fx"
-             % (row["joint"], row["distance"], row["radius"], row["ratio"]))
+    sys.exit(main())
