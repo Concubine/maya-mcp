@@ -584,12 +584,23 @@ Expected:
 # append to evals/drifter_live.py
 
 def build_skeleton() -> dict:
-    call("new_scene", {})
-    res = call("create_skeleton", {"joints": JOINTS}).get("result") or {}
-    if len(res.get("joints", [])) != len(JOINTS):
+    # confirm=True is REQUIRED and its absence fails SILENTLY: live_call
+    # returns the raw frame rather than raising, so an unchecked new_scene
+    # leaves the old scene in place and the next create_skeleton stacks a
+    # SECOND rig beside the first (measured 2026-08-23: three runs left 315
+    # joints and drifter_root_002). Check status on every mutating call -
+    # that is the convention every other live gate in this repo follows.
+    res = call("new_scene", {"confirm": True})
+    if res.get("status") != "ok":
+        raise SystemExit("new_scene failed: %r" % (res.get("error"),))
+    res = call("create_skeleton", {"joints": JOINTS})
+    if res.get("status") != "ok":
+        raise SystemExit("create_skeleton failed: %r" % (res.get("error"),))
+    out = res.get("result") or {}
+    if len(out.get("joints", [])) != len(JOINTS):
         raise SystemExit("create_skeleton returned %d joints, expected %d"
-                         % (len(res.get("joints", [])), len(JOINTS)))
-    return res
+                         % (len(out.get("joints", [])), len(JOINTS)))
+    return out
 ```
 
 Run it:
@@ -1050,7 +1061,24 @@ def author_takes() -> dict:
             "ik": {k: v for k, v in ik.items() if k != "rotations"}}
 ```
 
-**Note the bend axis.** `_rib_sway` and `_bell_contract` rotate about local Z. `create_skeleton` auto-orients local X down the bone, so the bend axis is a **per-joint local frame** — the axis that curls a rib is not necessarily Z. Read Task 3 Step 4's recorded orientations, and if the displacement in Step 3 below is near zero, try local Y before assuming the clip is broken.
+**The bend axis must be MEASURED, not assumed.** Task 3 measured the real orientations and they are not uniform:
+
+- **Rib joints carry non-trivial per-joint frames** — `drifter_rib2_01` reports `jointOrient = [39.762159, -23.093469, -8.450666]`. Local Z on a rib is *not* a world axis and *not* the same axis on every rib.
+- **Tendril joints are identity** — `drifter_tendril2_05` reports `jointOrient = [0, 0, 0]`, so their local axes are world axes.
+
+The `_rib_sway` / `_bell_contract` helpers below rotate about local Z as a **starting hypothesis only**. Before authoring any clip, derive the real axis empirically:
+
+```bash
+# For one rib joint, rotate +15 degrees about each local axis in turn and
+# measure where the RIB TIP lands. Inward curl = the tip moves toward the
+# bell axis (its distance from world Y shrinks). Whichever axis does that
+# is the bend axis; write the measured table into the report.
+uv run python -c "import sys,json; sys.path.insert(0,'evals'); import live_call as L; \
+[print(ax, L.call('pose_skeleton', {'root':'drifter_root','rotations':{'drifter_rib2_02':r}})['result'].get('max_displacement')) \
+ for ax, r in (('X',[15,0,0]), ('Y',[0,15,0]), ('Z',[0,0,15]))]"
+```
+
+Reset the pose afterwards. A near-zero displacement means the rotation landed on joints owning no vertices — which looks exactly like success in every check that does not measure movement. Do not proceed to author clips until the axis is a measured fact.
 
 - [ ] **Step 3: Run it and verify all three clips landed**
 
