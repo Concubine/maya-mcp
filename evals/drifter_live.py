@@ -30,8 +30,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import drifter_metrics as dm            # noqa: E402
-from live_call import call              # noqa: E402
+import drifter_metrics as dm                       # noqa: E402
+from live_call import call, structured_result       # noqa: E402
 
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                        "drifter_live")
@@ -88,16 +88,45 @@ def tendril_step(tendril: int) -> float:
             / TENDRIL_JOINTS)
 
 
-def build_joint_specs() -> list:
-    """The 105 joints, as create_skeleton's explicit `joints` form.
+# --- Joint-inside-geometry guard (#743) ------------------------------------
+#
+# Giving the tendrils rest-pose curvature with `bend` moved the GEOMETRY
+# while an earlier build's joint chains stayed on their straight analytic
+# line - every tendril bone ended up running through empty space beside its
+# tube (measured: tendril 1 = 0.253 m at radius 0.055 = 4.6x, tendril 3 =
+# 0.296 m at 0.045 = 6.6x, tendril 7 = 0.276 m at 0.043 = 6.4x; a joint
+# inside its tube measures about one radius). `closestDistance` binding
+# would have handed each tendril's vertices to whatever bone was nearest -
+# for several tendrils, a NEIGHBOURING tendril's - and a turntable would
+# have looked completely fine either way. It did look fine.
+#
+# So the build order inverts: geometry (with every deformer already
+# applied) defines the skeleton, not the other way round. Rib/root joints
+# keep their analytic positions - the bell is only ever radially rippled
+# (`wave`), never bent, so they never left their geometry. Tendril joints
+# are fit to the tube's MEASURED centreline after flare+bend: sample each
+# height ring's vertices, take its centroid and mean radius, then resample
+# that 11-point polyline at 10 equal ARC-LENGTH intervals (not just re-using
+# the 11 construction rings verbatim - after a bend, equal height-steps are
+# not exactly equal arc-length steps).
+JOINT_INSIDE_TOL_RATIO = 2.0
+RIB_RADIUS_FLOOR = 0.15     # metres - see rib_root_joint_specs()
 
-    Tendrils descend from rib TIPS, not from the root, so the hierarchy is
-    genuinely deep and a weight error at the bell margin propagates down a
-    tendril where a measurement cannot miss it. Each tendril's joint
-    spacing comes from its own TENDRIL_LENGTH_FACTOR, so the chain's total
-    length matches that tendril's geometry length exactly.
+
+def rib_root_joint_specs() -> tuple:
+    """The 25 analytic joints (root + 8 ribs x 3) and their local radii.
+
+    The bell is a single hollow shell with no wall thickness to measure, so
+    a rib/root joint's "local radius" is not a tube radius - it is the
+    joint's own analytic distance from the bell's vertical axis (RIM_R *
+    frac), the natural size of the spoke-like structure it represents. That
+    goes to 0 right at the apex, where a joint legitimately sits almost on
+    the shell, so it is floored at RIB_RADIUS_FLOOR (0.15 m, roughly the
+    scale of the apex region) rather than letting the ratio blow up on a
+    joint that is doing nothing wrong.
     """
     specs = [{"name": ROOT, "position": [0.0, APEX_Y, 0.0]}]
+    radius_of = {ROOT: RIB_RADIUS_FLOOR}
     for rib in range(1, RIBS + 1):
         theta = _rib_ring(rib)
         parent = ROOT
@@ -110,20 +139,214 @@ def build_joint_specs() -> list:
                           "position": [radius * math.cos(theta), y,
                                        radius * math.sin(theta)],
                           "parent": parent})
+            radius_of[name] = max(radius, RIB_RADIUS_FLOOR)
             parent = name
-        step = tendril_step(rib)
-        for j in range(1, TENDRIL_JOINTS + 1):
-            name = tendril_name(rib, j)
-            specs.append({"name": name,
-                          "position": [RIM_R * math.cos(theta),
-                                       RIM_Y - step * j,
-                                       RIM_R * math.sin(theta)],
-                          "parent": parent})
-            parent = name
-    return specs
+    return specs, radius_of
 
 
-JOINTS = build_joint_specs()
+def _tendril_ring_probe() -> list:
+    """Vertex indices per height ring on an UNDEFORMED tendril cylinder.
+
+    Every tendril is built with the same TENDRIL_DIVISIONS, so a
+    polyCylinder's vertex layout - which ring a given vertex INDEX belongs
+    to - is identical across all eight; this needs measuring only once, on
+    a throwaway probe, and is valid after flare/bend because those
+    reposition points without adding, removing or reordering them.
+
+    Rings are read in OBJECT space, before any transform or deformer is
+    applied. Within a ring, only vertices with a non-trivial radius are
+    kept - a plain polyCylinder also has two polar cap-centre vertices at
+    radius ~0, and including them would pull a ring's centroid toward the
+    axis for no geometric reason.
+    """
+    probe_res = call("create_primitive",
+                     {"kind": "cylinder", "name": "drifter_ring_probe",
+                      "divisions": TENDRIL_DIVISIONS})
+    if probe_res.get("status") != "ok":
+        raise SystemExit("ring probe cylinder failed: %r"
+                         % (probe_res.get("error"),))
+    name = (probe_res.get("result") or {})["name"]
+    code = (
+        "import maya.api.OpenMaya as om\n"
+        "sel = om.MSelectionList(); sel.add(%r)\n"
+        "fn = om.MFnMesh(sel.getDagPath(0))\n"
+        "pts = fn.getPoints(om.MSpace.kObject)\n"
+        "buckets = {}\n"
+        "for i, p in enumerate(pts):\n"
+        "    r = (p.x ** 2 + p.z ** 2) ** 0.5\n"
+        "    if r < 0.05:\n"
+        "        continue\n"
+        "    y = round(p.y, 5)\n"
+        "    buckets.setdefault(y, []).append(i)\n"
+        "ys = sorted(buckets.keys(), reverse=True)\n"
+        "[buckets[y] for y in ys]\n"
+    ) % (name,)
+    exec_res = call("execute_python", {"code": code, "timeout_s": 60})
+    if exec_res.get("status") != "ok":
+        raise SystemExit("ring probe measurement call failed: %r"
+                         % (exec_res.get("error"),))
+    exec_result = exec_res.get("result") or {}
+    if exec_result.get("traceback"):
+        raise SystemExit("ring probe measurement raised:\n%s"
+                         % exec_result["traceback"])
+    rings = structured_result(exec_result, "ring probe")
+    if len(rings) != TENDRIL_DIVISIONS + 1:
+        raise SystemExit("expected %d rings from the probe cylinder, got %d"
+                         % (TENDRIL_DIVISIONS + 1, len(rings)))
+    del_res = call("delete_objects", {"names": [name]})
+    if del_res.get("status") != "ok":
+        raise SystemExit("delete_objects(ring probe) failed: %r"
+                         % (del_res.get("error"),))
+    return rings
+
+
+def _tendril_ring_centroids(mesh: str, ring_indices: list) -> list:
+    """World-space centroid and mean radius of each height ring, POST-deform.
+
+    Returns a list of (position, radius) pairs, attachment ring first.
+    """
+    code = (
+        "import maya.api.OpenMaya as om\n"
+        "sel = om.MSelectionList(); sel.add(%r)\n"
+        "fn = om.MFnMesh(sel.getDagPath(0))\n"
+        "pts = fn.getPoints(om.MSpace.kWorld)\n"
+        "rings = %r\n"
+        "out = []\n"
+        "for idxs in rings:\n"
+        "    cx = sum(pts[i].x for i in idxs) / len(idxs)\n"
+        "    cy = sum(pts[i].y for i in idxs) / len(idxs)\n"
+        "    cz = sum(pts[i].z for i in idxs) / len(idxs)\n"
+        "    radius = sum(((pts[i].x - cx) ** 2 + (pts[i].y - cy) ** 2\n"
+        "                  + (pts[i].z - cz) ** 2) ** 0.5 for i in idxs) / len(idxs)\n"
+        "    out.append(([cx, cy, cz], radius))\n"
+        "out\n"
+    ) % (mesh, ring_indices)
+    exec_res = call("execute_python", {"code": code, "timeout_s": 60})
+    if exec_res.get("status") != "ok":
+        raise SystemExit("ring centroid call on %s failed: %r"
+                         % (mesh, exec_res.get("error")))
+    exec_result = exec_res.get("result") or {}
+    if exec_result.get("traceback"):
+        raise SystemExit("ring centroid measurement on %s raised:\n%s"
+                         % (mesh, exec_result["traceback"]))
+    return structured_result(exec_result, "ring centroids for %s" % mesh)
+
+
+def _resample_polyline(points: list, radii: list, count: int) -> tuple:
+    """Place `count` points at equal ARC-LENGTH intervals along a polyline.
+
+    `points[0]`/`radii[0]` is the tube's attachment ring and is used only as
+    the t=0 anchor - the rib tip already owns that position, so it is never
+    itself returned. `points[-1]` is the tip, always returned exactly as
+    the last (count-th) point. Radii are interpolated the same way each
+    position is, so a fitted joint's local tube radius matches wherever
+    along its segment it actually landed.
+    """
+    seg_lengths = [dm.distance(points[i], points[i + 1])
+                  for i in range(len(points) - 1)]
+    cumulative = [0.0]
+    for length in seg_lengths:
+        cumulative.append(cumulative[-1] + length)
+    total = cumulative[-1]
+    out_points, out_radii = [], []
+    for i in range(1, count + 1):
+        target = total * i / float(count)
+        seg = len(seg_lengths) - 1
+        for s in range(len(seg_lengths)):
+            if cumulative[s + 1] >= target - 1e-9:
+                seg = s
+                break
+        seg_len = seg_lengths[seg]
+        t = 0.0 if seg_len < 1e-9 else (target - cumulative[seg]) / seg_len
+        p0, p1 = points[seg], points[seg + 1]
+        out_points.append([p0[k] + t * (p1[k] - p0[k]) for k in range(3)])
+        r0, r1 = radii[seg], radii[seg + 1]
+        out_radii.append(r0 + t * (r1 - r0))
+    return out_points, out_radii
+
+
+def fit_tendril_joint_specs(tendril: int, ring_data: list) -> tuple:
+    """The 10 joint specs for one tendril, fit to its tube's measured centreline.
+
+    `ring_data` is the 11 (position, radius) pairs from
+    `_tendril_ring_centroids`, attachment ring first. Resampled to 10
+    equal-arc-length points - matching the old analytic build's spacing
+    semantics exactly (joint 1 one step below the rib tip, joint 10 at the
+    very tip) while actually lying on the deformed tube.
+    """
+    ring_points = [p for p, _ in ring_data]
+    ring_radii = [r for _, r in ring_data]
+    positions, radii = _resample_polyline(ring_points, ring_radii,
+                                          TENDRIL_JOINTS)
+    specs = []
+    radius_of = {}
+    parent = rib_name(tendril, RIB_JOINTS)
+    for j in range(1, TENDRIL_JOINTS + 1):
+        name = tendril_name(tendril, j)
+        specs.append({"name": name, "position": positions[j - 1],
+                      "parent": parent})
+        radius_of[name] = radii[j - 1]
+        parent = name
+    return specs, radius_of
+
+
+def assert_joints_inside(mesh: str, joint_names: list, radius_of: dict) -> dict:
+    """Every joint must lie within JOINT_INSIDE_TOL_RATIO local radii of the
+    nearest vertex of `mesh`.
+
+    This is the permanent guard against the #743 defect: a joint can bind,
+    export and import cleanly while sitting metres from the geometry it is
+    meant to drive, because `closestDistance` binding hands each vertex to
+    WHATEVER bone happens to be nearest - even a neighbouring tendril's -
+    and a turntable looks identical either way. Nothing else in this
+    fixture catches that; it measures fine, exports fine, imports fine, and
+    is wrong. Fails the run (raises) on any violation and reports the worst
+    offenders either way.
+    """
+    code = (
+        "import maya.api.OpenMaya as om\n"
+        "sel = om.MSelectionList(); sel.add(%r)\n"
+        "fn = om.MFnMesh(sel.getDagPath(0))\n"
+        "verts = fn.getPoints(om.MSpace.kWorld)\n"
+        "joints = %r\n"
+        "out = []\n"
+        "for jname in joints:\n"
+        "    jp = cmds.xform(jname, q=True, ws=True, t=True)\n"
+        "    best = None\n"
+        "    for v in verts:\n"
+        "        d2 = ((v.x - jp[0]) ** 2 + (v.y - jp[1]) ** 2\n"
+        "              + (v.z - jp[2]) ** 2)\n"
+        "        if best is None or d2 < best:\n"
+        "            best = d2\n"
+        "    out.append(best ** 0.5)\n"
+        "out\n"
+    ) % (mesh, joint_names)
+    exec_res = call("execute_python", {"code": code, "timeout_s": 180})
+    if exec_res.get("status") != "ok":
+        raise SystemExit("assert_joints_inside call failed: %r"
+                         % (exec_res.get("error"),))
+    exec_result = exec_res.get("result") or {}
+    if exec_result.get("traceback"):
+        raise SystemExit("assert_joints_inside measurement raised:\n%s"
+                         % exec_result["traceback"])
+    distances = structured_result(exec_result, "joint-inside distances")
+    rows = []
+    for name, dist in zip(joint_names, distances):
+        radius = radius_of[name]
+        ratio = dist / radius if radius > 0 else math.inf
+        rows.append({"joint": name, "distance": dist, "radius": radius,
+                    "ratio": ratio})
+    rows.sort(key=lambda r: r["ratio"], reverse=True)
+    violations = [r for r in rows if r["ratio"] > JOINT_INSIDE_TOL_RATIO]
+    if violations:
+        raise SystemExit(
+            "%d joint(s) exceed JOINT_INSIDE_TOL_RATIO=%.1f - worst: %s"
+            % (len(violations), JOINT_INSIDE_TOL_RATIO,
+               ", ".join("%s %.3fm/%.3fm=%.1fx"
+                        % (r["joint"], r["distance"], r["radius"], r["ratio"])
+                        for r in violations[:5])))
+    return {"worst": rows[:10], "max_ratio": rows[0]["ratio"] if rows else None,
+            "all": rows}
 
 
 def preflight() -> dict:
@@ -144,19 +367,36 @@ def preflight() -> dict:
     return ping
 
 
-def build_skeleton() -> dict:
-    # confirm=True is required - new_scene refuses to discard the current
-    # scene without it (status "error", not raised), and a caller that
-    # ignores the status silently builds on top of whatever was already
-    # there. Measured live: three unconfirmed calls left drifter_root,
-    # drifter_root_001, drifter_root_002 (315 joints) in one scene.
+def start_scene() -> None:
+    """A fresh scene, confirmed.
+
+    confirm=True is required - new_scene refuses to discard the current
+    scene without it (status "error", not raised), and a caller that
+    ignores the status silently builds on top of whatever was already
+    there. Measured live: three unconfirmed calls left drifter_root,
+    drifter_root_001, drifter_root_002 (315 joints) in one scene.
+
+    Called ONCE, before geometry - the build order is geometry-then-skeleton
+    now (#743), so this can no longer live inside build_skeleton().
+    """
     new_scene_res = call("new_scene", {"confirm": True})
     if new_scene_res.get("status") != "ok":
         raise SystemExit("new_scene failed: %r" % (new_scene_res.get("error"),))
-    res = call("create_skeleton", {"joints": JOINTS}).get("result") or {}
-    if len(res.get("joints", [])) != len(JOINTS):
+
+
+def build_skeleton(joints: list) -> dict:
+    """create_skeleton from an explicit, already-fitted `joints` list.
+
+    Called AFTER the geometry exists (#743) - rib/root positions are
+    analytic (rib_root_joint_specs), tendril positions are fit to the
+    tube's measured centreline (fit_tendril_joint_specs), and it is the
+    CALLER's job to assemble the full 105-joint list in parent-before-child
+    order before calling this.
+    """
+    res = call("create_skeleton", {"joints": joints}).get("result") or {}
+    if len(res.get("joints", [])) != len(joints):
         raise SystemExit("create_skeleton returned %d joints, expected %d"
-                         % (len(res.get("joints", [])), len(JOINTS)))
+                         % (len(res.get("joints", [])), len(joints)))
     return res
 
 
@@ -209,11 +449,15 @@ TENDRIL_BEND_DEG = (34.0, -22.0, 41.0, -30.0, 26.0, -38.0, 45.0, -25.0)
 TENDRIL_BEND_YAW = (0.0, 38.0, -25.0, 61.0, -47.0, 14.0, -66.0, 29.0)
 
 
-def build_geometry() -> dict:
-    """One shaped bell plus eight varied tendrils, combined into ONE mesh.
+def build_deformed_parts() -> dict:
+    """The bell and eight varied tendrils, EVERY deformer applied, UNCOMBINED.
 
-    One mesh means one skinCluster means one SkinnedMeshRenderer in Unity,
-    which is the shape a game character actually takes.
+    Geometry-then-skeleton (#743): this builds and deforms exactly what
+    `build_geometry` used to build, but stops short of combining, because
+    each tendril's joints must be fit to its tube's real centreline while
+    it is still its own mesh - `combine` would merge vertex indices across
+    all nine parts and the per-tendril ring probe indices computed by
+    `_tendril_ring_probe` would no longer line up.
 
     Tendrils are CYLINDERS now that the ceiling allows it (30000): a cube
     gives a square cross-section that reads as a rod however it is
@@ -225,10 +469,14 @@ def build_geometry() -> dict:
     all: flare keeps the cross-section perfectly circular, and twisting a
     circle yields the same circle. `bend` changes the silhouette, so its
     effect can be judged by looking rather than by trusting a displacement
-    number.
+    number. `bend` is also exactly what moved the tendrils' geometry off
+    their old analytic joint chains - see the module-level comment above
+    JOINT_INSIDE_TOL_RATIO.
     """
     parts = []
     tendril_diagnostics = []
+    tendril_joint_specs = []
+    tendril_radius_of = {}
 
     # --- the bell: a squashed sphere, then a RADIAL ripple for lobes -----
     bell_res = call("create_primitive",
@@ -270,6 +518,11 @@ def build_geometry() -> dict:
         "max_displacement")
     bell_wave_warnings = (wave_res.get("result") or {}).get("warnings") or []
     parts.append(bell)
+
+    # Vertex-index-per-ring map, measured ONCE (see _tendril_ring_probe) -
+    # every tendril shares it because every tendril is built with the same
+    # TENDRIL_DIVISIONS.
+    ring_indices = _tendril_ring_probe()
 
     # --- eight tendrils, none of them identical --------------------------
     for t in range(1, TENDRILS + 1):
@@ -326,6 +579,18 @@ def build_geometry() -> dict:
         bend_displacement = (bend_res.get("result") or {}).get(
             "max_displacement")
         bend_warnings = (bend_res.get("result") or {}).get("warnings") or []
+
+        # Fit THIS tendril's 10 joints to its tube's measured centreline,
+        # now that flare and bend have both been baked in
+        # (delete_history_after=True on each deform call above). This is
+        # the #743 fix: the joints are placed from what the mesh actually
+        # is, not from the analytic line the geometry was originally
+        # supposed to follow before `bend` moved it.
+        ring_data = _tendril_ring_centroids(name, ring_indices)
+        specs, radius_of = fit_tendril_joint_specs(t, ring_data)
+        tendril_joint_specs.extend(specs)
+        tendril_radius_of.update(radius_of)
+
         tendril_diagnostics.append({
             "tendril": t, "length": length, "thickness": thick,
             "bend_deg": TENDRIL_BEND_DEG[t - 1],
@@ -334,9 +599,27 @@ def build_geometry() -> dict:
             "flare_warnings": flare_warnings,
             "bend_max_displacement": bend_displacement,
             "bend_warnings": bend_warnings,
+            "fitted_ring_centroids": ring_data,
         })
         parts.append(name)
 
+    return {"parts": parts,
+            "bell_wave_max_displacement": bell_wave_displacement,
+            "bell_wave_warnings": bell_wave_warnings,
+            "tendril_diagnostics": tendril_diagnostics,
+            "tendril_joint_specs": tendril_joint_specs,
+            "tendril_radius_of": tendril_radius_of}
+
+
+def combine_geometry(parts: list) -> dict:
+    """Combine the deformed, already-fit-against parts into ONE mesh.
+
+    Called AFTER build_skeleton (#743) - one mesh means one skinCluster
+    means one SkinnedMeshRenderer in Unity, which is the shape a game
+    character actually takes, but combining any earlier would have merged
+    vertex indices across all nine parts before the per-tendril ring
+    sampling in build_deformed_parts could use them.
+    """
     combine_res = call("combine", {"names": parts, "name": "drifter_body"})
     if combine_res.get("status") != "ok":
         raise SystemExit("combine failed: %r" % (combine_res.get("error"),))
@@ -352,10 +635,7 @@ def build_geometry() -> dict:
             "drifter_body has %d vertices, ceiling is %d - lower "
             "BELL_DIVISIONS or TENDRIL_DIVISIONS rather than raising the "
             "ceiling" % (verts, VERTEX_CEILING))
-    return {"mesh": combined, "vertices": verts, "parts": parts,
-            "bell_wave_max_displacement": bell_wave_displacement,
-            "bell_wave_warnings": bell_wave_warnings,
-            "tendril_diagnostics": tendril_diagnostics}
+    return {"mesh": combined, "vertices": verts}
 
 
 def bind_and_weight(mesh: str) -> dict:
@@ -719,7 +999,64 @@ def author_takes() -> dict:
             "ik": {k: v for k, v in ik.items() if k != "rotations"}}
 
 
-if __name__ == "__main__":
+def build_fixture() -> dict:
+    """#743: geometry defines the skeleton, not the other way round.
+
+    1. Fresh scene.
+    2. Build the bell and all eight tendrils, every deformer applied
+       (build_deformed_parts) - this is verbatim what the old
+       build_geometry did, minus the combine.
+    3. Fit each tendril's 10 joints to its tube's MEASURED centreline
+       (done inside build_deformed_parts, per tendril, right after its
+       deformers are baked).
+    4. Rib/root joints stay analytic (rib_root_joint_specs) - the bell is
+       only ever radially rippled, never bent, so they never left their
+       geometry.
+    5. create_skeleton from the combined (rib/root + tendril) spec list.
+    6. THEN combine the parts into drifter_body.
+    7. assert_joints_inside - every one of the 105 joints must lie within
+       JOINT_INSIDE_TOL_RATIO local radii of the nearest vertex, or the
+       run fails.
+    """
     preflight()
-    result = build_skeleton()
-    print("built %d joints" % len(result.get("joints", [])))
+    start_scene()
+
+    geo = build_deformed_parts()
+
+    rib_root_specs, rib_root_radius_of = rib_root_joint_specs()
+    joints = rib_root_specs + geo["tendril_joint_specs"]
+    if len(joints) != 105:
+        raise SystemExit("assembled %d joint specs, expected 105" % len(joints))
+    parentless = [j for j in joints if "parent" not in j]
+    if len(parentless) != 1:
+        raise SystemExit("%d parentless joints, expected exactly 1: %r"
+                         % (len(parentless), [j["name"] for j in parentless]))
+    radius_of = dict(rib_root_radius_of)
+    radius_of.update(geo["tendril_radius_of"])
+
+    skeleton = build_skeleton(joints)
+
+    combined = combine_geometry(geo["parts"])
+
+    joint_names = [j["name"] for j in joints]
+    inside_report = assert_joints_inside(combined["mesh"], joint_names,
+                                         radius_of)
+
+    return {"vertices": combined["vertices"], "mesh": combined["mesh"],
+            "joints": len(skeleton.get("joints", [])),
+            "parentless": len(parentless),
+            "joint_inside": inside_report,
+            "tendril_diagnostics": geo["tendril_diagnostics"]}
+
+
+if __name__ == "__main__":
+    result = build_fixture()
+    print("drifter_body: %d vertices (ceiling %d)"
+         % (result["vertices"], VERTEX_CEILING))
+    print("skeleton: %d joints, %d parentless"
+         % (result["joints"], result["parentless"]))
+    print("assert_joints_inside: max ratio %.3f (tolerance %.1f)"
+         % (result["joint_inside"]["max_ratio"], JOINT_INSIDE_TOL_RATIO))
+    for row in result["joint_inside"]["worst"]:
+        print("  %-24s dist=%.4fm radius=%.4fm ratio=%.3fx"
+             % (row["joint"], row["distance"], row["radius"], row["ratio"]))
