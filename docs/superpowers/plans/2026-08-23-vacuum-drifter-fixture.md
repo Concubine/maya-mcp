@@ -28,6 +28,21 @@ Every task's requirements implicitly include this section.
 - **Port discipline.** `evals/live_call.py` reads `MAYA_MCP_PORT` (default 9878). Set `MAYA_MCP_EXPECT_PID` to the pid you intend to talk to — a port is not an identity (#648).
 - **Naming:** every scene node is prefixed `drifter_`.
 
+### Validated environment (2026-08-23, measured — not assumed)
+
+| Thing | Value | Consequence |
+|---|---|---|
+| Live Maya | **pid 70704, port 9879**, the only one running | `export MAYA_MCP_PORT=9879` and `MAYA_MCP_EXPECT_PID=70704` for every gate run |
+| Maya plugin | digest `74d1cbae…`, stamp `257d2ac`, `restart_required: false` | Current. `git diff 257d2ac..HEAD -- maya_plugin src` is empty, so the deployed copy is not behind |
+| Maya cwd | `C:\Users\plotk` | Neutral — no repo-import bypass (#604) |
+| MCP server to use | **`mcp__maya9879__*`** | `mcp__maya__*` points at 9877, where **nothing is listening**. It reports Connected because the MCP process connects lazily |
+| Unity, ours | **`My project (2)@3da4345997c84a8b`**, `C:/Users/plotk/devX/fluidics/My project (2)` | The scratch project. `set_active_instance` to this **first**, every session |
+| Unity, Demigol | **`unity@2d62d9f1db5a806c`**, `D:/devel/Demigol/unity` | **Never** target this. Named here so it can be avoided by hash rather than by guesswork |
+| Unity version | 6000.0.47f1, not playing, not compiling | — |
+| C# compiler | **CodeDom, not Roslyn** | `execute_code` is limited to **C# 6**: no string interpolation (`$""`), no `?.`, no `nameof`, no expression-bodied members. Plus the existing rule that snippets are METHOD BODIES — no `using`, no LINQ |
+
+The Maya's Python namespace still carries variables from the #737 session (`poses`, `chunks`, `bbox_height`, …). Harmless — the gate opens with `new_scene` — but do not assume a clean namespace when using `execute_python`.
+
 ---
 
 ## File Structure
@@ -402,19 +417,19 @@ git commit -m "test(#743): declared-vs-measured, seam and influence-histogram po
 
 **Before starting:** confirm which Maya answers. A port is not an identity (#648), and a Maya launched before the last deploy holds stale modules.
 
-- [ ] **Step 1: Verify the live Maya and record its identity**
+- [ ] **Step 1: Point at the validated Maya and confirm it is still the same one**
+
+This was validated on 2026-08-23 (see **Validated environment** above): pid 70704 on port 9879, plugin current. Re-confirm rather than trust it — a Maya can be restarted between sessions and the pid will change.
 
 ```bash
+export MAYA_MCP_PORT=9879
+export MAYA_MCP_EXPECT_PID=70704
 uv run python -c "import sys; sys.path.insert(0,'evals'); import live_call; print(live_call.call('ping', {}))"
 ```
 
-Expected: a `result` carrying `pid`, `package_dir`, `loaded_digest`, `restart_required`. **`restart_required` must be false.** If it is true, STOP and ask the user to restart that Maya — a stale plugin will refuse or mis-author the skeleton (#703's gate refuses pre-fix skeletons outright).
+Expected: `pid` 70704, `restart_required` **false**, `package_dir` under `Documents/maya/scripts`. If `restart_required` is true, STOP and ask the user to restart that Maya — a stale plugin will refuse or mis-author the skeleton (#703's gate refuses pre-fix skeletons outright). If the pid differs, update `MAYA_MCP_EXPECT_PID` and re-check the digest before continuing.
 
-Record the pid and export it for the rest of the session:
-
-```bash
-export MAYA_MCP_EXPECT_PID=<the pid ping reported>
-```
+**Do not use the `mcp__maya__*` MCP tools.** They target port 9877, where nothing is listening; the server shows Connected because it connects lazily. Use `mcp__maya9879__*` for any MCP-tool work alongside this gate.
 
 - [ ] **Step 2: Write the rig layout and preflight**
 
@@ -1562,7 +1577,12 @@ git commit -m "test(#743): consumer-gate policy, tested without a live Unity"
 - Consumes: Task 9's `verify()`.
 - Produces: `UNITY_MEASURE_CS`, `_steps_text()`, `main(argv)`.
 
-**`execute_code` snippets are METHOD BODIES.** `using` directives and LINQ are syntax errors there — that cost time on #718. Fully-qualify types (`UnityEngine.Mesh`, `System.Collections.Generic.List<>`) and write plain loops.
+**Two compiler constraints, both measured on this editor 2026-08-23.**
+
+1. **`execute_code` snippets are METHOD BODIES.** `using` directives and LINQ are syntax errors there — that cost time on #718. Fully-qualify types (`UnityEngine.Mesh`, `System.Collections.Generic.List<>`) and write plain loops.
+2. **The compiler is CodeDom, not Roslyn**, so the snippet is **C# 6**: no string interpolation (`$"..."`), no null-conditional (`?.`), no `nameof`, no expression-bodied members. `execute_code` reports which backend it used in its result — check it rather than assuming.
+
+`Mesh.GetBonesPerVertex()` returns a `Unity.Collections.NativeArray<byte>`. `var` covers the type, but it must be read with a plain indexed loop and it holds native memory — do not leak it across samples.
 
 - [ ] **Step 1: Add the C# and the runner**
 
@@ -1664,9 +1684,12 @@ def _steps_text() -> str:
         "",
         "0. claude mcp list -> unityMCP must be Connected. If it is not,",
         "   report it and STOP. No batchmode fallback.",
-        "1. Build a SCRATCH project (never Demigol - its importer forces",
-        "   importAnimation=false). Recipe: evals/multi_take_unity.py's",
-        "   docstring, ~5 minutes.",
+        "1. set_active_instance FIRST. Ours is",
+        "   'My project (2)@3da4345997c84a8b'",
+        "   (C:/Users/plotk/devX/fluidics/My project (2)).",
+        "   'unity@2d62d9f1db5a806c' is DEMIGOL - never target it; its",
+        "   importer forces importAnimation=false. If neither is up, build",
+        "   a scratch project: evals/multi_take_unity.py's docstring, ~5 min.",
         "2. Copy %s into <scratch>/Assets/drifter.fbx" % b["fbx"]["path"],
         "3. mcp__unityMCP__manage_asset(action='modify', ...) to confirm",
         "   importAnimation and importBlendShapes are ON.",
