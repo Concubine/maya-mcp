@@ -826,7 +826,19 @@ BEND_AXIS = "Z"              # measured (Step 1b): see task-7-report.md table.
                               # negligible 0.0005m. Negative amounts (as
                               # used by _bell_contract) therefore curl
                               # inward, matching the intended semantics.
-TENDRIL_KEYS = 9            # keys per looping clip - the wave needs samples
+                              # RE-MEASURED live 2026-08-23 against the
+                              # rebuilt rig (drifter_rib2_02, same target
+                              # joint) - identical numbers reproduced
+                              # (0.6->0.6708m at +15deg, 0.6->0.5155m at
+                              # -15deg, X exactly 0.0 delta, Y 0.00048m) -
+                              # Z stands confirmed, not just carried over.
+TENDRIL_KEYS = 5            # keys per looping clip. Was 9: author_clip
+#   evaluates the DEFORMED MESH at every key (it returns per_key displacement
+#   measurements), so cost scales with vertices x keys x joints. Nine keys
+#   authored three clips in ~12 min at 13,250 verts; at 23,922 verts with a
+#   skin cluster and blend shapes it wedged Maya TWICE - one core pegged at
+#   100% for 40+ min with memory dead flat at 4.4 GB, a spin, not progress.
+#   Five keys still spans a full 2*pi of travelling wave.
 IDLE_WAVE_DEG = 7.0
 SWIM_WAVE_DEG = 16.0
 WAVE_K = 0.55               # radians of phase LAG per joint down the chain
@@ -857,22 +869,44 @@ def _tendril_wave(phase: float, amp_deg: float,
     not run cloth or dynamic bones - the same curve applied down the chain
     with a phase LAG, so the bend propagates from the bell to the tip.
 
-    Rotation is about local X, which for a tendril joint IS world X: Task 3
-    measured drifter_tendril2_05 jointOrient = [0,0,0], so tendril local
-    frames are the world frame. A tendril hangs along -Y, so rotating about
-    X swings it in the YZ plane - along the swim axis, which is what makes
-    it read as drag rather than as a twist.
+    NEVER rotate a tendril joint about local X. Its child sits at
+    translate [0.3, 0, 0] - along local X - because create_skeleton aims X
+    down the bone. Rotation about X is a pure TWIST and bends nothing:
+    measured 0.00 degrees of segment turn at 25 degrees of rotateX, against
+    25.0 degrees for either Y or Z. On a square-section tendril that twist
+    is nearly invisible, so it produced perfect-looking curves, a passing
+    byte gate, and zero deformation. An earlier draft of this file rotated
+    about X on the (wrong) theory that jointOrient=[0,0,0] means the local
+    frame IS the world frame - it does not; jointOrient is relative to the
+    PARENT, and the tendril chain inherits the rib tip's frame.
 
-    per_tendril_offset=True gives each tendril its own phase (an organic,
-    non-uniform shimmer - right for idle). False keeps all eight in phase
-    so they trail TOGETHER, which is what drag looks like.
+    Local Z swings the tendril RADIALLY (in/out from the bell axis) and
+    local Y swings it TANGENTIALLY, both relative to that tendril's own
+    ring angle. To make all eight trail the SAME world direction - which
+    is what drag is - the desired world swing must be decomposed into each
+    tendril's own Y and Z by its ring angle.
+
+    per_tendril_offset=True gives each tendril its own phase and lets it
+    swing radially (an organic, non-uniform shimmer - right for idle).
+    False decomposes a single world-space drag direction per tendril, so
+    the eight trail together.
     """
     out = {}
     for t in range(1, TENDRILS + 1):
-        ring = _rib_ring(t) if per_tendril_offset else 0.0
+        ring = _rib_ring(t)
         for j in range(1, TENDRIL_JOINTS + 1):
-            angle = amp_deg * math.sin(phase - WAVE_K * j + ring)
-            out[tendril_name(t, j)] = [angle, 0.0, 0.0]
+            if per_tendril_offset:
+                # Idle: radial shimmer, each tendril phase-offset.
+                angle = amp_deg * math.sin(phase - WAVE_K * j + ring)
+                out[tendril_name(t, j)] = [0.0, 0.0, angle]
+            else:
+                # Swim: one world direction (-Z, opposing travel) resolved
+                # into this tendril's radial (local Z) and tangential
+                # (local Y) components.
+                angle = amp_deg * math.sin(phase - WAVE_K * j)
+                out[tendril_name(t, j)] = [0.0,
+                                           -angle * math.cos(ring),
+                                           -angle * math.sin(ring)]
     return out
 
 
