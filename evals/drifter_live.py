@@ -839,8 +839,13 @@ TENDRIL_KEYS = 5            # keys per looping clip. Was 9: author_clip
 #   skin cluster and blend shapes it wedged Maya TWICE - one core pegged at
 #   100% for 40+ min with memory dead flat at 4.4 GB, a spin, not progress.
 #   Five keys still spans a full 2*pi of travelling wave.
-IDLE_WAVE_DEG = 7.0
-SWIM_WAVE_DEG = 16.0
+# Per-joint wave amplitude, in degrees. These COMPOUND down the chain: at
+# 16 deg on ten joints the tip accumulated ~160 deg and the tendrils whipped
+# to horizontal and interpenetrated each other. The useful range on a
+# ten-joint chain is far smaller than on a three-joint limb - measured by
+# looking at the render, which is the only check that caught it.
+IDLE_WAVE_DEG = 3.0
+SWIM_WAVE_DEG = 6.0
 WAVE_K = 0.55               # radians of phase LAG per joint down the chain
 SWIM_DRAG = math.pi / 2.0   # tendrils trail the bell by a quarter cycle
 

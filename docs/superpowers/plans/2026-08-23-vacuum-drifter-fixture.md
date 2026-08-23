@@ -1156,8 +1156,8 @@ TENDRIL_KEYS = 5            # keys per looping clip. Was 9; MEASURED cost.
 # 23,922 verts with blend shapes it wedged Maya twice: one core pegged at
 # 100% for 40+ minutes with memory dead flat at 4.4 GB, which is a spin, not
 # progress. Five keys still carries a full 2*pi of travelling wave.
-IDLE_WAVE_DEG = 7.0
-SWIM_WAVE_DEG = 16.0
+IDLE_WAVE_DEG = 3.0         # per-joint, and it COMPOUNDS down the chain
+SWIM_WAVE_DEG = 6.0         # 16.0 accumulated ~160 deg at the tip: whipped
 WAVE_K = 0.55               # radians of phase LAG per joint down the chain
 SWIM_DRAG = math.pi / 2.0   # tendrils trail the bell by a quarter cycle
 
