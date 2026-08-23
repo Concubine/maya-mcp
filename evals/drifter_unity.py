@@ -26,7 +26,7 @@ DECLARED is derived from evals/drifter_live/baseline.json and never
 hand-restated, so the byte gate and this gate cannot silently disagree
 about what was declared.
 
-Two things measured about unityMCP's execute_code this session, both baked
+Four things measured about a real Unity import this session, all baked
 into UNITY_MEASURE_CS below:
 
   1. Snippets run as METHOD BODIES under CodeDom, not top-level programs -
@@ -40,6 +40,29 @@ into UNITY_MEASURE_CS below:
      are unavailable). Every filter below is a plain loop; a lambda
      assigned to a System.Func<> variable (not a LINQ extension) is fine -
      that pattern already ran clean against a real editor in #718's gate.
+  3. MEASURED against a real editor 2026-08-23: Unity's ModelImporter does
+     NOT preserve a 1:1 vertex index mapping with Maya. The drifter's
+     23,922-vertex mesh imports as sharedMesh.vertexCount == 93344 - UV
+     and hard-normal seams split each affected vertex into several, with
+     weldVertices/optimizeMeshVertices/optimizeMeshPolygons all OFF making
+     no difference (measured both ways). Worse, neither Maya's live
+     `.vtx[]` world positions NOR the raw FBX "Vertices" control-point
+     array (as fbxbytes.read_fbx parses it) locate a matching Unity vertex
+     within useful tolerance for any landmark except the apex (a pole
+     point where dozens of duplicates coincide) - Maya's `.vtx[]` index
+     and the FBX file's control-point index are evidently not the same
+     ordering either. A landmark picked by INDEX in Maya cannot be
+     re-located by index, or by naive nearest-position search, in Unity.
+     The fix: re-derive apex/tip/rim in Unity using the SAME geometric
+     definition drifter_live.py's _find_landmarks uses (max/min world Y
+     for apex/tip; farthest pair among rim-band candidates for rim),
+     applied directly to Unity's own bind-pose sharedMesh.vertices - never
+     Maya's indices. See RIM_Y/RIM_RADIUS_MIN below, imported from
+     drifter_live rather than restated.
+  4. MEASURED: a blend shape's Unity name carries its Maya deformer-node
+     prefix, e.g. "drifter_body_shapes.bell_crease" - not the bare alias
+     ("bell_crease") baseline.json declares. verify() matches by exact
+     name OR by dot-suffix so the two conventions can agree.
 
 Mesh.GetBonesPerVertex() returns a Unity.Collections.NativeArray<byte>
 holding NATIVE memory - read with a plain indexed loop and Dispose() it
@@ -67,6 +90,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import drifter_metrics as dm  # noqa: E402
+# RIM_Y/RIM_RADIUS_MIN drive the C#'s own landmark re-detection (see the
+# module docstring, point 3) - imported, never hand-restated, so a future
+# change to drifter_live's rim band moves this gate too.
+from drifter_live import RIM_Y as _RIM_Y  # noqa: E402
+from drifter_live import RIM_RADIUS_MIN as _RIM_RADIUS_MIN  # noqa: E402
 
 BASELINE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "drifter_live", "baseline.json")
@@ -106,14 +134,19 @@ DECLARED = {
     "samples": _baseline["samples"],
 }
 
+# Maya's own landmark indices/measurement, kept ONLY for cross-reference in
+# the report (e.g. comparing Unity's re-derived rim_diameter_at_pick against
+# this one) - MEASURED 2026-08-23: these indices are NOT fed to Unity. See
+# the module docstring, point 3: neither Maya's `.vtx[]` index nor the FBX
+# file's own control-point index locates the same vertex in Unity's
+# imported (vertex-split) mesh, so UNITY_MEASURE_CS re-derives its own
+# landmarks geometrically instead of reusing these.
 _LANDMARKS = _baseline["landmarks"]
-APEX_IDX = int(_LANDMARKS["apex"])
-TIP_IDX = int(_LANDMARKS["tip"])
-_RIM = [int(i) for i in _LANDMARKS["rim"]]
-if len(_RIM) != 2:
+_MAYA_RIM = [int(i) for i in _LANDMARKS["rim"]]
+if len(_MAYA_RIM) != 2:
     raise SystemExit("landmarks.rim must carry exactly 2 vertex indices "
-                     "(the farthest pair), got %d" % len(_RIM))
-RIM0_IDX, RIM1_IDX = _RIM
+                     "(the farthest pair), got %d" % len(_MAYA_RIM))
+MAYA_RIM_DIAMETER_AT_PICK = float(_LANDMARKS["rim_diameter_at_pick"])
 
 FBX_PATH = _baseline["fbx"]["path"]
 ASSET_SUBDIR = "Assets/DrifterGate743"
@@ -150,10 +183,20 @@ def verify(declared: dict, measured: dict) -> dict:
         problems.append("bone count is %r, declared %r"
                         % (measured.get("bones"), declared["joints"]))
 
+    # MEASURED 2026-08-23 against a real editor: Unity's imported blend
+    # shape names carry the Maya deformer node's name as a dot-prefix
+    # ("drifter_body_shapes.bell_crease"), not the bare alias baseline.json
+    # declares ("bell_crease") - an exact-match check failed on a file that
+    # genuinely carries both channels. Accept an exact match OR the
+    # declared name as a dot-suffix of a measured one.
     got_shapes = set(measured.get("blend_shapes") or [])
     for want in declared["blend_targets"]:
-        if want not in got_shapes:
-            problems.append("blend shape %r absent in Unity" % want)
+        if want in got_shapes:
+            continue
+        suffix = "." + want
+        if not any(g == want or g.endswith(suffix) for g in got_shapes):
+            problems.append("blend shape %r absent in Unity (got %r)"
+                            % (want, sorted(got_shapes)))
 
     got_clips = {c["name"]: c for c in (measured.get("clips") or [])}
     for want in declared["clips"]:
@@ -251,19 +294,22 @@ _UNITY_MEASURE_TEMPLATE = r"""
 //
 // rim_diameter/apex_to_tip are read from the SkinnedMeshRenderer's
 // ACTUALLY BAKED mesh (BakeMesh, after SampleAnimation posed the rig) at
-// four fixed vertex indices Maya measured once on the undeformed mesh
-// (drifter_live's landmarks: apex, tip, and the rim's farthest pair) -
-// the same frame-invariant distances drifter_metrics computes on the Maya
-// side, so the two numbers are directly comparable.
+// four vertex indices found by RE-DERIVING drifter_live's landmark
+// definitions directly on Unity's own bind-pose mesh (apex/tip = max/min
+// world Y; rim = farthest pair among rim-band candidates) - MEASURED
+// 2026-08-23: Unity's FBX import splits the drifter's 23,922 vertices into
+// 93,344 (UV/hard-normal seams), and neither Maya's `.vtx[]` index nor the
+// raw FBX control-point index locates the same physical vertex in that
+// split mesh within useful tolerance, so Maya's landmark INDICES cannot be
+// reused here - only the geometric RULE that picked them can.
 string modelPath = "__ASSET_PATH__";
 string outputPath = System.IO.Path.Combine(
     System.IO.Path.GetDirectoryName(UnityEngine.Application.dataPath),
     "drifter_unity_measurement.json");
 
-int apexIdx = __APEX_IDX__;
-int tipIdx = __TIP_IDX__;
-int rim0Idx = __RIM0_IDX__;
-int rim1Idx = __RIM1_IDX__;
+float rimY = __RIM_Y__;
+float rimRadiusMin = __RIM_RADIUS_MIN__;
+float rimBandHalfWidth = 0.06f;   // drifter_live.py's own band tolerance
 
 string[] reqClip = new string[] { __SAMPLE_CLIPS__ };
 int[] reqFrame = new int[] { __SAMPLE_FRAMES__ };
@@ -300,6 +346,39 @@ if (infoSmr == null) {
 }
 int bones = infoSmr.bones.Length;
 UnityEngine.Mesh sharedMesh = infoSmr.sharedMesh;
+
+// --- Landmarks, re-derived on Unity's OWN bind-pose vertices - see the
+// header comment above this template. apex/tip are the single global
+// max/min-Y vertex; rim is the farthest pair among candidates within
+// rimBandHalfWidth of rimY and farther than rimRadiusMin from the vertical
+// axis - the exact rule drifter_live.py's _find_landmarks uses in Maya,
+// just run here instead of trusted to carry an index across the import. ---
+UnityEngine.Vector3[] bindVerts = sharedMesh.vertices;
+int apexIdx = 0;
+int tipIdx = 0;
+for (int vi = 1; vi < bindVerts.Length; vi++) {
+    if (bindVerts[vi].y > bindVerts[apexIdx].y) apexIdx = vi;
+    if (bindVerts[vi].y < bindVerts[tipIdx].y) tipIdx = vi;
+}
+System.Collections.Generic.List<int> rimCandidates = new System.Collections.Generic.List<int>();
+for (int vi = 0; vi < bindVerts.Length; vi++) {
+    UnityEngine.Vector3 p = bindVerts[vi];
+    float radius = UnityEngine.Mathf.Sqrt(p.x * p.x + p.z * p.z);
+    if (UnityEngine.Mathf.Abs(p.y - rimY) < rimBandHalfWidth && radius > rimRadiusMin) {
+        rimCandidates.Add(vi);
+    }
+}
+int rim0Idx = rimCandidates.Count > 0 ? rimCandidates[0] : 0;
+int rim1Idx = rimCandidates.Count > 1 ? rimCandidates[1] : 0;
+float rimDiameterAtPick = 0f;
+for (int a = 0; a < rimCandidates.Count; a++) {
+    int ia = rimCandidates[a];
+    for (int b = a + 1; b < rimCandidates.Count; b++) {
+        int ib = rimCandidates[b];
+        float d = UnityEngine.Vector3.Distance(bindVerts[ia], bindVerts[ib]);
+        if (d > rimDiameterAtPick) { rimDiameterAtPick = d; rim0Idx = ia; rim1Idx = ib; }
+    }
+}
 
 System.Text.StringBuilder blendSb = new System.Text.StringBuilder();
 blendSb.Append("[");
@@ -389,24 +468,30 @@ outSb.Append("\"bones\":" + bones + ",");
 outSb.Append("\"blend_shapes\":" + blendSb.ToString() + ",");
 outSb.Append("\"clips\":" + clipsSb.ToString() + ",");
 outSb.Append("\"bones_per_vertex_max\":" + bonesPerVertexMax + ",");
-outSb.Append("\"samples\":" + samplesSb.ToString());
+outSb.Append("\"samples\":" + samplesSb.ToString() + ",");
+// Diagnostics only - verify() does not read these. rim_candidates/
+// rim_diameter_at_pick let the report compare Unity's independently
+// re-derived rim pick against Maya's own (baseline.json's landmarks).
+outSb.Append("\"landmark_indices\":{\"apex\":" + apexIdx + ",\"tip\":" + tipIdx
+    + ",\"rim0\":" + rim0Idx + ",\"rim1\":" + rim1Idx + "},");
+outSb.Append("\"landmark_rim_candidates\":" + rimCandidates.Count + ",");
+outSb.Append("\"landmark_rim_diameter_at_pick\":" + Num(rimDiameterAtPick) + ",");
+outSb.Append("\"mesh_vertex_count\":" + bindVerts.Length);
 outSb.Append("}");
 
 System.IO.File.WriteAllText(outputPath, outSb.ToString());
 
 string summary = "wrote " + reqClip.Length + " sample(s) across " + uniqueClipNames.Length
     + " clip(s) to " + outputPath + " (bones=" + bones + " blend_shapes=" + sharedMesh.blendShapeCount
-    + " bones_per_vertex_max=" + bonesPerVertexMax + ")";
+    + " bones_per_vertex_max=" + bonesPerVertexMax + " rim_candidates=" + rimCandidates.Count + ")";
 UnityEngine.Debug.Log(summary);
 return summary;
 """.strip("\n")
 
 UNITY_MEASURE_CS = (_UNITY_MEASURE_TEMPLATE
                      .replace("__ASSET_PATH__", ASSET_PATH)
-                     .replace("__APEX_IDX__", str(APEX_IDX))
-                     .replace("__TIP_IDX__", str(TIP_IDX))
-                     .replace("__RIM0_IDX__", str(RIM0_IDX))
-                     .replace("__RIM1_IDX__", str(RIM1_IDX))
+                     .replace("__RIM_Y__", "%.17gf" % _RIM_Y)
+                     .replace("__RIM_RADIUS_MIN__", "%.17gf" % _RIM_RADIUS_MIN)
                      .replace("__SAMPLE_CLIPS__", _cs_string_array(_SAMPLE_CLIPS))
                      .replace("__SAMPLE_FRAMES__", _cs_int_array(_SAMPLE_FRAMES))
                      .replace("__SAMPLE_TIMES__", _cs_float_array(_SAMPLE_TIMES)))
