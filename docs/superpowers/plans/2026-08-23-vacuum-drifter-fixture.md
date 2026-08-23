@@ -1015,54 +1015,141 @@ uv run python -c "import sys,json; sys.path.insert(0,'evals'); import drifter_li
 ```python
 # append to evals/drifter_live.py
 
+BEND_AXIS = None            # set from the Step 1b measurement, per rib
+TENDRIL_KEYS = 9            # keys per looping clip - the wave needs samples
+IDLE_WAVE_DEG = 7.0
+SWIM_WAVE_DEG = 16.0
+WAVE_K = 0.55               # radians of phase LAG per joint down the chain
+SWIM_DRAG = math.pi / 2.0   # tendrils trail the bell by a quarter cycle
+
+
 def _rib_sway(amount: float) -> dict:
-    """Every rib's second joint, rotated about its own local Z."""
-    return {rib_name(r, 2): [0.0, 0.0, amount]
-            for r in range(1, RIBS + 1)}
+    """Every rib's second joint, rotated about the MEASURED bend axis."""
+    return {rib_name(r, 2): _bend(amount) for r in range(1, RIBS + 1)}
 
 
 def _bell_contract(amount: float) -> dict:
     """Ribs curling inward - the pulse."""
     out = {}
     for r in range(1, RIBS + 1):
-        out[rib_name(r, 2)] = [0.0, 0.0, amount]
-        out[rib_name(r, 3)] = [0.0, 0.0, amount * 0.6]
+        out[rib_name(r, 2)] = _bend(amount)
+        out[rib_name(r, 3)] = _bend(amount * 0.6)
+    return out
+
+
+def _tendril_wave(phase: float, amp_deg: float,
+                  per_tendril_offset: bool) -> dict:
+    """A travelling wave down every tendril, not a rigid swing.
+
+    Without this the tendrils are 80 of the rig's 105 joints and NOTHING
+    keys them: they hang off the rib tips and translate with the body like
+    eight stiff rods. This is how games fake trailing dynamics when they do
+    not run cloth or dynamic bones - the same curve applied down the chain
+    with a phase LAG, so the bend propagates from the bell to the tip.
+
+    Rotation is about local X, which for a tendril joint IS world X: Task 3
+    measured drifter_tendril2_05 jointOrient = [0,0,0], so tendril local
+    frames are the world frame. A tendril hangs along -Y, so rotating about
+    X swings it in the YZ plane - along the swim axis, which is what makes
+    it read as drag rather than as a twist.
+
+    per_tendril_offset=True gives each tendril its own phase (an organic,
+    non-uniform shimmer - right for idle). False keeps all eight in phase
+    so they trail TOGETHER, which is what drag looks like.
+    """
+    out = {}
+    for t in range(1, TENDRILS + 1):
+        ring = _rib_ring(t) if per_tendril_offset else 0.0
+        for j in range(1, TENDRIL_JOINTS + 1):
+            angle = amp_deg * math.sin(phase - WAVE_K * j + ring)
+            out[tendril_name(t, j)] = [angle, 0.0, 0.0]
+    return out
+
+
+def _wave_keys(count: int, duration_s: float, amp_deg: float,
+               per_tendril_offset: bool, drag: float = 0.0) -> list:
+    """Phase runs a FULL 2*pi across the clip so the loop closes exactly.
+
+    author_clip(loop=True) refuses a cycle whose last key does not equal
+    its first, and carries the measured difference in the refusal. A whole
+    number of periods makes that exact rather than nearly-exact.
+    """
+    keys = []
+    for n in range(count):
+        frac = n / float(count - 1)
+        phase = 2.0 * math.pi * frac - drag
+        keys.append({"time": duration_s * frac,
+                     "rotations": _tendril_wave(phase, amp_deg,
+                                                per_tendril_offset)})
+    return keys
+
+
+def _bend(amount: float) -> list:
+    """Rotation vector about the MEASURED rib bend axis (Step 1b)."""
+    if BEND_AXIS is None:
+        raise SystemExit("run the Step 1b bend-axis measurement first - the "
+                         "ribs carry non-trivial per-joint orientations and "
+                         "the curl axis is not assumable")
+    return [amount if BEND_AXIS == "X" else 0.0,
+            amount if BEND_AXIS == "Y" else 0.0,
+            amount if BEND_AXIS == "Z" else 0.0]
+
+
+def _merge(*maps) -> dict:
+    out = {}
+    for m in maps:
+        out.update(m)
     return out
 
 
 def author_takes() -> dict:
     ik = solve_tendril_reach()
     clips = []
+    zero_w = {b: 0.0 for b in BLEND_TARGETS}
 
+    # --- drift_idle: ribs sway, tendrils undulate out of phase -----------
+    idle_keys = _wave_keys(TENDRIL_KEYS, 2.0, IDLE_WAVE_DEG,
+                           per_tendril_offset=True)
+    for n, key in enumerate(idle_keys):
+        frac = n / float(TENDRIL_KEYS - 1)
+        key["rotations"] = _merge(
+            key["rotations"],
+            _rib_sway(2.0 * math.sin(2.0 * math.pi * frac)))
+        key["blend_weights"] = dict(zero_w)
     idle = call("author_clip", {
         "root": ROOT, "name": "drift_idle", "fps": FPS,
         "interpolation": "smooth", "loop": True,
-        "keys": [
-            {"time": 0.0, "rotations": _rib_sway(-2.0),
-             "blend_weights": {b: 0.0 for b in BLEND_TARGETS}},
-            {"time": 1.0, "rotations": _rib_sway(2.0),
-             "blend_weights": {b: 0.0 for b in BLEND_TARGETS}},
-            {"time": 2.0, "rotations": _rib_sway(-2.0),
-             "blend_weights": {b: 0.0 for b in BLEND_TARGETS}},
-        ]}).get("result") or {}
-    clips.append(idle)
+        "keys": idle_keys})
+    if idle.get("status") != "ok":
+        raise SystemExit("drift_idle refused: %r" % (idle.get("error"),))
+    clips.append(idle["result"])
 
+    # --- pulse_swim: bell contracts, tendrils TRAIL it -------------------
+    # The root glides forward and RETURNS. It must: author_clip(loop=True)
+    # validates that the last key closes onto the first across rotations,
+    # weights AND root position, so a net-displacing cycle is refused
+    # outright. An in-place cycle still keys the translate channel - the
+    # only one author_clip supports - and a game drives net travel itself.
+    swim_keys = _wave_keys(TENDRIL_KEYS, 1.0, SWIM_WAVE_DEG,
+                           per_tendril_offset=False, drag=SWIM_DRAG)
+    for n, key in enumerate(swim_keys):
+        frac = n / float(TENDRIL_KEYS - 1)
+        pulse = math.sin(2.0 * math.pi * frac)
+        key["rotations"] = _merge(key["rotations"],
+                                  _bell_contract(-22.0 * max(pulse, 0.0)))
+        key["blend_weights"] = {"bell_crease": max(pulse, 0.0),
+                                "tendril_flare": 0.0}
+        key["root_position"] = [0.0, APEX_Y, 0.35 * (1.0 - math.cos(
+            2.0 * math.pi * frac))]
     swim = call("author_clip", {
         "root": ROOT, "name": "pulse_swim", "fps": FPS,
         "interpolation": "smooth", "loop": True,
-        "keys": [
-            {"time": 0.0, "rotations": _bell_contract(0.0),
-             "blend_weights": {"bell_crease": 0.0, "tendril_flare": 0.0},
-             "root_position": [0.0, APEX_Y, 0.0]},
-            {"time": 0.5, "rotations": _bell_contract(-22.0),
-             "blend_weights": {"bell_crease": 1.0, "tendril_flare": 0.0},
-             "root_position": [0.0, APEX_Y, 0.35]},
-            {"time": 1.0, "rotations": _bell_contract(0.0),
-             "blend_weights": {"bell_crease": 0.0, "tendril_flare": 0.0},
-             "root_position": [0.0, APEX_Y, 0.70]},
-        ]}).get("result") or {}
-    clips.append(swim)
+        "keys": swim_keys})
+    if swim.get("status") != "ok":
+        raise SystemExit("pulse_swim refused: %r" % (swim.get("error"),))
+    clips.append(swim["result"])
 
+    # --- tendril_reach: one-shot, IK-derived, no wave --------------------
     reach = call("author_clip", {
         "root": ROOT, "name": "tendril_reach", "fps": FPS,
         "interpolation": "smooth", "loop": False,
@@ -1072,8 +1159,10 @@ def author_takes() -> dict:
              "blend_weights": {"bell_crease": 0.0, "tendril_flare": 0.0}},
             {"time": 1.2, "rotations": ik["rotations"],
              "blend_weights": {"bell_crease": 0.0, "tendril_flare": 1.0}},
-        ]}).get("result") or {}
-    clips.append(reach)
+        ]})
+    if reach.get("status") != "ok":
+        raise SystemExit("tendril_reach refused: %r" % (reach.get("error"),))
+    clips.append(reach["result"])
 
     return {"clips": [{"name": c.get("clip"),
                        "start_frame": c.get("start_frame"),
