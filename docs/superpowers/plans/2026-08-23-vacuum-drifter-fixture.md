@@ -64,7 +64,12 @@ The example code below was written from convention in places. These were correct
 |---|---|---|---|---|
 | vertices | 40 | 400 | 1440 | 3120 |
 
-That is exactly **`20·d·(d+1)`** — 20d axis subdivisions multiplied by d height subdivisions. **The coupling is multiplicative, not additive**, which is #669 stated as a formula: buying ten edge loops along a tendril's length also buys 200-way radial resolution on a 3 cm-thick limb, at 2,200 vertices each. Eight such tendrils would be 66% over this fixture's whole budget. Cubes cost `6d²` faces and spend divisions linearly per axis, which is why the tendrils are cubes.
+That is exactly **`20·d·(d+1)`**, confirmed against the handler source (`maya_plugin/handlers/modeling.py`: `subdivisionsAxis = 20*d`, `subdivisionsHeight = d`). So the two axes do not scale alike — **height buys `d` loops while the axis is forced to `20d`** — and that asymmetry is #669 stated exactly:
+
+- A ten-joint tendril needs **d = 10** for ten length loops. That also forces **200-way radial resolution** on a 3 cm-thick limb: **2,200 vertices each**, so eight tendrils cost **17,600 — 17% over this fixture's entire 15,000 budget** before the bell is added at all.
+- At the d = 12 the cubes actually use, a cylinder would cost 3,120 each: **24,960, or 66% over**.
+
+Either way the conclusion holds. Cubes spend divisions linearly per axis (`6d²` faces), which is why the tendrils are cubes.
 
 ---
 
