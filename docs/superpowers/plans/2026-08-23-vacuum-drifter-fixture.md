@@ -54,7 +54,11 @@ The example code below was written from convention in places. These were correct
 | `get_object_info` | Counts are nested at **`mesh_stats.verts`** / **`mesh_stats.faces`**, not top-level `vertices` / `faces` |
 | `capture_turntable` | Takes **`target`**, and the raw response has **no `path` field** |
 | `bind_skin` | `max_influences` is 1–8, default 4 (confirmed from the signature) |
-| `author_clip` | Has a `loop` flag that validates the cycle closes and refuses with the measured difference (confirmed from the signature) |
+| `author_clip` | Has a `loop` flag that validates the cycle closes — across rotations, weights **and root position**, so a net-displacing cycle is refused outright |
+| `deform` | Takes **`mesh`** / **`deformer`** / **`params`**, not `name`/`kind`/`amount`. **There is no `taper` deformer** — `squash` and `flare` are the bounded ones that work here. `bend`'s curvature is in DEGREES (#636) |
+| `create_blendshape` | Targets are `{name, target_mesh}`, not `{mesh, alias}`. Targets really are **CONSUMED** — `blendshape.py:196` deletes every resolved target unconditionally, so the gate must not delete them again |
+
+**Four of this plan's convention-derived parameter names were wrong** (`combine`, `get_object_info`, `capture_turntable`, `deform`), and every signature actually read from `src/maya_mcp/server.py` before use has held. Read the signature. Do not infer it.
 
 ### #669, measured (Task 4) — the first cost table this ticket has ever had
 
