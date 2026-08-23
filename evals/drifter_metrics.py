@@ -77,11 +77,23 @@ def compare_samples(declared, measured, tol: float) -> List[dict]:
             raise ValueError(
                 "no measurement for clip %s frame %d" % (k[0], k[1]))
         for metric in METRICS:
-            delta = abs(float(want[metric]) - float(got[metric]))
+            declared_val = float(want[metric])
+            measured_val = float(got[metric])
+            if not (math.isfinite(declared_val) and math.isfinite(measured_val)):
+                # A NaN delta compares False against any tol (NaN > tol is
+                # always False), so a corrupted measurement would pass
+                # silently. Treat non-finite on either side as a violation
+                # in its own right; delta is meaningless here, so report it
+                # as infinite rather than inventing a number.
+                out.append({"clip": k[0], "frame": k[1], "metric": metric,
+                            "declared": declared_val,
+                            "measured": measured_val, "delta": math.inf})
+                continue
+            delta = abs(declared_val - measured_val)
             if delta > tol:
                 out.append({"clip": k[0], "frame": k[1], "metric": metric,
-                            "declared": float(want[metric]),
-                            "measured": float(got[metric]), "delta": delta})
+                            "declared": declared_val,
+                            "measured": measured_val, "delta": delta})
     return out
 
 

@@ -99,6 +99,38 @@ def test_compare_samples_refuses_a_missing_measurement():
         raise AssertionError("expected ValueError")
 
 
+def test_compare_samples_flags_a_nan_measured_value_as_a_violation():
+    measured = [dict(s) for s in DECLARED]
+    measured[1]["apex_to_tip"] = float("nan")
+    bad = dm.compare_samples(DECLARED, measured, 1e-3)
+    assert len(bad) == 1
+    assert bad[0]["clip"] == "pulse_swim"
+    assert bad[0]["frame"] == 15
+    assert bad[0]["metric"] == "apex_to_tip"
+    assert math.isnan(bad[0]["measured"])
+    assert bad[0]["delta"] == math.inf
+
+
+def test_compare_samples_flags_a_nan_declared_value_as_a_violation():
+    declared = [dict(s) for s in DECLARED]
+    declared[0]["rim_diameter"] = float("nan")
+    measured = [dict(s) for s in DECLARED]
+    bad = dm.compare_samples(declared, measured, 1e-3)
+    assert len(bad) == 1
+    assert bad[0]["clip"] == "pulse_swim"
+    assert bad[0]["frame"] == 0
+    assert bad[0]["metric"] == "rim_diameter"
+    assert math.isnan(bad[0]["declared"])
+    assert bad[0]["delta"] == math.inf
+
+
+def test_compare_samples_deliberately_ignores_unmatched_extra_measurements():
+    measured = [dict(s) for s in DECLARED]
+    measured.append({"clip": "pulse_swim", "frame": 999,
+                      "rim_diameter": 42.0, "apex_to_tip": 42.0})
+    assert dm.compare_samples(DECLARED, measured, 1e-3) == []
+
+
 def test_seam_violations_ignores_a_one_shot_clip():
     samples = [
         {"clip": "tendril_reach", "frame": 0, "rim_diameter": 1.2,
