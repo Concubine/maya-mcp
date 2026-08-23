@@ -16,7 +16,7 @@ Ticket: [#743](http://localhost:3000/issues/743)
 Every task's requirements implicitly include this section.
 
 - **Metre-native.** `maya_export_fbx(metres_per_unit=1.0)`; only 1.0 exports. Assert `export_metres_per_unit == 1.0`, never the `linear_unit` string.
-- **Vertex ceiling: 15000 total.** The gate asserts the ceiling and reports the actual count. Exceeding it FAILS the gate.
+- **Vertex ceiling: 30000 total.** Raised from 15000 on 2026-08-23 at the user's direction, to buy round tendril cross-sections and a shaped bell. Still an honest game budget — modern hero characters run 30–80k. The gate asserts the ceiling and reports the actual count. Exceeding it FAILS the gate; it is not to be raised again to accommodate a mesh.
 - **Rig: exactly 105 joints** — 1 root, 8 ribs × 3, 8 tendrils × 10.
 - **fps: 30**, declared explicitly and restated at export.
 - **Loop-seam tolerance: 1e-4** (metres, on the §8 metrics, in the consumer).
@@ -541,12 +541,27 @@ def tendril_name(tendril: int, joint: int) -> str:
     return "drifter_tendril%d_%02d" % (tendril, joint)
 
 
+# Per-tendril length factors. Deliberately irregular - eight identical
+# clones is most of what makes a creature read as a prop. Every joint chain
+# is scaled by its factor and its GEOMETRY matches, so no tip joint is ever
+# left owning zero vertices (a joint owning nothing produces near-zero
+# displacement, which looks exactly like success in any check that does not
+# measure movement).
+TENDRIL_LENGTH_FACTOR = (1.00, 0.78, 0.94, 0.66, 0.99, 0.83, 0.90, 0.72)
+
+
+def tendril_step(tendril: int) -> float:
+    """Joint spacing for one tendril, from its own length factor."""
+    return (TENDRIL_SPAN * TENDRIL_LENGTH_FACTOR[tendril - 1]
+            / TENDRIL_JOINTS)
+
+
 def build_joint_specs() -> list:
     """The 105 joints, as create_skeleton's explicit `joints` form.
 
     Tendrils descend from rib TIPS, not from the root, so the hierarchy is
-    genuinely deep and a weight error at the bell margin propagates three
-    metres down a tendril where a measurement cannot miss it.
+    genuinely deep and a weight error at the bell margin propagates metres
+    down a tendril where a measurement cannot miss it.
     """
     specs = [{"name": ROOT, "position": [0.0, APEX_Y, 0.0]}]
     for rib in range(1, RIBS + 1):
@@ -562,11 +577,12 @@ def build_joint_specs() -> list:
                                        radius * math.sin(theta)],
                           "parent": parent})
             parent = name
+        step = tendril_step(rib)
         for j in range(1, TENDRIL_JOINTS + 1):
             name = tendril_name(rib, j)
             specs.append({"name": name,
                           "position": [RIM_R * math.cos(theta),
-                                       RIM_Y - TENDRIL_STEP * j,
+                                       RIM_Y - step * j,
                                        RIM_R * math.sin(theta)],
                           "parent": parent})
             parent = name
@@ -706,47 +722,99 @@ Expected: vertex counts rising steeply with `divisions`. **Write the actual numb
 # append to evals/drifter_live.py
 
 BELL_DIVISIONS = 4          # sphere: 400*d^2 faces -> ~6.4k
-TENDRIL_DIVISIONS = 12      # cube: 6*d^2 faces -> ~864, 12 loops of length
+TENDRIL_DIVISIONS = 10      # cylinder: 20*d*(d+1) verts -> 2200, ROUND
 BELL_SCALE = [1.2, 0.9, 1.2]
-TENDRIL_SCALE = [0.08, TENDRIL_SPAN, 0.08]
+
+# Per-tendril base thickness. Varied with the length factors so the eight
+# read as a creature's appendages rather than eight copies of one prop.
+TENDRIL_THICKNESS = (0.11, 0.06, 0.09, 0.05, 0.10, 0.07, 0.085, 0.055)
 
 
 def build_geometry() -> dict:
-    """One bell plus eight tendrils, combined into ONE mesh.
+    """One shaped bell plus eight varied tendrils, combined into ONE mesh.
 
     One mesh means one skinCluster means one SkinnedMeshRenderer in Unity,
     which is the shape a game character actually takes.
+
+    Tendrils are CYLINDERS now that the ceiling allows it (30000): a cube
+    gives a square cross-section that reads as a rod however it is
+    textured, and cross-section is geometry, not material. Each one is
+    tapered with `flare` - the deformer's own docs call it "THE taper, for
+    a limb thick at one end and thin at the other" - and every other one
+    gets a `twist` so they do not read as clones.
     """
     parts = []
-    bell = (call("create_primitive",
-                 {"kind": "sphere", "name": "drifter_bell",
-                  "divisions": BELL_DIVISIONS,
-                  "translate": [0.0, (APEX_Y + RIM_Y) / 2.0, 0.0],
-                  "scale": BELL_SCALE}).get("result") or {})["name"]
-    parts.append(bell)
 
+    # --- the bell: a squashed sphere, then a RADIAL ripple for lobes -----
+    bell = call("create_primitive",
+                {"kind": "sphere", "name": "drifter_bell",
+                 "divisions": BELL_DIVISIONS,
+                 "translate": [0.0, (APEX_Y + RIM_Y) / 2.0, 0.0],
+                 "scale": BELL_SCALE})
+    if bell.get("status") != "ok":
+        raise SystemExit("bell: %r" % (bell.get("error"),))
+    bell_name = bell["result"]["name"]
+    # `wave` is a CONCENTRIC RADIAL ripple bounded by minRadius/maxRadius -
+    # a scalloped rim rather than a smooth dome edge. It takes NO
+    # lowBound/highBound, unlike bend/squash/twist/flare/sine.
+    w = call("deform", {"mesh": bell_name, "deformer": "wave",
+                        "delete_history_after": True,
+                        "params": {"amplitude": 0.055, "wavelength": 0.42,
+                                   "minRadius": 0.18, "maxRadius": 1.0,
+                                   "dropoff": -0.35}})
+    if w.get("status") != "ok":
+        raise SystemExit("bell wave: %r" % (w.get("error"),))
+    parts.append(bell_name)
+
+    # --- eight tendrils, none of them identical --------------------------
     for t in range(1, TENDRILS + 1):
         theta = _rib_ring(t)
-        name = (call("create_primitive",
-                     {"kind": "cube", "name": "drifter_tendril_geo%d" % t,
-                      "divisions": TENDRIL_DIVISIONS,
-                      "translate": [RIM_R * math.cos(theta),
-                                    (RIM_Y + TENDRIL_BOTTOM_Y) / 2.0,
-                                    RIM_R * math.sin(theta)],
-                      "scale": TENDRIL_SCALE}).get("result") or {})["name"]
+        length = TENDRIL_SPAN * TENDRIL_LENGTH_FACTOR[t - 1]
+        thick = TENDRIL_THICKNESS[t - 1]
+        res = call("create_primitive",
+                   {"kind": "cylinder", "name": "drifter_tendril_geo%d" % t,
+                    "divisions": TENDRIL_DIVISIONS,
+                    "translate": [RIM_R * math.cos(theta),
+                                  RIM_Y - length / 2.0,
+                                  RIM_R * math.sin(theta)],
+                    "scale": [thick, length, thick]})
+        if res.get("status") != "ok":
+            raise SystemExit("tendril %d: %r" % (t, res.get("error")))
+        name = res["result"]["name"]
+
+        # Taper: full thickness at the attachment, drawn to a fine tip.
+        f = call("deform", {"mesh": name, "deformer": "flare",
+                            "delete_history_after": True,
+                            "params": {"startFlareX": 1.0, "startFlareZ": 1.0,
+                                       "endFlareX": 0.18, "endFlareZ": 0.18,
+                                       "curve": 0.5}})
+        if f.get("status") != "ok":
+            raise SystemExit("tendril %d flare: %r" % (t, f.get("error")))
+
+        if t % 2 == 0:      # every other one corkscrews
+            tw = call("deform", {"mesh": name, "deformer": "twist",
+                                 "delete_history_after": True,
+                                 "params": {"startAngle": 0.0,
+                                            "endAngle": 110.0}})
+            if tw.get("status") != "ok":
+                raise SystemExit("tendril %d twist: %r" % (t, tw.get("error")))
         parts.append(name)
 
-    combined = (call("combine", {"names": parts,
-                                 "new_name": "drifter_body"}).get("result")
-                or {})["name"]
-    info = call("get_object_info", {"name": combined}).get("result") or {}
-    verts = int(info.get("vertices", 0))
+    combined = call("combine", {"names": parts, "name": "drifter_body"})
+    if combined.get("status") != "ok":
+        raise SystemExit("combine: %r" % (combined.get("error"),))
+    mesh = combined["result"]["name"]
+
+    info = call("get_object_info", {"name": mesh})
+    if info.get("status") != "ok":
+        raise SystemExit("get_object_info: %r" % (info.get("error"),))
+    verts = int(((info["result"] or {}).get("mesh_stats") or {}).get("verts", 0))
     if verts > VERTEX_CEILING:
         raise SystemExit(
             "drifter_body has %d vertices, ceiling is %d - lower "
-            "BELL_DIVISIONS or TENDRIL_DIVISIONS rather than raising the "
-            "ceiling" % (verts, VERTEX_CEILING))
-    return {"mesh": combined, "vertices": verts, "parts": parts}
+            "BELL_DIVISIONS or TENDRIL_DIVISIONS. Do NOT raise the ceiling"
+            % (verts, VERTEX_CEILING))
+    return {"mesh": mesh, "vertices": verts, "parts": parts}
 ```
 
 - [ ] **Step 3: Run it and confirm the budget holds**
