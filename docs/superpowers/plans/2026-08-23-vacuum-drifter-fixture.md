@@ -43,6 +43,29 @@ Every task's requirements implicitly include this section.
 
 The Maya's Python namespace still carries variables from the #737 session (`poses`, `chunks`, `bbox_height`, …). Harmless — the gate opens with `new_scene` — but do not assume a clean namespace when using `execute_python`.
 
+### Tool signatures VERIFIED against the running plugin (corrections to this plan's example code)
+
+The example code below was written from convention in places. These were corrected during live runs — trust this table over any code block in this document, and read the real signature from `src/maya_mcp/server.py` before assuming any parameter this table does not name.
+
+| Call | Correction |
+|---|---|
+| `new_scene` | **Requires `confirm=True`**, and its absence fails **silently** — `live_call` returns the raw frame rather than raising. Check `status != "ok"` on **every** mutating call |
+| `combine` | The new name parameter is **`name`**, not `new_name` |
+| `get_object_info` | Counts are nested at **`mesh_stats.verts`** / **`mesh_stats.faces`**, not top-level `vertices` / `faces` |
+| `capture_turntable` | Takes **`target`**, and the raw response has **no `path` field** |
+| `bind_skin` | `max_influences` is 1–8, default 4 (confirmed from the signature) |
+| `author_clip` | Has a `loop` flag that validates the cycle closes and refuses with the measured difference (confirmed from the signature) |
+
+### #669, measured (Task 4) — the first cost table this ticket has ever had
+
+`create_primitive(kind="cylinder", divisions=d)` vertex counts:
+
+| divisions | 1 | 4 | 8 | 12 |
+|---|---|---|---|---|
+| vertices | 40 | 400 | 1440 | 3120 |
+
+That is exactly **`20·d·(d+1)`** — 20d axis subdivisions multiplied by d height subdivisions. **The coupling is multiplicative, not additive**, which is #669 stated as a formula: buying ten edge loops along a tendril's length also buys 200-way radial resolution on a 3 cm-thick limb, at 2,200 vertices each. Eight such tendrils would be 66% over this fixture's whole budget. Cubes cost `6d²` faces and spend divisions linearly per axis, which is why the tendrils are cubes.
+
 ---
 
 ## File Structure
