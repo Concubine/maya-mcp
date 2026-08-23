@@ -39,7 +39,9 @@ BASELINE_PATH = os.path.join(OUT_DIR, "baseline.json")
 
 # --- Global constraints, as constants -------------------------------------
 FPS = 30
-VERTEX_CEILING = 15000
+VERTEX_CEILING = 30000      # raised deliberately to afford round tendrils
+                             # (#743 rework) - do NOT raise it further; lower
+                             # BELL_DIVISIONS or TENDRIL_DIVISIONS instead
 MAX_INFLUENCES = 8          # deliberately above Unity's 4 - see docstring
 SEAM_TOL = 1e-4             # metres, on the frame-invariant metrics
 COMPARE_TOL = 1e-3          # metres, Maya-declared vs Unity-measured
@@ -53,8 +55,7 @@ APEX_Y = 4.0                # bell apex
 RIM_Y = 3.1                 # bell equator, where tendrils start
 RIM_R = 0.6                 # bell radius: 1.2 m across
 TENDRIL_BOTTOM_Y = 0.1
-TENDRIL_SPAN = RIM_Y - TENDRIL_BOTTOM_Y          # 3.0 m
-TENDRIL_STEP = TENDRIL_SPAN / TENDRIL_JOINTS     # 0.3 m per joint
+TENDRIL_SPAN = RIM_Y - TENDRIL_BOTTOM_Y          # 3.0 m nominal
 
 ROOT = "drifter_root"
 
@@ -72,12 +73,29 @@ def tendril_name(tendril: int, joint: int) -> str:
     return "drifter_tendril%d_%02d" % (tendril, joint)
 
 
+# Per-tendril length factors. Deliberately irregular - eight identical
+# clones is most of what makes a creature read as a prop. Every joint chain
+# is scaled by its factor and its GEOMETRY matches, so no tip joint is ever
+# left owning zero vertices (a joint owning nothing produces near-zero
+# displacement, which looks exactly like success in any check that does not
+# measure movement).
+TENDRIL_LENGTH_FACTOR = (1.00, 0.78, 0.94, 0.66, 0.99, 0.83, 0.90, 0.72)
+
+
+def tendril_step(tendril: int) -> float:
+    """Joint spacing for one tendril, from its own length factor."""
+    return (TENDRIL_SPAN * TENDRIL_LENGTH_FACTOR[tendril - 1]
+            / TENDRIL_JOINTS)
+
+
 def build_joint_specs() -> list:
     """The 105 joints, as create_skeleton's explicit `joints` form.
 
     Tendrils descend from rib TIPS, not from the root, so the hierarchy is
-    genuinely deep and a weight error at the bell margin propagates three
-    metres down a tendril where a measurement cannot miss it.
+    genuinely deep and a weight error at the bell margin propagates down a
+    tendril where a measurement cannot miss it. Each tendril's joint
+    spacing comes from its own TENDRIL_LENGTH_FACTOR, so the chain's total
+    length matches that tendril's geometry length exactly.
     """
     specs = [{"name": ROOT, "position": [0.0, APEX_Y, 0.0]}]
     for rib in range(1, RIBS + 1):
@@ -93,11 +111,12 @@ def build_joint_specs() -> list:
                                        radius * math.sin(theta)],
                           "parent": parent})
             parent = name
+        step = tendril_step(rib)
         for j in range(1, TENDRIL_JOINTS + 1):
             name = tendril_name(rib, j)
             specs.append({"name": name,
                           "position": [RIM_R * math.cos(theta),
-                                       RIM_Y - TENDRIL_STEP * j,
+                                       RIM_Y - step * j,
                                        RIM_R * math.sin(theta)],
                           "parent": parent})
             parent = name
@@ -176,20 +195,31 @@ def measure_cylinder_coupling() -> dict:
 
 
 BELL_DIVISIONS = 4          # sphere: 400*d^2 faces -> ~6.4k
-TENDRIL_DIVISIONS = 12      # cube: 6*d^2 faces -> ~864, 12 loops of length
+TENDRIL_DIVISIONS = 10      # cylinder: 20*d*(d+1) verts -> ~2200, ROUND
 BELL_SCALE = [1.2, 0.9, 1.2]
-TENDRIL_SCALE = [0.08, TENDRIL_SPAN, 0.08]
+
+# Per-tendril base thickness. Varied with the length factors so the eight
+# read as a creature's appendages rather than eight copies of one prop.
+TENDRIL_THICKNESS = (0.11, 0.06, 0.09, 0.05, 0.10, 0.07, 0.085, 0.055)
 
 
 def build_geometry() -> dict:
-    """One bell plus eight tendrils, combined into ONE mesh.
+    """One shaped bell plus eight varied tendrils, combined into ONE mesh.
 
     One mesh means one skinCluster means one SkinnedMeshRenderer in Unity,
-    which is the shape a game character actually takes. Tendrils are
-    CUBES, not cylinders - see measure_cylinder_coupling's docstring and
-    the #669 datapoint it records.
+    which is the shape a game character actually takes.
+
+    Tendrils are CYLINDERS now that the ceiling allows it (30000): a cube
+    gives a square cross-section that reads as a rod however it is
+    textured, and cross-section is geometry, not material. Each one is
+    tapered with `flare` - the deformer's own docs call it "THE taper, for
+    a limb thick at one end and thin at the other" - and every other one
+    gets a `twist` so they do not read as clones.
     """
     parts = []
+    tendril_diagnostics = []
+
+    # --- the bell: a squashed sphere, then a RADIAL ripple for lobes -----
     bell_res = call("create_primitive",
                     {"kind": "sphere", "name": "drifter_bell",
                      "divisions": BELL_DIVISIONS,
@@ -199,21 +229,96 @@ def build_geometry() -> dict:
         raise SystemExit("create_primitive(bell) failed: %r"
                          % (bell_res.get("error"),))
     bell = (bell_res.get("result") or {})["name"]
+    # `wave` is a CONCENTRIC RADIAL ripple bounded by minRadius/maxRadius -
+    # a scalloped rim rather than a smooth dome edge. It takes NO
+    # lowBound/highBound, unlike bend/squash/twist/flare/sine.
+    #
+    # The brief's original numbers (amplitude=0.055, wavelength=0.42,
+    # minRadius=0.18) were measured LIVE to be a no-op: the tool's own
+    # response carried the warning "wave moved the mesh by 0.0110369 (mesh
+    # extent 1.92094) - that is not a visible deformation" - 0.6% of the
+    # bell's extent, invisible in every capture. Retuned live against an
+    # isolated probe sphere (same divisions/scale) until the ripple was
+    # visibly a ridged rim rather than a smooth ellipsoid, without turning
+    # the bell into a stack of rings: amplitude 0.18 (vs 0.055), wavelength
+    # 0.25 (vs 0.42, more ripples across the radius), minRadius 0.35 (vs
+    # 0.18, keeps the crown smooth and concentrates the ripple toward the
+    # equator/rim). Measured max_displacement on the probe: 0.0363 m on a
+    # 1.92 m extent (parts of #669's live-tuning pattern - see also the
+    # blendshape deformers in build_blendshapes, tuned the same way).
+    wave_res = call("deform", {"mesh": bell, "deformer": "wave",
+                               "delete_history_after": True,
+                               "params": {"amplitude": 0.18,
+                                          "wavelength": 0.25,
+                                          "minRadius": 0.35, "maxRadius": 1.0,
+                                          "dropoff": -0.35}})
+    if wave_res.get("status") != "ok":
+        raise SystemExit("deform(bell wave) failed: %r"
+                         % (wave_res.get("error"),))
+    bell_wave_displacement = (wave_res.get("result") or {}).get(
+        "max_displacement")
+    bell_wave_warnings = (wave_res.get("result") or {}).get("warnings") or []
     parts.append(bell)
 
+    # --- eight tendrils, none of them identical --------------------------
     for t in range(1, TENDRILS + 1):
         theta = _rib_ring(t)
+        length = TENDRIL_SPAN * TENDRIL_LENGTH_FACTOR[t - 1]
+        thick = TENDRIL_THICKNESS[t - 1]
         tendril_res = call("create_primitive",
-                           {"kind": "cube", "name": "drifter_tendril_geo%d" % t,
+                           {"kind": "cylinder",
+                            "name": "drifter_tendril_geo%d" % t,
                             "divisions": TENDRIL_DIVISIONS,
                             "translate": [RIM_R * math.cos(theta),
-                                          (RIM_Y + TENDRIL_BOTTOM_Y) / 2.0,
+                                          RIM_Y - length / 2.0,
                                           RIM_R * math.sin(theta)],
-                            "scale": TENDRIL_SCALE})
+                            "scale": [thick, length, thick]})
         if tendril_res.get("status") != "ok":
             raise SystemExit("create_primitive(tendril %d) failed: %r"
                              % (t, tendril_res.get("error")))
         name = (tendril_res.get("result") or {})["name"]
+
+        # Taper: full thickness at the attachment, drawn to a fine tip.
+        flare_res = call("deform", {"mesh": name, "deformer": "flare",
+                                    "delete_history_after": True,
+                                    "params": {"startFlareX": 1.0,
+                                               "startFlareZ": 1.0,
+                                               "endFlareX": 0.18,
+                                               "endFlareZ": 0.18,
+                                               "curve": 0.5}})
+        if flare_res.get("status") != "ok":
+            raise SystemExit("deform(tendril %d flare) failed: %r"
+                             % (t, flare_res.get("error")))
+        flare_displacement = (flare_res.get("result") or {}).get(
+            "max_displacement")
+
+        twist_displacement = None
+        if t % 2 == 0:      # every other one corkscrews
+            # NOTE (measured live): twist reports a non-zero
+            # max_displacement (it genuinely rotates the decagon's facet
+            # vertices around the axis - this is not a no-op deformer call)
+            # but on a flare-tapered cylinder whose cross-section stays
+            # circular (startFlareX == startFlareZ, endFlareX == endFlareZ
+            # at every point along the length) that rotation is invisible in
+            # a plain grey shaded capture - there is no texture seam or
+            # asymmetric silhouette for the eye to read as a corkscrew. See
+            # task-3-4-rebuild-report.md for the isolated-probe capture that
+            # confirms this.
+            twist_res = call("deform", {"mesh": name, "deformer": "twist",
+                                        "delete_history_after": True,
+                                        "params": {"startAngle": 0.0,
+                                                   "endAngle": 110.0}})
+            if twist_res.get("status") != "ok":
+                raise SystemExit("deform(tendril %d twist) failed: %r"
+                                 % (t, twist_res.get("error")))
+            twist_displacement = (twist_res.get("result") or {}).get(
+                "max_displacement")
+        tendril_diagnostics.append({
+            "tendril": t, "length": length, "thickness": thick,
+            "twisted": t % 2 == 0,
+            "flare_max_displacement": flare_displacement,
+            "twist_max_displacement": twist_displacement,
+        })
         parts.append(name)
 
     combine_res = call("combine", {"names": parts, "name": "drifter_body"})
@@ -231,7 +336,10 @@ def build_geometry() -> dict:
             "drifter_body has %d vertices, ceiling is %d - lower "
             "BELL_DIVISIONS or TENDRIL_DIVISIONS rather than raising the "
             "ceiling" % (verts, VERTEX_CEILING))
-    return {"mesh": combined, "vertices": verts, "parts": parts}
+    return {"mesh": combined, "vertices": verts, "parts": parts,
+            "bell_wave_max_displacement": bell_wave_displacement,
+            "bell_wave_warnings": bell_wave_warnings,
+            "tendril_diagnostics": tendril_diagnostics}
 
 
 def bind_and_weight(mesh: str) -> dict:
