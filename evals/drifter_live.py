@@ -234,6 +234,57 @@ def build_geometry() -> dict:
     return {"mesh": combined, "vertices": verts, "parts": parts}
 
 
+def bind_and_weight(mesh: str) -> dict:
+    """Bind ABOVE Unity's limit on purpose, then measure what we made.
+
+    max_influences=8 constructs the truncation case; bound at the default
+    4 the asset could never exceed Unity's cap and the question could not
+    arise. over_four PREDICTS a consumer-side difference before we go
+    looking for one.
+    """
+    bind_res = call("bind_skin", {"mesh": mesh, "root": ROOT,
+                                  "max_influences": MAX_INFLUENCES,
+                                  "method": "closestDistance"})
+    if bind_res.get("status") != "ok":
+        raise SystemExit("bind_skin failed: %r" % (bind_res.get("error"),))
+    bind = bind_res.get("result") or {}
+    if int(bind.get("unweighted_vertices", -1)) != 0:
+        raise SystemExit(
+            "%d unweighted vertices - a vertex no joint owns stays behind "
+            "when the creature moves, and nothing looks wrong at bind time"
+            % bind.get("unweighted_vertices"))
+
+    before = call("weight_report", {"mesh": mesh}).get("result") or {}
+    smooth_res = call("smooth_weights", {"mesh": mesh, "iterations": 2})
+    if smooth_res.get("status") != "ok":
+        raise SystemExit("smooth_weights failed: %r" % (smooth_res.get("error"),))
+    after = call("weight_report", {"mesh": mesh}).get("result") or {}
+
+    facts_before = dm.histogram_facts(before.get("histogram", []))
+    facts_after = dm.histogram_facts(after.get("histogram", []))
+    return {"skin_cluster": bind.get("skin_cluster"),
+            "unweighted": int(after.get("unweighted_vertices", 0)),
+            "histogram": after.get("histogram", []),
+            "facts_before_smoothing": facts_before,
+            "facts": facts_after,
+            "smoothing_raised_max": (facts_after["max_influences"]
+                                     > facts_before["max_influences"])}
+
+
+def probe_mirror(mesh: str) -> dict:
+    """Ribs at 90 and 270 degrees mirror ONTO THEMSELVES.
+
+    mirror_weights pairs positionally and has only ever seen a humanoid,
+    where nothing sits on the symmetry plane except an excluded spine. A
+    self-paired joint is a case it has never met. Whatever it does is a
+    FINDING, not an obstacle - record it and move on.
+    """
+    res = call("mirror_weights", {"mesh": mesh, "root": ROOT})
+    return {"status": res.get("status"),
+            "error": res.get("error"),
+            "result": res.get("result")}
+
+
 if __name__ == "__main__":
     preflight()
     result = build_skeleton()
