@@ -52,3 +52,73 @@ def rim_diameter(points: List[Point]) -> float:
 def apex_to_tip(apex: Point, tip: Point) -> float:
     """Distance from the bell apex vertex to a named tendril's tip vertex."""
     return distance(apex, tip)
+
+
+METRICS = ("rim_diameter", "apex_to_tip")
+
+
+def _key(sample) -> tuple:
+    return (sample["clip"], int(sample["frame"]))
+
+
+def compare_samples(declared, measured, tol: float) -> List[dict]:
+    """Declared-vs-measured, per clip, per frame, per metric.
+
+    Refuses a missing measurement rather than skipping it: a consumer gate
+    that silently compares the samples it happens to have is how a partial
+    run reads as a pass.
+    """
+    have = {_key(s): s for s in measured}
+    out = []
+    for want in declared:
+        k = _key(want)
+        got = have.get(k)
+        if got is None:
+            raise ValueError(
+                "no measurement for clip %s frame %d" % (k[0], k[1]))
+        for metric in METRICS:
+            delta = abs(float(want[metric]) - float(got[metric]))
+            if delta > tol:
+                out.append({"clip": k[0], "frame": k[1], "metric": metric,
+                            "declared": float(want[metric]),
+                            "measured": float(got[metric]), "delta": delta})
+    return out
+
+
+def seam_violations(samples, looping_clips, tol: float) -> List[dict]:
+    """First frame vs last frame, for looping clips only.
+
+    author_clip's own `loop=True` already refuses a cycle that does not
+    close IN MAYA. This is the other half: whether the seam survives the
+    consumer's import, resampling and tangent handling.
+    """
+    looping = set(looping_clips)
+    by_clip: dict = {}
+    for s in samples:
+        if s["clip"] in looping:
+            by_clip.setdefault(s["clip"], []).append(s)
+    out = []
+    for clip, rows in sorted(by_clip.items()):
+        rows = sorted(rows, key=lambda r: int(r["frame"]))
+        first, last = rows[0], rows[-1]
+        for metric in METRICS:
+            delta = abs(float(first[metric]) - float(last[metric]))
+            if delta > tol:
+                out.append({"clip": clip, "metric": metric,
+                            "first": float(first[metric]),
+                            "last": float(last[metric]), "delta": delta})
+    return out
+
+
+def histogram_facts(buckets) -> dict:
+    """Flatten weight_report's influence histogram into three numbers.
+
+    over_four is the one that matters: Unity truncates to four influences
+    per vertex and renormalises, so a non-zero count here PREDICTS a
+    consumer-side deformation difference before we go looking for one.
+    """
+    vertices = sum(int(b["vertices"]) for b in buckets)
+    over = sum(int(b["vertices"]) for b in buckets
+               if int(b["influences"]) > 4)
+    top = max((int(b["influences"]) for b in buckets), default=0)
+    return {"max_influences": top, "vertices": vertices, "over_four": over}
