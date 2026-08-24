@@ -50,8 +50,176 @@ def rim_diameter(points: List[Point]) -> float:
 
 
 def apex_to_tip(apex: Point, tip: Point) -> float:
-    """Distance from the bell apex vertex to a named tendril's tip vertex."""
+    """Distance from the bell apex point to the tendril tip point.
+
+    Both arguments are CENTROIDS of a landmark set, not single vertices -
+    see the landmark section below for why a single vertex cannot be used.
+    """
     return distance(apex, tip)
+
+
+# --- Landmarks: index-free selection, aggregate measurement ----------------
+#
+# MEASURED in the first live Unity run (#743 Task 10) and this is the whole
+# reason the rule below is shaped the way it is:
+#
+#   1. Unity's FBX import split the drifter's 23,922 vertices into 93,344.
+#      UV/hard-normal seams duplicate vertices at the same POSITION, and no
+#      importer setting (weld, optimize) collapses them. So neither Maya's
+#      .vtx[] index nor the raw FBX control-point index names the same
+#      physical point in both engines, and any RAW mean over vertices is
+#      biased by however many duplicates each engine happens to carry.
+#   2. The 12 lowest vertices on a tapered tendril cap sit at 0.0, 1.7,
+#      1.7, 3.5, 3.5, 5.2, 5.2, 6.9, 6.9, 8.6, 8.6 and 10.3 mm from each
+#      other - all DISTINCT positions. "The lowest vertex" is therefore a
+#      coin-flip between a dozen candidates spread over a centimetre, and
+#      float noise across an FBX round-trip is more than enough to flip it.
+#      The 26/42 deltas of 0.6-12.1 mm that failed the first consumer gate
+#      were exactly that candidate spread, not a skinning error.
+#
+# So a landmark is (a) SELECTED as a set, by a geometric band rather than
+# an extremum, (b) DEDUPED by quantised position so a split mesh weighs the
+# same as an unsplit one, and (c) MEASURED as an aggregate - a centroid or
+# a mean radius - which barely moves when the two engines disagree about
+# one member. Selection happens once at bind in each engine independently;
+# the resulting indices are then tracked per frame, which is what keeps a
+# metric following the SAME physical feature as it deforms.
+
+POSITION_QUANTUM = 1e-4
+"""Position-key grid, in metres (0.1 mm).
+
+Coarse enough to collapse a split vertex onto its twin across an FBX
+round-trip, fine enough to keep the 1.7 mm-apart cap candidates distinct.
+"""
+
+
+def position_key(p: Point, quantum: float = POSITION_QUANTUM) -> tuple:
+    """Quantised position - a split vertex and its twin share one key."""
+    return (int(round(p[0] / quantum)), int(round(p[1] / quantum)),
+            int(round(p[2] / quantum)))
+
+
+def dedupe_by_position(points: List[Point], indices: Sequence[int],
+                       quantum: float = POSITION_QUANTUM) -> List[int]:
+    """One index per distinct position, first occurrence wins, order kept.
+
+    Order is preserved rather than sorted so a caller can reason about
+    which index survived; first-wins makes the choice deterministic.
+    """
+    seen = set()
+    out = []
+    for i in indices:
+        k = position_key(points[i], quantum)
+        if k not in seen:
+            seen.add(k)
+            out.append(i)
+    return out
+
+
+def low_band_indices(points: List[Point], half_width: float) -> List[int]:
+    """Indices within `half_width` of the mesh's MINIMUM y.
+
+    A band, not an argmin: the set is stable even when float noise flips
+    which individual vertex is lowest, because a sub-millimetre flip does
+    not move anyone across a centimetre-wide boundary.
+    """
+    if not points:
+        raise ValueError("low_band_indices needs at least 1 point")
+    lo = min(p[1] for p in points)
+    return [i for i, p in enumerate(points) if p[1] - lo <= half_width]
+
+
+def high_band_indices(points: List[Point], half_width: float) -> List[int]:
+    """Indices within `half_width` of the mesh's MAXIMUM y."""
+    if not points:
+        raise ValueError("high_band_indices needs at least 1 point")
+    hi = max(p[1] for p in points)
+    return [i for i, p in enumerate(points) if hi - p[1] <= half_width]
+
+
+def rim_band_indices(points: List[Point], rim_y: float, half_width: float,
+                     radius_min: float) -> List[int]:
+    """Indices near the bell's rim height and off its vertical axis.
+
+    The radius floor is load-bearing, not tidiness: each of the eight
+    tendrils is BUILT starting at the bell's rim, so each one's polar
+    cap-centre vertex also sits at rim height, ~0.02 m from the axis. A
+    plain Y band catches 1,815 vertices on this mesh and most of them are
+    those cap clusters.
+    """
+    out = []
+    for i, p in enumerate(points):
+        radius = math.sqrt(p[0] ** 2 + p[2] ** 2)
+        if abs(p[1] - rim_y) < half_width and radius > radius_min:
+            out.append(i)
+    return out
+
+
+def lowest_n(points: List[Point], indices: Sequence[int], n: int) -> List[int]:
+    """The `n` indices with the smallest y, ties broken by index.
+
+    Rank selection, not thresholding, and it exists because a threshold
+    could not make the two engines agree on set SIZE. MEASURED across an
+    FBX round-trip: the same band+dedupe rule yielded 105 tip vertices in
+    Maya and 120 in Unity (774 vs 784 at the rim), because float32
+    positions land either side of a hard boundary - and of the dedupe's
+    own quantum grid - differently in each engine. A constant offset from
+    that is harmless, but during `tendril_reach`'s curl the 15 extra
+    members moved differently and drove apex_to_tip 38 mm apart.
+
+    So the producer DECLARES the cardinality and the consumer reproduces
+    it: search a deliberately wider band, then cut to the declared n. The
+    index tiebreak is what keeps the cut deterministic when two vertices
+    share a y exactly.
+    """
+    ranked = sorted(indices, key=lambda i: (points[i][1], i))
+    return ranked[:n]
+
+
+def highest_n(points: List[Point], indices: Sequence[int], n: int) -> List[int]:
+    """The `n` indices with the largest y, ties broken by index."""
+    ranked = sorted(indices, key=lambda i: (-points[i][1], i))
+    return sorted(ranked[:n])
+
+
+def nearest_y_n(points: List[Point], indices: Sequence[int], target_y: float,
+                n: int) -> List[int]:
+    """The `n` indices whose y is closest to `target_y`, ties by index."""
+    ranked = sorted(indices, key=lambda i: (abs(points[i][1] - target_y), i))
+    return sorted(ranked[:n])
+
+
+def centroid(points: List[Point], indices: Sequence[int]) -> Tuple[float, float, float]:
+    """Mean position of the selected indices.
+
+    Dedupe the indices first (`dedupe_by_position`) whenever the mesh may
+    be split - this function deliberately does not, so the caller decides.
+    """
+    if not indices:
+        raise ValueError("centroid needs at least 1 index")
+    n = float(len(indices))
+    return (sum(points[i][0] for i in indices) / n,
+            sum(points[i][1] for i in indices) / n,
+            sum(points[i][2] for i in indices) / n)
+
+
+def ring_diameter(points: List[Point], indices: Sequence[int]) -> float:
+    """Twice the mean XZ radius of a ring about its OWN XZ centre.
+
+    Replaces the farthest-pair rim measure. Two reasons, both measured:
+    a farthest pair is an extremum and inherits the same coin-flip as the
+    lowest vertex; and referencing the ring's own centre rather than the
+    world axis makes the number survive the root translation `pulse_swim`
+    applies (0.7 m of it).
+    """
+    if not indices:
+        raise ValueError("ring_diameter needs at least 1 index")
+    cx = sum(points[i][0] for i in indices) / float(len(indices))
+    cz = sum(points[i][2] for i in indices) / float(len(indices))
+    total = 0.0
+    for i in indices:
+        total += math.sqrt((points[i][0] - cx) ** 2 + (points[i][2] - cz) ** 2)
+    return 2.0 * total / float(len(indices))
 
 
 METRICS = ("rim_diameter", "apex_to_tip")

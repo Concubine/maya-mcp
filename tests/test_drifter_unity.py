@@ -34,9 +34,13 @@ def _measured(**over):
     base = {
         "bones": 105,
         "blend_shapes": ["bell_crease", "tendril_flare"],
-        "clips": [{"name": "drift_idle", "length": 2.0},
-                  {"name": "pulse_swim", "length": 1.0},
-                  {"name": "tendril_reach", "length": 1.2}],
+        # is_looping mirrors DECLARED["looping_clips"] - the C# emits the
+        # field for every clip, so a fixture without it models a template
+        # that no longer exists.
+        "clips": [{"name": "drift_idle", "length": 2.0, "is_looping": True},
+                  {"name": "pulse_swim", "length": 1.0, "is_looping": True},
+                  {"name": "tendril_reach", "length": 1.2,
+                   "is_looping": False}],
         "bones_per_vertex_max": 4,
         "samples": [dict(s) for s in DECLARED["samples"]],
     }
@@ -89,3 +93,60 @@ def test_truncation_is_reported_but_does_not_fail_the_gate():
     out = du.verify(DECLARED, _measured(bones_per_vertex_max=4))
     assert out["ok"] is True
     assert "bones_per_vertex_max" in out["detail"]
+
+
+# --- Loop flag: measured 2026-08-24, and no gate had ever looked ----------
+#
+# The seam check proves the GEOMETRY closes - drift_idle's first and last
+# frame agreed to 0.000000 m. It says nothing about whether Unity will
+# actually replay the clip. MEASURED on the real import: all four clips
+# arrive with AnimationClip.isLooping == false, because the FBX importer
+# defaults every take's loopTime off. Dropped into a game as-is, a
+# perfectly seamless drift_idle plays once and stops.
+
+
+def test_a_declared_looping_clip_must_import_as_looping():
+    m = _measured(clips=[{"name": "drift_idle", "length": 2.0,
+                          "is_looping": False},
+                         {"name": "pulse_swim", "length": 1.0,
+                          "is_looping": True},
+                         {"name": "tendril_reach", "length": 1.2,
+                          "is_looping": False}])
+    got = du.verify(DECLARED, m)
+    assert got["ok"] is False
+    assert any("drift_idle" in p and "loop" in p.lower()
+               for p in got["problems"]), got["problems"]
+
+
+def test_loop_flags_correct_on_every_clip_passes():
+    m = _measured(clips=[{"name": "drift_idle", "length": 2.0,
+                          "is_looping": True},
+                         {"name": "pulse_swim", "length": 1.0,
+                          "is_looping": True},
+                         {"name": "tendril_reach", "length": 1.2,
+                          "is_looping": False}])
+    assert du.verify(DECLARED, m)["ok"] is True
+
+
+def test_a_one_shot_clip_that_imports_looping_is_also_a_problem():
+    m = _measured(clips=[{"name": "drift_idle", "length": 2.0,
+                          "is_looping": True},
+                         {"name": "pulse_swim", "length": 1.0,
+                          "is_looping": True},
+                         {"name": "tendril_reach", "length": 1.2,
+                          "is_looping": True}])
+    got = du.verify(DECLARED, m)
+    assert got["ok"] is False
+    assert any("tendril_reach" in p and "loop" in p.lower()
+               for p in got["problems"]), got["problems"]
+
+
+def test_a_measurement_without_loop_flags_is_refused_not_ignored():
+    # An older C# template that never emitted the field must FAIL loudly
+    # rather than silently skipping the check - the #718 rule.
+    stripped = _measured()
+    for c in stripped["clips"]:
+        c.pop("is_looping", None)
+    got = du.verify(DECLARED, stripped)
+    assert got["ok"] is False
+    assert any("is_looping" in p for p in got["problems"]), got["problems"]

@@ -1205,40 +1205,52 @@ def build_material(mesh: str) -> dict:
 SAMPLES_PER_CLIP = 7        # first, last, and five evenly spaced interior
 RIM_RADIUS_MIN = 0.3        # metres from the bell's vertical axis - see
                              # _find_landmarks docstring for why this matters
+RIM_BAND_HALF = 0.06        # metres either side of RIM_Y
+TIP_BAND = 0.012            # metres above the mesh's lowest point. Sized
+                             # from the MEASURED candidate spread: the 12
+                             # lowest cap vertices span 10.3 mm, so 12 mm
+                             # takes the whole ambiguous cluster and a
+                             # sub-millimetre float flip moves nobody
+                             # across the boundary
+APEX_BAND = 0.012           # metres below the mesh's highest point. The
+                             # apex is a lone pole - the next ring down is
+                             # 23.6 mm away (measured) - so this captures
+                             # the pole and its split twins and nothing else
 
 
 def _find_landmarks(mesh: str) -> dict:
-    """Pick the landmark vertices ONCE, at rest, by index.
+    """Select the three landmark SETS once, at rest, and keep their indices.
 
-    Indices - not positions - so every later sample reads the SAME
-    vertices. A metric that re-picks "the highest vertex" each frame is
-    measuring a different point each frame.
+    Sets, not single vertices, and this is the correction the first live
+    Unity run forced (#743 Task 10). The old rule picked `apex`/`tip` as
+    the single max/min-Y vertex and `rim` as the farthest pair in a band.
+    All three are EXTREMA, and an extremum is a coin-flip whenever the
+    candidates are near-equal: the 12 lowest cap vertices measured 0.0 to
+    10.3 mm apart in distinct positions, so Maya and Unity each picked a
+    different physical point and the gate reported 26/42 deltas of
+    0.6-12.1 mm that were pure selection noise, not deformation error.
 
-    apex/tip are single vertices (max/min world Y across the whole mesh).
-    `rim` is the TWO vertices - not a ring's worth - farthest apart among
-    candidates near the bell's rim band (RIM_Y +-0.06m). This differs from
-    the brief's draft (which took a plain index slice, `rim[:64]`, of every
-    vertex in that Y band) after a live measurement showed why that fails:
-    the naive Y-band alone catches 1,815 vertices on this mesh, because
-    each of the 8 tendrils' own attachment rings also sits near y=RIM_Y (the
-    tendrils are BUILT starting at the bell's rim). Many of those are each
-    tendril's polar CAP-CENTRE vertex, at radius ~0.02m from the axis - and
-    an arbitrary slice of the combined set (indices 0-63) landed entirely
-    within one such cluster, all within about 0.03m of each other: an
-    apparent "rim diameter" near zero on a ~1.2-1.8m dome. Filtering
-    candidates to radius > RIM_RADIUS_MIN before taking the true farthest
-    pair (774 candidates, O(n^2), ~0.3s measured) gave 1.548m instead -
-    consistent with the bell's designed scale (RIM_R=0.6m nominal radius,
-    extended by the rim's `wave` ripple lobes).
+    The rule now is the one `drifter_metrics` documents and unit-tests:
+    band-select a set, dedupe it by quantised position (Unity splits this
+    mesh's 23,922 vertices into 93,344, so raw counts differ per engine),
+    and measure an aggregate. Selection runs once here; the resulting
+    indices are then tracked per frame, which is what keeps each metric
+    following the same physical feature as the rig deforms - a band
+    re-derived every frame would wander onto a different tendril the
+    moment `tendril_reach` curls the lowest one upward.
 
-    Picked at frame 0 explicitly (pulse_swim's own first key, where its
-    pulse/contract/root-glide channels are all zero - the closest thing
-    this animated rig has to a rest pose) with `cmds.refresh(force=True)`
-    first - MEASURED live: without pinning the frame, this read whatever
-    time the Maya session's playhead happened to be at (a leftover from
-    whatever ran last), and the chosen indices/candidate count changed
-    between otherwise-identical runs (864 vs 774 candidates) purely from
-    that.
+    The band filtering happens inside Maya (cheap, and it keeps the
+    payload small - the whole mesh would blow `execute_python`'s 256 KB
+    result cap), but the dedupe and every measurement are done out here
+    with the shared `drifter_metrics` functions, so the producer and the
+    consumer run the same tested code rather than two transcriptions.
+
+    Picked at frame 0 explicitly - pulse_swim's own first key, where its
+    pulse/contract/root-glide channels are all zero - with
+    `cmds.refresh(force=True)` first. MEASURED live: without pinning the
+    frame this read whatever time the session's playhead happened to be
+    at, and the chosen set changed between otherwise-identical runs
+    (864 vs 774 rim candidates) purely from that.
     """
     code = (
         "import maya.cmds as cmds\n"
@@ -1248,37 +1260,62 @@ def _find_landmarks(mesh: str) -> dict:
         "sel = om.MSelectionList(); sel.add(%r)\n"
         "fn = om.MFnMesh(sel.getDagPath(0))\n"
         "pts = fn.getPoints(om.MSpace.kWorld)\n"
-        "apex = max(range(len(pts)), key=lambda i: pts[i].y)\n"
-        "tip = min(range(len(pts)), key=lambda i: pts[i].y)\n"
-        "cand = [i for i in range(len(pts)) if abs(pts[i].y - %f) < 0.06 "
-        "and (pts[i].x ** 2 + pts[i].z ** 2) ** 0.5 > %f]\n"
-        "best = (cand[0], cand[1], -1.0)\n"
-        "for a in range(len(cand)):\n"
-        "    ia = cand[a]\n"
-        "    for b in range(a + 1, len(cand)):\n"
-        "        ib = cand[b]\n"
-        "        dx = pts[ia].x - pts[ib].x\n"
-        "        dy = pts[ia].y - pts[ib].y\n"
-        "        dz = pts[ia].z - pts[ib].z\n"
-        "        d = (dx * dx + dy * dy + dz * dz) ** 0.5\n"
-        "        if d > best[2]:\n"
-        "            best = (ia, ib, d)\n"
-        "result = {'apex': apex, 'tip': tip, 'rim': [best[0], best[1]], "
-        "'rim_candidates': len(cand), 'rim_diameter_at_pick': best[2], "
-        "'count': len(pts)}\n"
+        "ys = [p.y for p in pts]\n"
+        "lo = min(ys); hi = max(ys)\n"
+        "def band(keep):\n"
+        "    out = []\n"
+        "    for i in range(len(pts)):\n"
+        "        if keep(i):\n"
+        "            out.append([i, pts[i].x, pts[i].y, pts[i].z])\n"
+        "    return out\n"
+        "tip = band(lambda i: pts[i].y - lo <= %f)\n"
+        "apex = band(lambda i: hi - pts[i].y <= %f)\n"
+        "rim = band(lambda i: abs(pts[i].y - %f) < %f and "
+        "(pts[i].x ** 2 + pts[i].z ** 2) ** 0.5 > %f)\n"
+        "result = {'apex': apex, 'tip': tip, 'rim': rim, 'count': len(pts), "
+        "'min_y': lo, 'max_y': hi}\n"
         "result\n"
-    ) % (mesh, RIM_Y, RIM_RADIUS_MIN)
+    ) % (mesh, TIP_BAND, APEX_BAND, RIM_Y, RIM_BAND_HALF, RIM_RADIUS_MIN)
     res = call("execute_python", {"code": code, "timeout_s": 120})
     if res.get("status") != "ok":
         raise SystemExit("_find_landmarks call failed: %r" % (res.get("error"),))
     exec_result = res.get("result") or {}
     if exec_result.get("traceback"):
         raise SystemExit("_find_landmarks raised:\n%s" % exec_result["traceback"])
-    return structured_result(exec_result, "landmarks")
+    raw = structured_result(exec_result, "landmarks")
+
+    out = {"count": int(raw["count"]), "min_y": float(raw["min_y"]),
+           "max_y": float(raw["max_y"])}
+    for name in ("apex", "tip", "rim"):
+        rows = raw[name]
+        if not rows:
+            raise SystemExit("_find_landmarks: the %s band selected nothing - "
+                             "the band constants no longer fit this mesh" % name)
+        idx = [int(r[0]) for r in rows]
+        pts = {int(r[0]): [float(r[1]), float(r[2]), float(r[3])] for r in rows}
+        # Dedupe against the band's OWN positions, then keep the surviving
+        # mesh indices - dedupe_by_position wants a dense list, so map
+        # through a local ordering and back.
+        local = [pts[i] for i in idx]
+        kept = dm.dedupe_by_position(local, list(range(len(local))))
+        out[name] = [idx[k] for k in kept]
+        out[name + "_raw_count"] = len(idx)
+    out["rim_diameter_at_pick"] = dm.ring_diameter(
+        [ [float(r[1]), float(r[2]), float(r[3])] for r in raw["rim"] ],
+        [ i for i, _ in enumerate(raw["rim"]) if int(raw["rim"][i][0]) in set(out["rim"]) ])
+    return out
 
 
 def sample_deformation(mesh: str, clips: list, landmarks: dict) -> list:
     """Frame-invariant metrics at seven frames of every clip.
+
+    Reads the three landmark SETS chosen by `_find_landmarks` - by index,
+    so every frame measures the same physical features - and reduces each
+    to an aggregate with the shared `drifter_metrics` functions:
+    `apex_to_tip` between two centroids, `rim_diameter` as twice the rim
+    ring's mean radius about its own centre. Neither number depends on
+    which individual vertex happens to be extreme, which is what the
+    first live Unity run proved a metric has to survive.
 
     Two traps fixed against the brief's draft, both MEASURED in this
     session: (1) `cmds.currentTime(f)` does not force DAG evaluation - a
@@ -1289,8 +1326,8 @@ def sample_deformation(mesh: str, clips: list, landmarks: dict) -> list:
     on `result = {...}`, an assignment, which returns nothing; a trailing
     bare `result` line is required.
     """
-    apex_i, tip_i = landmarks["apex"], landmarks["tip"]
-    rim_i = landmarks["rim"]
+    idx = {"apex": list(landmarks["apex"]), "tip": list(landmarks["tip"]),
+           "rim": list(landmarks["rim"])}
     out = []
     for clip in clips:
         start, end = int(clip["start_frame"]), int(clip["end_frame"])
@@ -1305,17 +1342,11 @@ def sample_deformation(mesh: str, clips: list, landmarks: dict) -> list:
                 "sel = om.MSelectionList(); sel.add(%r)\n"
                 "fn = om.MFnMesh(sel.getDagPath(0))\n"
                 "pts = fn.getPoints(om.MSpace.kWorld)\n"
-                "apex = [pts[%d].x, pts[%d].y, pts[%d].z]\n"
-                "tip = [pts[%d].x, pts[%d].y, pts[%d].z]\n"
-                "rim = [[pts[%d].x, pts[%d].y, pts[%d].z], "
-                "[pts[%d].x, pts[%d].y, pts[%d].z]]\n"
-                "result = {'apex': apex, 'tip': tip, 'rim': rim}\n"
+                "IDX = %r\n"
+                "result = dict((k, [[pts[i].x, pts[i].y, pts[i].z] "
+                "for i in v]) for k, v in IDX.items())\n"
                 "result\n"
-            ) % (frame, mesh,
-                 apex_i, apex_i, apex_i,
-                 tip_i, tip_i, tip_i,
-                 rim_i[0], rim_i[0], rim_i[0],
-                 rim_i[1], rim_i[1], rim_i[1])
+            ) % (frame, mesh, idx)
             res = call("execute_python", {"code": code, "timeout_s": 120})
             if res.get("status") != "ok":
                 raise SystemExit("sample_deformation(%s@%d) call failed: %r"
@@ -1326,11 +1357,17 @@ def sample_deformation(mesh: str, clips: list, landmarks: dict) -> list:
                                  % (clip["name"], frame, exec_result["traceback"]))
             got = structured_result(exec_result,
                                     "sample %s@%d" % (clip["name"], frame))
+            apex_pts = got["apex"]
+            tip_pts = got["tip"]
+            rim_pts = got["rim"]
             out.append({
                 "clip": clip["name"], "frame": frame,
                 "time_s": (frame - start) / float(FPS),
-                "rim_diameter": dm.rim_diameter(got["rim"]),
-                "apex_to_tip": dm.apex_to_tip(got["apex"], got["tip"]),
+                "rim_diameter": dm.ring_diameter(
+                    rim_pts, list(range(len(rim_pts)))),
+                "apex_to_tip": dm.apex_to_tip(
+                    dm.centroid(apex_pts, list(range(len(apex_pts)))),
+                    dm.centroid(tip_pts, list(range(len(tip_pts))))),
             })
     return out
 

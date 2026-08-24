@@ -11,6 +11,8 @@ import math
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "evals"))
 
@@ -168,3 +170,159 @@ def test_histogram_facts_on_a_bind_that_never_exceeds_four():
     buckets = [{"influences": 3, "vertices": 10},
                {"influences": 4, "vertices": 20}]
     assert dm.histogram_facts(buckets)["over_four"] == 0
+
+
+# --- #743 landmark redesign: index-free, split-invariant, aggregate ---------
+#
+# The live Unity run measured why the old rule failed: Unity splits the
+# drifter's 23,922 vertices into 93,344 on import, and the 12 lowest
+# vertices on a tapered tendril cap sit 0.0-10.3 mm apart in DISTINCT
+# positions. Picking "the lowest vertex" therefore names a different
+# physical point in each engine, and the observed 0.6-12.1 mm deltas were
+# exactly that candidate spread. These tests pin the replacement rule.
+
+
+def test_position_key_collapses_a_split_vertex_and_its_twin():
+    a = [1.0, 2.0, 3.0]
+    b = [1.000001, 2.000001, 3.000001]
+    assert dm.position_key(a) == dm.position_key(b)
+
+
+def test_position_key_separates_genuinely_distinct_points():
+    a = [1.0, 2.0, 3.0]
+    b = [1.01, 2.0, 3.0]
+    assert dm.position_key(a) != dm.position_key(b)
+
+
+def test_dedupe_by_position_keeps_one_index_per_distinct_position():
+    pts = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
+    assert dm.dedupe_by_position(pts, [0, 1, 2]) == [0, 2]
+
+
+def test_dedupe_by_position_preserves_input_order():
+    pts = [[2.0, 0.0, 0.0], [0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]
+    assert dm.dedupe_by_position(pts, [0, 1, 2]) == [0, 1]
+
+
+def test_low_band_selects_the_whole_ambiguous_cluster_not_one_winner():
+    # Four cap vertices spread over 8 mm, plus a body vertex far above.
+    pts = [[0.0, 0.000, 0.0], [0.01, 0.003, 0.0],
+           [0.0, 0.006, 0.01], [0.01, 0.008, 0.01], [0.0, 1.0, 0.0]]
+    got = dm.low_band_indices(pts, 0.012)
+    assert got == [0, 1, 2, 3]
+
+
+def test_low_band_is_unchanged_when_the_lowest_vertex_flips():
+    # The exact failure mode: two near-equal candidates swap which is
+    # lowest under float noise. The SET must not care.
+    pts = [[0.0, 0.0000, 0.0], [0.01, 0.0001, 0.0], [0.0, 1.0, 0.0]]
+    flipped = [[0.0, 0.0001, 0.0], [0.01, 0.0000, 0.0], [0.0, 1.0, 0.0]]
+    assert dm.low_band_indices(pts, 0.012) == dm.low_band_indices(flipped, 0.012)
+
+
+def test_high_band_selects_near_the_maximum():
+    pts = [[0.0, 0.0, 0.0], [0.0, 0.99, 0.0], [0.0, 1.0, 0.0]]
+    assert dm.high_band_indices(pts, 0.02) == [1, 2]
+
+
+def test_centroid_averages_the_selected_points():
+    pts = [[0.0, 0.0, 0.0], [2.0, 4.0, 6.0], [99.0, 99.0, 99.0]]
+    c = dm.centroid(pts, [0, 1])
+    assert c == (1.0, 2.0, 3.0)
+
+
+def test_centroid_of_a_deduped_cap_ignores_split_duplicates():
+    # Same cap, once clean and once with one vertex duplicated 3x. A raw
+    # mean would drag toward the duplicate; a deduped one must not.
+    clean = [[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
+    split = [[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0],
+             [-1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]]
+    a = dm.centroid(clean, dm.dedupe_by_position(clean, [0, 1]))
+    b = dm.centroid(split, dm.dedupe_by_position(split, [0, 1, 2, 3]))
+    assert abs(a[0] - b[0]) < 1e-12
+
+
+def test_ring_diameter_of_a_unit_circle_is_two():
+    pts = [[math.cos(t / 16.0 * 2 * math.pi), 0.0,
+            math.sin(t / 16.0 * 2 * math.pi)] for t in range(16)]
+    assert abs(dm.ring_diameter(pts, list(range(16))) - 2.0) < 1e-9
+
+
+def test_ring_diameter_ignores_where_the_ring_sits():
+    pts = [[math.cos(t / 16.0 * 2 * math.pi), 0.0,
+            math.sin(t / 16.0 * 2 * math.pi)] for t in range(16)]
+    moved = [[p[0] + 7.0, p[1] - 3.0, p[2] + 2.0] for p in pts]
+    a = dm.ring_diameter(pts, list(range(16)))
+    b = dm.ring_diameter(moved, list(range(16)))
+    assert abs(a - b) < 1e-9
+
+
+def test_ring_diameter_survives_one_dropped_member():
+    # Robustness is the whole point: an aggregate must barely move when
+    # the two engines disagree about one vertex's membership.
+    pts = [[math.cos(t / 16.0 * 2 * math.pi), 0.0,
+            math.sin(t / 16.0 * 2 * math.pi)] for t in range(16)]
+    full = dm.ring_diameter(pts, list(range(16)))
+    short = dm.ring_diameter(pts, list(range(15)))
+    assert abs(full - short) < 0.02
+
+
+def test_ring_diameter_refuses_an_empty_set():
+    with pytest.raises(ValueError):
+        dm.ring_diameter([[0.0, 0.0, 0.0]], [])
+
+
+def test_rim_band_indices_rejects_the_tendril_cap_centres():
+    # The measured trap: each tendril's polar cap vertex sits at the rim's
+    # Y but ~0.02 m from the axis. A radius floor is what excludes them.
+    pts = [[0.6, 3.0, 0.0], [-0.6, 3.0, 0.0], [0.02, 3.0, 0.0],
+           [0.6, 0.5, 0.0]]
+    got = dm.rim_band_indices(pts, 3.0, 0.06, 0.2)
+    assert got == [0, 1]
+
+
+# --- Rank selection: the producer declares cardinality --------------------
+#
+# MEASURED 2026-08-24, second live Unity run: band+dedupe alone still let
+# the two engines disagree on SET SIZE - tip 105 in Maya vs 120 in Unity,
+# rim 774 vs 784 - because a hard threshold (and the dedupe's own quantum
+# grid) is boundary-sensitive under an FBX float32 round-trip. Constant
+# offsets that causes are harmless, but during tendril_reach's curl the
+# 15 extra tip members moved differently and pushed apex_to_tip 38 mm
+# apart. A rank cut to a declared N removes the disagreement by
+# construction: same count, same rule, both engines.
+
+
+def test_lowest_n_takes_exactly_n_smallest_by_y():
+    pts = [[0.0, 5.0, 0.0], [0.0, 1.0, 0.0], [0.0, 3.0, 0.0], [0.0, 2.0, 0.0]]
+    assert dm.lowest_n(pts, [0, 1, 2, 3], 2) == [1, 3]
+
+
+def test_lowest_n_breaks_ties_by_index_so_both_engines_agree():
+    pts = [[0.0, 1.0, 0.0], [9.0, 1.0, 0.0], [0.0, 0.5, 0.0]]
+    assert dm.lowest_n(pts, [0, 1, 2], 2) == [2, 0]
+
+
+def test_lowest_n_returns_everything_when_n_exceeds_the_set():
+    pts = [[0.0, 1.0, 0.0], [0.0, 2.0, 0.0]]
+    assert dm.lowest_n(pts, [0, 1], 9) == [0, 1]
+
+
+def test_highest_n_takes_the_largest_y():
+    pts = [[0.0, 5.0, 0.0], [0.0, 1.0, 0.0], [0.0, 3.0, 0.0]]
+    assert dm.highest_n(pts, [0, 1, 2], 2) == [0, 2]
+
+
+def test_nearest_y_n_takes_those_closest_to_a_target_height():
+    pts = [[0.0, 3.0, 0.0], [0.0, 3.5, 0.0], [0.0, 2.9, 0.0], [0.0, 9.0, 0.0]]
+    assert dm.nearest_y_n(pts, [0, 1, 2, 3], 3.0, 2) == [0, 2]
+
+
+def test_rank_selection_is_insensitive_to_a_widened_band():
+    # The whole point: Unity searches a WIDER band than Maya so it can
+    # never come up short, then cuts to Maya's declared N and lands on
+    # the same members regardless of where the band edge fell.
+    pts = [[0.0, float(i) * 0.001, 0.0] for i in range(50)]
+    tight = dm.lowest_n(pts, dm.low_band_indices(pts, 0.012), 10)
+    wide = dm.lowest_n(pts, dm.low_band_indices(pts, 0.030), 10)
+    assert tight == wide

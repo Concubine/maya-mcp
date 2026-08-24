@@ -95,6 +95,10 @@ import drifter_metrics as dm  # noqa: E402
 # change to drifter_live's rim band moves this gate too.
 from drifter_live import RIM_Y as _RIM_Y  # noqa: E402
 from drifter_live import RIM_RADIUS_MIN as _RIM_RADIUS_MIN  # noqa: E402
+from drifter_live import RIM_BAND_HALF as _RIM_BAND_HALF  # noqa: E402
+from drifter_live import TIP_BAND as _TIP_BAND  # noqa: E402
+from drifter_live import APEX_BAND as _APEX_BAND  # noqa: E402
+from drifter_metrics import POSITION_QUANTUM as _QUANTUM  # noqa: E402
 
 BASELINE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "drifter_live", "baseline.json")
@@ -142,11 +146,23 @@ DECLARED = {
 # imported (vertex-split) mesh, so UNITY_MEASURE_CS re-derives its own
 # landmarks geometrically instead of reusing these.
 _LANDMARKS = _baseline["landmarks"]
-_MAYA_RIM = [int(i) for i in _LANDMARKS["rim"]]
-if len(_MAYA_RIM) != 2:
-    raise SystemExit("landmarks.rim must carry exactly 2 vertex indices "
-                     "(the farthest pair), got %d" % len(_MAYA_RIM))
+for _name in ("apex", "tip", "rim"):
+    _got = _LANDMARKS.get(_name)
+    if not isinstance(_got, list) or not _got:
+        raise SystemExit(
+            "landmarks.%s must be a non-empty LIST of vertex indices, got %r. "
+            "A bare int (or a 2-element rim) is the pre-2026-08-24 shape, "
+            "where each landmark was a single extremum vertex - that rule was "
+            "measured unable to survive re-derivation in Unity. Re-run "
+            "evals/drifter_live.py to regenerate baseline.json." % (_name, _got))
+MAYA_LANDMARK_SIZES = {n: len(_LANDMARKS[n]) for n in ("apex", "tip", "rim")}
 MAYA_RIM_DIAMETER_AT_PICK = float(_LANDMARKS["rim_diameter_at_pick"])
+
+# How much wider than Maya's the C# searches each band before rank-cutting
+# to MAYA_LANDMARK_SIZES. 1.5 is a margin, not a tuned value: the measured
+# overshoot was 14% at the tip and 1.3% at the rim, so 50% clears both with
+# room, and anything the widening lets in is discarded by the cut anyway.
+BAND_WIDEN = 1.5
 
 FBX_PATH = _baseline["fbx"]["path"]
 ASSET_SUBDIR = "Assets/DrifterGate743"
@@ -209,6 +225,24 @@ def verify(declared: dict, measured: dict) -> dict:
             problems.append("clip %r length %r, declared %r (delta %.3g)"
                             % (want["name"], got["length"],
                                want["duration_s"], delta))
+        # The loop FLAG, which is a different question from the loop SEAM.
+        # seam_violations proves the geometry closes - drift_idle's first
+        # and last frame agreed to 0.000000 m on the first live run. It
+        # cannot prove Unity will replay the clip, and MEASURED 2026-08-24
+        # it would not have: every take imports with isLooping == false,
+        # because the FBX importer defaults loopTime off per take. A
+        # seamless clip that plays once and stops is still a broken asset.
+        if "is_looping" not in got:
+            problems.append(
+                "clip %r carries no is_looping - the measurement predates "
+                "the loop-flag check; re-run UNITY_MEASURE_CS" % want["name"])
+        else:
+            want_loop = want["name"] in declared["looping_clips"]
+            if bool(got["is_looping"]) != want_loop:
+                problems.append(
+                    "clip %r imported with is_looping=%r, declared %r "
+                    "(set Loop Time on the take in the model importer)"
+                    % (want["name"], bool(got["is_looping"]), want_loop))
 
     try:
         bad = dm.compare_samples(declared["samples"],
@@ -309,7 +343,19 @@ string outputPath = System.IO.Path.Combine(
 
 float rimY = __RIM_Y__;
 float rimRadiusMin = __RIM_RADIUS_MIN__;
-float rimBandHalfWidth = 0.06f;   // drifter_live.py's own band tolerance
+float rimBandHalfWidth = __RIM_BAND_HALF__;
+float tipBand = __TIP_BAND__;
+float apexBand = __APEX_BAND__;
+float quantum = __QUANTUM__;
+// Bands are searched WIDER here than in Maya, then rank-cut to the counts
+// Maya declared. A hard threshold cannot make two engines agree on set
+// SIZE across an FBX float32 round-trip - measured 105 vs 120 at the tip,
+// 774 vs 784 at the rim - so the producer declares cardinality and this
+// side reproduces it. Widening guarantees the cut never comes up short.
+float bandWiden = __BAND_WIDEN__;
+int apexN = __APEX_N__;
+int tipN = __TIP_N__;
+int rimN = __RIM_N__;
 
 string[] reqClip = new string[] { __SAMPLE_CLIPS__ };
 int[] reqFrame = new int[] { __SAMPLE_FRAMES__ };
@@ -347,38 +393,121 @@ if (infoSmr == null) {
 int bones = infoSmr.bones.Length;
 UnityEngine.Mesh sharedMesh = infoSmr.sharedMesh;
 
-// --- Landmarks, re-derived on Unity's OWN bind-pose vertices - see the
-// header comment above this template. apex/tip are the single global
-// max/min-Y vertex; rim is the farthest pair among candidates within
-// rimBandHalfWidth of rimY and farther than rimRadiusMin from the vertical
-// axis - the exact rule drifter_live.py's _find_landmarks uses in Maya,
-// just run here instead of trusted to carry an index across the import. ---
+// --- Landmarks, re-derived on Unity's OWN bind-pose vertices ------------
+// Same rule drifter_metrics.py documents and unit-tests, run here rather
+// than trusted to carry an index across the import: band-select a SET,
+// dedupe it by quantised position, measure an AGGREGATE.
+//
+// The first live run of this gate picked apex/tip as the single global
+// max/min-Y vertex and rim as the farthest pair in the band. All three are
+// extrema, and MEASURED, the drifter's 12 lowest cap vertices span just
+// 10.3 mm in distinct positions - so Maya and Unity each landed on a
+// different physical point and 26 of 42 deltas came back 0.6-12.1 mm out.
+// That was selection noise, not deformation error, and no tolerance could
+// have told the difference. Bands plus centroids remove the choice.
+//
+// The dedupe matters specifically here: Unity splits this mesh's 23,922
+// vertices into 93,344 at UV/hard-normal seams, and those duplicates share
+// a position exactly. A raw mean would weight a seam vertex 2-4x and drift
+// away from Maya's; one index per quantised position weighs them equally.
 UnityEngine.Vector3[] bindVerts = sharedMesh.vertices;
-int apexIdx = 0;
-int tipIdx = 0;
+float minY = bindVerts[0].y;
+float maxY = bindVerts[0].y;
 for (int vi = 1; vi < bindVerts.Length; vi++) {
-    if (bindVerts[vi].y > bindVerts[apexIdx].y) apexIdx = vi;
-    if (bindVerts[vi].y < bindVerts[tipIdx].y) tipIdx = vi;
+    if (bindVerts[vi].y < minY) minY = bindVerts[vi].y;
+    if (bindVerts[vi].y > maxY) maxY = bindVerts[vi].y;
 }
-System.Collections.Generic.List<int> rimCandidates = new System.Collections.Generic.List<int>();
+
+System.Func<UnityEngine.Vector3, string> posKey = delegate(UnityEngine.Vector3 p) {
+    long kx = (long)System.Math.Round(p.x / quantum);
+    long ky = (long)System.Math.Round(p.y / quantum);
+    long kz = (long)System.Math.Round(p.z / quantum);
+    return kx.ToString() + "_" + ky.ToString() + "_" + kz.ToString();
+};
+
+System.Collections.Generic.List<int> apexSet = new System.Collections.Generic.List<int>();
+System.Collections.Generic.List<int> tipSet = new System.Collections.Generic.List<int>();
+System.Collections.Generic.List<int> rimSet = new System.Collections.Generic.List<int>();
+System.Collections.Generic.HashSet<string> apexSeen = new System.Collections.Generic.HashSet<string>();
+System.Collections.Generic.HashSet<string> tipSeen = new System.Collections.Generic.HashSet<string>();
+System.Collections.Generic.HashSet<string> rimSeen = new System.Collections.Generic.HashSet<string>();
+int apexRaw = 0;
+int tipRaw = 0;
+int rimRaw = 0;
 for (int vi = 0; vi < bindVerts.Length; vi++) {
     UnityEngine.Vector3 p = bindVerts[vi];
+    string k = posKey(p);
+    if (maxY - p.y <= apexBand * bandWiden) {
+        apexRaw++;
+        if (apexSeen.Add(k)) apexSet.Add(vi);
+    }
+    if (p.y - minY <= tipBand * bandWiden) {
+        tipRaw++;
+        if (tipSeen.Add(k)) tipSet.Add(vi);
+    }
     float radius = UnityEngine.Mathf.Sqrt(p.x * p.x + p.z * p.z);
-    if (UnityEngine.Mathf.Abs(p.y - rimY) < rimBandHalfWidth && radius > rimRadiusMin) {
-        rimCandidates.Add(vi);
+    if (UnityEngine.Mathf.Abs(p.y - rimY) < rimBandHalfWidth * bandWiden && radius > rimRadiusMin) {
+        rimRaw++;
+        if (rimSeen.Add(k)) rimSet.Add(vi);
     }
 }
-int rim0Idx = rimCandidates.Count > 0 ? rimCandidates[0] : 0;
-int rim1Idx = rimCandidates.Count > 1 ? rimCandidates[1] : 0;
-float rimDiameterAtPick = 0f;
-for (int a = 0; a < rimCandidates.Count; a++) {
-    int ia = rimCandidates[a];
-    for (int b = a + 1; b < rimCandidates.Count; b++) {
-        int ib = rimCandidates[b];
-        float d = UnityEngine.Vector3.Distance(bindVerts[ia], bindVerts[ib]);
-        if (d > rimDiameterAtPick) { rimDiameterAtPick = d; rim0Idx = ia; rim1Idx = ib; }
-    }
+// Rank-cut to the declared cardinality: tip = lowest y, apex = highest y,
+// rim = closest to rimY. Ties break by vertex index in BOTH engines, so
+// the cut is deterministic rather than dependent on iteration order.
+apexSet.Sort(delegate(int a, int b) {
+    int c = bindVerts[b].y.CompareTo(bindVerts[a].y);
+    return c != 0 ? c : a.CompareTo(b);
+});
+tipSet.Sort(delegate(int a, int b) {
+    int c = bindVerts[a].y.CompareTo(bindVerts[b].y);
+    return c != 0 ? c : a.CompareTo(b);
+});
+rimSet.Sort(delegate(int a, int b) {
+    float da = UnityEngine.Mathf.Abs(bindVerts[a].y - rimY);
+    float db = UnityEngine.Mathf.Abs(bindVerts[b].y - rimY);
+    int c = da.CompareTo(db);
+    return c != 0 ? c : a.CompareTo(b);
+});
+int apexCut = apexSet.Count < apexN ? apexSet.Count : apexN;
+int tipCut = tipSet.Count < tipN ? tipSet.Count : tipN;
+int rimCut = rimSet.Count < rimN ? rimSet.Count : rimN;
+apexSet = apexSet.GetRange(0, apexCut);
+tipSet = tipSet.GetRange(0, tipCut);
+rimSet = rimSet.GetRange(0, rimCut);
+
+if (apexSet.Count == 0 || tipSet.Count == 0 || rimSet.Count == 0) {
+    return "LANDMARK BAND EMPTY (apex=" + apexSet.Count + " tip=" + tipSet.Count
+        + " rim=" + rimSet.Count + ") - the band constants no longer fit this mesh";
 }
+
+// centroid of a set, in WORLD space
+System.Func<UnityEngine.Vector3[], UnityEngine.Matrix4x4, System.Collections.Generic.List<int>, UnityEngine.Vector3> centroidOf =
+    delegate(UnityEngine.Vector3[] vv, UnityEngine.Matrix4x4 m, System.Collections.Generic.List<int> set) {
+        UnityEngine.Vector3 acc = UnityEngine.Vector3.zero;
+        for (int si = 0; si < set.Count; si++) { acc += m.MultiplyPoint3x4(vv[set[si]]); }
+        return acc / (float)set.Count;
+    };
+
+// 2 x mean XZ radius about the ring's OWN XZ centre - centre-relative so
+// pulse_swim's 0.7 m of root translation cannot move the number.
+System.Func<UnityEngine.Vector3[], UnityEngine.Matrix4x4, System.Collections.Generic.List<int>, float> ringDiameterOf =
+    delegate(UnityEngine.Vector3[] vv, UnityEngine.Matrix4x4 m, System.Collections.Generic.List<int> set) {
+        float cx = 0f;
+        float cz = 0f;
+        for (int si = 0; si < set.Count; si++) {
+            UnityEngine.Vector3 w = m.MultiplyPoint3x4(vv[set[si]]);
+            cx += w.x; cz += w.z;
+        }
+        cx /= (float)set.Count; cz /= (float)set.Count;
+        float total = 0f;
+        for (int si = 0; si < set.Count; si++) {
+            UnityEngine.Vector3 w = m.MultiplyPoint3x4(vv[set[si]]);
+            total += UnityEngine.Mathf.Sqrt((w.x - cx) * (w.x - cx) + (w.z - cz) * (w.z - cz));
+        }
+        return 2f * total / (float)set.Count;
+    };
+
+float rimDiameterAtPick = ringDiameterOf(bindVerts, UnityEngine.Matrix4x4.identity, rimSet);
 
 System.Text.StringBuilder blendSb = new System.Text.StringBuilder();
 blendSb.Append("[");
@@ -436,12 +565,10 @@ for (int uci = 0; uci < uniqueClipNames.Length; uci++) {
         smr.BakeMesh(baked);
         UnityEngine.Vector3[] verts = baked.vertices;
         UnityEngine.Matrix4x4 l2w = smr.transform.localToWorldMatrix;
-        UnityEngine.Vector3 apexW = l2w.MultiplyPoint3x4(verts[apexIdx]);
-        UnityEngine.Vector3 tipW = l2w.MultiplyPoint3x4(verts[tipIdx]);
-        UnityEngine.Vector3 rim0W = l2w.MultiplyPoint3x4(verts[rim0Idx]);
-        UnityEngine.Vector3 rim1W = l2w.MultiplyPoint3x4(verts[rim1Idx]);
+        UnityEngine.Vector3 apexW = centroidOf(verts, l2w, apexSet);
+        UnityEngine.Vector3 tipW = centroidOf(verts, l2w, tipSet);
         float apexToTip = UnityEngine.Vector3.Distance(apexW, tipW);
-        float rimDiameter = UnityEngine.Vector3.Distance(rim0W, rim1W);
+        float rimDiameter = ringDiameterOf(verts, l2w, rimSet);
 
         if (!firstSample) samplesSb.Append(",");
         firstSample = false;
@@ -458,7 +585,8 @@ System.Text.StringBuilder clipsSb = new System.Text.StringBuilder();
 clipsSb.Append("[");
 for (int ci = 0; ci < clips.Length; ci++) {
     if (ci > 0) clipsSb.Append(",");
-    clipsSb.Append("{\"name\":\"" + Esc(clips[ci].name) + "\",\"length\":" + Num(clips[ci].length) + "}");
+    clipsSb.Append("{\"name\":\"" + Esc(clips[ci].name) + "\",\"length\":" + Num(clips[ci].length)
+    + ",\"is_looping\":" + (clips[ci].isLooping ? "true" : "false") + "}");
 }
 clipsSb.Append("]");
 
@@ -472,9 +600,11 @@ outSb.Append("\"samples\":" + samplesSb.ToString() + ",");
 // Diagnostics only - verify() does not read these. rim_candidates/
 // rim_diameter_at_pick let the report compare Unity's independently
 // re-derived rim pick against Maya's own (baseline.json's landmarks).
-outSb.Append("\"landmark_indices\":{\"apex\":" + apexIdx + ",\"tip\":" + tipIdx
-    + ",\"rim0\":" + rim0Idx + ",\"rim1\":" + rim1Idx + "},");
-outSb.Append("\"landmark_rim_candidates\":" + rimCandidates.Count + ",");
+outSb.Append("\"landmark_sizes\":{\"apex\":" + apexSet.Count + ",\"tip\":" + tipSet.Count
+    + ",\"rim\":" + rimSet.Count + "},");
+outSb.Append("\"landmark_sizes_before_dedupe\":{\"apex\":" + apexRaw + ",\"tip\":" + tipRaw
+    + ",\"rim\":" + rimRaw + "},");
+outSb.Append("\"landmark_rim_candidates\":" + rimSet.Count + ",");
 outSb.Append("\"landmark_rim_diameter_at_pick\":" + Num(rimDiameterAtPick) + ",");
 outSb.Append("\"mesh_vertex_count\":" + bindVerts.Length);
 outSb.Append("}");
@@ -483,15 +613,67 @@ System.IO.File.WriteAllText(outputPath, outSb.ToString());
 
 string summary = "wrote " + reqClip.Length + " sample(s) across " + uniqueClipNames.Length
     + " clip(s) to " + outputPath + " (bones=" + bones + " blend_shapes=" + sharedMesh.blendShapeCount
-    + " bones_per_vertex_max=" + bonesPerVertexMax + " rim_candidates=" + rimCandidates.Count + ")";
+    + " bones_per_vertex_max=" + bonesPerVertexMax + " rim_candidates=" + rimSet.Count + ")";
 UnityEngine.Debug.Log(summary);
 return summary;
 """.strip("\n")
+
+# --- Importer configuration, driven by the producer's own declaration ----
+#
+# MEASURED 2026-08-24: every take imports with AnimationClip.isLooping ==
+# false. That is NOT a product defect and no change to the FBX can fix it -
+# the format has no per-take loop flag, so "this clip loops" cannot travel
+# in the bytes at all. It is a CONSUMER configuration step, and the point
+# of running it here is that the configuration is derived from
+# baseline.json's own `looping_clips` rather than hand-set in the editor:
+# if a clip were renamed, or the producer's loop declaration drifted, the
+# importer config would silently fail to match and the measurement step
+# would then catch it.
+#
+# Read defaultClipAnimations, mutate, assign back: clipAnimations starts
+# EMPTY on a fresh importer and assigning an empty array wipes the takes.
+_UNITY_CONFIGURE_TEMPLATE = r"""
+string modelPath = "__ASSET_PATH__";
+string[] loopNames = new string[] { __LOOPING_CLIPS__ };
+UnityEditor.ModelImporter mi = (UnityEditor.ModelImporter)UnityEditor.AssetImporter.GetAtPath(modelPath);
+if (mi == null) { return "NO IMPORTER at " + modelPath; }
+mi.importAnimation = true;
+UnityEditor.ModelImporterClipAnimation[] clips = mi.defaultClipAnimations;
+if (clips == null || clips.Length == 0) { return "NO TAKES on " + modelPath; }
+System.Text.StringBuilder sb = new System.Text.StringBuilder();
+for (int i = 0; i < clips.Length; i++) {
+    bool want = false;
+    for (int j = 0; j < loopNames.Length; j++) {
+        if (clips[i].name == loopNames[j]) { want = true; break; }
+    }
+    clips[i].loopTime = want;
+    sb.Append(clips[i].name + "=" + (want ? "loop" : "once") + " ");
+}
+mi.clipAnimations = clips;
+UnityEditor.EditorUtility.SetDirty(mi);
+mi.SaveAndReimport();
+return "configured " + clips.Length + " takes: " + sb.ToString();
+"""
+
+UNITY_CONFIGURE_CS = (_UNITY_CONFIGURE_TEMPLATE
+                      .replace("__ASSET_PATH__", ASSET_PATH)
+                      .replace("__LOOPING_CLIPS__",
+                               ", ".join('"%s"' % c
+                                         for c in DECLARED["looping_clips"])))
+
 
 UNITY_MEASURE_CS = (_UNITY_MEASURE_TEMPLATE
                      .replace("__ASSET_PATH__", ASSET_PATH)
                      .replace("__RIM_Y__", "%.17gf" % _RIM_Y)
                      .replace("__RIM_RADIUS_MIN__", "%.17gf" % _RIM_RADIUS_MIN)
+                     .replace("__RIM_BAND_HALF__", "%.17gf" % _RIM_BAND_HALF)
+                     .replace("__TIP_BAND__", "%.17gf" % _TIP_BAND)
+                     .replace("__APEX_BAND__", "%.17gf" % _APEX_BAND)
+                     .replace("__QUANTUM__", "%.17gf" % _QUANTUM)
+                     .replace("__BAND_WIDEN__", "%.17gf" % BAND_WIDEN)
+                     .replace("__APEX_N__", str(MAYA_LANDMARK_SIZES["apex"]))
+                     .replace("__TIP_N__", str(MAYA_LANDMARK_SIZES["tip"]))
+                     .replace("__RIM_N__", str(MAYA_LANDMARK_SIZES["rim"]))
                      .replace("__SAMPLE_CLIPS__", _cs_string_array(_SAMPLE_CLIPS))
                      .replace("__SAMPLE_FRAMES__", _cs_int_array(_SAMPLE_FRAMES))
                      .replace("__SAMPLE_TIMES__", _cs_float_array(_SAMPLE_TIMES)))
