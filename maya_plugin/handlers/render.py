@@ -22,7 +22,7 @@ import uuid
 from typing import Any, Dict, List, Optional, Sequence
 
 from ..dispatcher import HandlerError
-from . import capture, lighting, naming
+from . import capture, lighting, naming, session
 
 VALID_RENDERERS = ("arnold", "hw2")
 RENDERER_TO_MAYA = {"arnold": "arnold", "hw2": "mayaHardware2"}
@@ -715,6 +715,7 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
     rig: Dict[str, float] = {}
     temp_camera = None
     temp_light = None
+    hygiene: List[str] = []
     prev_undo = cmds.undoInfo(query=True, state=True)
     cmds.undoInfo(stateWithoutFlush=False)
     prev_time = (cmds.currentTime(query=True)
@@ -834,7 +835,7 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
                  "rotation": list(rot), "camera": temp_camera}
             )
 
-        return {
+        out = {
             "images": images_out,
             "camera_positions": positions,
             "renderer": renderer,
@@ -866,6 +867,13 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
             cmds.undoInfo(stateWithoutFlush=prev_undo)
         except Exception:
             pass
+        hygiene = session.stop_idle_ipr(cmds)
+
+    out.setdefault("warnings", []).extend(
+        a + " after rendering - an idle IPR re-renders on every scene "
+        "mutation and can wedge later keyframe work (#721)"
+        for a in hygiene)
+    return out
 
 
 # Perception must not pollute the user's undo queue.

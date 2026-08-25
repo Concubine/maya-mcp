@@ -369,3 +369,48 @@ def test_undo_handlers_are_chunk_exempt():
     for fn in (session.undo, session.redo, session.restore_checkpoint,
                session.new_scene, session.open_scene):
         assert getattr(fn, "no_undo_chunk", False) is True
+
+
+class RecordingIprCmds:
+    """Only what stop_idle_ipr touches; every surface is recorded."""
+    def __init__(self, batch=False, mtoa=True, window=True):
+        self.batch, self.mtoa, self.window_open = batch, mtoa, window
+        self.calls = []
+
+    def about(self, batch=False):
+        return self.batch
+
+    def pluginInfo(self, name, query=False, loaded=False):
+        return self.mtoa
+
+    def arnoldRenderView(self, **kw):
+        self.calls.append(("arnoldRenderView", kw))
+
+    def window(self, name, exists=False):
+        return self.window_open
+
+    def deleteUI(self, name):
+        self.calls.append(("deleteUI", name))
+        self.window_open = False
+
+
+class TestStopIdleIpr:
+    def test_batch_mode_does_nothing(self):
+        cmds = RecordingIprCmds(batch=True)
+        assert session.stop_idle_ipr(cmds) == []
+        assert cmds.calls == []
+
+    def test_no_mtoa_no_window_does_nothing(self):
+        assert session.stop_idle_ipr(
+            RecordingIprCmds(mtoa=False, window=False)) == []
+
+    def test_an_open_view_is_stopped_and_closed(self):
+        cmds = RecordingIprCmds()
+        actions = session.stop_idle_ipr(cmds)
+        assert actions   # something was done, and it is reported
+        assert ("deleteUI", "ArnoldRenderView") in cmds.calls
+
+    def test_a_fake_without_ui_surfaces_degrades_to_noop(self):
+        class Bare:
+            pass
+        assert session.stop_idle_ipr(Bare()) == []

@@ -185,7 +185,7 @@ Lighting and materials:
 
 | cmd | params | result |
 |---|---|---|
-| `render_scene` | `{ angles?, renderer?, resolution?, isolate?, target?, zoom?, relight?, samples?, fallback_light? }` | `{ images: [{angle, png_b64}], camera_positions: [...], renderer, samples, fallback_light }` |
+| `render_scene` | `{ angles?, renderer?, resolution?, isolate?, target?, zoom?, relight?, samples?, fallback_light? }` | `{ images: [{angle, png_b64}], camera_positions: [...], renderer, samples, fallback_light, warnings }` |
 
 `render_scene` is the second eye. `capture_viewport` reads the VP2 viewport, so
 it is fast, needs a mapped window, and draws transmission as plain transparency -
@@ -236,6 +236,16 @@ timeout never stops the command: Maya runs it to completion on the main thread
 and the session stays busy either way, so raising the timeout costs nothing and
 timing out costs the images. At the ceiling the error stops recommending a larger
 value and says to split the work instead.
+
+**IPR hygiene (#721).** Both `render_scene` and `render_sheet` call
+`session.stop_idle_ipr` once the render loop finishes (success or error - it
+runs in the `finally`), best-effort and silent when there was nothing to
+clean up. An Arnold RenderView (IPR) left open re-renders on every scene
+mutation, and a caller renders through `cmds.arnoldRender`/`cmds.render`
+directly rather than the IPR view - so any ARV window still open is a leak
+from something else, not from this call. What it did, if anything, is
+appended to `warnings` (e.g. `"closed the Arnold RenderView window after
+rendering - ..."`).
 
 ## Framing, and writing images to disk
 
@@ -499,7 +509,7 @@ reports each channel's name and delta payload as read from the bytes.
 | cmd | params | result |
 |---|---|---|
 | `author_clip` | `{ root, name, fps=30, keys: [{time_s, rotations?, blend_weights?, root_position?}], interpolation, loop, timeout_s=120 }` | `{ root, clip, fps, duration_s, frames, keyed_joints, keyed_weight_channels, root_position_keyed, interpolation, loop, start_frame, end_frame, clips, padded_channels, held_channels, back_filled, replaced, per_key, warnings }` |
-| `preview_clip` | `{ root, name, angle?, every_nth?, resolution?, renderer?, zoom? }` | `{ clip, fps, start_frame, end_frame, frames, images, ... }` |
+| `preview_clip` | `{ root, name, angle?, every_nth?, resolution?, renderer?, zoom? }` | `{ clip, fps, start_frame, end_frame, frames, images, warnings, ... }` |
 | `delete_clip` | `{ root, name? }` | `{ root, clip, clips, deleted_curves, reaped_channels, max_displacement, warnings }` |
 
 `author_clip` keys the phase-1 pose map over time. **One rig carries as many
@@ -532,7 +542,12 @@ displacement is MEASURED by driving the scene time to that frame;
 ceiling `MAX_TIMEOUT_S`) exists because the tool's own timeout advice was
 unfollowable (#721): a long clip on a heavy scene outlives the default, and
 an open Arnold RenderView (IPR) re-renders on every scene mutation, which
-can stall keyframing for minutes.
+can stall keyframing for minutes. `author_clip` and `preview_clip` now also
+call `session.stop_idle_ipr` proactively - `author_clip` right before any
+key is written, `preview_clip` right after resolving which clip it is
+about to render - so an ARV left open from an earlier render no longer
+gets the chance to wedge the keyframe work at all; whatever it did lands in
+`warnings` with an `(#721)` tag.
 
 **The self-contained rule, and its two kinds of pin.** All clips on a rig
 share one curve per channel, so a channel a clip never mentions would

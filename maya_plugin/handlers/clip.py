@@ -372,6 +372,11 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
                  "work; delete_clip removes it if that is intended")
 
     warnings: List[str] = []
+    for action in session.stop_idle_ipr(cmds):
+        warnings.append(
+            action + " before keyframe work - an idle IPR re-renders on "
+            "every scene mutation and can wedge a keyframe call for "
+            "minutes (#721)")
     fractional = clipmath.fractional_frame_times(
         [k["time_s"] for k in resolved_keys], fps)
     if fractional:
@@ -1065,6 +1070,14 @@ def preview_clip(params: Dict[str, Any]) -> Dict[str, Any]:
             % (name, _short(root_long),
                ", ".join(repr(r["name"]) for r in records)),
             hint="a rig carries several clips now - pass the one to judge")
+
+    warnings: List[str] = []
+    for action in session.stop_idle_ipr(cmds):
+        warnings.append(
+            action + " before keyframe work - an idle IPR re-renders on "
+            "every scene mutation and can wedge a keyframe call for "
+            "minutes (#721)")
+
     fps = int(meta.get("fps", 30))
     start_frame = int(meta["start_frame"])
     duration_frames = int(meta["end_frame"]) - start_frame
@@ -1142,6 +1155,7 @@ def preview_clip(params: Dict[str, Any]) -> Dict[str, Any]:
             "reuse_camera": i > 0,
         })
     result = render._run_shots(cmds, shots, render_params)
+    result["warnings"] = warnings + result.get("warnings", [])
     result["clip"] = meta["name"]
     result["fps"] = fps
     result["start_frame"] = start_frame

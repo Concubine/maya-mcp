@@ -293,3 +293,47 @@ def save_scene(params: Dict[str, Any]) -> Dict[str, Any]:
     file_type = "mayaBinary" if current.lower().endswith(".mb") else "mayaAscii"
     cmds.file(save=True, type=file_type)
     return {"path": current}
+
+
+def stop_idle_ipr(cmds) -> list:
+    """Best-effort: stop any Arnold IPR session and close the Arnold
+    RenderView window; returns what was done, [] when there was nothing
+    to do. #721: an idle IPR view re-renders on EVERY scene mutation -
+    the first keyframe call after a render_scene hero pass wedged Maya
+    for 30+ minutes. render tools call this after finishing; keyframe
+    tools call it before starting. Interactive sessions only - batch has
+    no UI to leak.
+
+    Both mtoa calls below are MEASURED (#721p2 probe, progress.md): the
+    window is really named "ArnoldRenderView" (both a `window` and a
+    `workspaceControl` by that name track each other exactly across
+    open/close). The option value is "0"/"1", not "true"/"false" - every
+    real usage in mtoa's own shipped source uses "0"/"1", and a live test
+    setting either "0" or "false" left `getoption("Run IPR")` reading "1"
+    unchanged, so this best-effort call is kept (harmless, matches mtoa's
+    own internal pause pattern) but `deleteUI` is what actually closes the
+    window - measured to work, twice, via both existence probes flipping
+    True -> False.
+    """
+    actions = []
+    try:
+        if cmds.about(batch=True):
+            return actions
+    except Exception:
+        return actions  # not a real cmds (headless fake): nothing to do
+    try:
+        if cmds.pluginInfo("mtoa", query=True, loaded=True):
+            try:
+                cmds.arnoldRenderView(option=("Run IPR", "0"))
+                actions.append("stopped the Arnold RenderView IPR")
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        if cmds.window("ArnoldRenderView", exists=True):
+            cmds.deleteUI("ArnoldRenderView")
+            actions.append("closed the Arnold RenderView window")
+    except Exception:
+        pass
+    return actions

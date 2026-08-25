@@ -462,6 +462,13 @@ class TestAuthor:
         fake.string_attrs["|root"].pop("mcp_clip")
         assert clip.clip_meta(fake, "|root") == []
 
+    def test_author_clip_stops_an_idle_ipr_and_warns(self, fake, monkeypatch):
+        monkeypatch.setattr(clip.session, "stop_idle_ipr",
+                            lambda cmds: ["closed the Arnold RenderView"])
+        out = _author(fake)
+        assert any("closed the Arnold RenderView" in w and "#721" in w
+                   for w in out["warnings"])
+
 
 class TestSelfContainedTakes:
     """#718's correctness rule: at its own first and last frame, every clip
