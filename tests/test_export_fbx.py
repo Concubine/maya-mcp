@@ -1447,3 +1447,106 @@ class TestSceneClipsPredicate:
     def test_only_empty_attrs_means_no_clips(self):
         cmds = FakeClipSceneCmds({"|junk": "[]"})
         assert export._scene_clips(cmds) is None
+
+
+def _tfacts(basenames=(), names=()):
+    return {"texture_records": len(basenames), "video_records": len(basenames),
+            "textures": [{"name": n, "basename": b}
+                         for n, b in zip(names or basenames, basenames)],
+            "videos": [{"name": n, "basename": b}
+                       for n, b in zip(names or basenames, basenames)],
+            "unavailable_reason": None}
+
+
+def _file_claim(basename="grain.png", on_disk=True, semantics_lost=(),
+                material="skin_mat", attr="baseColor"):
+    return {"mesh": "|bodyShape", "meshes": ["|bodyShape"],
+            "material": material, "sg": "bodySG", "attr": attr,
+            "slot": "color", "classification": "file",
+            "terminals": [{"node": "tex", "type": "file",
+                           "file_path": "C:/t/" + basename,
+                           "basename": basename, "on_disk": on_disk,
+                           "colorspace": "sRGB"}],
+            "via": [], "semantics_lost": list(semantics_lost)}
+
+
+def _procedural_claim(terminal="mcpTex_noise", ttype="noise"):
+    return {"mesh": "|bodyShape", "meshes": ["|bodyShape"],
+            "material": "skin_mat", "sg": "bodySG", "attr": "normalCamera",
+            "slot": "normal", "classification": "procedural",
+            "terminals": [{"node": terminal, "type": ttype,
+                           "file_path": None, "basename": None,
+                           "on_disk": None, "colorspace": None}],
+            "via": ["bump2d"], "semantics_lost": []}
+
+
+class TestTextureViolations:
+    def test_a_surviving_file_claim_is_clean(self):
+        bad, warn = export.texture_violations(
+            _tfacts(["grain.png"]), [_file_claim()], False)
+        assert bad == [] and warn == []
+
+    def test_a_missing_on_disk_file_claim_refuses_in_both_modes(self):
+        # Never-observed loss class: file-backed maps always survived in
+        # every measurement, so its absence is an exporter regression and
+        # refusing it breaks nobody.
+        for strict in (False, True):
+            bad, _warn = export.texture_violations(
+                _tfacts([]), [_file_claim()], strict)
+            assert len(bad) == 1
+            assert "grain.png" in bad[0] and "skin_mat" in bad[0]
+
+    def test_basename_matching_is_case_insensitive(self):
+        bad, _warn = export.texture_violations(
+            _tfacts(["GRAIN.PNG"]), [_file_claim("grain.png")], False)
+        assert bad == []
+
+    def test_a_claim_whose_image_is_not_on_disk_only_warns(self):
+        # The exporter's behaviour for a missing image is UNMEASURED
+        # (#714 probe P5) - warn until it is.
+        bad, warn = export.texture_violations(
+            _tfacts([]), [_file_claim(on_disk=False)], True)
+        assert bad == []
+        assert any("not on disk" in w for w in warn)
+
+    def test_a_procedural_claim_warns_by_default(self):
+        bad, warn = export.texture_violations(
+            _tfacts([]), [_procedural_claim()], False)
+        assert bad == []
+        assert any("mcpTex_noise" in w and "silently drops" in w
+                   for w in warn)
+
+    def test_a_procedural_claim_violates_under_require_baked(self):
+        bad, _warn = export.texture_violations(
+            _tfacts([]), [_procedural_claim()], True)
+        assert len(bad) == 1
+        assert "normalCamera" in bad[0] or "normal" in bad[0]
+
+    def test_semantics_lost_warns_and_never_refuses(self):
+        claim = _file_claim(semantics_lost=["channel swizzle outColorR"])
+        for strict in (False, True):
+            bad, warn = export.texture_violations(
+                _tfacts(["grain.png"]), [claim], strict)
+            assert bad == []
+            assert any("outColorR" in w for w in warn)
+
+    def test_an_unclaimed_record_warns(self):
+        bad, warn = export.texture_violations(
+            _tfacts(["mystery.png"]), [], False)
+        assert bad == []
+        assert any("mystery.png" in w for w in warn)
+
+    def test_a_procedural_name_in_the_bytes_warns_that_the_model_is_stale(
+            self):
+        bad, warn = export.texture_violations(
+            _tfacts(["x.png"], names=["mcpTex_noise"]),
+            [_procedural_claim()], False)
+        assert bad == []
+        assert any("stale" in w for w in warn)
+
+    def test_an_unreadable_texture_block_warns_and_refuses_nothing(self):
+        tfacts = dict(_tfacts([]), unavailable_reason="record truncated")
+        bad, warn = export.texture_violations(
+            tfacts, [_file_claim()], True)
+        assert bad == []
+        assert any("record truncated" in w for w in warn)

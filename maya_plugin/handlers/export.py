@@ -351,6 +351,112 @@ def shape_violations(sfacts, declared: List[str]) -> List[str]:
     return out
 
 
+# Tokens Maya expands itself (assign_pbr._PATTERN_TOKENS). Such a path names
+# no single file, so its basename cannot be matched whole - the comparison
+# falls back to the literal prefix and only ever warns (#714: the
+# exporter's token handling is unmeasured).
+_TEXTURE_PATTERN_TOKENS = ("<udim>", "<u>", "<v>", "<f>", "<frame0", "<tile>")
+
+
+def texture_violations(tfacts, claims, require_baked):
+    """How the file's texture records disagree with what the scene claims.
+
+    Returns (violations, warnings). The asymmetry is deliberate and
+    measured:
+
+    * A FILE-backed claim missing from the bytes is a loss class never
+      observed - every measurement shows file textures surviving as a
+      Texture+Video pair carrying the basename - so its absence means the
+      exporter regressed, and refusing it breaks no working pipeline.
+    * A PROCEDURAL claim missing from the bytes is the KNOWN behaviour
+      every golem-class delivery already relies on. Refusing it by default
+      would retroactively break correct pipelines, so it warns unless the
+      caller demands baked-only cargo.
+    * semantics_lost never refuses: the image ships and the consumer
+      rewires the channel. Refusing would refuse assign_pbr's own mask
+      workflow.
+
+    Comparison is by image BASENAME, case-insensitively (Windows), never by
+    node name (this toolbox writes two different naming conventions and the
+    exporter may rename), and never by record counts (one file node can
+    drive several slots).
+    """
+    violations = []
+    warnings = []
+
+    if tfacts.get("unavailable_reason"):
+        warnings.append(
+            "the file's texture records could not be read (%s) - texture "
+            "claims were NOT verified against the bytes"
+            % tfacts["unavailable_reason"])
+        return violations, warnings
+
+    in_file = {(row.get("basename") or "").lower()
+               for row in tfacts["textures"] + tfacts["videos"]
+               if row.get("basename")}
+    record_names = {(row.get("name") or "")
+                    for row in tfacts["textures"] + tfacts["videos"]}
+    claimed = set()
+
+    for claim in claims:
+        where = "material %r slot %r (%s)" % (
+            claim["material"], claim["slot"] or "?", claim["attr"])
+        if claim["classification"] == "file":
+            for terminal in claim["terminals"]:
+                basename = (terminal.get("basename") or "")
+                claimed.add(basename.lower())
+                pattern = any(tok in basename.lower()
+                              for tok in _TEXTURE_PATTERN_TOKENS)
+                found = basename.lower() in in_file
+                if found:
+                    continue
+                if pattern:
+                    warnings.append(
+                        "%s claims the image sequence %r, whose expansion "
+                        "in the file is unmeasured - no record matched"
+                        % (where, basename))
+                elif not terminal.get("on_disk"):
+                    warnings.append(
+                        "%s claims image %r, which is not on disk at export "
+                        "time - the file carries no record for it"
+                        % (where, basename))
+                else:
+                    violations.append(
+                        "%s claims file texture %r but the file carries no "
+                        "Texture/Video record for it"
+                        % (where, basename))
+            if claim["semantics_lost"]:
+                warnings.append(
+                    "%s survives as an image reference only - %s do not "
+                    "travel in FBX and must be re-created by the consumer"
+                    % (where, ", ".join(claim["semantics_lost"])))
+        else:
+            nodes = ", ".join(t["node"] for t in claim["terminals"])
+            if require_baked:
+                violations.append(
+                    "%s is driven by a procedural network (%s), which "
+                    "Maya's FBX exporter cannot write" % (where, nodes))
+            else:
+                warnings.append(
+                    "%s is driven by a procedural network (%s) that Maya's "
+                    "FBX exporter silently drops - the exported file does "
+                    "not carry this map" % (where, nodes))
+            for terminal in claim["terminals"]:
+                if terminal["node"] in record_names:
+                    warnings.append(
+                        "%s: %r appears among the file's texture records - "
+                        "the #714 drop model is stale and wants re-measuring"
+                        % (where, terminal["node"]))
+
+    for basename in sorted(b for b in in_file if b and b not in claimed):
+        warnings.append(
+            "the file carries texture %r that no walked material claim "
+            "explains - the claim walk covers this toolbox's authored "
+            "slots only" % basename)
+
+    return violations, warnings
+
+
 def _scene_clips(cmds):
     """The clips maya_author_clip stamped, and the span they occupy.
 
