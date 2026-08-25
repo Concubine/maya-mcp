@@ -405,12 +405,16 @@ def texture_violations(tfacts, claims, require_baked):
         where = "material %r slot %r (%s)" % (
             claim["material"], claim["slot"] or "?", claim["attr"])
         if claim["classification"] == "file":
-            # Gates the semantics_lost warning below: that warning describes
-            # what happens to an image that SURVIVES, so it must not fire
-            # alongside a report (violation or warning) that the image's own
-            # terminal was not found in the bytes - asserting both at once
-            # is a contradiction, not two independent findings.
-            all_found = True
+            # Gates the semantics_lost warning below. That warning describes
+            # what does NOT travel about an image that DID travel, so it is
+            # true the moment ANY terminal of a (possibly multi-terminal,
+            # e.g. a bump2d feeding two file-backed attributes) claim was
+            # found in the bytes - one surviving terminal is enough. It is
+            # false, and must be suppressed, only when NONE survived: there
+            # is then no surviving image for the warning to describe, and
+            # asserting it alongside "no record for it" would contradict
+            # that report.
+            any_found = False
             for terminal in claim["terminals"]:
                 basename = (terminal.get("basename") or "")
                 claimed.add(basename.lower())
@@ -418,8 +422,8 @@ def texture_violations(tfacts, claims, require_baked):
                               for tok in _TEXTURE_PATTERN_TOKENS)
                 found = basename.lower() in in_file
                 if found:
+                    any_found = True
                     continue
-                all_found = False
                 if pattern:
                     warnings.append(
                         "%s claims the image sequence %r, whose expansion "
@@ -435,7 +439,7 @@ def texture_violations(tfacts, claims, require_baked):
                         "%s claims file texture %r but the file carries no "
                         "Texture/Video record for it"
                         % (where, basename))
-            if claim["semantics_lost"] and all_found:
+            if claim["semantics_lost"] and any_found:
                 warnings.append(
                     "%s survives as an image reference only - %s do not "
                     "travel in FBX and must be re-created by the consumer"

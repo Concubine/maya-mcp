@@ -1470,6 +1470,31 @@ def _file_claim(basename="grain.png", on_disk=True, semantics_lost=(),
             "via": [], "semantics_lost": list(semantics_lost)}
 
 
+def _multi_file_claim(basename_a="diffuse.png", basename_b="grain.png",
+                      on_disk_b=False, semantics_lost=(),
+                      material="skin_mat", attr="baseColor"):
+    """A two-terminal file claim (fix round 2). texclaim legitimately
+    produces these: once the walk steps through a bump2d/reverse it queries
+    the bare node, so two file-fed attributes of one such node yield two
+    file terminals in one claim. Terminal A is basename_a (found by
+    default); terminal B is basename_b, defaulting to on_disk=False so it
+    only warns rather than violating."""
+    return {"mesh": "|bodyShape", "meshes": ["|bodyShape"],
+            "material": material, "sg": "bodySG", "attr": attr,
+            "slot": "color", "classification": "file",
+            "terminals": [
+                {"node": "texA", "type": "file",
+                 "file_path": "C:/t/" + basename_a,
+                 "basename": basename_a, "on_disk": True,
+                 "colorspace": "Raw"},
+                {"node": "texB", "type": "file",
+                 "file_path": "C:/t/" + basename_b,
+                 "basename": basename_b, "on_disk": on_disk_b,
+                 "colorspace": "sRGB"},
+            ],
+            "via": [], "semantics_lost": list(semantics_lost)}
+
+
 def _procedural_claim(terminal="mcpTex_noise", ttype="noise"):
     return {"mesh": "|bodyShape", "meshes": ["|bodyShape"],
             "material": "skin_mat", "sg": "bodySG", "attr": "normalCamera",
@@ -1589,3 +1614,50 @@ class TestTextureViolations:
             _tfacts([]), [_file_claim("body_<udim>.png")], True)
         assert bad == []
         assert any("body_<udim>.png" in w for w in warn)
+
+    def test_semantics_lost_is_reported_when_one_of_two_terminals_survives(
+            self):
+        # Fix round 2: the gate over-corrected to ALL terminals found. A
+        # multi-terminal claim (e.g. a bump2d feeding two file-backed
+        # attributes) can have one terminal survive in the bytes and one
+        # not (here: not on disk, so it only warns) - the surviving
+        # terminal's semantics_lost is still true and actionable, and must
+        # not be suppressed by the other terminal's unrelated warning.
+        claim = _multi_file_claim(semantics_lost=["Raw colorspace"])
+        bad, warn = export.texture_violations(
+            _tfacts(["diffuse.png"]), [claim], False)
+        assert bad == []
+        assert any("Raw colorspace" in w for w in warn)
+
+    def test_semantics_lost_is_suppressed_when_no_terminal_survives(self):
+        # The pre-fix contradiction stays fixed: with NO terminal found,
+        # "survives as an image reference only" would itself be false, so
+        # it must not be asserted.
+        claim = _multi_file_claim(semantics_lost=["Raw colorspace"])
+        bad, warn = export.texture_violations(_tfacts([]), [claim], False)
+        assert not any("Raw colorspace" in w for w in warn)
+
+    def test_stale_warning_skips_file_type_terminals_in_a_mixed_procedural_claim(
+            self):
+        # Regression for the type == "file" skip (fix round 1, Minor 4): a
+        # layeredTexture mixing real files is itself procedural, so a
+        # genuine file terminal's NAME can legitimately appear among the
+        # bytes' records without that being evidence the #714 drop model
+        # is stale.
+        claim = {"mesh": "|bodyShape", "meshes": ["|bodyShape"],
+                "material": "skin_mat", "sg": "bodySG",
+                "attr": "normalCamera", "slot": "normal",
+                "classification": "procedural",
+                "terminals": [
+                    {"node": "mixTex", "type": "file",
+                     "file_path": "C:/t/mixTex.png",
+                     "basename": "mixTex.png", "on_disk": True,
+                     "colorspace": "sRGB"},
+                    {"node": "layerNode", "type": "layeredTexture",
+                     "file_path": None, "basename": None,
+                     "on_disk": None, "colorspace": None},
+                ],
+                "via": ["bump2d"], "semantics_lost": []}
+        bad, warn = export.texture_violations(
+            _tfacts(["x.png"], names=["mixTex"]), [claim], False)
+        assert not any("stale" in w for w in warn)
