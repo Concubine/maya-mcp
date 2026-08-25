@@ -4276,7 +4276,15 @@ class TestTextureHonestyInMaya:
         Video record (texture_records=1, video_records=1) in a 33024-byte
         selected-export file; file_maps names basename "grain.png" with
         found_in_file=True and dropped_maps=[]. Confirms the module
-        docstring's claim on real bytes, not just the headless fake."""
+        docstring's claim on real bytes, not just the headless fake.
+
+        found_in_file is the handler's OWN report - proving the ticket's
+        claim needs the independent raw-bytes check below too: the
+        basename's literal bytes ("grain.png") are read back out of the
+        written file directly, the same rigor the procedural test applies
+        to prove absence. A found_in_file that were ever computed from
+        something other than a real post-export byte scan would still
+        pass the structured assertions above; it cannot survive this one."""
         import maya.cmds as cmds
 
         from maya_plugin.handlers import export, material, texture_recipes
@@ -4293,10 +4301,12 @@ class TestTextureHonestyInMaya:
                                  "nodes": [mesh]})
         block = out["textures"]
         assert block is not None
-        assert block["texture_records"] >= 1
+        assert block["texture_records"] == 1
         maps = [m for m in block["file_maps"] if m["basename"] == "grain.png"]
         assert maps and maps[0]["found_in_file"] is True
         assert block["dropped_maps"] == []
+        with open(path, "rb") as fh:
+            assert b"grain.png" in fh.read()
 
     def test_a_procedural_network_is_named_dropped_and_absent_from_bytes(
             self, tmp_path):
@@ -4371,7 +4381,9 @@ class TestTextureHonestyInMaya:
         export of the same file_texture setup carries texture_records=1
         and reports basename "whole.png" with found_in_file=True - the
         same shape as the selected-export case, confirming the claim is
-        not selection-mode-dependent."""
+        not selection-mode-dependent. As with the selected-export test,
+        found_in_file is checked against an independent raw-bytes read
+        too, not just the handler's own report."""
         import maya.cmds as cmds
 
         from maya_plugin.handlers import export, material, texture_recipes
@@ -4388,6 +4400,8 @@ class TestTextureHonestyInMaya:
         found = [m for m in out["textures"]["file_maps"]
                  if m["basename"] == "whole.png"]
         assert found and found[0]["found_in_file"] is True
+        with open(path, "rb") as fh:
+            assert b"whole.png" in fh.read()
 
     def test_texclaim_walk_on_awkward_but_legal_shading_does_not_raise(self):
         """Risk probe (#714 Task 5, carried-forward risk #2): texclaim's
@@ -4427,3 +4441,58 @@ class TestTextureHonestyInMaya:
 
         claims = texclaim.material_claims(cmds, [disconnected, bare])
         assert claims == []
+
+    def test_bump2d_aggregates_every_source_not_just_the_recipes_own(
+            self, tmp_path):
+        """Risk #1, actually proven (#714 Task 5 fix round 1): via==
+        ["bump2d"] on the noise_bump recipe's ONE-input bump2d cannot
+        distinguish "listConnections on the bare node aggregates EVERY
+        source" from "there happened to be exactly one source to find".
+        This builds a genuinely two-input bump2d and asserts the claim
+        names BOTH upstream nodes.
+
+        MEASURED under mayapy (Maya 2027): bump2d exposes a real, unused
+        float input - bumpFilterOffset - that a real Maya bump2d node
+        accepts a second texture connection into without complaint
+        (bumpDepth, also probed, is equally connectable; bumpFilterOffset
+        was picked because the recipe never touches it). After wiring a
+        second noise's outColorR into mcpTex_bump.bumpFilterOffset
+        alongside the recipe's own noise->bumpValue connection,
+        cmds.listConnections("mcpTex_bump", source=True, destination=
+        False, plugs=True) - the exact bare-node call _walk_upstream
+        makes - returned BOTH source plugs
+        ["mcpTex_noise.outColorR", "probe_noise2.outColorR"], and
+        texclaim.material_claims's terminals for the normalCamera claim
+        were exactly ["mcpTex_noise", "probe_noise2"] with via==
+        ["bump2d"], classification "procedural". The aggregation
+        assumption the whole walker rests on past a pass-through is
+        CONFIRMED, not merely consistent with a single-input case."""
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import export, material, texture_recipes
+
+        mesh = cmds.ls(cmds.polyCube(name="two_in_cube")[0], long=True)[0]
+        material.assign_material({"mesh": mesh, "material": "two_in_mat",
+                                  "shader": "standardSurface"})
+        recipe = texture_recipes.apply_texture_recipe({
+            "mesh": mesh, "recipe": "noise_bump"})
+        noise1 = [n for n in recipe["nodes"] if "noise" in n][0]
+        bump = [n for n in recipe["nodes"] if "bump" in n][0]
+        noise2 = cmds.shadingNode("noise", asTexture=True,
+                                  name="probe_noise2")
+        # An unused float input on the SAME bump2d - not bumpValue, which
+        # the recipe already drives. Wiring here (rather than a second
+        # slot) is what makes this a two-SOURCE, one-NODE fixture: the
+        # walk reaches both through the identical bare-node
+        # listConnections("bump2d", ...) call, which is exactly the
+        # behaviour risk #1 is about.
+        cmds.connectAttr(noise2 + ".outColorR", bump + ".bumpFilterOffset",
+                         force=True)
+
+        path = str(tmp_path / "two_input.fbx").replace("\\", "/")
+        out = export.export_fbx({"path": path, "metres_per_unit": 1.0,
+                                 "nodes": [mesh]})
+        dropped = out["textures"]["dropped_maps"]
+        terminals = sorted(d["terminal"] for d in dropped)
+        assert terminals == sorted([noise1, noise2])
+        assert all(d["via"] == ["bump2d"] for d in dropped)
