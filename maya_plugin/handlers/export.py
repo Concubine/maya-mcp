@@ -870,7 +870,23 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
     # scene is never modified. Scoped to the exported shapes, like shape
     # aliases and clips above.
     claim_shapes = _exported_mesh_shapes(cmds, nodes)
-    texture_claims = texclaim.material_claims(cmds, claim_shapes)
+    # The walk touches cmds.listSets/listConnections/nodeType/attributeQuery
+    # with no guard of its own (only _file_terminal's two getAttr reads are
+    # wrapped) and Task 4 put it on the critical path of EVERY export,
+    # including whole-scene exports of scenes that never touched a shading
+    # network. This claim is a MEASUREMENT of the scene, and a measurement
+    # that fails must cost the measurement, not the export - the same
+    # precedent _bounds() sets for a rotation order its reader cannot
+    # compose. Never swallowed silently: claims_unavailable surfaces below,
+    # both in the strict pre-write refusal and in the reported result.
+    try:
+        texture_claims = texclaim.material_claims(cmds, claim_shapes)
+        claims_unavailable = None
+    except Exception as exc:          # noqa: BLE001 - never fail a good export
+        texture_claims = []
+        claims_unavailable = (
+            "the scene's texture claims could not be read (%s: %s)"
+            % (type(exc).__name__, exc))
     if require_baked:
         procedural = [c for c in texture_claims
                       if c["classification"] == "procedural"]
@@ -888,6 +904,13 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
                      "(maya_assign_pbr, or the file_texture recipe), or "
                      "export with require_baked_textures=false and accept "
                      "that the look does not travel")
+        if claims_unavailable:
+            raise HandlerError(
+                "require_baked_textures=true but %s - the export cannot "
+                "prove the materials carry only file-backed maps"
+                % claims_unavailable,
+                hint="re-run without require_baked_textures to export "
+                     "anyway, or fix the scene condition named above")
 
     declared_clip = _scene_clips(cmds) if include_animation else None
     if include_animation and declared_clip is None:
@@ -1051,6 +1074,8 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
     tex_block = fbxbytes.texture_facts(facts)
     tex_bad, tex_warnings = texture_violations(tex_block, texture_claims,
                                                require_baked)
+    if claims_unavailable:
+        tex_warnings.append(claims_unavailable)
     violations += tex_bad
     texture_hint = (
         " For texture violations: a file texture's image must exist on disk "
@@ -1093,7 +1118,10 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
     os.replace(tmp_path, path)
 
     reported_textures = None
-    if texture_claims or tex_block["texture_records"]:
+    # A failed claim walk still reports a block - claims_unavailable alone
+    # must not look like a clean textureless export, or the failure this
+    # try/except exists to surface would go unreported by omission.
+    if texture_claims or tex_block["texture_records"] or claims_unavailable:
         in_file = {(row.get("basename") or "").lower()
                    for row in tex_block["textures"] + tex_block["videos"]
                    if row.get("basename")}
@@ -1119,6 +1147,12 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
                         "terminal_type": terminal["type"],
                         "via": claim["via"], "meshes": claim["meshes"]})
         claimed = {(m["basename"] or "").lower() for m in file_maps}
+        # Both reasons are kept, joined, when both fire - the claim walk
+        # and the byte read are independent failures and neither should
+        # hide the other.
+        combined_unavailable = "; ".join(
+            r for r in (claims_unavailable, tex_block["unavailable_reason"])
+            if r) or None
         reported_textures = {
             "texture_records": tex_block["texture_records"],
             "video_records": tex_block["video_records"],
@@ -1126,7 +1160,7 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
             "dropped_maps": dropped_maps,
             "unclaimed_records": sorted(b for b in in_file
                                         if b and b not in claimed),
-            "unavailable_reason": tex_block["unavailable_reason"],
+            "unavailable_reason": combined_unavailable,
         }
 
     lo, hi, height, bounds_unavailable_reason = _bounds(facts)

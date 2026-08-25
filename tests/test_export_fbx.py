@@ -1717,3 +1717,53 @@ class TestRequireBakedTextures:
         out = export.export_fbx(_params(tmp_path))
         assert out["textures"] is None
         assert out["warnings"] == []
+
+
+def _raise_boom(_c, _s):
+    raise RuntimeError("boom")
+
+
+class TestClaimWalkFailure:
+    """The claim walk (texclaim.material_claims) is unguarded internally -
+    only _file_terminal's two getAttr reads are wrapped - and export_fbx
+    puts it on the critical path of EVERY export. The claim is a
+    MEASUREMENT of the scene (the _bounds() precedent): a failure there
+    must cost the measurement, not a good export."""
+
+    def test_a_failing_claim_walk_does_not_break_the_export(
+            self, monkeypatch, tmp_path):
+        node = fbxbytes.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1,
+                                geometry=7)
+        _install(monkeypatch, FakeCmds(), _facts([node]))
+        monkeypatch.setattr(export.texclaim, "material_claims", _raise_boom)
+        out = export.export_fbx(_params(tmp_path))
+        assert "boom" in out["textures"]["unavailable_reason"]
+        assert any("boom" in w for w in out["warnings"])
+
+    def test_a_failing_claim_walk_refuses_under_require_baked(
+            self, monkeypatch, tmp_path):
+        node = fbxbytes.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1,
+                                geometry=7)
+        cmds = FakeCmds()
+        _install(monkeypatch, cmds, _facts([node]))
+        monkeypatch.setattr(export.texclaim, "material_claims", _raise_boom)
+        params = _params(tmp_path, require_baked_textures=True)
+        with pytest.raises(HandlerError, match="could not be read"):
+            export.export_fbx(params)
+        assert not any(c[0] == "file" for c in cmds.calls)
+
+    def test_both_unavailable_reasons_are_reported_together(
+            self, monkeypatch, tmp_path):
+        node = fbxbytes.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1,
+                                geometry=7)
+        _install(monkeypatch, FakeCmds(), _facts([node]))
+        monkeypatch.setattr(export.texclaim, "material_claims", _raise_boom)
+        monkeypatch.setattr(
+            export.fbxbytes, "texture_facts",
+            lambda _f: {"texture_records": 0, "video_records": 0,
+                       "textures": [], "videos": [],
+                       "unavailable_reason": "byte-reason-xyz"})
+        out = export.export_fbx(_params(tmp_path))
+        reason = out["textures"]["unavailable_reason"]
+        assert "boom" in reason
+        assert "byte-reason-xyz" in reason
