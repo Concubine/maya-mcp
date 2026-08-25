@@ -1510,8 +1510,98 @@ def export_and_check(mesh: str, material: dict) -> dict:
     # predicted, measured outcome (it does not survive) is the finding
     # itself, not a gate violation.
 
+    # #714 Task 7: cross-check the PRODUCT's own reported `textures` block
+    # against THIS eval's independent byte walk (_fbx_generic_records /
+    # _fbx_texture_facts above). This is the #718 byte-honesty pattern -
+    # replacing the independent walker with the product's own reader would
+    # make the gate agree with itself, which proves nothing. Three checks,
+    # each reporting the measured numbers behind its verdict.
+    reported = res.get("textures") or {}
+    file_maps = reported.get("file_maps") or []
+    dropped_maps = reported.get("dropped_maps") or []
+    reported_warnings = res.get("warnings") or []
+    cross_check = {}
+
+    # Cross-check 1: the file_texture basename, both readers.
+    target_basename = os.path.basename(TEXTURE_PATH)
+    file_claim = next(
+        (m for m in file_maps
+         if (m.get("basename") or "").lower() == target_basename.lower()),
+        None)
+    cross_check["file_basename"] = target_basename
+    cross_check["file_maps_basenames"] = [m.get("basename") for m in file_maps]
+    if file_claim is None:
+        cross_check["file_cross_check_agree"] = False
+        problems.append(
+            "cross-check 1: result['textures']['file_maps'] (%d entries: "
+            "%r) has no entry for basename %r - the product's own claim "
+            "walk lost the file_texture recipe"
+            % (len(file_maps), cross_check["file_maps_basenames"],
+               target_basename))
+    else:
+        product_found = bool(file_claim.get("found_in_file"))
+        eval_found = texture_facts["file_texture_basename_found"]
+        cross_check["file_cross_check_agree"] = (product_found == eval_found)
+        if product_found != eval_found:
+            problems.append(
+                "cross-check 1 DISAGREEMENT on basename %r: product's "
+                "textures.file_maps reports found_in_file=%r, this eval's "
+                "independent byte walk reports "
+                "file_texture_basename_found=%r (%d Texture / %d Video "
+                "records scanned in the raw bytes)"
+                % (target_basename, product_found, eval_found,
+                   texture_facts["texture_objects"],
+                   texture_facts["video_objects"]))
+
+    # Cross-check 2: the noise_bump terminal the product claims was dropped.
+    dropped_terminal_names = [d.get("terminal") for d in dropped_maps]
+    drop_entry = next(
+        (d for d in dropped_maps if d.get("terminal") in procedural_nodes),
+        None)
+    cross_check["procedural_nodes"] = procedural_nodes
+    cross_check["dropped_maps_terminals"] = dropped_terminal_names
+    if drop_entry is None:
+        cross_check["drop_cross_check_agree"] = False
+        problems.append(
+            "cross-check 2: result['textures']['dropped_maps'] (%d entries, "
+            "terminals %r) names none of noise_bump's nodes %r - the "
+            "product's own claim walk missed a drop this eval's byte walk "
+            "confirms (procedural_node_names_found: %r)"
+            % (len(dropped_maps), dropped_terminal_names, procedural_nodes,
+               texture_facts["procedural_node_names_found"]))
+    else:
+        terminal = drop_entry.get("terminal")
+        bytes_found = texture_facts["procedural_node_names_found"].get(terminal)
+        cross_check["dropped_terminal"] = terminal
+        cross_check["drop_cross_check_agree"] = not bool(bytes_found)
+        if bytes_found:
+            problems.append(
+                "cross-check 2 DISAGREEMENT: product's dropped_maps names "
+                "%r as dropped, but this eval's independent byte walk "
+                "FOUND %r present in the exported bytes (occurrences: %r)"
+                % (terminal, terminal,
+                   texture_facts["procedural_node_names_found"]))
+
+        # Cross-check 3: warnings names the dropped material/slot.
+        material_name = drop_entry.get("material")
+        slot_name = drop_entry.get("slot") or drop_entry.get("attr")
+        named_in_warnings = any(
+            material_name and slot_name
+            and material_name in w and slot_name in w
+            for w in reported_warnings)
+        cross_check["material"] = material_name
+        cross_check["slot"] = slot_name
+        cross_check["warning_names_drop"] = named_in_warnings
+        if not named_in_warnings:
+            problems.append(
+                "cross-check 3: result['warnings'] (%d lines: %r) carries "
+                "no line naming dropped material %r slot %r"
+                % (len(reported_warnings), reported_warnings, material_name,
+                   slot_name))
+
     return {"export": res, "take_names": take_names, "shapes": shapes,
-            "texture_facts": texture_facts, "problems": problems}
+            "texture_facts": texture_facts, "cross_check": cross_check,
+            "problems": problems}
 
 
 # --- Task 8 orchestration: consume the already-built scene -----------------
@@ -1686,7 +1776,9 @@ def main() -> int:
                 "shapes": exported["shapes"],
                 "metres_per_unit": exported["export"].get("metres_per_unit"),
                 "bytes": exported["export"].get("bytes"),
-                "texture_facts": exported["texture_facts"]},
+                "texture_facts": exported["texture_facts"],
+                "textures": exported["export"].get("textures"),
+                "cross_check": exported["cross_check"]},
     }
     os.makedirs(OUT_DIR, exist_ok=True)
     with open(BASELINE_PATH, "w") as fh:
@@ -1707,6 +1799,13 @@ def main() -> int:
     print("#714 verdict: file_texture basename found=%r; procedural nodes "
          "survived=%r" % (exported["texture_facts"]["file_texture_basename_found"],
                           exported["texture_facts"]["procedural_survived_names"]))
+    cc = exported["cross_check"]
+    print("#714 task 7 cross-check: file_basename=%r agree=%r; "
+         "dropped_terminal=%r agree=%r; warning_names_drop=%r "
+         "(material=%r slot=%r)"
+         % (cc.get("file_basename"), cc.get("file_cross_check_agree"),
+            cc.get("dropped_terminal"), cc.get("drop_cross_check_agree"),
+            cc.get("warning_names_drop"), cc.get("material"), cc.get("slot")))
     return 1 if problems else 0
 
 
