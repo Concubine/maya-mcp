@@ -185,7 +185,7 @@ Lighting and materials:
 
 | cmd | params | result |
 |---|---|---|
-| `render_scene` | `{ angles?, renderer?, resolution?, isolate?, target?, zoom?, relight?, samples?, fallback_light? }` | `{ images: [{angle, png_b64}], camera_positions: [...], renderer, samples, fallback_light }` |
+| `render_scene` | `{ angles?, renderer?, resolution?, isolate?, target?, zoom?, relight?, samples?, fallback_light? }` | `{ images: [{angle, png_b64}], camera_positions: [...], renderer, samples, fallback_light, warnings }` |
 
 `render_scene` is the second eye. `capture_viewport` reads the VP2 viewport, so
 it is fast, needs a mapped window, and draws transmission as plain transparency -
@@ -236,6 +236,16 @@ timeout never stops the command: Maya runs it to completion on the main thread
 and the session stays busy either way, so raising the timeout costs nothing and
 timing out costs the images. At the ceiling the error stops recommending a larger
 value and says to split the work instead.
+
+**IPR hygiene (#721).** Both `render_scene` and `render_sheet` call
+`session.stop_idle_ipr` once the render loop finishes (success or error - it
+runs in the `finally`), best-effort and silent when there was nothing to
+clean up. An Arnold RenderView (IPR) left open re-renders on every scene
+mutation, and a caller renders through `cmds.arnoldRender`/`cmds.render`
+directly rather than the IPR view - so any ARV window still open is a leak
+from something else, not from this call. What it did, if anything, is
+appended to `warnings` (e.g. `"closed the Arnold RenderView window after
+rendering - ..."`).
 
 ## Framing, and writing images to disk
 
@@ -499,8 +509,8 @@ reports each channel's name and delta payload as read from the bytes.
 | cmd | params | result |
 |---|---|---|
 | `author_clip` | `{ root, name, fps=30, keys: [{time_s, rotations?, blend_weights?, root_position?}], interpolation, loop, timeout_s=120 }` | `{ root, clip, fps, duration_s, frames, keyed_joints, keyed_weight_channels, root_position_keyed, interpolation, loop, start_frame, end_frame, clips, padded_channels, held_channels, back_filled, replaced, per_key, warnings }` |
-| `preview_clip` | `{ root, name, angle?, every_nth?, resolution?, renderer?, zoom? }` | `{ clip, fps, start_frame, end_frame, frames, images, ... }` |
-| `delete_clip` | `{ root, name? }` | `{ root, clip, clips, deleted_curves, max_displacement, warnings }` |
+| `preview_clip` | `{ root, name, angle?, every_nth?, resolution?, renderer?, zoom? }` | `{ clip, fps, start_frame, end_frame, frames, images, warnings, ... }` |
+| `delete_clip` | `{ root, name? }` | `{ root, clip, clips, deleted_curves, reaped_channels, max_displacement, warnings }` |
 
 `author_clip` keys the phase-1 pose map over time. **One rig carries as many
 named clips as the asset needs, laid end to end on ONE shared timeline** —
@@ -532,7 +542,13 @@ displacement is MEASURED by driving the scene time to that frame;
 ceiling `MAX_TIMEOUT_S`) exists because the tool's own timeout advice was
 unfollowable (#721): a long clip on a heavy scene outlives the default, and
 an open Arnold RenderView (IPR) re-renders on every scene mutation, which
-can stall keyframing for minutes.
+can stall keyframing for minutes. `author_clip` and `preview_clip` now also
+call `session.stop_idle_ipr` proactively - `author_clip` right before any
+key is written, `preview_clip` right after resolving which clip it is
+about to render - so an ARV left open from an earlier render no longer gets
+the chance to wedge what comes next: keyframing for `author_clip`,
+rendering and time-scrubbing for `preview_clip` (it writes no keys of its
+own). Whatever it did lands in `warnings` with an `(#721)` tag.
 
 **The self-contained rule, and its two kinds of pin.** All clips on a rig
 share one curve per channel, so a channel a clip never mentions would
@@ -542,11 +558,20 @@ both directions:
 
 * **`padded_channels`** — channels some OTHER clip on the rig touches that
   THIS clip does not key anywhere in its own range. Pinned at their REST
-  value (the value recorded the moment the channel first became
-  curve-driven, or inferred with a warning for a scene that predates this
-  attribute) at this clip's own boundary frames, so the take cannot inherit
-  a neighbour's pose — a caller reading only this clip's take sees the rig
-  sitting at rest outside the motion it actually authors.
+  value, recorded the moment the channel first becomes curve-driven, at
+  this clip's own boundary frames, so the take cannot inherit a neighbour's
+  pose — a caller reading only this clip's take sees the rig sitting at
+  rest outside the motion it actually authors. **Rest is the BIND pose**
+  (#732) wherever the joint's dagPose bind matrix can be decomposed — the
+  default XYZ rotate order, with `jointOrient`/`rotateAxis` stripped out —
+  which is the common case for an imported rig whose bind pose legitimately
+  carries rotation; a warning fires only when the rig is measurably POSED
+  AWAY from that bind pose at the moment of first capture. A joint with no
+  readable bind entry (no dagPose, or a non-default rotate order) falls
+  back to the pre-#732 behavior — the rig's CURRENT pose at first capture —
+  with its own summarized warning when that capture is non-zero. A scene
+  authored before `mcp_clip_rest` existed at all still infers rest with a
+  warning, from the existing clip's first key.
 * **`held_channels`** — channels this clip DOES animate, but did not key
   exactly at one of its own boundary frames (a sparse declaration, or a
   fractional-time key that rounds short of the boundary). These are pinned
@@ -602,17 +627,15 @@ passed:
 
 Both report the measured displacement of the return.
 
-**`deleted_curves` on a NAMED, partial delete is structurally 0 while two or
-more clips remain on the rig — this is a measurement, not a bug.** The
-self-contained rule (above) keys every channel the rig uses at every clip's
-own boundary frames, so cutting one clip's frame range essentially never
-empties a curve outright: the curve still carries keys from the clips that
-remain, including the pins the deleted clip's neighbours hold at their own
-boundaries. `deleted_curves` counts curves that disappear ENTIRELY, and with
-other clips still declaring those same channels, that count is honestly
-zero. A future reader seeing 0 next to "deleted" should not "fix" this —
-the curves that emptied out are exactly the ones a full (unnamed) delete
-reports.
+**`deleted_curves` on a NAMED, partial delete counts two things.** Cutting
+the doomed clip's own frame range essentially never empties a shared curve
+(the surviving clips' keys and pins remain), BUT a channel that only the
+deleted clip declared is reaped whole (#730): the rest pins the deleted
+clip back-filled into the surviving clips' ranges are dead weight no take
+declares, so its curves are removed entirely and reported in
+`reaped_channels`. A partial delete of a clip whose channels are all
+shared with survivors still honestly reports `deleted_curves: 0` and
+`reaped_channels: []`.
 
 The rig's `playbackOptions` range is always set to the **full span** —
 frame 0 through the latest `end_frame` across every clip on the rig, not

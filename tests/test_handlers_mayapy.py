@@ -3645,6 +3645,64 @@ class TestClipExportInMaya:
             clip.delete_clip({"root": root_b})
 
 
+class TestBindPoseRestInMaya:
+    """#732 against real dagPose data. create_skeleton auto-orients local
+    X down the bone, so jointOrient is NON-zero and rotate is zero at
+    bind - decomposition must recover ~0. A hand-built rig with non-zero
+    rotate at bind is the imported-rig case the warning used to spam."""
+
+    def test_a_posed_create_skeleton_rig_pins_at_bind_and_warns(self, tmp_path):
+        import json
+        import maya.cmds as cmds
+        from maya_plugin.handlers import clip, rigging
+
+        base = cmds.ls(cmds.polyCube(name="bp_base", height=2,
+                                     subdivisionsHeight=4)[0], long=True)[0]
+        skel = rigging.create_skeleton({"joints": [
+            {"name": "bp_root", "position": [0.0, -1.0, 0.0]},
+            {"name": "bp_mid", "position": [0.0, 0.0, 0.0],
+             "parent": "bp_root"},
+            {"name": "bp_tip", "position": [0.0, 1.0, 0.0],
+             "parent": "bp_mid"}]})
+        rigging.bind_skin({"mesh": base, "root": skel["root"]})
+        rigging.pose_skeleton({"root": skel["root"],
+                               "rotations": {"bp_mid": [25, 0, 0]}})
+        out = clip.author_clip({
+            "root": skel["root"], "name": "idle", "fps": 30,
+            "keys": [
+                {"time_s": 0.0, "rotations": {"bp_mid": [0, 0, 0]}},
+                {"time_s": 1.0, "rotations": {"bp_mid": [0, 0, 30]}}]})
+        rest = json.loads(cmds.getAttr(skel["root"] + ".mcp_clip_rest"))
+        assert abs(rest["bp_mid.rotateX"]) < 1e-3   # BIND, not 25
+        assert any("posed away from the bind pose" in w
+                   for w in out["warnings"])
+        clip.delete_clip({"root": skel["root"]})
+
+    def test_a_bind_pose_with_rotation_does_not_warn(self, tmp_path):
+        import json
+        import maya.cmds as cmds
+        from maya_plugin.handlers import clip, rigging
+
+        cmds.select(clear=True)
+        r = cmds.joint(name="ir_root", position=[0, -1, 0])
+        m = cmds.joint(name="ir_mid", position=[0, 0, 0])
+        cmds.joint(name="ir_tip", position=[0, 1, 0])
+        cmds.setAttr(m + ".rotateX", 15.0)   # bind pose WITH rotation
+        base = cmds.ls(cmds.polyCube(name="ir_base", height=2,
+                                     subdivisionsHeight=4)[0], long=True)[0]
+        root_long = cmds.ls(r, long=True)[0]
+        rigging.bind_skin({"mesh": base, "root": root_long})
+        out = clip.author_clip({
+            "root": root_long, "name": "idle", "fps": 30,
+            "keys": [
+                {"time_s": 0.0, "rotations": {"ir_mid": [15, 0, 0]}},
+                {"time_s": 1.0, "rotations": {"ir_mid": [45, 0, 0]}}]})
+        rest = json.loads(cmds.getAttr(root_long + ".mcp_clip_rest"))
+        assert abs(rest["ir_mid.rotateX"] - 15.0) < 1e-3
+        assert not any("posed" in w for w in out["warnings"])
+        clip.delete_clip({"root": root_long})
+
+
 class TestMultiTakeExportInMaya:
     """#718's measurement battery. Same reset-per-test-scene,
     persistent-process rule as TestClipExportInMaya: one prefix per test.
@@ -4014,6 +4072,17 @@ class TestMultiTakeExportInMaya:
         this shared-process suite). This in-suite test is a standing
         regression guard at the budget the shared process can carry
         safely.
+
+        PRE-#729 HISTORY - the budget above no longer constrains this test:
+        #729 replaced the unconditional per-export unload/reload with a
+        guard that only pays the reload cost when the scene's time unit
+        actually changed (export._fbx_reload_needed); a same-fps export no
+        longer spends a reload cycle at all (see
+        TestMultiTakeExportInMaya.test_repeated_same_fps_exports_neither_
+        reload_nor_crash, which runs six real animated exports in this
+        same process and measures zero reload cycles). This test stays a
+        single call because a single call is still all it needs to prove,
+        not because the process cannot afford more.
         """
         import maya.cmds as cmds
 
@@ -4048,6 +4117,16 @@ class TestMultiTakeExportInMaya:
         delete leaves the surviving clip's take in the file and the
         deleted one's name gone - on the bypass helper instead of spending
         a reload cycle the process does not have.
+
+        PRE-#729 HISTORY - the reload-cycle budget above no longer applies:
+        #729 replaced the unconditional per-export unload/reload with a
+        guard that only reloads on an actual frame-rate change
+        (export._fbx_reload_needed), so a same-fps `export_fbx` call here
+        would cost zero reload cycles, not one. This test stays on the
+        bypass helper regardless, because `_export_bypassing_the_gate`
+        reads the RAW per-take curve records (facts.anim_nodes) that the
+        real gate's anim_facts/anim_violations path does not expose - not
+        because the process cannot afford the call.
         """
         import maya.cmds as cmds
         import maya.mel as mel
@@ -4069,52 +4148,55 @@ class TestMultiTakeExportInMaya:
     def test_named_delete_measures_real_curve_removal(self):
         """Item 3 of the four owed measurements: delete_clip's
         `deleted_curves` depends on real Maya actually removing a curve
-        node once cutKey(..., clear=True) empties it of every key - only
-        the headless test fake asserts that behaviour today. This measures
-        it against a real Maya, and against the raw curve state before and
-        after, rather than trusting the reported number alone.
+        node once cutKey(..., clear=True) empties it of every key, or #730's
+        reap explicitly deletes it - only the headless test fake asserts
+        this behaviour today. This measures it against a real Maya, and
+        against the raw curve state before and after, rather than trusting
+        the reported number alone.
 
         MEASURED: in this two-clip scene, deleting "idle" reports
-        deleted_curves == 0. Real Maya does NOT delete either mt_mid's or
-        mt_tip's curve nodes here, because the self-contained rule (#718)
-        means every channel used anywhere on the rig carries keys spanning
-        the WHOLE timeline by construction: mt_mid keeps the two rest-pin
-        keys walk's own authoring pinned at frames 32/62 (outside idle's
-        cut range 0-30), and mt_tip keeps its own walk-authored keys at
-        32/47/62 (also outside the cut range) - cutKey(clear=True) removes
-        only the keys IN the cut range, and a curve with keys left on it
-        is not deleted. A curve node is only fully emptied, and thus
-        deleted, when the channel it drives is NOT touched by any
-        surviving clip's own keys or by the self-contained rule's pads -
-        structurally the case only for the LAST clip's teardown path
-        (delete_clip with no surviving clips), which the full-teardown
-        branch below measures instead.
+        deleted_curves >= 1 and reaped_channels == ["my_mid"] (#730).
+        my_mid is a channel idle declared and no surviving clip (walk)
+        declares - it carries only walk's own rest-pin keys at frames
+        32/62 (outside idle's cut range 0-30), so #730 reaps its whole
+        curve rather than leaving those pins as dead weight. my_tip is
+        untouched: walk still declares it, so the reap never considers it,
+        and idle's own cutKey range (0-30) only strips the back-filled
+        rest pins walk put at idle's boundaries, leaving walk's own
+        32/47/62 keys exactly as they were.
+
+        Pre-#730 history: this same delete used to report deleted_curves
+        == 0 and leave my_mid's curve node in place, just missing idle's
+        own keys - "deleted_curves == 0 is structural" was the measured
+        truth THEN, before a channel no survivor declared was reaped.
         """
         import maya.cmds as cmds
 
         from maya_plugin.handlers import clip
 
-        base, root, idle, walk = self._two_clip_scene(cmds, "my")
-        mid = cmds.ls("my_mid", long=True)[0]
-        tip = cmds.ls("my_tip", long=True)[0]
-        mid_curves_before = set(cmds.listConnections(
-            mid + ".rotateX", source=True, destination=False,
-            type="animCurve") or [])
-        tip_curves_before = set(cmds.listConnections(
-            tip + ".rotateX", source=True, destination=False,
-            type="animCurve") or [])
+        prefix = "my"
+        base, root, idle, walk = self._two_clip_scene(cmds, prefix)
+        mid = cmds.ls(prefix + "_mid", long=True)[0]
+        tip = cmds.ls(prefix + "_tip", long=True)[0]
+        # walk back-filled my_tip onto IDLE's own boundaries (0, 30) when
+        # walk introduced it (idle didn't declare it yet) - those two pins
+        # live inside idle's own doomed range and are correctly cut away
+        # by the existing per-range cutKey step below, unrelated to #730's
+        # reap. Exclude them so this checks only walk's own keys.
+        tip_keys_before = [t for t in cmds.keyframe(tip + ".rotateZ",
+                                                     query=True)
+                           if not (idle["start_frame"] <= t
+                                   <= idle["end_frame"])]
+
         out = clip.delete_clip({"root": root, "name": "idle"})
-        assert out["deleted_curves"] == 0
-        # the curve nodes themselves are the SAME objects, still present,
-        # just missing the keys idle owned
-        mid_curves_after = set(cmds.listConnections(
-            mid + ".rotateX", source=True, destination=False,
+        # #730: my_mid is declared by no survivor - its whole curves go.
+        assert out["reaped_channels"] == [prefix + "_mid"]
+        assert out["deleted_curves"] >= 1
+        assert not (cmds.listConnections(
+            mid + ".rotateZ", source=True, destination=False,
             type="animCurve") or [])
-        tip_curves_after = set(cmds.listConnections(
-            tip + ".rotateX", source=True, destination=False,
-            type="animCurve") or [])
-        assert mid_curves_after == mid_curves_before
-        assert tip_curves_after == tip_curves_before
+        # walk's own channel is untouched: same key times as before.
+        assert cmds.keyframe(tip + ".rotateZ", query=True) == tip_keys_before
         # walk's own motion is untouched by deleting idle
         cmds.currentTime(47)
         assert abs(cmds.getAttr(tip + ".rotateZ") - 25.0) < 1e-3
@@ -4126,3 +4208,37 @@ class TestMultiTakeExportInMaya:
                                         destination=False, type="animCurve")
         assert not cmds.listConnections(tip + ".rotateX", source=True,
                                         destination=False, type="animCurve")
+
+    def test_repeated_same_fps_exports_neither_reload_nor_crash(self, tmp_path):
+        """#729: six real animated exports at ONE fps in this shared
+        process. Before the guard this was the measured teardown killer
+        (running total of 3 fbxmaya reload cycles crashed
+        maya.standalone.uninitialize(), 3/3); with the guard the six
+        exports below cost ZERO additional reload cycles, measured by
+        counting unloadPlugin calls. The suite finishing cleanly IS the
+        teardown proof."""
+        import maya.cmds as cmds
+        from maya_plugin.handlers import clip, export
+
+        base, root, idle, walk = self._two_clip_scene(cmds, "rp")
+        unloads = []
+        real_unload = cmds.unloadPlugin
+
+        def counting_unload(*a, **kw):
+            unloads.append(a)
+            return real_unload(*a, **kw)
+
+        cmds.unloadPlugin = counting_unload
+        try:
+            for i in range(6):
+                path = str(tmp_path / ("r%d.fbx" % i)).replace("\\", "/")
+                result = export.export_fbx({
+                    "path": path, "metres_per_unit": 1.0,
+                    "nodes": [base, root], "include_animation": True})
+                assert result["animation"] is not None
+        finally:
+            cmds.unloadPlugin = real_unload
+            clip.delete_clip({"root": root})
+        # at most one reload (only if this process's tracker was stale
+        # when the loop started); never one per export.
+        assert len(unloads) <= 1

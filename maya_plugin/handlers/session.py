@@ -293,3 +293,40 @@ def save_scene(params: Dict[str, Any]) -> Dict[str, Any]:
     file_type = "mayaBinary" if current.lower().endswith(".mb") else "mayaAscii"
     cmds.file(save=True, type=file_type)
     return {"path": current}
+
+
+def stop_idle_ipr(cmds) -> list:
+    """Best-effort: close the Arnold RenderView window; returns what was
+    done, [] when there was nothing to do. #721: an idle IPR view
+    re-renders on EVERY scene mutation - the first keyframe call after a
+    render_scene hero pass wedged Maya for 30+ minutes. render tools call
+    this after finishing; keyframe tools call it before starting.
+    Interactive sessions only - batch has no UI to leak.
+
+    MEASURED (#721p2 probe, progress.md): the window is really named
+    "ArnoldRenderView" (both a `window` and a `workspaceControl` by that
+    name track each other exactly across open/close). `deleteUI` on it is
+    the one measured-effective stop - both existence probes flip
+    True -> False, twice, on a live re-test.
+
+    The ARV's "Run IPR" option was ALSO probed as a stop mechanism
+    (`cmds.arnoldRenderView(option=("Run IPR", "0"))`, the value mtoa's own
+    shipped source uses everywhere it touches this option) and is INERT
+    from script: `getoption("Run IPR")` stayed "1" after setting it to "0"
+    live, twice. It is deliberately NOT called here - do not re-add it
+    without a fresh measurement showing it actually changes state, and
+    never report an action this call did not itself verify happened.
+    """
+    actions = []
+    try:
+        if cmds.about(batch=True):
+            return actions
+    except Exception:
+        return actions  # not a real cmds (headless fake): nothing to do
+    try:
+        if cmds.window("ArnoldRenderView", exists=True):
+            cmds.deleteUI("ArnoldRenderView")
+            actions.append("closed the Arnold RenderView window")
+    except Exception:
+        pass
+    return actions

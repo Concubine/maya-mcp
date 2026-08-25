@@ -50,3 +50,7 @@ evals/lizard_run/checkpoints/
 # #718 Task 10b determinism probe: the per-run FBXs it writes are throwaway,
 # rebuilt on every run of evals/clip_export_determinism_live.py
 evals/clip_export_determinism_live/
+
+# #729 Step 1 fps-cache probe: the seed/control/trial FBXs are throwaway,
+# rebuilt on every run of evals/fbx_fps_probe.py
+evals/fbx_fps_probe_out/

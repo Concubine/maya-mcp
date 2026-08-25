@@ -149,6 +149,34 @@ EXPORT_SCALE_FACTOR = 1.0
 
 SCALE_TOL = 1e-3
 
+# #729: fbxmaya caches the scene's frame rate at plugin LOAD time (#695,
+# measured), but force-unloading a native plugin before EVERY animated
+# export corrupts the Windows heap under repetition - a mayapy process died
+# in maya.standalone.uninitialize() at a running total of 3 reload cycles
+# (2 measured clean; t718-10b-report.md). Step 1's probe (evals/
+# fbx_fps_probe.py) looked for an FBXProperty that resets the cache without
+# an unload - none exists: every candidate matching Rate|Sampling|Time in
+# the live property tree (including the two structurally inapplicable ones -
+# Export|AdvOptGrp|FileFormat|Motion_Base|MotionFrameRate and Export|
+# AdvOptGrp|Collada|FrameRate, which belong to Motion Analysis and Collada
+# exporters respectively, not FBX export) baked at the stale rate, same as
+# the FBXResetExport control that already runs before every export.py
+# preamble and was never expected to help. So the reload happens only when
+# the scene's time unit differs from what the plugin cached at its last
+# genuine load. Known residual risk, accepted on the ticket: if something
+# OUTSIDE this module reloads fbxmaya while the scene sits at a different
+# rate than this tracker recorded, the tracker is stale and one export can
+# bake at the wrong rate; the gate's key-count check still refuses that
+# file.
+_fbx_loaded_time_unit: Optional[str] = None
+
+
+def _fbx_reload_needed(loaded, cached_unit, scene_unit):
+    """Must fbxmaya be force-reloaded before an animated export?"""
+    if not loaded:
+        return False  # the load below is fresh and reads the current rate
+    return cached_unit is None or cached_unit != scene_unit
+
 
 def _scale_reaches_vertices(facts) -> set:
     """ids of the nodes whose scale actually multiplies a vertex.
@@ -329,22 +357,25 @@ def _scene_clips(cmds):
     Multi-CLIP is supported (#718): one rig, N takes on one timeline. Two
     SKELETONS carrying clips still refuses - a take is a frame range over
     the WHOLE file, so a multi-rig file needs a timeline policy of its own.
+
+    A root "carries clips" only when its mcp_clip attr parses to a
+    non-empty record list (#731) - an empty or hollow attr left by a
+    crashed or hand-edited scene must not refuse a good export.
     """
-    roots = [j for j in cmds.ls(type="joint", long=True) or []
-             if cmds.attributeQuery(clip_mod.CLIP_ATTR, node=j, exists=True)]
-    if not roots:
+    carriers = [(j, records) for j in cmds.ls(type="joint", long=True) or []
+                for records in [clip_mod.clip_meta(cmds, j)] if records]
+    if not carriers:
         return None
-    if len(roots) > 1:
+    if len(carriers) > 1:
         raise HandlerError(
             "%d skeletons carry clips (%s) - one rig may carry several "
             "clips and they all export as named takes, but two skeletons "
             "cannot: a take is a frame range over the whole file"
-            % (len(roots), ", ".join(r.split("|")[-1] for r in roots)),
+            % (len(carriers),
+               ", ".join(r.split("|")[-1] for r, _ in carriers)),
             hint="delete_clip the skeletons not being exported")
-    records = clip_mod.clip_meta(cmds, roots[0])
-    if not records:
-        return None
-    return {"root": roots[0].split("|")[-1],
+    root, records = carriers[0]
+    return {"root": root.split("|")[-1],
             "fps": records[0]["fps"],
             "span_frames": max(r["end_frame"] for r in records),
             "clips": records}
@@ -667,6 +698,7 @@ def _bounds(facts):
 
 
 def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
+    global _fbx_loaded_time_unit
     path, nodes, include_skins, include_animation = _validate(params)
     cmds = _cmds()
     mel = _mel()
@@ -687,29 +719,36 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
             hint="author_clip keys the motion first; a static export needs "
                  "no flag at all")
 
-    if include_animation and cmds.pluginInfo("fbxmaya", query=True, loaded=True):
-        # MEASURED under mayapy (TestClipExportInMaya, the baked-key-count
-        # item of the #695 battery): the bundled FBX plugin (2020.3.9) reads
-        # the scene's frame rate ONCE, at plugin LOAD time, and caches it for
-        # the rest of the process - FBXExportBakeComplexStep/-Start/-End are
-        # then baked at that CACHED rate, not whatever currentUnit(query=True,
-        # time=True) reports at export time, even though FBXResetExport runs
-        # before every export below. Reproduced directly: a 24 fps clip
-        # exported first, then a 30 fps clip exported second in the SAME
-        # mayapy process, baked the second clip's curves at 24 samples/s too
-        # (25 keys, not 31). Without the reload, a legitimate 30 fps export
-        # following a 24 fps one FAILS the gate with a bogus "bakes 25 keys,
-        # expected 31" violation (measured); it is silent only for a
-        # weight-channels-only clip, where the gate requires just >=2 keys.
-        # Unloading and reloading the plugin forces it to re-read the
-        # scene's current frame rate before every animated export.
+    # MEASURED under mayapy (TestClipExportInMaya, the baked-key-count item
+    # of the #695 battery): the bundled FBX plugin (2020.3.9) reads the
+    # scene's frame rate ONCE, at plugin LOAD time, and caches it for the
+    # rest of the process - FBXExportBakeComplexStep/-Start/-End are then
+    # baked at that CACHED rate, not whatever currentUnit(query=True,
+    # time=True) reports at export time, even though FBXResetExport runs
+    # before every export below. Reproduced directly: a 24 fps clip
+    # exported first, then a 30 fps clip exported second in the SAME mayapy
+    # process, baked the second clip's curves at 24 samples/s too (25 keys,
+    # not 31). Without a reload, a legitimate 30 fps export following a
+    # 24 fps one FAILS the gate with a bogus "bakes 25 keys, expected 31"
+    # violation (measured); it is silent only for a weight-channels-only
+    # clip, where the gate requires just >=2 keys. Unloading and reloading
+    # the plugin forces it to re-read the scene's current frame rate - but
+    # #729 measured that doing this before EVERY animated export corrupts
+    # the Windows heap under repetition (see _fbx_reload_needed's comment
+    # above), so the reload now happens only when the scene's time unit
+    # actually differs from what this module last saw the plugin cache.
+    if include_animation and _fbx_reload_needed(
+            cmds.pluginInfo("fbxmaya", query=True, loaded=True),
+            _fbx_loaded_time_unit,
+            cmds.currentUnit(query=True, time=True)):
         try:
             # a refused unload (GUI Maya, FBX UI open) must not abort the
-            # export - skipping the reload just means a stale fps surfaces
-            # as the key-count violation above.
+            # export - the fresh-load check below then leaves the tracker
+            # alone, so the next animated export tries again.
             cmds.unloadPlugin("fbxmaya", force=True)
         except Exception:
             pass
+    fresh = not cmds.pluginInfo("fbxmaya", query=True, loaded=True)
     try:
         cmds.loadPlugin("fbxmaya", quiet=True)
     except Exception as exc:
@@ -717,6 +756,11 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
             "the fbxmaya plugin failed to load: %s" % exc,
             hint="the bundled FBX plugin lives in Maya's plug-ins directory; "
                  "check the Plug-in Manager")
+    if fresh:
+        # the plugin just read (and cached) the scene's CURRENT rate -
+        # recorded for static loads too, so the tracker never claims a
+        # rate the plugin did not actually cache.
+        _fbx_loaded_time_unit = cmds.currentUnit(query=True, time=True)
     for statement in (FBX_PREAMBLE_MEL + FBX_SCENE_CONTENT_MEL
                       + FBX_SHAPES_MEL + FBX_SKINS_MEL[include_skins]
                       + FBX_ANIM_MEL[include_animation]):

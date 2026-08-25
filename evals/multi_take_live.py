@@ -73,9 +73,15 @@ those signs were MEASURED, not derived, in that gate's first run; see its
 WALK_KEYS comment for the probe numbers. The wave arm literals are new to
 this gate and were checked against the rendered sheet (see the report).
 
-DESTRUCTIVE: calls new_scene. Port 9878, the agent-launched Maya, per the
-two-Maya policy - never point this at the user's 9877 (or the second
-disposable instance some sessions run on 9879).
+DESTRUCTIVE: calls new_scene. Port defaults to 9878, the disposable
+agent-launched Maya. A port number is NOT an identity (#648) - a task that
+launches its own dedicated Maya on a different port (e.g. 9877, per that
+task's own brief) may point MAYA_MCP_PORT there too, but MUST set
+MAYA_MCP_EXPECT_PID to the launched pid first: live_call.py's handshake
+then refuses to proceed if anything else answers that port, which is the
+actual safety property - a hardcoded port blocklist here previously stood
+in for that check and instead blocked task-6's own legitimate run against
+its dedicated 9877 Maya (fixed as part of that verification pass).
 
 Run:  uv run python evals/multi_take_live.py
 Exit: 0 pass, 1 fail, 2 no connection.
@@ -537,9 +543,12 @@ def save_preview(tag, result, meta):
 
 
 def main():
-    if PORT in (9877, 9879):
-        print("refusing to run on %d: this eval discards the open scene "
-              "(two-Maya policy). Launch a disposable Maya on 9878." % PORT)
+    if PORT != 9878 and not os.environ.get("MAYA_MCP_EXPECT_PID"):
+        print("refusing to run on %d without MAYA_MCP_EXPECT_PID set: this "
+              "eval discards the open scene (new_scene), and a port number "
+              "is not an identity (#648). Either run on the default 9878, "
+              "or set MAYA_MCP_EXPECT_PID to the pid of the Maya you "
+              "deliberately launched on %d." % (PORT, PORT))
         return 2
 
     os.makedirs(OUT_DIR, exist_ok=True)
@@ -731,15 +740,17 @@ def main():
     # ---- check 4: delete_clip removes exactly one clip and leaves the
     # others measurable (their own keys still byte-identical).
     #
-    # deleted_curves is NOT asserted >0 here: measured directly (see the
-    # t718-12 report), wave's own R_shoulder/R_elbow curves also carry
+    # #730 history: wave's own R_shoulder/R_elbow curves also carry
     # BACKWARD rest-pin keys at idle's and step's boundary frames (#718's
-    # own backward-contamination guard, working exactly as designed), so
-    # cutting wave's own [start_frame, end_frame] range leaves those curve
-    # NODES alive with 2 residual keys apiece - deleted_curves counts fully
-    #-vanished curve nodes, so it reads 0 on a rig built exactly this way,
-    # correctly. What actually proves the deletion is that wave's own
-    # range is empty afterwards - checked directly below.
+    # own backward-contamination guard, working exactly as designed) - no
+    # survivor (idle, step) declares either joint. Before #730, cutting
+    # wave's own [start_frame, end_frame] range left those curve NODES
+    # alive with 2 residual rest-pin keys apiece: dead weight every
+    # surviving take would still bake, and deleted_curves read 0 on a rig
+    # built exactly this way, correctly by the OLD contract, without
+    # proving anything about those residual pins. #730 reaps a channel's
+    # WHOLE curve when the doomed clip declared it and no survivor does -
+    # measured directly below, not just logged.
     gone = ok("delete_clip", {"root": root, "name": "wave"})
     wave_range_empty = py(
         "import maya.cmds as cmds\n"
@@ -753,6 +764,22 @@ def main():
           gone["clips"] == ["idle", "step"] and wave_range_empty is False,
           "clips=%s deleted_curves=%s wave_range_has_keys=%s"
           % (gone["clips"], gone["deleted_curves"], wave_range_empty))
+    wave_curves_remain = py(
+        "import maya.cmds as cmds\n"
+        "_plugs = %r\n"
+        "any(cmds.listConnections(_p, source=True, destination=False, "
+        "type='animCurve') for _p in _plugs)"
+        % ["%s.rotate%s" % (j, axis) for j in WAVE_JOINTS for axis in "XYZ"],
+        "R_shoulder/R_elbow curve connections after delete_clip")
+    check("delete_clip(name='wave') reaps R_shoulder's and R_elbow's whole "
+          "curves (#730) - no survivor declares them, so their residual "
+          "rest pins were dead weight, not just cut in wave's own range",
+          gone["reaped_channels"] == WAVE_JOINTS
+          and gone["deleted_curves"] == len(WAVE_JOINTS) * 3
+          and wave_curves_remain is False,
+          "reaped_channels=%s deleted_curves=%s curves_remain=%s"
+          % (gone["reaped_channels"], gone["deleted_curves"],
+             wave_curves_remain))
     idle_deleted = capture_keys("idle keys after delete_clip('wave')",
                                 IDLE_JOINTS, idle)
     step_deleted = capture_keys("step keys after delete_clip('wave')",

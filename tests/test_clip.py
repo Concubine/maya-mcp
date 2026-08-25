@@ -379,7 +379,9 @@ class TestAuthor:
         assert fake.checkpoints == ["author_clip"]
 
     def test_a_clip_on_another_rig_warns_because_export_will_refuse(self, fake):
-        fake.string_attrs["|other_root"] = {"mcp_clip": "[]"}
+        fake.string_attrs["|other_root"] = {
+            "mcp_clip": json.dumps([{"name": "walk", "fps": 30,
+                                     "start_frame": 0, "end_frame": 10}])}
         fake.joints.append("|other_root")
         out = _author(fake, name="idle")
         assert any("other_root" in w and "export_fbx" in w
@@ -459,6 +461,13 @@ class TestAuthor:
         # no attr at all is an empty list, not None
         fake.string_attrs["|root"].pop("mcp_clip")
         assert clip.clip_meta(fake, "|root") == []
+
+    def test_author_clip_stops_an_idle_ipr_and_warns(self, fake, monkeypatch):
+        monkeypatch.setattr(clip.session, "stop_idle_ipr",
+                            lambda cmds: ["closed the Arnold RenderView"])
+        out = _author(fake)
+        assert any("closed the Arnold RenderView" in w and "#721" in w
+                   for w in out["warnings"])
 
 
 class TestSelfContainedTakes:
@@ -562,14 +571,12 @@ class TestSelfContainedTakes:
         assert keys[float(end)] == pytest.approx(0.0)
 
     def test_a_posed_rig_warns_that_rest_is_not_the_bind_pose(self, fake):
-        """#718 review Fix 4: _capture_rest reads the rig's CURRENT pose,
-        which is the bind pose only when nobody posed the rig first. A
-        create_skeleton rest pose reads zero, so a non-zero capture is the
-        measurable signal that this rig was posed (e.g. via pose_skeleton)
-        before its first clip - and that has to be said, loudly."""
+        """#732: FakeCmds.dagPose returns [] (no bind pose known), so
+        _bind_rotations answers {} and every joint falls back to the
+        pre-#732 capture-current behavior - summarized, not per-joint."""
         fake.attrs["|root|mid.rotateZ"] = 10.0
         out = _author(fake, name="idle", keys=self._idle())
-        assert any("CURRENT pose" in w and "mid" in w and "10" in w
+        assert any("no readable bind pose" in w and "mid" in w
                    for w in out["warnings"]), out["warnings"]
 
     def test_zero_rest_and_root_translation_never_warn(self, fake):
@@ -868,6 +875,47 @@ class TestSelfContainedTakes:
                 (plug, times)
 
 
+class TestBindPoseRest:
+    def test_rest_captures_the_bind_rotation_when_known(self, fake, monkeypatch):
+        # an "imported rig" whose bind pose carries rotation: current pose
+        # EQUALS bind, so no warning, and rest records the bind value.
+        monkeypatch.setattr(clip, "_bind_rotations",
+                            lambda cmds, root, joints:
+                            {"mid": [10.0, 0.0, 0.0]})
+        fake.attrs["|root|mid.rotateX"] = 10.0
+        out = _author(fake, keys=[
+            {"time_s": 0.0, "rotations": {"mid": [10, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [40, 0, 0]}}])
+        rest = json.loads(fake.string_attrs["|root"]["mcp_clip_rest"])
+        assert rest["mid.rotateX"] == 10.0
+        assert not any("posed" in w for w in out["warnings"])
+
+    def test_posed_away_from_a_known_bind_warns_and_pins_at_bind(
+            self, fake, monkeypatch):
+        monkeypatch.setattr(clip, "_bind_rotations",
+                            lambda cmds, root, joints:
+                            {"mid": [0.0, 0.0, 0.0]})
+        fake.attrs["|root|mid.rotateX"] = 25.0   # posed away from bind
+        out = _author(fake, keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [40, 0, 0]}}])
+        rest = json.loads(fake.string_attrs["|root"]["mcp_clip_rest"])
+        assert rest["mid.rotateX"] == 0.0        # BIND, not the posed 25
+        assert any("posed away from the bind pose" in w
+                   for w in out["warnings"])
+
+    def test_unknown_bind_falls_back_to_current_capture(self, fake):
+        # FakeCmds.dagPose returns [] -> _bind_rotations returns {} -> the
+        # pre-#732 behavior: capture current, warn (summarized) on non-zero.
+        fake.attrs["|root|mid.rotateX"] = 25.0
+        out = _author(fake, keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [40, 0, 0]}}])
+        rest = json.loads(fake.string_attrs["|root"]["mcp_clip_rest"])
+        assert rest["mid.rotateX"] == 25.0
+        assert any("no readable bind pose" in w for w in out["warnings"])
+
+
 class TestDelete:
     def test_no_clip_refuses(self, fake):
         with pytest.raises(HandlerError, match="no clip"):
@@ -1011,6 +1059,54 @@ class TestDelete:
         for frame in b_range:
             assert float(frame) not in mid_rotZ_keys, \
                 (f"B's padding key at frame {frame} should be deleted")
+
+    def test_a_named_delete_reaps_channels_no_survivor_declares(self, fake):
+        # #730: idle keys mid, wave introduces tip, step keys mid again.
+        # Deleting wave must remove tip's whole curves - they carry only
+        # rest pins inside idle's and step's ranges - without touching a
+        # single key of idle's or step's own mid channel.
+        _author(fake, name="idle", keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [0, 0, 30]}}])
+        wave_rec = _author(fake, name="wave", keys=[
+            {"time_s": 0.0, "rotations": {"tip": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"tip": [0, 0, 45]}}])
+        _author(fake, name="step", keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [0, 0, -30]}}])
+        # wave never declares mid, so the pre-existing #718 padding rule
+        # also pins mid at rest at WAVE's OWN boundaries (32, 62) - a pin
+        # that lives entirely inside wave's own doomed range and is
+        # correctly cut away by the existing own-range cutKey step below,
+        # unrelated to #730's reap. Exclude it so this checks only the
+        # survivors' own authored keys are untouched.
+        mid_keys_before = {
+            t: v for t, v in fake.keys.get("|root|mid.rotateZ", {}).items()
+            if not (wave_rec["start_frame"] <= t <= wave_rec["end_frame"])}
+
+        out = clip.delete_clip({"root": "root", "name": "wave"})
+
+        assert out["clips"] == ["idle", "step"]
+        assert out["reaped_channels"] == ["tip"]
+        # tip's curves are gone ENTIRELY, not just cut in wave's range
+        assert not any(p.startswith("|root|mid|tip.") for p in fake.keys)
+        assert out["deleted_curves"] >= 3   # tip's three rotate curves
+        # the survivors' own keys are untouched
+        assert dict(fake.keys.get("|root|mid.rotateZ", {})) == mid_keys_before
+        assert any("no surviving clip declares" in w for w in out["warnings"])
+
+    def test_a_named_delete_of_a_declared_shared_channel_reaps_nothing(
+            self, fake):
+        # mid is declared by the survivor too - nothing may be reaped.
+        _author(fake, name="idle", keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [0, 0, 30]}}])
+        _author(fake, name="wave", keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [0, 0, 45]}}])
+        out = clip.delete_clip({"root": "root", "name": "wave"})
+        assert out["reaped_channels"] == []
+        assert "|root|mid.rotateZ" in fake.keys
 
 
 class TestGuards:
@@ -1188,6 +1284,15 @@ class TestPreviewClip:
             clip.preview_clip({"root": "root", "name": "idle"})
         assert fake.time_unit_calls == []
 
+    def test_preview_clip_stops_an_idle_ipr_and_warns(self, fake,
+                                                       monkeypatch):
+        self._wire(fake, monkeypatch)
+        monkeypatch.setattr(clip.session, "stop_idle_ipr",
+                            lambda cmds: ["closed the Arnold RenderView"])
+        out = clip.preview_clip({"root": "root", "name": "idle"})
+        assert any("closed the Arnold RenderView" in w and "#721" in w
+                   for w in out["warnings"])
+
 
 class TestRigidParentRig:
     """#720: a rig whose chunks are parented under joints with NO skinCluster
@@ -1249,3 +1354,27 @@ class TestRigidParentRig:
             {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
             {"time_s": 1.0, "rotations": {"mid": [0, 0, 45]}}])
         assert [w for w in out["warnings"] if "moves no mesh" in w]
+
+
+class TestClipsElsewherePredicate:
+    def test_an_empty_clip_attr_on_another_root_is_not_a_clip(self, monkeypatch):
+        # #731: a joint carrying mcp_clip that parses to [] must not trip the
+        # "another skeleton carries clips" warning.
+        fake = FakeCmds()
+        fake.joints.append("|other")
+        fake.string_attrs["|other"] = {"mcp_clip": "[]"}
+        _install(fake, monkeypatch)
+        out = _author(fake)
+        assert not any("another skeleton carries clips" in w
+                       for w in out["warnings"])
+
+    def test_a_real_clip_on_another_root_still_warns(self, monkeypatch):
+        fake = FakeCmds()
+        fake.joints.append("|other")
+        fake.string_attrs["|other"] = {
+            "mcp_clip": json.dumps([{"name": "walk", "fps": 30,
+                                     "start_frame": 0, "end_frame": 10}])}
+        _install(fake, monkeypatch)
+        out = _author(fake)
+        assert any("another skeleton carries clips" in w
+                   for w in out["warnings"])

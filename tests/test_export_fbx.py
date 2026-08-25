@@ -4,6 +4,7 @@ Nothing here imports Maya. The handler's Maya calls are faked, because the
 point of this suite is the logic that decides whether a written file is
 allowed to survive - and that logic must be checkable without a Maya licence.
 """
+import json
 import os
 import sys
 from pathlib import Path
@@ -445,15 +446,29 @@ def test_include_skins_must_be_a_bool(tmp_path):
 class FakeCmds:
     """Just enough Maya to drive the handler: record the calls, write a file."""
 
-    def __init__(self, existing=("golem_C_pelvis",), load_plugin_raises=None):
+    def __init__(self, existing=("golem_C_pelvis",), load_plugin_raises=None,
+                 plugin_loaded=True):
         self.existing = set(existing)
         self.calls = []
         self.load_plugin_raises = load_plugin_raises
+        self.plugin_loaded = plugin_loaded
 
     def loadPlugin(self, name, quiet=False):
         self.calls.append(("loadPlugin", name))
         if self.load_plugin_raises is not None:
             raise self.load_plugin_raises
+        self.plugin_loaded = True
+
+    def pluginInfo(self, name, query=False, loaded=False):
+        self.calls.append(("pluginInfo", name))
+        return self.plugin_loaded
+
+    def unloadPlugin(self, name, force=False):
+        self.calls.append(("unloadPlugin", name))
+        self.plugin_loaded = False
+
+    def currentUnit(self, query=False, time=False):
+        return "ntsc"
 
     def objExists(self, name):
         return name in self.existing
@@ -507,6 +522,56 @@ def _install(monkeypatch, cmds, facts, mel=None):
                         _fake_set_unit_scale_factor)
     monkeypatch.setattr(export.fbxbytes, "read_fbx", lambda _p: facts)
     return mel
+
+
+@pytest.fixture(autouse=True)
+def _reset_fbx_loaded_time_unit():
+    """export._fbx_loaded_time_unit is a plain module-level global (export.py
+    assigns it directly at the point a real load happens, not through any
+    test seam), so a real export in one test leaves it set for every test
+    that runs after unless each test resets it itself - previously only
+    test_a_fresh_load_records_the_scene_time_unit did. Reset it around every
+    test in this file so none of them can see another's leftover value."""
+    saved = export._fbx_loaded_time_unit
+    export._fbx_loaded_time_unit = None
+    yield
+    export._fbx_loaded_time_unit = saved
+
+
+class TestFbxReloadGuard:
+    """#729: fbxmaya force-reload only when the scene's frame rate changed.
+
+    See export.py's module-level comment above _fbx_reload_needed for the
+    measured crash this replaces (a running total of 3 unload/reload
+    cycles in one mayapy process corrupts the Windows heap, 3/3
+    reproduced - t718-10b-report.md)."""
+
+    def test_reload_decision_truth_table(self):
+        # (loaded, cached, scene) -> reload?
+        assert export._fbx_reload_needed(False, None, "ntsc") is False
+        assert export._fbx_reload_needed(False, "film", "ntsc") is False
+        assert export._fbx_reload_needed(True, None, "ntsc") is True
+        assert export._fbx_reload_needed(True, "film", "ntsc") is True
+        assert export._fbx_reload_needed(True, "ntsc", "ntsc") is False
+
+    def test_a_static_export_never_unloads_the_plugin(self, monkeypatch,
+                                                       tmp_path):
+        node = fbxbytes.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1,
+                                geometry=7)
+        cmds = FakeCmds()
+        _install(monkeypatch, cmds, _facts([node]))
+        export.export_fbx(_params(tmp_path))
+        assert not any(c[0] == "unloadPlugin" for c in cmds.calls)
+
+    def test_a_fresh_load_records_the_scene_time_unit(self, monkeypatch,
+                                                       tmp_path):
+        node = fbxbytes.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1,
+                                geometry=7)
+        cmds = FakeCmds(plugin_loaded=False)
+        _install(monkeypatch, cmds, _facts([node]))
+        monkeypatch.setattr(export, "_fbx_loaded_time_unit", None)
+        export.export_fbx(_params(tmp_path))
+        assert export._fbx_loaded_time_unit == "ntsc"
 
 
 def test_a_clean_export_reports_the_file_not_the_scene(monkeypatch, tmp_path):
@@ -1344,3 +1409,41 @@ class TestExportFbxReportsClips:
 
         assert out["animation"] is not clean
         assert "clips" not in clean
+
+
+class FakeClipSceneCmds:
+    """Only what _scene_clips touches: joints, the mcp_clip attr."""
+    def __init__(self, attrs):
+        # attrs: {joint_long_name: mcp_clip string or None}
+        self.attrs = attrs
+
+    def ls(self, type=None, long=False):
+        return list(self.attrs)
+
+    def attributeQuery(self, attr, node=None, exists=False):
+        return self.attrs.get(node) is not None
+
+    def getAttr(self, key):
+        node = key.rsplit(".", 1)[0]
+        return self.attrs[node]
+
+
+class TestSceneClipsPredicate:
+    def _records(self):
+        return json.dumps([{"name": "idle", "fps": 30,
+                            "start_frame": 0, "end_frame": 30}])
+
+    def test_an_empty_attr_beside_a_real_rig_does_not_refuse(self):
+        cmds = FakeClipSceneCmds({"|rig": self._records(), "|junk": "[]"})
+        declared = export._scene_clips(cmds)
+        assert declared is not None and declared["root"] == "rig"
+
+    def test_two_real_rigs_still_refuse(self):
+        cmds = FakeClipSceneCmds({"|a": self._records(),
+                                  "|b": self._records()})
+        with pytest.raises(HandlerError, match="skeletons carry clips"):
+            export._scene_clips(cmds)
+
+    def test_only_empty_attrs_means_no_clips(self):
+        cmds = FakeClipSceneCmds({"|junk": "[]"})
+        assert export._scene_clips(cmds) is None

@@ -22,10 +22,11 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..dispatcher import HandlerError
-from . import capture, clipmath, naming, render, sculpt, sculpt_math, session, units
+from . import (capture, clipmath, naming, render, rigmath, sculpt,
+              sculpt_math, session, units)
 
 CLIP_ATTR = "mcp_clip"
 REST_ATTR = "mcp_clip_rest"
@@ -174,10 +175,13 @@ def _clips_elsewhere(cmds, root_long: str) -> List[str]:
     """Short names of OTHER skeleton roots carrying clips. export_fbx
     refuses such a scene (a take is a frame range over the whole file, so a
     multi-rig file needs a timeline policy of its own) - and that ceiling
-    should be discovered while authoring, not at write time (#718)."""
+    should be discovered while authoring, not at write time (#718).
+
+    Keyed on clip_meta parsing to a non-empty record list, NOT on the
+    attribute existing (#731): an empty or hollow mcp_clip attr carries no
+    clips and must not warn."""
     return [_short(j) for j in cmds.ls(type="joint", long=True) or []
-            if j != root_long
-            and cmds.attributeQuery(CLIP_ATTR, node=j, exists=True)]
+            if j != root_long and clip_meta(cmds, j)]
 
 
 def _rest_key(plug: str) -> str:
@@ -204,12 +208,55 @@ def _write_rest(cmds, root_long: str, rest: Dict[str, float]) -> None:
                  type="string")
 
 
-def _capture_rest(cmds, plug: str, rest: Dict[str, float]) -> None:
+def _bind_rotations(cmds, root_long: str,
+                    joints: List[str]) -> Dict[str, Optional[List[float]]]:
+    """short joint name -> the BIND pose's `.rotate` triple (UI angle
+    units), or None when it cannot be determined for that joint. {} when
+    nothing is bound (no dagPose). Reads the SAME pose node delete_clip
+    restores (#732)."""
+    poses = cmds.dagPose(root_long, query=True, bindPose=True) or []
+    if not poses:
+        return {}
+    pose = poses[0]
+    out: Dict[str, Optional[List[float]]] = {}
+    for j in joints:
+        out[_short(j)] = None
+        try:
+            plugs = cmds.listConnections(j + ".message", source=False,
+                                         destination=True, plugs=True,
+                                         type="dagPose") or []
+            idx = None
+            for p in plugs:
+                node, attr = p.split(".", 1)
+                if node == pose and attr.startswith("members["):
+                    idx = int(attr[len("members["):-1])
+                    break
+            if idx is None:
+                continue
+            xform = list(cmds.getAttr("%s.xformMatrix[%d]" % (pose, idx)))
+            orient = [units.ui_to_degrees(cmds, v)
+                      for v in cmds.getAttr(j + ".jointOrient")[0]]
+            axis = [units.ui_to_degrees(cmds, v)
+                    for v in cmds.getAttr(j + ".rotateAxis")[0]]
+            deg = rigmath.bind_rotation_deg(
+                xform, orient, axis, int(cmds.getAttr(j + ".rotateOrder")))
+            if deg is not None:
+                out[_short(j)] = [units.degrees_to_ui(cmds, v) for v in deg]
+        except Exception:
+            pass  # unreadable entry -> current-pose fallback for this joint
+    return out
+
+
+def _capture_rest(cmds, plug: str, rest: Dict[str, float],
+                  value: Optional[float] = None) -> None:
     """Record a channel's rest value the moment it becomes curve-driven.
 
     Read it later and a curve answers instead of the rest pose - which is
     why this is captured here, before the keying, and not derived on
     demand. A channel already driven (and already recorded) is left alone.
+
+    `value` overrides the current-pose read: the BIND rotation when the
+    dagPose decomposition knows it (#732).
     """
     key = _rest_key(plug)
     if key in rest:
@@ -217,7 +264,7 @@ def _capture_rest(cmds, plug: str, rest: Dict[str, float]) -> None:
     if cmds.listConnections(plug, source=True, destination=False,
                             type="animCurve"):
         return
-    rest[key] = float(cmds.getAttr(plug))
+    rest[key] = float(cmds.getAttr(plug)) if value is None else float(value)
 
 
 def _rest_value(cmds, plug: str, rest: Dict[str, float],
@@ -325,6 +372,11 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
                  "work; delete_clip removes it if that is intended")
 
     warnings: List[str] = []
+    for action in session.stop_idle_ipr(cmds):
+        warnings.append(
+            action + " before keyframe work - an idle IPR re-renders on "
+            "every scene mutation and can wedge a keyframe call for "
+            "minutes (#721)")
     fractional = clipmath.fractional_frame_times(
         [k["time_s"] for k in resolved_keys], fps)
     if fractional:
@@ -397,9 +449,13 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     }
     rest = _rest_map(cmds, root_long)
     rest_before = set(rest)
+    bind = _bind_rotations(cmds, root_long, joints)
     for short in mine["joints"]:
-        for plug in _rot_plugs(short):
-            _capture_rest(cmds, plug, rest)
+        triple = bind.get(short)
+        for plug, bind_v in zip(_rot_plugs(short),
+                                triple if triple is not None
+                                else (None, None, None)):
+            _capture_rest(cmds, plug, rest, value=bind_v)
     if mine["root_position_used"]:
         for plug in root_translate_plugs:
             _capture_rest(cmds, plug, rest)
@@ -407,33 +463,45 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
         # By rule, not by capture: weights-all-zero IS the reset (phase 5).
         rest.setdefault(_rest_key("%s.%s" % (alias_map[alias], alias)), 0.0)
 
-    # #718 review Fix 4: rest is the BIND pose by spec, but _capture_rest
-    # reads whatever the rig's CURRENT pose is - the same thing normally,
-    # except when the rig was deliberately posed (pose_skeleton) before its
-    # first clip, in which case every later clip's undeclared channels
-    # would be pinned at that posed value forever. A rig at the
-    # create_skeleton rest pose reads zero here, so a non-zero ROTATION
-    # value just captured is the measurable signal that it was posed - loud
-    # by design, since decomposing a dagPose's bind matrices is a far
-    # larger change than this fix. Root translation is excluded (a rig
-    # legitimately sits anywhere) and weight channels are excluded (they
-    # are recorded 0.0 by rule, never captured).
+    # #732: rest is the BIND pose where the dagPose can be decomposed
+    # (rigmath.bind_rotation_deg strips jointOrient/rotateAxis). The
+    # warning now fires only when the rig is measurably POSED AWAY from
+    # that bind pose at first capture - an imported rig whose bind pose
+    # legitimately carries rotation stays silent. Joints with no readable
+    # bind entry keep the pre-#732 behavior (capture current, warn on
+    # non-zero, since a create_skeleton rig reads zero at rest) - both
+    # warnings are summarized, never one line per joint. Root translation
+    # is excluded (a rig legitimately sits anywhere) and weight channels
+    # are excluded (recorded 0.0 by rule, never captured).
     newly_captured = {k: v for k, v in rest.items() if k not in rest_before}
-    posed_joints = sorted({
-        k.rsplit(".", 1)[0] for k, v in newly_captured.items()
-        if k.rsplit(".", 1)[1] in ROTATE_ATTRS and abs(v) > 1e-9})
-    if posed_joints:
-        detail = ", ".join(
-            "%s=(%s)" % (node, ", ".join(
-                "%g" % newly_captured.get("%s.%s" % (node, a), 0.0)
-                for a in ROTATE_ATTRS))
-            for node in posed_joints)
+    posed_away: List[str] = []
+    unknown_bind: List[str] = []
+    for short in sorted({k.rsplit(".", 1)[0] for k in newly_captured
+                         if k.rsplit(".", 1)[1] in ROTATE_ATTRS}):
+        plugs = _rot_plugs(short)
+        if not plugs:
+            continue
+        triple = bind.get(short)
+        if triple is not None:
+            current = [float(cmds.getAttr(p)) for p in plugs]
+            if any(abs(c - b) > 1e-4 for c, b in zip(current, triple)):
+                posed_away.append(short)
+        elif any(abs(newly_captured.get("%s.%s" % (short, a), 0.0)) > 1e-9
+                 for a in ROTATE_ATTRS):
+            unknown_bind.append(short)
+    if posed_away:
         warnings.append(
-            "rest was captured from this rig's CURRENT pose, not "
-            "necessarily its bind pose - %s (a rig at the create_skeleton "
-            "rest pose reads zero here, so a non-zero rest value means the "
-            "rig was posed, e.g. via pose_skeleton, before its first clip)"
-            % detail)
+            "%d joint(s) are posed away from the bind pose (e.g. %s) - "
+            "rest pins use the BIND pose, so boundary frames will not hold "
+            "the current pose" % (len(posed_away),
+                                  ", ".join(posed_away[:3])))
+    if unknown_bind:
+        warnings.append(
+            "rest was captured from this rig's CURRENT pose for %d "
+            "joint(s) with no readable bind pose (e.g. %s) - a non-zero "
+            "value here usually means the rig was posed, e.g. via "
+            "pose_skeleton, before its first clip"
+            % (len(unknown_bind), ", ".join(unknown_bind[:3])))
 
     # Re-authoring a name RE-APPENDS it at the tail (#718 decision 4): its
     # old range is cut, and no other clip's motion moves. Take ORDER in the
@@ -859,6 +927,7 @@ def delete_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     before = {m: _points(m) for m in meshes}
 
     deleted_curves = 0
+    reaped_channels: List[str] = []
     if kept:
         # ONE clip out of several: cut its range only. Gaps are NOT
         # re-packed (#718 decision 5) - a take is an explicit range, so a
@@ -875,6 +944,61 @@ def delete_clip(params: Dict[str, Any]) -> Dict[str, Any]:
             cmds.cutKey(plug, time=(doomed_record["start_frame"],
                                     doomed_record["end_frame"]
                                     + clipmath.GAP_FRAMES), clear=True)
+        # #730: the doomed clip's back-fill wrote rest pins for its own
+        # channels into the SURVIVING clips' ranges. A channel no survivor
+        # declares now carries only those pins - dead weight every take
+        # would bake. Reap the WHOLE curve, but only for channels the
+        # doomed record itself declared and no survivor does; a channel a
+        # survivor still uses is never touched, range or no range.
+        survivors = clipmath.channel_union(kept)
+        by_short: Dict[str, List[str]] = {}
+        for j in joints:
+            by_short.setdefault(_short(j), []).append(j)
+        orphan_plugs: List[str] = []
+        for short in doomed_record.get("joints", []):
+            if short in survivors["joints"]:
+                continue
+            matches = by_short.get(short) or []
+            if len(matches) != 1:
+                continue  # vanished or ambiguous: never guess (_rot_plugs rule)
+            orphan_plugs.extend("%s.%s" % (matches[0], a)
+                                for a in ROTATE_ATTRS)
+            reaped_channels.append(short)
+        for alias in doomed_record.get("weight_channels", []):
+            if alias in survivors["weight_channels"]:
+                continue
+            node = alias_map.get(alias)
+            if node is None or isinstance(node, HandlerError):
+                continue
+            orphan_plugs.append("%s.%s" % (node, alias))
+            reaped_channels.append(alias)
+        if (doomed_record.get("root_position_used")
+                and not survivors["root_position_used"]):
+            orphan_plugs.extend("%s.%s" % (root_long, a)
+                                for a in TRANSLATE_ATTRS)
+            reaped_channels.append("root_position")
+        orphan_curves = sorted({
+            c for plug in orphan_plugs
+            for c in cmds.listConnections(plug, source=True,
+                                          destination=False,
+                                          type="animCurve") or []})
+        # Invariant this gate relies on: under #718's self-contained rule,
+        # every channel a clip declares stays curve-driven outside the
+        # doomed range too (a neighbour's rest pin keeps it keyed there), so
+        # an orphaned channel always has a curve to find here. If that ever
+        # breaks, reaped_channels could fill while orphan_curves stays empty
+        # and this warning silently never fires.
+        if orphan_curves:
+            # mcp_clip_rest entries for these channels are NOT pruned here -
+            # they deliberately survive the reap. Re-introducing the channel
+            # in a later clip reuses the recorded rest value; do not "fix"
+            # this by deleting the rest record too.
+            cmds.delete(*orphan_curves)
+            warnings.append(
+                "removed the whole curve(s) of %d channel(s) (%s) no "
+                "surviving clip declares - they carried only rest pins "
+                "inside the surviving clips' ranges (#730)"
+                % (len(reaped_channels), ", ".join(reaped_channels)))
         remaining = _anim_curves(cmds, _joint_plugs(joints) + weight_plugs)
         deleted_curves = len({c for curves in driven.values() for c in curves}
                              - {c for curves in remaining.values()
@@ -925,6 +1049,7 @@ def delete_clip(params: Dict[str, Any]) -> Dict[str, Any]:
                  else (records[0]["name"] if records else None)),
         "clips": [r["name"] for r in kept],
         "deleted_curves": deleted_curves,
+        "reaped_channels": reaped_channels,
         "max_displacement": max_disp,
         "warnings": warnings,
     }
@@ -955,6 +1080,7 @@ def preview_clip(params: Dict[str, Any]) -> Dict[str, Any]:
             % (name, _short(root_long),
                ", ".join(repr(r["name"]) for r in records)),
             hint="a rig carries several clips now - pass the one to judge")
+
     fps = int(meta.get("fps", 30))
     start_frame = int(meta["start_frame"])
     duration_frames = int(meta["end_frame"]) - start_frame
@@ -995,6 +1121,15 @@ def preview_clip(params: Dict[str, Any]) -> Dict[str, Any]:
             % (every_nth, len(frames), MAX_PREVIEW_FRAMES),
             hint="raise every_nth, or omit it to auto-fit")
 
+    # Hygiene only after every refusal above: a refused preview_clip must
+    # mutate nothing (matches author_clip's discipline).
+    warnings: List[str] = []
+    for action in session.stop_idle_ipr(cmds):
+        warnings.append(
+            action + " before rendering clip frames - an idle IPR "
+            "re-renders on every scene change and can wedge the render "
+            "and time scrubbing (#721)")
+
     joints = rigging._hierarchy_joints(cmds, root_long)
     meshes = rigging._bound_meshes(cmds, set(joints))
     if not meshes:
@@ -1032,6 +1167,7 @@ def preview_clip(params: Dict[str, Any]) -> Dict[str, Any]:
             "reuse_camera": i > 0,
         })
     result = render._run_shots(cmds, shots, render_params)
+    result["warnings"] = warnings + result.get("warnings", [])
     result["clip"] = meta["name"]
     result["fps"] = fps
     result["start_frame"] = start_frame

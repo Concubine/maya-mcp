@@ -593,3 +593,70 @@ def prebend_rotations(positions, matrices: Dict[int, List[float]], target,
         out[i] = [angle_deg * sign * c
                   for c in local_components(normal, matrices[i])]
     return out
+
+
+# --- #732: bind-pose rotation decomposition ---------------------------------
+
+
+def _rot3_axis(axis: str, deg: float):
+    """Row-vector rotation matrix about one axis (Maya's convention:
+    row-major matrices, v' = v . M)."""
+    r = math.radians(deg)
+    c, s = math.cos(r), math.sin(r)
+    if axis == "x":
+        return [[1.0, 0.0, 0.0], [0.0, c, s], [0.0, -s, c]]
+    if axis == "y":
+        return [[c, 0.0, -s], [0.0, 1.0, 0.0], [s, 0.0, c]]
+    return [[c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]]
+
+
+def _mat3_mul(a, b):
+    return [[sum(a[i][k] * b[k][j] for k in range(3)) for j in range(3)]
+            for i in range(3)]
+
+
+def _euler_xyz_deg(m) -> List[float]:
+    """Euler XYZ (degrees) of a row-vector rotation matrix M = Rx.Ry.Rz."""
+    sy = -m[0][2]
+    cy = math.hypot(m[0][0], m[0][1])
+    if cy < 1e-9:  # gimbal: pick rz = 0
+        return [math.degrees(math.atan2(-m[2][1], m[1][1])),
+                math.degrees(math.atan2(sy, cy)), 0.0]
+    return [math.degrees(math.atan2(m[1][2], m[2][2])),
+            math.degrees(math.atan2(sy, cy)),
+            math.degrees(math.atan2(m[0][1], m[0][0]))]
+
+
+def bind_rotation_deg(xform16: List[float], joint_orient_deg: List[float],
+                      rotate_axis_deg: List[float],
+                      rotate_order: int) -> Optional[List[float]]:
+    """The `.rotate` euler (DEGREES, XYZ) stored inside a dagPose local
+    xformMatrix, with jointOrient and rotateAxis stripped (#732).
+
+    A joint's local rotation composes as Rot = RA . R . JO in Maya's
+    row-vector convention, so R = RA^-1 . Rot . JO^-1; both strippers are
+    orthonormal, so inverse = transpose. Only the default XYZ rotate order
+    (0) is composed - anything else returns None rather than guessing
+    (the fbxbytes._rotation precedent: a wrong assumption would record a
+    wrong rest value silently)."""
+    if rotate_order != 0:
+        return None
+    rows = [[float(xform16[i * 4 + j]) for j in range(3)] for i in range(3)]
+    normalized = []
+    for row in rows:
+        norm = math.sqrt(sum(v * v for v in row))
+        if norm < 1e-12:
+            return None
+        normalized.append([v / norm for v in row])
+
+    def _xyz(t):
+        return _mat3_mul(_mat3_mul(_rot3_axis("x", t[0]),
+                                   _rot3_axis("y", t[1])),
+                         _rot3_axis("z", t[2]))
+
+    def _t(m):
+        return [[m[j][i] for j in range(3)] for i in range(3)]
+
+    r = _mat3_mul(_mat3_mul(_t(_xyz(rotate_axis_deg)), normalized),
+                  _t(_xyz(joint_orient_deg)))
+    return _euler_xyz_deg(r)
