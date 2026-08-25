@@ -568,11 +568,16 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 samples=result.get("samples", samples),
                 fallback_light=bool(result.get("fallback_light", False)),
                 frames=frames,
+                warnings=result.get("warnings", []),
             ).model_dump_json()
         )
         content.append(
             "camera_positions: " + json.dumps(result.get("camera_positions", []))
         )
+        # The same forwarding render_sheet does: a handler notice (the #721
+        # IPR-hygiene report, for one) otherwise dies here unseen.
+        for warning in result.get("warnings", []):
+            content.append("note: " + warning)
         wrote = _write_frames(
             out_path, [s["angle"] for s in result.get("images", [])],
             [base64.b64decode(s["png_b64"]) for s in result.get("images", [])],
@@ -2427,6 +2432,10 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 json.dumps([s["label"] for s in shots])),
             "frames: " + json.dumps(result.get("frames", [])),
         ]
+        # The same forwarding render_sheet does: a handler notice (the #721
+        # IPR-hygiene report, for one) otherwise dies here unseen.
+        for warning in result.get("warnings", []):
+            content.append("note: " + warning)
         return content
 
     @mcp.tool(

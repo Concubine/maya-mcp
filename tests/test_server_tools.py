@@ -278,6 +278,19 @@ class TestRenderScene:
             ))
         assert conn.calls == []
 
+    def test_handler_warnings_are_forwarded_as_notes(self):
+        # #757: the #721 IPR-hygiene report arrived at the wire and died in
+        # this wrapper - render_sheet forwarded it, render_scene dropped it.
+        responses = self._response([("front", lit_png_b64())])
+        responses["render_scene"]["warnings"] = [
+            "closed the Arnold RenderView window after rendering - an idle "
+            "IPR re-renders on every scene mutation (#721)"]
+        conn = FakeConn(responses=responses)
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_render_scene", {"angles": ["front"]}))
+        text = " ".join(c.text for c in result.content if c.type == "text")
+        assert "note: closed the Arnold RenderView window" in text
+
 
 class TestCaptureViewport:
     def test_returns_downscaled_images_plus_camera_summary(self, monkeypatch):
@@ -1944,6 +1957,24 @@ class TestClipTools:
         run(mcp.call_tool("maya_preview_clip", {
             "root": "|pelvis", "name": "walk", "angle": "side", "zoom": 1.6}))
         assert conn.calls[0]["params"]["zoom"] == 1.6
+
+    def test_preview_forwards_handler_warnings(self):
+        # #757: same gap as render_scene - the #721 hygiene warning existed
+        # at the dispatcher layer and never reached the tool's content.
+        png = png_b64(32, 32)
+        conn = FakeConn(responses={"preview_clip": {
+            "clip": "walk", "fps": 30,
+            "frames": [{"frame": 0, "time_s": 0.0}],
+            "images": [{"label": "t=0.00s", "angle": "side", "png_b64": png}],
+            "renderer": "hw2", "samples": 1, "fallback_light": False,
+            "zoom": 1.0, "relit_lights": 0,
+            "warnings": ["closed the Arnold RenderView window after "
+                         "rendering (#721)"]}})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_preview_clip", {
+            "root": "|pelvis", "name": "walk"}))
+        text = " ".join(c.text for c in result.content if c.type == "text")
+        assert "note: closed the Arnold RenderView window" in text
 
     def test_export_gains_include_animation(self):
         conn = FakeConn(responses={"export_fbx": dict(

@@ -394,6 +394,13 @@ class RenderResult(BaseModel):
         description="True if the scene had no light and a temporary key was added for the render."
     )
     frames: List[RenderedFrame]
+    warnings: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Handler-side notices about the render session - e.g. the #721 "
+            "IPR-hygiene report. Also surfaced as 'note: ' content lines."
+        ),
+    )
 
 
 class ViewportState(BaseModel):
