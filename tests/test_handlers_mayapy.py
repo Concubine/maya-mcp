@@ -4242,3 +4242,188 @@ class TestMultiTakeExportInMaya:
         # at most one reload (only if this process's tracker was stale
         # when the loop started); never one per export.
         assert len(unloads) <= 1
+
+
+class TestTextureHonestyInMaya:
+    """#714 against a real exporter. The whole ticket rests on one measured
+    claim - file textures survive as Texture+Video records, procedural
+    networks vanish entirely - so it is measured here, not assumed."""
+
+    def _png(self, path):
+        """A 2x2 PNG with no dependencies (the tool_gaps_live precedent)."""
+        import struct
+        import zlib
+
+        raw = b"".join(b"\x00" + bytes([255, 0, 0, 0, 255, 0])
+                       for _ in range(2))
+
+        def chunk(kind, payload):
+            body = kind + payload
+            return (struct.pack(">I", len(payload)) + body
+                    + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF))
+
+        png = (b"\x89PNG\r\n\x1a\n"
+               + chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 2, 8, 2, 0, 0, 0))
+               + chunk(b"IDAT", zlib.compress(raw))
+               + chunk(b"IEND", b""))
+        with open(path, "wb") as fh:
+            fh.write(png)
+        return path
+
+    def test_a_file_texture_survives_and_is_reported_found(self, tmp_path):
+        """MEASURED under mayapy (Maya 2027): a single `file` node driving
+        standardSurface.baseColor exported as exactly 1 Texture record + 1
+        Video record (texture_records=1, video_records=1) in a 33024-byte
+        selected-export file; file_maps names basename "grain.png" with
+        found_in_file=True and dropped_maps=[]. Confirms the module
+        docstring's claim on real bytes, not just the headless fake."""
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import export, material, texture_recipes
+
+        image = self._png(str(tmp_path / "grain.png").replace("\\", "/"))
+        mesh = cmds.ls(cmds.polyCube(name="tex_cube")[0], long=True)[0]
+        material.assign_material({"mesh": mesh, "material": "tex_mat",
+                                  "shader": "standardSurface"})
+        texture_recipes.apply_texture_recipe({
+            "mesh": mesh, "recipe": "file_texture",
+            "params": {"file_path": image}})
+        path = str(tmp_path / "textured.fbx").replace("\\", "/")
+        out = export.export_fbx({"path": path, "metres_per_unit": 1.0,
+                                 "nodes": [mesh]})
+        block = out["textures"]
+        assert block is not None
+        assert block["texture_records"] >= 1
+        maps = [m for m in block["file_maps"] if m["basename"] == "grain.png"]
+        assert maps and maps[0]["found_in_file"] is True
+        assert block["dropped_maps"] == []
+
+    def test_a_procedural_network_is_named_dropped_and_absent_from_bytes(
+            self, tmp_path):
+        """MEASURED under mayapy (Maya 2027): a noise ("mcpTex_noise") ->
+        bump2d -> normalCamera network exports with texture_records=0,
+        video_records=0 (28384-byte file), and dropped_maps names exactly
+        one entry: terminal="mcpTex_noise", via=["bump2d"] - proof that
+        _walk_upstream's bare-node listConnections(bump2d) query aggregates
+        the noise source correctly for this single-input case (the #714
+        Task 4/5 carried-forward risk #1 - CONFIRMED against real Maya).
+        The noise node's own name never appears anywhere in the exported
+        bytes (measured: noise.encode() not in the file's raw bytes)."""
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import export, material, texture_recipes
+
+        mesh = cmds.ls(cmds.polyCube(name="proc_cube")[0], long=True)[0]
+        material.assign_material({"mesh": mesh, "material": "proc_mat",
+                                  "shader": "standardSurface"})
+        recipe = texture_recipes.apply_texture_recipe({
+            "mesh": mesh, "recipe": "noise_bump"})
+        noise = [n for n in recipe["nodes"] if "noise" in n][0]
+        path = str(tmp_path / "procedural.fbx").replace("\\", "/")
+        out = export.export_fbx({"path": path, "metres_per_unit": 1.0,
+                                 "nodes": [mesh]})
+        dropped = out["textures"]["dropped_maps"]
+        assert [d["terminal"] for d in dropped] == [noise]
+        assert dropped[0]["slot"] == "normal"
+        # Risk #1 (bare-node listConnections aggregation): the walk steps
+        # THROUGH bump2d and queries the bare node name, not a plug - this
+        # only reaches the noise terminal at all if real Maya's
+        # listConnections(bareNodeName) aggregates every source connection
+        # of that node, as the headless fake was built to model. via names
+        # exactly the pass-through the walk stepped through to get there.
+        assert dropped[0]["via"] == ["bump2d"]
+        assert any("silently drops" in w for w in out["warnings"])
+        with open(path, "rb") as fh:
+            assert noise.encode() not in fh.read()
+
+    def test_require_baked_textures_refuses_and_writes_nothing(self, tmp_path):
+        """MEASURED under mayapy (Maya 2027): a ramp_gradient recipe under
+        require_baked_textures=true raises HandlerError with message
+        "require_baked_textures=true but 1 material slot(s) are driven by
+        procedural networks: strict_cube_mat.baseColor (mcpTex_ramp)" -
+        refused PRE-WRITE, so neither the final path nor the .part.fbx
+        sibling exists afterwards (both measured False)."""
+        import os
+
+        import maya.cmds as cmds
+        import pytest as _pytest
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import export, material, texture_recipes
+
+        mesh = cmds.ls(cmds.polyCube(name="strict_cube")[0], long=True)[0]
+        material.assign_material({"mesh": mesh, "material": "strict_mat",
+                                  "shader": "standardSurface"})
+        texture_recipes.apply_texture_recipe({"mesh": mesh,
+                                              "recipe": "ramp_gradient"})
+        path = str(tmp_path / "strict.fbx").replace("\\", "/")
+        with _pytest.raises(HandlerError, match="procedural"):
+            export.export_fbx({"path": path, "metres_per_unit": 1.0,
+                               "nodes": [mesh],
+                               "require_baked_textures": True})
+        assert not os.path.exists(path)
+        assert not os.path.exists(path + ".part.fbx")
+
+    def test_a_whole_scene_export_claims_the_same_maps(self, tmp_path):
+        """Whole-scene material carriage is its own measurement, not an
+        assumption: the drifter probe measured a SELECTED export only.
+        MEASURED under mayapy (Maya 2027): an unselected (whole-scene)
+        export of the same file_texture setup carries texture_records=1
+        and reports basename "whole.png" with found_in_file=True - the
+        same shape as the selected-export case, confirming the claim is
+        not selection-mode-dependent."""
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import export, material, texture_recipes
+
+        image = self._png(str(tmp_path / "whole.png").replace("\\", "/"))
+        mesh = cmds.ls(cmds.polyCube(name="whole_cube")[0], long=True)[0]
+        material.assign_material({"mesh": mesh, "material": "whole_mat",
+                                  "shader": "standardSurface"})
+        texture_recipes.apply_texture_recipe({
+            "mesh": mesh, "recipe": "file_texture",
+            "params": {"file_path": image}})
+        path = str(tmp_path / "whole.fbx").replace("\\", "/")
+        out = export.export_fbx({"path": path, "metres_per_unit": 1.0})
+        found = [m for m in out["textures"]["file_maps"]
+                 if m["basename"] == "whole.png"]
+        assert found and found[0]["found_in_file"] is True
+
+    def test_texclaim_walk_on_awkward_but_legal_shading_does_not_raise(self):
+        """Risk probe (#714 Task 5, carried-forward risk #2): texclaim's
+        walk is unguarded outside _file_terminal's two getAttr reads, and
+        nobody had measured what real Maya raises (if anything) from a
+        disconnected shading group or a shape with no shading group at
+        all - both awkward but legal scene states. MEASURED under mayapy
+        (Maya 2027): the walk RETURNS CLEANLY, raising nothing, and
+        reports claims=[] for both nodes - listSets(object=shape, type=1)
+        returns an empty list rather than raising when a shape belongs to
+        no shading group at all, and a shading group whose surfaceShader
+        is disconnected yields `shaders = []` inside material_claims,
+        which `continue`s past that shape with no claim (correct: an
+        unconnected surfaceShader means the shape has no readable material,
+        not that the walk is broken). The #714 Task 4/5 carried-forward
+        risk #2 is CONFIRMED harmless for these two shapes; Task 4's
+        try/except around the walk therefore never fires here, but stays
+        in place as a backstop for scene shapes this probe did not cover."""
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import texclaim
+
+        # A shading group whose surfaceShader is disconnected - legal to
+        # build (sets(noSurfaceShader=True) is exactly this), just unusual.
+        disconnected = cmds.ls(
+            cmds.polyCube(name="disconnected_cube")[0], long=True)[0]
+        sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True,
+                       name="disconnectedSG")
+        cmds.sets(disconnected, edit=True, forceElement=sg)
+
+        # A mesh with no shading group at all - remove it from every set
+        # membership Maya gave it by default.
+        bare = cmds.ls(cmds.polyCube(name="bare_cube")[0], long=True)[0]
+        for s in cmds.listSets(object=bare, type=1) or []:
+            cmds.sets(bare, edit=True, remove=s)
+        assert not (cmds.listSets(object=bare, type=1) or [])
+
+        claims = texclaim.material_claims(cmds, [disconnected, bare])
+        assert claims == []
