@@ -375,6 +375,9 @@ def texture_violations(tfacts, claims, require_baked):
     * semantics_lost never refuses: the image ships and the consumer
       rewires the channel. Refusing would refuse assign_pbr's own mask
       workflow.
+    * A pattern-token path (<UDIM>, <U>, <V>, ...) names no single file, so
+      its expansion in the bytes is unmeasured - it therefore only ever
+      warns, never refuses, in either mode.
 
     Comparison is by image BASENAME, case-insensitively (Windows), never by
     node name (this toolbox writes two different naming conventions and the
@@ -402,6 +405,12 @@ def texture_violations(tfacts, claims, require_baked):
         where = "material %r slot %r (%s)" % (
             claim["material"], claim["slot"] or "?", claim["attr"])
         if claim["classification"] == "file":
+            # Gates the semantics_lost warning below: that warning describes
+            # what happens to an image that SURVIVES, so it must not fire
+            # alongside a report (violation or warning) that the image's own
+            # terminal was not found in the bytes - asserting both at once
+            # is a contradiction, not two independent findings.
+            all_found = True
             for terminal in claim["terminals"]:
                 basename = (terminal.get("basename") or "")
                 claimed.add(basename.lower())
@@ -410,6 +419,7 @@ def texture_violations(tfacts, claims, require_baked):
                 found = basename.lower() in in_file
                 if found:
                     continue
+                all_found = False
                 if pattern:
                     warnings.append(
                         "%s claims the image sequence %r, whose expansion "
@@ -425,7 +435,7 @@ def texture_violations(tfacts, claims, require_baked):
                         "%s claims file texture %r but the file carries no "
                         "Texture/Video record for it"
                         % (where, basename))
-            if claim["semantics_lost"]:
+            if claim["semantics_lost"] and all_found:
                 warnings.append(
                     "%s survives as an image reference only - %s do not "
                     "travel in FBX and must be re-created by the consumer"
@@ -433,15 +443,32 @@ def texture_violations(tfacts, claims, require_baked):
         else:
             nodes = ", ".join(t["node"] for t in claim["terminals"])
             if require_baked:
+                # require_baked_textures is a contract about the SCENE (only
+                # file-backed maps are declared to ship), not a prediction
+                # about the exporter - wording it as an exporter-capability
+                # claim ("cannot write") would contradict the stale-model
+                # warning below, which is exactly the evidence that the
+                # exporter's real behaviour here is unmeasured.
                 violations.append(
                     "%s is driven by a procedural network (%s), which "
-                    "Maya's FBX exporter cannot write" % (where, nodes))
+                    "require_baked_textures forbids - only file-backed maps "
+                    "are known to survive FBX export" % (where, nodes))
             else:
+                # Here, unlike the require_baked branch above, "silently
+                # drops" IS the measured claim (#714) - nothing below
+                # contradicts it, so it stays worded as fact.
                 warnings.append(
                     "%s is driven by a procedural network (%s) that Maya's "
                     "FBX exporter silently drops - the exported file does "
                     "not carry this map" % (where, nodes))
             for terminal in claim["terminals"]:
+                # Only non-file terminals: a layeredTexture mixing real
+                # files is itself procedural, so its terminals can include a
+                # file node whose name legitimately appears among the
+                # bytes' records - that is not evidence the drop model is
+                # stale.
+                if terminal["type"] == "file":
+                    continue
                 if terminal["node"] in record_names:
                     warnings.append(
                         "%s: %r appears among the file's texture records - "

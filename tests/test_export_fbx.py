@@ -1550,3 +1550,42 @@ class TestTextureViolations:
             tfacts, [_file_claim()], True)
         assert bad == []
         assert any("record truncated" in w for w in warn)
+
+    def test_a_missing_file_claim_with_semantics_lost_does_not_also_claim_survival(
+            self):
+        # Fix round 1, defect 1: the semantics_lost warning says the image
+        # SURVIVES as a reference. A basename absent from the bytes gets the
+        # violation only - asserting both at once would contradict itself.
+        claim = _file_claim(semantics_lost=["channel swizzle outColorR"])
+        bad, warn = export.texture_violations(_tfacts([]), [claim], False)
+        assert len(bad) == 1
+        assert not any("survives as an image reference" in w for w in warn)
+
+    def test_require_baked_violation_does_not_assert_exporter_capability(
+            self):
+        # Fix round 1, defect 2: require_baked_textures is a contract about
+        # the SCENE, not a prediction about the exporter - the refusal must
+        # not claim the exporter "cannot write" this while a same-result
+        # stale-model warning says that evidence is unmeasured.
+        bad, warn = export.texture_violations(
+            _tfacts(["x.png"], names=["mcpTex_noise"]),
+            [_procedural_claim()], True)
+        assert len(bad) == 1
+        assert "cannot write" not in bad[0]
+        assert "require_baked_textures" in bad[0]
+        assert any("stale" in w for w in warn)
+
+    def test_a_pattern_token_claim_only_warns(self):
+        bad, warn = export.texture_violations(
+            _tfacts([]), [_file_claim("body_<udim>.png")], False)
+        assert bad == []
+        assert any("body_<udim>.png" in w for w in warn)
+
+    def test_a_pattern_token_claim_only_warns_under_require_baked_too(self):
+        # The unmeasured-exporter-behaviour rule holds in both modes: a
+        # sequence token never refuses, even when the caller demands
+        # baked-only cargo.
+        bad, warn = export.texture_violations(
+            _tfacts([]), [_file_claim("body_<udim>.png")], True)
+        assert bad == []
+        assert any("body_<udim>.png" in w for w in warn)
