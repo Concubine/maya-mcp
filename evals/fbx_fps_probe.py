@@ -234,7 +234,13 @@ def main():
         line = line.strip()
         if not line or not CANDIDATE_RE.search(line):
             continue
-        token = line.split()[0]
+        # Each relevant line is shaped "PATH: <property> ( TYPE: ... ) ...".
+        # split()[0] is always the literal "PATH:" - the property path is
+        # the token AFTER it. Guard for lines that don't start with "PATH:".
+        parts = line.split()
+        if len(parts) < 2 or parts[0] != "PATH:":
+            continue
+        token = parts[1]
         if token not in seen:
             seen.add(token)
             candidates.append(token)

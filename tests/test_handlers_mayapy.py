@@ -4156,17 +4156,17 @@ class TestMultiTakeExportInMaya:
 
         MEASURED: in this two-clip scene, deleting "idle" reports
         deleted_curves >= 1 and reaped_channels == ["my_mid"] (#730).
-        mt_mid is a channel idle declared and no surviving clip (walk)
+        my_mid is a channel idle declared and no surviving clip (walk)
         declares - it carries only walk's own rest-pin keys at frames
         32/62 (outside idle's cut range 0-30), so #730 reaps its whole
-        curve rather than leaving those pins as dead weight. mt_tip is
+        curve rather than leaving those pins as dead weight. my_tip is
         untouched: walk still declares it, so the reap never considers it,
         and idle's own cutKey range (0-30) only strips the back-filled
         rest pins walk put at idle's boundaries, leaving walk's own
         32/47/62 keys exactly as they were.
 
         Pre-#730 history: this same delete used to report deleted_curves
-        == 0 and leave mt_mid's curve node in place, just missing idle's
+        == 0 and leave my_mid's curve node in place, just missing idle's
         own keys - "deleted_curves == 0 is structural" was the measured
         truth THEN, before a channel no survivor declared was reaped.
         """
@@ -4178,7 +4178,7 @@ class TestMultiTakeExportInMaya:
         base, root, idle, walk = self._two_clip_scene(cmds, prefix)
         mid = cmds.ls(prefix + "_mid", long=True)[0]
         tip = cmds.ls(prefix + "_tip", long=True)[0]
-        # walk back-filled mt_tip onto IDLE's own boundaries (0, 30) when
+        # walk back-filled my_tip onto IDLE's own boundaries (0, 30) when
         # walk introduced it (idle didn't declare it yet) - those two pins
         # live inside idle's own doomed range and are correctly cut away
         # by the existing per-range cutKey step below, unrelated to #730's
@@ -4189,7 +4189,7 @@ class TestMultiTakeExportInMaya:
                                    <= idle["end_frame"])]
 
         out = clip.delete_clip({"root": root, "name": "idle"})
-        # #730: mt_mid is declared by no survivor - its whole curves go.
+        # #730: my_mid is declared by no survivor - its whole curves go.
         assert out["reaped_channels"] == [prefix + "_mid"]
         assert out["deleted_curves"] >= 1
         assert not (cmds.listConnections(

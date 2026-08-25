@@ -524,6 +524,20 @@ def _install(monkeypatch, cmds, facts, mel=None):
     return mel
 
 
+@pytest.fixture(autouse=True)
+def _reset_fbx_loaded_time_unit():
+    """export._fbx_loaded_time_unit is a plain module-level global (export.py
+    assigns it directly at the point a real load happens, not through any
+    test seam), so a real export in one test leaves it set for every test
+    that runs after unless each test resets it itself - previously only
+    test_a_fresh_load_records_the_scene_time_unit did. Reset it around every
+    test in this file so none of them can see another's leftover value."""
+    saved = export._fbx_loaded_time_unit
+    export._fbx_loaded_time_unit = None
+    yield
+    export._fbx_loaded_time_unit = saved
+
+
 class TestFbxReloadGuard:
     """#729: fbxmaya force-reload only when the scene's frame rate changed.
 

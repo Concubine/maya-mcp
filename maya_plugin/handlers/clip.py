@@ -982,7 +982,17 @@ def delete_clip(params: Dict[str, Any]) -> Dict[str, Any]:
             for c in cmds.listConnections(plug, source=True,
                                           destination=False,
                                           type="animCurve") or []})
+        # Invariant this gate relies on: under #718's self-contained rule,
+        # every channel a clip declares stays curve-driven outside the
+        # doomed range too (a neighbour's rest pin keeps it keyed there), so
+        # an orphaned channel always has a curve to find here. If that ever
+        # breaks, reaped_channels could fill while orphan_curves stays empty
+        # and this warning silently never fires.
         if orphan_curves:
+            # mcp_clip_rest entries for these channels are NOT pruned here -
+            # they deliberately survive the reap. Re-introducing the channel
+            # in a later clip reuses the recorded rest value; do not "fix"
+            # this by deleting the rest record too.
             cmds.delete(*orphan_curves)
             warnings.append(
                 "removed the whole curve(s) of %d channel(s) (%s) no "
@@ -1071,13 +1081,6 @@ def preview_clip(params: Dict[str, Any]) -> Dict[str, Any]:
                ", ".join(repr(r["name"]) for r in records)),
             hint="a rig carries several clips now - pass the one to judge")
 
-    warnings: List[str] = []
-    for action in session.stop_idle_ipr(cmds):
-        warnings.append(
-            action + " before rendering clip frames - an idle IPR "
-            "re-renders on every scene change and can wedge the render "
-            "and time scrubbing (#721)")
-
     fps = int(meta.get("fps", 30))
     start_frame = int(meta["start_frame"])
     duration_frames = int(meta["end_frame"]) - start_frame
@@ -1117,6 +1120,15 @@ def preview_clip(params: Dict[str, Any]) -> Dict[str, Any]:
             "every_nth=%d yields %d frames; the cap is %d frames per sheet"
             % (every_nth, len(frames), MAX_PREVIEW_FRAMES),
             hint="raise every_nth, or omit it to auto-fit")
+
+    # Hygiene only after every refusal above: a refused preview_clip must
+    # mutate nothing (matches author_clip's discipline).
+    warnings: List[str] = []
+    for action in session.stop_idle_ipr(cmds):
+        warnings.append(
+            action + " before rendering clip frames - an idle IPR "
+            "re-renders on every scene change and can wedge the render "
+            "and time scrubbing (#721)")
 
     joints = rigging._hierarchy_joints(cmds, root_long)
     meshes = rigging._bound_meshes(cmds, set(joints))

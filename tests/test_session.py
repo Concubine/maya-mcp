@@ -373,18 +373,12 @@ def test_undo_handlers_are_chunk_exempt():
 
 class RecordingIprCmds:
     """Only what stop_idle_ipr touches; every surface is recorded."""
-    def __init__(self, batch=False, mtoa=True, window=True):
-        self.batch, self.mtoa, self.window_open = batch, mtoa, window
+    def __init__(self, batch=False, window=True):
+        self.batch, self.window_open = batch, window
         self.calls = []
 
     def about(self, batch=False):
         return self.batch
-
-    def pluginInfo(self, name, query=False, loaded=False):
-        return self.mtoa
-
-    def arnoldRenderView(self, **kw):
-        self.calls.append(("arnoldRenderView", kw))
 
     def window(self, name, exists=False):
         return self.window_open
@@ -400,9 +394,8 @@ class TestStopIdleIpr:
         assert session.stop_idle_ipr(cmds) == []
         assert cmds.calls == []
 
-    def test_no_mtoa_no_window_does_nothing(self):
-        assert session.stop_idle_ipr(
-            RecordingIprCmds(mtoa=False, window=False)) == []
+    def test_no_window_does_nothing(self):
+        assert session.stop_idle_ipr(RecordingIprCmds(window=False)) == []
 
     def test_an_open_view_is_stopped_and_closed(self):
         cmds = RecordingIprCmds()
