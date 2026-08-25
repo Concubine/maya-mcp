@@ -102,18 +102,40 @@ def _walk_upstream(cmds, plug: str) -> tuple:
 
     Steps THROUGH PASS_THROUGH_TYPES only; everything else terminates. All
     upstream branches are followed (a layeredTexture is itself a terminal,
-    so its inputs are never entered). Depth-capped and cycle-guarded: a
-    graph the walk cannot resolve yields an "unresolved(depth)" terminal,
-    which classifies procedural - conservative in the direction that
-    REPORTS loss rather than promising survival.
+    so its inputs are never entered).
+
+    Two DIFFERENT things can make a node reappear, and conflating them was
+    a real bug (#714 fix round 1): a legitimate ACYCLIC reconvergence - one
+    file feeding two attributes of the same bump2d, or the same file
+    reaching the slot by two branches - must resolve to ONE terminal, not a
+    false "unresolved(depth)" that turns a clean file claim procedural. A
+    genuine CYCLE (a node that is its own ancestor on this walk) must still
+    be capped and reported. So two separate guards, checked in this order:
+
+      - `ancestors` (carried per frontier entry) - the pass-through nodes
+        currently open on THIS path. A node reached that is already its own
+        ancestor is a real cycle -> "unresolved(depth)", checked FIRST,
+        because a cyclic node is also always in `resolved` by the time the
+        cycle closes and would otherwise be silently swallowed by the next
+        check instead of reported.
+      - `resolved` - every node already turned into a terminal, or already
+        pushed onto the frontier for exploration. Reached again from ANY
+        other branch (not an ancestor), it is skipped silently: the file
+        (or the pass-through subtree beneath it) was already accounted for.
+
+    The depth cap is a backstop for both: a pathological or hand-built
+    graph must not hang the export even without a literal cycle. The
+    returned terminal list is deduplicated by node name as a final safety
+    net, since two sibling branches can each independently trip the
+    cap/cycle check for the same node before either is recorded.
     """
     terminals: List[Dict[str, Any]] = []
     via: List[str] = []
     swizzles: List[str] = []
-    seen = set()
-    frontier = [(plug, 0)]
+    resolved = set()
+    frontier = [(plug, 0, frozenset())]
     while frontier:
-        current, depth = frontier.pop(0)
+        current, depth, ancestors = frontier.pop(0)
         sources = cmds.listConnections(current, source=True,
                                        destination=False, plugs=True) or []
         for source in sources:
@@ -121,20 +143,33 @@ def _walk_upstream(cmds, plug: str) -> tuple:
             attr = source.split(".", 1)[1] if "." in source else ""
             if attr in _SWIZZLE_PLUGS and attr not in swizzles:
                 swizzles.append(attr)
-            if node in seen or depth >= MAX_DEPTH:
+            if node in ancestors:
                 terminals.append(_other_terminal(node, "unresolved(depth)"))
                 continue
-            seen.add(node)
+            if node in resolved:
+                continue
+            if depth >= MAX_DEPTH:
+                terminals.append(_other_terminal(node, "unresolved(depth)"))
+                continue
+            resolved.add(node)
             node_type = cmds.nodeType(node)
             if node_type in PASS_THROUGH_TYPES:
                 if node_type not in via:
                     via.append(node_type)
-                frontier.append((node, depth + 1))
+                frontier.append((node, depth + 1, ancestors | {node}))
             elif node_type == "file":
                 terminals.append(_file_terminal(cmds, node))
             else:
                 terminals.append(_other_terminal(node, node_type))
-    return terminals, via, swizzles
+
+    deduped: List[Dict[str, Any]] = []
+    seen_nodes = set()
+    for terminal in terminals:
+        if terminal["node"] in seen_nodes:
+            continue
+        seen_nodes.add(terminal["node"])
+        deduped.append(terminal)
+    return deduped, via, swizzles
 
 
 def _semantics_lost(swizzles: List[str], via: List[str],

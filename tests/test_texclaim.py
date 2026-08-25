@@ -86,9 +86,6 @@ class FakeCmds:
     def getAttr(self, plug):
         return self.attrs.get(plug, "")
 
-    def objExists(self, node):
-        return node in self.types
-
 
 def _shader_with(fake, attr, source_plug):
     fake.existing_attrs.add("skin_mat." + attr)
@@ -153,14 +150,19 @@ class TestMaterialClaims:
         fake.attrs["rough_tex.fileTextureName"] = str(image)
         fake.attrs["rough_tex.colorSpace"] = "Raw"
         fake.conns["rough_inv.inputX"] = ["rough_tex.outColorR"]
+        # A second channel of the SAME file into reverse's other component -
+        # both swizzles must be reported, and the file still resolves once.
+        fake.conns["rough_inv.inputY"] = ["rough_tex.outAlpha"]
         _shader_with(fake, "specularRoughness", "rough_inv.outputX")
 
         claim = texclaim.material_claims(fake, ["|bodyShape"])[0]
 
         assert claim["classification"] == "file"
         assert claim["via"] == ["reverse"]
+        assert len(claim["terminals"]) == 1
         lost = " ".join(claim["semantics_lost"])
-        assert "outColorR" in lost and "reverse" in lost and "Raw" in lost
+        assert "outColorR" in lost and "outAlpha" in lost
+        assert "reverse" in lost and "Raw" in lost
 
     def test_a_layered_texture_mixing_a_file_is_procedural(self, tmp_path):
         image = tmp_path / "base.png"
@@ -200,3 +202,61 @@ class TestMaterialClaims:
     def test_a_shape_with_no_shading_group_is_skipped_silently(self):
         fake = FakeCmds()
         assert texclaim.material_claims(fake, ["|otherShape"]) == []
+
+    def test_a_file_reaching_one_pass_through_twice_is_still_a_file_claim(
+            self):
+        # #714 fix round 1: one file feeding TWO attrs of the same bump2d
+        # (two channels of one mask) is an ACYCLIC reconvergence, not a
+        # loss - conflating "seen before" with "cycle" turned this into a
+        # false procedural drop.
+        fake = FakeCmds()
+        fake.types["grain"] = "file"
+        fake.types["mcpTex_bump"] = "bump2d"
+        fake.conns["mcpTex_bump.bumpValue"] = ["grain.outColorR"]
+        fake.conns["mcpTex_bump.bumpFilter"] = ["grain.outColorG"]
+        _shader_with(fake, "normalCamera", "mcpTex_bump.outNormal")
+
+        claim = texclaim.material_claims(fake, ["|bodyShape"])[0]
+
+        assert claim["classification"] == "file"
+        assert len(claim["terminals"]) == 1
+        lost = " ".join(claim["semantics_lost"])
+        assert "outColorR" in lost and "outColorG" in lost
+
+    def test_a_file_reaching_the_shader_by_two_branches_is_one_terminal(
+            self):
+        # The same file reached DIRECTLY (bump2d.bumpValue) and again
+        # through a second pass-through (bump2d.bumpFilter -> reverse ->
+        # the same file): a real diamond, not a cycle - still one terminal.
+        fake = FakeCmds()
+        fake.types["grain"] = "file"
+        fake.types["mcpTex_bump"] = "bump2d"
+        fake.types["mcpTex_inv"] = "reverse"
+        fake.conns["mcpTex_bump.bumpValue"] = ["grain.outColorR"]
+        fake.conns["mcpTex_bump.bumpFilter"] = ["mcpTex_inv.outputX"]
+        fake.conns["mcpTex_inv.inputX"] = ["grain.outColorG"]
+        _shader_with(fake, "normalCamera", "mcpTex_bump.outNormal")
+
+        claim = texclaim.material_claims(fake, ["|bodyShape"])[0]
+
+        assert claim["classification"] == "file"
+        assert len(claim["terminals"]) == 1
+
+    def test_a_chain_longer_than_max_depth_reports_unresolved(self):
+        # The depth cap alone, no cycle: MAX_DEPTH + 1 DISTINCT
+        # pass-through nodes chained in a straight line must still be
+        # capped - the cycle test above does not exercise this branch.
+        fake = FakeCmds()
+        nodes = ["p%d" % i for i in range(texclaim.MAX_DEPTH + 1)]
+        for name in nodes:
+            fake.types[name] = "bump2d"
+        for i in range(len(nodes) - 1):
+            fake.conns["%s.bumpValue" % nodes[i]] = [
+                "%s.outNormal" % nodes[i + 1]]
+        _shader_with(fake, "normalCamera", "%s.outNormal" % nodes[0])
+
+        claim = texclaim.material_claims(fake, ["|bodyShape"])[0]
+
+        assert claim["classification"] == "procedural"
+        assert any(t["type"] == "unresolved(depth)"
+                   for t in claim["terminals"])
