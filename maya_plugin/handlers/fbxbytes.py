@@ -847,8 +847,7 @@ def texture_facts(facts):
     """
     def rows(store):
         return [{"name": rec["name"],
-                 "basename": os.path.basename(rec["filename"])
-                 if rec["filename"] else ""}
+                 "basename": os.path.basename(rec["filename"])}
                 for rec in store.values()]
 
     return {"texture_records": len(facts.textures),

@@ -482,6 +482,11 @@ class TestAnimFactsFromTheCommittedArtifact:
 # by one file.
 FIXTURE_WITH_TEXTURE = os.path.join(REPO, "evals", "drifter_live", "drifter.fbx")
 FIXTURE_TEXTURE_BASENAME = "drifter_basecolor.png"
+# MEASURED (standalone record-count walk, independent of fbxbytes.py, plus a
+# raw substring grep as a second check): 0 Texture records, 0 Video records;
+# the literal bytes b"Texture" and b"Video" do not occur anywhere in this
+# file at all (count() == 0 for both). Genuinely textureless, not merely
+# under-counted by the parser.
 FIXTURE_WITHOUT_TEXTURE = os.path.join(
     REPO, "evals", "rigging_fixtures", "skinned_cylinder.fbx")
 
@@ -506,9 +511,14 @@ class TestTextureRecords:
         assert block["texture_records"] == 1
         assert block["video_records"] == 1
         assert block["unavailable_reason"] is None
-        basenames = {t["basename"] for t in block["textures"]} | {
-            v["basename"] for v in block["videos"]}
-        assert FIXTURE_TEXTURE_BASENAME in basenames
+        # Asserted separately, not unioned: Video's filename is filled by
+        # the nested-P "Path" arm, Texture's ONLY by the bare
+        # FileName/RelativeFilename child-record arm - a union would let a
+        # break in either arm hide behind the other's basename.
+        assert {t["basename"] for t in block["textures"]} == {
+            FIXTURE_TEXTURE_BASENAME}
+        assert {v["basename"] for v in block["videos"]} == {
+            FIXTURE_TEXTURE_BASENAME}
 
     def test_a_textureless_fixture_reports_zero_not_an_error(self):
         facts = fbxbytes.read_fbx(FIXTURE_WITHOUT_TEXTURE)
