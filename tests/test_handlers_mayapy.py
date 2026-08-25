@@ -4014,6 +4014,17 @@ class TestMultiTakeExportInMaya:
         this shared-process suite). This in-suite test is a standing
         regression guard at the budget the shared process can carry
         safely.
+
+        PRE-#729 HISTORY - the budget above no longer constrains this test:
+        #729 replaced the unconditional per-export unload/reload with a
+        guard that only pays the reload cost when the scene's time unit
+        actually changed (export._fbx_reload_needed); a same-fps export no
+        longer spends a reload cycle at all (see
+        TestMultiTakeExportInMaya.test_repeated_same_fps_exports_neither_
+        reload_nor_crash, which runs six real animated exports in this
+        same process and measures zero reload cycles). This test stays a
+        single call because a single call is still all it needs to prove,
+        not because the process cannot afford more.
         """
         import maya.cmds as cmds
 
@@ -4048,6 +4059,16 @@ class TestMultiTakeExportInMaya:
         delete leaves the surviving clip's take in the file and the
         deleted one's name gone - on the bypass helper instead of spending
         a reload cycle the process does not have.
+
+        PRE-#729 HISTORY - the reload-cycle budget above no longer applies:
+        #729 replaced the unconditional per-export unload/reload with a
+        guard that only reloads on an actual frame-rate change
+        (export._fbx_reload_needed), so a same-fps `export_fbx` call here
+        would cost zero reload cycles, not one. This test stays on the
+        bypass helper regardless, because `_export_bypassing_the_gate`
+        reads the RAW per-take curve records (facts.anim_nodes) that the
+        real gate's anim_facts/anim_violations path does not expose - not
+        because the process cannot afford the call.
         """
         import maya.cmds as cmds
         import maya.mel as mel
@@ -4129,3 +4150,37 @@ class TestMultiTakeExportInMaya:
                                         destination=False, type="animCurve")
         assert not cmds.listConnections(tip + ".rotateX", source=True,
                                         destination=False, type="animCurve")
+
+    def test_repeated_same_fps_exports_neither_reload_nor_crash(self, tmp_path):
+        """#729: six real animated exports at ONE fps in this shared
+        process. Before the guard this was the measured teardown killer
+        (running total of 3 fbxmaya reload cycles crashed
+        maya.standalone.uninitialize(), 3/3); with the guard the six
+        exports below cost ZERO additional reload cycles, measured by
+        counting unloadPlugin calls. The suite finishing cleanly IS the
+        teardown proof."""
+        import maya.cmds as cmds
+        from maya_plugin.handlers import clip, export
+
+        base, root, idle, walk = self._two_clip_scene(cmds, "rp")
+        unloads = []
+        real_unload = cmds.unloadPlugin
+
+        def counting_unload(*a, **kw):
+            unloads.append(a)
+            return real_unload(*a, **kw)
+
+        cmds.unloadPlugin = counting_unload
+        try:
+            for i in range(6):
+                path = str(tmp_path / ("r%d.fbx" % i)).replace("\\", "/")
+                result = export.export_fbx({
+                    "path": path, "metres_per_unit": 1.0,
+                    "nodes": [base, root], "include_animation": True})
+                assert result["animation"] is not None
+        finally:
+            cmds.unloadPlugin = real_unload
+            clip.delete_clip({"root": root})
+        # at most one reload (only if this process's tracker was stale
+        # when the loop started); never one per export.
+        assert len(unloads) <= 1
