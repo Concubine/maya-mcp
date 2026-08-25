@@ -174,10 +174,13 @@ def _clips_elsewhere(cmds, root_long: str) -> List[str]:
     """Short names of OTHER skeleton roots carrying clips. export_fbx
     refuses such a scene (a take is a frame range over the whole file, so a
     multi-rig file needs a timeline policy of its own) - and that ceiling
-    should be discovered while authoring, not at write time (#718)."""
+    should be discovered while authoring, not at write time (#718).
+
+    Keyed on clip_meta parsing to a non-empty record list, NOT on the
+    attribute existing (#731): an empty or hollow mcp_clip attr carries no
+    clips and must not warn."""
     return [_short(j) for j in cmds.ls(type="joint", long=True) or []
-            if j != root_long
-            and cmds.attributeQuery(CLIP_ATTR, node=j, exists=True)]
+            if j != root_long and clip_meta(cmds, j)]
 
 
 def _rest_key(plug: str) -> str:

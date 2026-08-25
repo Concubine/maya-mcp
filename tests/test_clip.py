@@ -379,7 +379,9 @@ class TestAuthor:
         assert fake.checkpoints == ["author_clip"]
 
     def test_a_clip_on_another_rig_warns_because_export_will_refuse(self, fake):
-        fake.string_attrs["|other_root"] = {"mcp_clip": "[]"}
+        fake.string_attrs["|other_root"] = {
+            "mcp_clip": json.dumps([{"name": "walk", "fps": 30,
+                                     "start_frame": 0, "end_frame": 10}])}
         fake.joints.append("|other_root")
         out = _author(fake, name="idle")
         assert any("other_root" in w and "export_fbx" in w
@@ -1249,3 +1251,27 @@ class TestRigidParentRig:
             {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
             {"time_s": 1.0, "rotations": {"mid": [0, 0, 45]}}])
         assert [w for w in out["warnings"] if "moves no mesh" in w]
+
+
+class TestClipsElsewherePredicate:
+    def test_an_empty_clip_attr_on_another_root_is_not_a_clip(self, monkeypatch):
+        # #731: a joint carrying mcp_clip that parses to [] must not trip the
+        # "another skeleton carries clips" warning.
+        fake = FakeCmds()
+        fake.joints.append("|other")
+        fake.string_attrs["|other"] = {"mcp_clip": "[]"}
+        _install(fake, monkeypatch)
+        out = _author(fake)
+        assert not any("another skeleton carries clips" in w
+                       for w in out["warnings"])
+
+    def test_a_real_clip_on_another_root_still_warns(self, monkeypatch):
+        fake = FakeCmds()
+        fake.joints.append("|other")
+        fake.string_attrs["|other"] = {
+            "mcp_clip": json.dumps([{"name": "walk", "fps": 30,
+                                     "start_frame": 0, "end_frame": 10}])}
+        _install(fake, monkeypatch)
+        out = _author(fake)
+        assert any("another skeleton carries clips" in w
+                   for w in out["warnings"])

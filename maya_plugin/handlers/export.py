@@ -329,22 +329,25 @@ def _scene_clips(cmds):
     Multi-CLIP is supported (#718): one rig, N takes on one timeline. Two
     SKELETONS carrying clips still refuses - a take is a frame range over
     the WHOLE file, so a multi-rig file needs a timeline policy of its own.
+
+    A root "carries clips" only when its mcp_clip attr parses to a
+    non-empty record list (#731) - an empty or hollow attr left by a
+    crashed or hand-edited scene must not refuse a good export.
     """
-    roots = [j for j in cmds.ls(type="joint", long=True) or []
-             if cmds.attributeQuery(clip_mod.CLIP_ATTR, node=j, exists=True)]
-    if not roots:
+    carriers = [(j, records) for j in cmds.ls(type="joint", long=True) or []
+                for records in [clip_mod.clip_meta(cmds, j)] if records]
+    if not carriers:
         return None
-    if len(roots) > 1:
+    if len(carriers) > 1:
         raise HandlerError(
             "%d skeletons carry clips (%s) - one rig may carry several "
             "clips and they all export as named takes, but two skeletons "
             "cannot: a take is a frame range over the whole file"
-            % (len(roots), ", ".join(r.split("|")[-1] for r in roots)),
+            % (len(carriers),
+               ", ".join(r.split("|")[-1] for r, _ in carriers)),
             hint="delete_clip the skeletons not being exported")
-    records = clip_mod.clip_meta(cmds, roots[0])
-    if not records:
-        return None
-    return {"root": roots[0].split("|")[-1],
+    root, records = carriers[0]
+    return {"root": root.split("|")[-1],
             "fps": records[0]["fps"],
             "span_frames": max(r["end_frame"] for r in records),
             "clips": records}

@@ -4,6 +4,7 @@ Nothing here imports Maya. The handler's Maya calls are faked, because the
 point of this suite is the logic that decides whether a written file is
 allowed to survive - and that logic must be checkable without a Maya licence.
 """
+import json
 import os
 import sys
 from pathlib import Path
@@ -1344,3 +1345,41 @@ class TestExportFbxReportsClips:
 
         assert out["animation"] is not clean
         assert "clips" not in clean
+
+
+class FakeClipSceneCmds:
+    """Only what _scene_clips touches: joints, the mcp_clip attr."""
+    def __init__(self, attrs):
+        # attrs: {joint_long_name: mcp_clip string or None}
+        self.attrs = attrs
+
+    def ls(self, type=None, long=False):
+        return list(self.attrs)
+
+    def attributeQuery(self, attr, node=None, exists=False):
+        return self.attrs.get(node) is not None
+
+    def getAttr(self, key):
+        node = key.rsplit(".", 1)[0]
+        return self.attrs[node]
+
+
+class TestSceneClipsPredicate:
+    def _records(self):
+        return json.dumps([{"name": "idle", "fps": 30,
+                            "start_frame": 0, "end_frame": 30}])
+
+    def test_an_empty_attr_beside_a_real_rig_does_not_refuse(self):
+        cmds = FakeClipSceneCmds({"|rig": self._records(), "|junk": "[]"})
+        declared = export._scene_clips(cmds)
+        assert declared is not None and declared["root"] == "rig"
+
+    def test_two_real_rigs_still_refuse(self):
+        cmds = FakeClipSceneCmds({"|a": self._records(),
+                                  "|b": self._records()})
+        with pytest.raises(HandlerError, match="skeletons carry clips"):
+            export._scene_clips(cmds)
+
+    def test_only_empty_attrs_means_no_clips(self):
+        cmds = FakeClipSceneCmds({"|junk": "[]"})
+        assert export._scene_clips(cmds) is None
