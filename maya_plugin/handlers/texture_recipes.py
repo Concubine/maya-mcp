@@ -146,10 +146,18 @@ def apply_texture_recipe(params: Dict[str, Any]) -> Dict[str, Any]:
                     pass
         raise
 
+    warnings: List[str] = []
+    if recipe != "file_texture":
+        warnings.append(
+            "this recipe builds a procedural network that Maya's FBX "
+            "exporter silently drops - maya_export_fbx reports it in "
+            "textures.dropped_maps; use file textures (maya_assign_pbr or "
+            "the file_texture recipe) for anything that must survive export")
+
     return {
         "mesh": mesh_long,
         "recipe": recipe,
         "slot": slot,
         "nodes": created,
-        "warnings": [],
+        "warnings": warnings,
     }

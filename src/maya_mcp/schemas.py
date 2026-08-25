@@ -877,6 +877,65 @@ class AnimFacts(BaseModel):
     unavailable_reason: Optional[str] = None
 
 
+class FileMapFact(BaseModel):
+    """A file-backed map the scene claims, checked against the bytes."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    material: str
+    attr: str = Field(description="The shader attribute, e.g. 'baseColor'.")
+    slot: Optional[str] = Field(default=None, description=(
+        "The semantic slot name ('color', 'normal', ...) when the attribute "
+        "maps back to one; null for an attribute outside the slot tables."))
+    file_node: str
+    basename: str
+    on_disk: bool = Field(description=(
+        "Whether the image existed on disk at export time."))
+    found_in_file: bool = Field(description=(
+        "Whether a Texture/Video record in the written FBX carries this "
+        "basename. False REFUSES the export when the image is on disk - a "
+        "file-backed map has never been measured to vanish, so its absence "
+        "means the exporter regressed."))
+    semantics_lost: List[str] = Field(default_factory=list, description=(
+        "Wiring decisions FBX cannot carry: channel swizzle, reverse-invert, "
+        "Raw colorspace. The image ships; the consumer re-creates these."))
+
+
+class DroppedMapFact(BaseModel):
+    """A map the scene carries that the FBX exporter cannot write at all."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    material: str
+    attr: str
+    slot: Optional[str] = None
+    terminal: str = Field(description="The procedural node, e.g. a noise.")
+    terminal_type: str
+    via: List[str] = Field(default_factory=list, description=(
+        "Intermediate node types between the terminal and the shader."))
+    meshes: List[str] = Field(default_factory=list)
+
+
+class TextureFacts(BaseModel):
+    """Texture honesty (#714): what the scene claims, what the file carries.
+
+    The one block in this result that is NOT purely byte-derived - and it
+    says so deliberately: absence cannot be read from the bytes, so the
+    scene's claim is what makes a dropped map nameable.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    texture_records: int
+    video_records: int
+    file_maps: List[FileMapFact] = Field(default_factory=list)
+    dropped_maps: List[DroppedMapFact] = Field(default_factory=list)
+    unclaimed_records: List[str] = Field(default_factory=list, description=(
+        "Basenames in the file no walked claim explains - the walk covers "
+        "this toolbox's authored slots only."))
+    unavailable_reason: Optional[str] = None
+
+
 class ExportFbxResult(BaseModel):
     """What maya_export_fbx actually wrote, read back out of the file.
 
@@ -955,6 +1014,15 @@ class ExportFbxResult(BaseModel):
             "Animation facts when include_animation=true; null otherwise. "
             "When false, the byte gate has asserted the file carries ZERO "
             "curve records even if the scene is animated."))
+    textures: Optional[TextureFacts] = Field(
+        default=None,
+        description=(
+            "Texture facts when the scene claims any map or the file carries "
+            "any Texture record; null otherwise. Procedural networks are "
+            "named in dropped_maps - Maya's FBX exporter drops them with no "
+            "signal, which is what #714 exists to surface."))
+    warnings: List[str] = Field(default_factory=list, description=(
+        "Measured caveats about the written file - today, texture losses."))
 
 
 class SkeletonJoint(BaseModel):

@@ -126,3 +126,25 @@ def test_file_texture_requires_a_path(monkeypatch):
             {"mesh": "|torso", "recipe": "file_texture"}
         )
     assert "file_path" in str(exc.value) or "file_path" in exc.value.hint
+
+
+def test_procedural_recipes_warn_that_the_map_will_not_export(monkeypatch):
+    # #714: Maya's FBX exporter silently drops procedural networks - the
+    # recipe that builds one must say so up front, not leave it to be
+    # discovered later in maya_export_fbx's dropped_maps.
+    fake = FakeCmds()
+    monkeypatch.setattr(texture_recipes, "_cmds", lambda: fake)
+    result = texture_recipes.apply_texture_recipe(
+        {"mesh": "|torso", "recipe": "noise_bump"}
+    )
+    assert any("silently drops" in w for w in result["warnings"])
+
+
+def test_the_file_texture_recipe_does_not_warn(monkeypatch):
+    fake = FakeCmds()
+    monkeypatch.setattr(texture_recipes, "_cmds", lambda: fake)
+    result = texture_recipes.apply_texture_recipe(
+        {"mesh": "|torso", "recipe": "file_texture",
+         "params": {"file_path": "C:/t/t.png"}}
+    )
+    assert result["warnings"] == []

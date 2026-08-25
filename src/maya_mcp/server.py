@@ -937,6 +937,15 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "static export of an animated scene is byte-identical to an "
             "unanimated one, asserted from the bytes."
         ))] = False,
+        require_baked_textures: Annotated[bool, Field(description=(
+            "Refuse the export when any material slot is driven by a "
+            "procedural texture network (noise, ramp, layeredTexture). "
+            "Maya's FBX exporter cannot write those at all and drops them "
+            "silently, so a delivery that must carry its look sets this "
+            "true and gets a refusal instead of a flat file. False (the "
+            "default) exports anyway and names every dropped map in "
+            "textures.dropped_maps."
+        ))] = False,
     ) -> ExportFbxResult:
         """Export FBX and gate the result on the BYTES it just wrote.
 
@@ -952,7 +961,8 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 "export_fbx",
                 {"path": path, "metres_per_unit": metres_per_unit,
                  "nodes": nodes, "include_skins": include_skins,
-                 "include_animation": include_animation},
+                 "include_animation": include_animation,
+                 "require_baked_textures": require_baked_textures},
                 timeout_s=EXPORT_TIMEOUT_S,
             )
         )

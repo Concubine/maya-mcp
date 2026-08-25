@@ -11,7 +11,7 @@ import json
 import pytest
 from PIL import Image as PILImage
 
-from maya_mcp import refstore, server as server_mod
+from maya_mcp import refstore, schemas, server as server_mod
 
 
 def png_b64(width=1024, height=1024, color=(140, 100, 70)):
@@ -406,6 +406,7 @@ class TestSessionTools:
         assert conn.calls[0]["params"] == {
             "path": "x.fbx", "metres_per_unit": 1.0, "nodes": ["golem_arm"],
             "include_skins": False, "include_animation": False,
+            "require_baked_textures": False,
         }
         assert result.structured_content["fbx_version"] == 7700
         assert result.structured_content["skin"] is None
@@ -428,6 +429,7 @@ class TestSessionTools:
         assert conn.calls[0]["params"] == {
             "path": "x.fbx", "metres_per_unit": 1.0, "nodes": None,
             "include_skins": False, "include_animation": False,
+            "require_baked_textures": False,
         }
 
     def test_maya_export_fbx_forwards_include_skins_and_surfaces_the_block(self):
@@ -454,6 +456,35 @@ class TestSessionTools:
         assert conn.calls[0]["params"]["include_skins"] is True
         assert result.structured_content["skin"]["clusters"] == 3
         assert result.structured_content["skin"]["bind_pose_present"] is True
+
+    def test_export_fbx_forwards_textures_and_warnings(self):
+        """#714: ExportFbxResult is extra='ignore', so a field the model does
+        not declare is dropped silently on the way to the caller - exactly
+        the #757 defect class."""
+        result = _export_result_with(
+            textures={
+                "texture_records": 1, "video_records": 1,
+                "file_maps": [{"material": "m", "attr": "baseColor",
+                               "slot": "color", "file_node": "t",
+                               "basename": "grain.png", "on_disk": True,
+                               "found_in_file": True, "semantics_lost": []}],
+                "dropped_maps": [{"material": "m", "attr": "normalCamera",
+                                  "slot": "normal",
+                                  "terminal": "mcpTex_noise",
+                                  "terminal_type": "noise",
+                                  "via": ["bump2d"], "meshes": ["|c"]}],
+                "unclaimed_records": [], "unavailable_reason": None,
+            },
+            warnings=["material 'm' slot 'normal' ... silently drops"],
+        )
+        assert result.textures.dropped_maps[0].terminal == "mcpTex_noise"
+        assert result.textures.file_maps[0].found_in_file is True
+        assert result.warnings
+
+    def test_export_fbx_passes_require_baked_textures_to_the_wire(self):
+        sent = _capture_request(lambda tool: tool(
+            path="C:/t/x.fbx", metres_per_unit=1.0, require_baked_textures=True))
+        assert sent["params"]["require_baked_textures"] is True
 
 
 class TestLinearUnitReachesTheToolSurface:
@@ -1332,6 +1363,27 @@ def test_array_result_signed_volume_is_optional():
     assert result.warnings == []
 
 
+class TestApplyTextureRecipeForwardsWarnings:
+    """#714/#757: apply_texture_recipe's handler is about to start emitting
+    a warning for the procedural recipes. TextureRecipeResult already
+    declares `warnings`, but nothing had proven a handler-emitted warning
+    actually survives the round trip to the tool's caller."""
+
+    def test_a_handler_warning_reaches_the_caller(self):
+        conn = FakeConn(responses={"apply_texture_recipe": {
+            "mesh": "|torso", "recipe": "noise_bump", "slot": "normal",
+            "nodes": ["mcpTex_noise1", "mcpTex_bump1"],
+            "warnings": ["this recipe builds a procedural network that "
+                         "Maya's FBX exporter silently drops"],
+        }})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_apply_texture_recipe", {
+            "mesh": "|torso", "recipe": "noise_bump"}))
+        assert result.structured_content["warnings"] == [
+            "this recipe builds a procedural network that Maya's FBX "
+            "exporter silently drops"]
+
+
 class TestLightingPresets:
     def test_environment_preset_is_reachable_and_needs_no_file(self):
         conn = FakeConn(responses={"setup_lighting": {
@@ -1864,6 +1916,30 @@ def _export_result_stub():
         "node_count": 3, "mesh_count": 1, "root_nodes": ["|golem_arm"],
         "unit_scale_factor": 100.0, "metres_per_unit": 1.0,
     }
+
+
+def _export_result_with(**overrides):
+    """Push a handler response through the real maya_export_fbx tool and
+    back into ExportFbxResult - proving a field the wire carries survives
+    the round trip rather than vanishing at the extra='ignore' boundary
+    (#757)."""
+    conn = FakeConn(
+        responses={"export_fbx": dict(_export_result_stub(), **overrides)}
+    )
+    mcp = server_mod.create_server(conn)
+    result = run(
+        mcp.call_tool("maya_export_fbx", {"path": "x.fbx", "metres_per_unit": 1.0})
+    )
+    return schemas.ExportFbxResult(**result.structured_content)
+
+
+def _capture_request(fn):
+    """Call fn(tool), where tool(**kwargs) invokes maya_export_fbx through
+    the real server, and return the params FakeConn recorded."""
+    conn = FakeConn(responses={"export_fbx": _export_result_stub()})
+    mcp = server_mod.create_server(conn)
+    fn(lambda **kwargs: run(mcp.call_tool("maya_export_fbx", kwargs)))
+    return conn.calls[0]
 
 
 class TestClipTools:
