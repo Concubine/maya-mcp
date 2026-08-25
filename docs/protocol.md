@@ -766,3 +766,16 @@ R/G/B/A off a map), a `reverse` invert, and a `Raw` colorspace declaration
 are reported in each file map's `semantics_lost` and never gated: the
 image itself survives in FBX, only the wiring decision does not, and
 refusing it would refuse `assign_pbr`'s own mask workflow.
+
+The claim walk itself can fail (an unreadable shading graph) without
+failing the export — it costs the measurement, not the export, the same
+rule `_bounds` follows for a rotation order it cannot compose. When it
+does, `require_baked_textures=true` refuses pre-write on that too: a
+strict caller demanded proof that only file-backed maps are present, and
+with no claim there is no proof. Either way the failure lands in
+`textures.unavailable_reason` (the scene's claim could not be read, the
+file's texture records could not be parsed, or both, joined with `"; "`)
+and the same string is echoed into `warnings`. A set `unavailable_reason`
+means texture verification did **not** happen for this export — a
+successful export carrying one has reported strictly less than a clean
+one.
