@@ -30,6 +30,7 @@ from ..dispatcher import HandlerError
 from . import clip as clip_mod
 from . import clipmath
 from . import fbxbytes
+from . import texclaim
 
 # The five statements, in order, with FBXResetExport first so no setting from a
 # previous export survives. Held as data rather than a code blob so
@@ -303,16 +304,23 @@ def skin_violations(sfacts) -> List[str]:
     return out
 
 
+def _exported_mesh_shapes(cmds, nodes) -> List[str]:
+    """Every non-intermediate mesh shape this export covers. A selected
+    export walks its own `nodes` (DAG-expanded, so a group export finds its
+    children); a whole-scene export walks every mesh shape in the scene.
+    One definition of "what this export covers", shared by
+    _scene_shape_aliases (blendShape targets) and the #714 texture claim
+    walk - two expansion rules here would be two things to keep in sync."""
+    if nodes:
+        return cmds.ls(nodes, dagObjects=True, type="mesh",
+                       long=True, noIntermediate=True) or []
+    return cmds.ls(type="mesh", long=True, noIntermediate=True) or []
+
+
 def _scene_shape_aliases(cmds, nodes) -> List[str]:
     """Weight aliases of every blendShape reachable from the exported
-    meshes - what the FILE must now carry. A selected export walks its own
-    `nodes` (DAG-expanded, so a group export finds its children); a
-    whole-scene export walks every non-intermediate mesh shape."""
-    if nodes:
-        shapes = cmds.ls(nodes, dagObjects=True, type="mesh",
-                         long=True, noIntermediate=True) or []
-    else:
-        shapes = cmds.ls(type="mesh", long=True, noIntermediate=True) or []
+    meshes - what the FILE must now carry."""
+    shapes = _exported_mesh_shapes(cmds, nodes)
     aliases: List[str] = []
     for shape in shapes:
         for bs in cmds.ls(cmds.listHistory(shape, pruneDagObjects=True)
@@ -725,7 +733,7 @@ def anim_clip_facts(afacts, declared) -> List[Dict[str, Any]]:
 
 def _validate(
     params: Dict[str, Any],
-) -> Tuple[str, Optional[List[str]], bool, bool]:
+) -> Tuple[str, Optional[List[str]], bool, bool, bool]:
     """Check every parameter before touching Maya. A bad call must cost nothing."""
     path = params.get("path")
     if not isinstance(path, str) or not path.strip():
@@ -798,7 +806,14 @@ def _validate(
             raise HandlerError(
                 "nodes is an empty list, which would export nothing",
                 hint="omit nodes entirely to export the whole scene")
-    return path, nodes, include_skins, include_animation
+
+    require_baked = params.get("require_baked_textures", False)
+    if not isinstance(require_baked, bool):
+        raise HandlerError(
+            "require_baked_textures must be true or false",
+            hint="true refuses the export when any material slot is driven "
+                 "by a procedural network Maya's FBX exporter cannot write")
+    return path, nodes, include_skins, include_animation, require_baked
 
 
 def _cmds():
@@ -836,7 +851,8 @@ def _bounds(facts):
 
 def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
     global _fbx_loaded_time_unit
-    path, nodes, include_skins, include_animation = _validate(params)
+    path, nodes, include_skins, include_animation, require_baked = _validate(
+        params)
     cmds = _cmds()
     mel = _mel()
 
@@ -849,6 +865,30 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
                      "the scene actually contains")
 
     declared_shapes = _scene_shape_aliases(cmds, nodes)
+
+    # #714: what the SCENE says its materials carry. Read-only queries; the
+    # scene is never modified. Scoped to the exported shapes, like shape
+    # aliases and clips above.
+    claim_shapes = _exported_mesh_shapes(cmds, nodes)
+    texture_claims = texclaim.material_claims(cmds, claim_shapes)
+    if require_baked:
+        procedural = [c for c in texture_claims
+                      if c["classification"] == "procedural"]
+        if procedural:
+            raise HandlerError(
+                "require_baked_textures=true but %d material slot(s) are "
+                "driven by procedural networks: %s"
+                % (len(procedural),
+                   "; ".join("%s.%s (%s)"
+                             % (c["material"], c["attr"],
+                                ", ".join(t["node"] for t in c["terminals"]))
+                             for c in procedural[:4])),
+                hint="Maya's FBX exporter cannot write a procedural texture "
+                     "network. Author the map as a file texture "
+                     "(maya_assign_pbr, or the file_texture recipe), or "
+                     "export with require_baked_textures=false and accept "
+                     "that the look does not travel")
+
     declared_clip = _scene_clips(cmds) if include_animation else None
     if include_animation and declared_clip is None:
         raise HandlerError(
@@ -1008,6 +1048,15 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
         " For animation violations: the clip must exist (maya_author_clip) "
         "and a selected export ('nodes') must include the skeleton root - "
         "curves travel with their joints." if anim_bad else "")
+    tex_block = fbxbytes.texture_facts(facts)
+    tex_bad, tex_warnings = texture_violations(tex_block, texture_claims,
+                                               require_baked)
+    violations += tex_bad
+    texture_hint = (
+        " For texture violations: a file texture's image must exist on disk "
+        "at export time and its mesh must be in the exported selection - "
+        "procedural networks (noise, ramp, layeredTexture) have no FBX "
+        "representation at all." if tex_bad else "")
     if violations:
         try:
             os.unlink(tmp_path)
@@ -1026,7 +1075,8 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
                      "unit means one metre (linear_unit 'cm' in this repo's "
                      "convention). Deletion itself failed - remove %s by hand "
                      "before it reaches a delivery" % tmp_path
-                     + skin_hint + shape_hint + anim_hint) from unlink_exc
+                     + skin_hint + shape_hint + anim_hint
+                     + texture_hint) from unlink_exc
         raise HandlerError(
             "the exported FBX failed the unit gate and was never written to "
             "%s - the temp file was deleted, and any pre-existing file at "
@@ -1037,10 +1087,47 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
                  "means one metre (linear_unit 'cm' in this repo's convention). "
                  "Nothing reaches %s until it passes - a wrong file on disk is "
                  "how maya-mcp #629 reached three deliveries" % path
-                 + skin_hint + shape_hint + anim_hint)
+                 + skin_hint + shape_hint + anim_hint + texture_hint)
 
     # Only now, with the gate passed, does the real path get touched.
     os.replace(tmp_path, path)
+
+    reported_textures = None
+    if texture_claims or tex_block["texture_records"]:
+        in_file = {(row.get("basename") or "").lower()
+                   for row in tex_block["textures"] + tex_block["videos"]
+                   if row.get("basename")}
+        file_maps = []
+        dropped_maps = []
+        for claim in texture_claims:
+            if claim["classification"] == "file":
+                for terminal in claim["terminals"]:
+                    basename = terminal.get("basename") or ""
+                    file_maps.append({
+                        "material": claim["material"],
+                        "attr": claim["attr"], "slot": claim["slot"],
+                        "file_node": terminal["node"], "basename": basename,
+                        "on_disk": bool(terminal.get("on_disk")),
+                        "found_in_file": basename.lower() in in_file,
+                        "semantics_lost": claim["semantics_lost"]})
+            else:
+                for terminal in claim["terminals"]:
+                    dropped_maps.append({
+                        "material": claim["material"],
+                        "attr": claim["attr"], "slot": claim["slot"],
+                        "terminal": terminal["node"],
+                        "terminal_type": terminal["type"],
+                        "via": claim["via"], "meshes": claim["meshes"]})
+        claimed = {(m["basename"] or "").lower() for m in file_maps}
+        reported_textures = {
+            "texture_records": tex_block["texture_records"],
+            "video_records": tex_block["video_records"],
+            "file_maps": file_maps,
+            "dropped_maps": dropped_maps,
+            "unclaimed_records": sorted(b for b in in_file
+                                        if b and b not in claimed),
+            "unavailable_reason": tex_block["unavailable_reason"],
+        }
 
     lo, hi, height, bounds_unavailable_reason = _bounds(facts)
     return {
@@ -1060,4 +1147,6 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
         "shapes": (shapes_block
                    if declared_shapes or shapes_block["channels"] else None),
         "animation": reported_anim,
+        "textures": reported_textures,
+        "warnings": tex_warnings,
     }

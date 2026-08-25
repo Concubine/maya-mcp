@@ -373,13 +373,14 @@ def _params(tmp_path, **over):
 
 
 def test_a_good_call_normalises_the_path(tmp_path):
-    path, nodes, include_skins, include_animation = export._validate(
-        _params(tmp_path))
+    path, nodes, include_skins, include_animation, require_baked = (
+        export._validate(_params(tmp_path)))
     assert path.endswith("/out.fbx")
     assert "\\" not in path
     assert nodes is None
     assert include_skins is False
     assert include_animation is False
+    assert require_baked is False
 
 
 def test_metres_per_unit_has_no_default(tmp_path):
@@ -433,7 +434,7 @@ def test_an_empty_node_list_is_refused(tmp_path):
 
 
 def test_a_node_list_survives_validation(tmp_path):
-    _path, nodes, _skins, _anim = export._validate(
+    _path, nodes, _skins, _anim, _req_baked = export._validate(
         _params(tmp_path, nodes=["golem_C_pelvis"]))
     assert nodes == ["golem_C_pelvis"]
 
@@ -494,6 +495,16 @@ class FakeCmds:
     def listAttr(self, attr, **kw):
         """Stub for listAttr. For shape-less test scenes, return empty."""
         return []
+
+    def listSets(self, object=None, type=None):
+        """Stub for listSets - the texclaim walker's entry point. Empty by
+        default so an un-monkeypatched export never reaches a shader."""
+        return []
+
+    def attributeQuery(self, attr, node=None, exists=False):
+        """Stub for attributeQuery - the texclaim walker's slot probe.
+        False by default so an un-monkeypatched export claims nothing."""
+        return False
 
 
 class FakeMel:
@@ -1661,3 +1672,48 @@ class TestTextureViolations:
         bad, warn = export.texture_violations(
             _tfacts(["x.png"], names=["mixTex"]), [claim], False)
         assert not any("stale" in w for w in warn)
+
+
+class TestRequireBakedTextures:
+    def test_it_must_be_a_bool(self, tmp_path):
+        with pytest.raises(HandlerError, match="require_baked_textures"):
+            export._validate(_params(tmp_path, require_baked_textures="yes"))
+
+    def test_a_procedural_claim_refuses_before_anything_is_written(
+            self, monkeypatch, tmp_path):
+        # Pre-write refusal: the cost-nothing principle. Nothing is written,
+        # so there is no temp file to clean up and no path to protect.
+        node = fbxbytes.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1,
+                                geometry=7)
+        cmds = FakeCmds()
+        _install(monkeypatch, cmds, _facts([node]))
+        monkeypatch.setattr(export.texclaim, "material_claims",
+                            lambda _c, _s: [_procedural_claim()])
+        params = _params(tmp_path, require_baked_textures=True)
+        with pytest.raises(HandlerError, match="procedural"):
+            export.export_fbx(params)
+        assert not any(c[0] == "file" for c in cmds.calls)
+
+    def test_a_procedural_claim_passes_by_default_and_is_named(
+            self, monkeypatch, tmp_path):
+        node = fbxbytes.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1,
+                                geometry=7)
+        cmds = FakeCmds()
+        _install(monkeypatch, cmds, _facts([node]))
+        monkeypatch.setattr(export.texclaim, "material_claims",
+                            lambda _c, _s: [_procedural_claim()])
+        out = export.export_fbx(_params(tmp_path))
+        assert out["textures"]["dropped_maps"][0]["terminal"] == "mcpTex_noise"
+        assert out["textures"]["dropped_maps"][0]["material"] == "skin_mat"
+        assert any("silently drops" in w for w in out["warnings"])
+
+    def test_a_textureless_export_reports_no_texture_block(
+            self, monkeypatch, tmp_path):
+        node = fbxbytes.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1,
+                                geometry=7)
+        _install(monkeypatch, FakeCmds(), _facts([node]))
+        monkeypatch.setattr(export.texclaim, "material_claims",
+                            lambda _c, _s: [])
+        out = export.export_fbx(_params(tmp_path))
+        assert out["textures"] is None
+        assert out["warnings"] == []

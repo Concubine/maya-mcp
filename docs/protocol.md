@@ -715,7 +715,7 @@ does not exist yet. `delete_clip` the rig that is not being exported.
 
 | cmd | params | result |
 |---|---|---|
-| `export_fbx` | `{ path, metres_per_unit, nodes?, include_skins?, include_animation? }` | `{ path, bytes, fbx_version, node_count, mesh_count, root_nodes, unit_scale_factor, metres_per_unit, world_bounds_min, world_bounds_max, height_m, bounds_unavailable_reason, skin, shapes, animation }` |
+| `export_fbx` | `{ path, metres_per_unit, nodes?, include_skins?, include_animation?, require_baked_textures? }` | `{ path, bytes, fbx_version, node_count, mesh_count, root_nodes, unit_scale_factor, metres_per_unit, world_bounds_min, world_bounds_max, height_m, bounds_unavailable_reason, skin, shapes, animation, textures, warnings }` |
 
 Every field of the result is read back **out of the written file**, never from the Maya scene — the unit defect this tool guards (#629) is produced by the exporter and is absent from the scene, so a scene-derived report would be confidently wrong in exactly the case that matters. The file is written to a sibling temp path and only reaches `path` once it passes; a refused export leaves whatever was already there untouched.
 
@@ -749,3 +749,20 @@ localScale 100 on every such joint and compounds it per level, silently
 (#703: a 12-joint serpent instantiated at world scale ~10^21 m with a clean
 console). `create_skeleton` turns SSC off at joint creation, so this fires
 only on skeletons authored outside the tool or predating the fix.
+
+`export_fbx` also reports what the scene's materials CLAIM to carry against
+what the bytes actually hold (#714). Procedural texture networks (noise,
+ramp, layeredTexture, ...) have no FBX representation at all — Maya's
+exporter silently drops them — and each dropped slot is reported per
+material/slot in `textures.dropped_maps`, with a matching entry in
+`warnings`. File-backed maps are byte-verified against the file's own
+Texture/Video records by image basename; a claimed file missing from the
+bytes REFUSES the export (that loss class has never been observed, so its
+absence means the exporter regressed). `require_baked_textures=true`
+(default `false`) turns any procedural claim into a pre-write refusal —
+before anything is exported, naming the offending material/slot/node —
+for callers who need every map to travel. Channel swizzle (picking one of
+R/G/B/A off a map), a `reverse` invert, and a `Raw` colorspace declaration
+are reported in each file map's `semantics_lost` and never gated: the
+image itself survives in FBX, only the wiring decision does not, and
+refusing it would refuse `assign_pbr`'s own mask workflow.
