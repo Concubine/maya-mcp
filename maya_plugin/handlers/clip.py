@@ -1074,9 +1074,9 @@ def preview_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     warnings: List[str] = []
     for action in session.stop_idle_ipr(cmds):
         warnings.append(
-            action + " before keyframe work - an idle IPR re-renders on "
-            "every scene mutation and can wedge a keyframe call for "
-            "minutes (#721)")
+            action + " before rendering clip frames - an idle IPR "
+            "re-renders on every scene change and can wedge the render "
+            "and time scrubbing (#721)")
 
     fps = int(meta.get("fps", 30))
     start_frame = int(meta["start_frame"])

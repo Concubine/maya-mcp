@@ -702,6 +702,12 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
     maya_renderer = RENDERER_TO_MAYA[renderer]
     available = _ensure_renderer(cmds, maya_renderer)
     if available and maya_renderer not in available:
+        # This refusal raises before the try/finally below, so #721 hygiene
+        # deliberately does NOT run here: an ARV can only be leaked by a
+        # PRIOR render (whose own finally already cleaned it up) or by
+        # something else opening it by hand (author_clip's/preview_clip's
+        # own guard covers that case before any keyframe work touches it) -
+        # this call never got far enough to open or touch one itself.
         raise HandlerError(
             "renderer %r is not available in this Maya (have: %s)"
             % (renderer, ", ".join(available)),

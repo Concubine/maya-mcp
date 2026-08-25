@@ -296,24 +296,26 @@ def save_scene(params: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def stop_idle_ipr(cmds) -> list:
-    """Best-effort: stop any Arnold IPR session and close the Arnold
-    RenderView window; returns what was done, [] when there was nothing
-    to do. #721: an idle IPR view re-renders on EVERY scene mutation -
-    the first keyframe call after a render_scene hero pass wedged Maya
-    for 30+ minutes. render tools call this after finishing; keyframe
-    tools call it before starting. Interactive sessions only - batch has
-    no UI to leak.
+    """Best-effort: close the Arnold RenderView window; returns what was
+    done, [] when there was nothing to do. #721: an idle IPR view
+    re-renders on EVERY scene mutation - the first keyframe call after a
+    render_scene hero pass wedged Maya for 30+ minutes. render tools call
+    this after finishing; keyframe tools call it before starting.
+    Interactive sessions only - batch has no UI to leak.
 
-    Both mtoa calls below are MEASURED (#721p2 probe, progress.md): the
-    window is really named "ArnoldRenderView" (both a `window` and a
-    `workspaceControl` by that name track each other exactly across
-    open/close). The option value is "0"/"1", not "true"/"false" - every
-    real usage in mtoa's own shipped source uses "0"/"1", and a live test
-    setting either "0" or "false" left `getoption("Run IPR")` reading "1"
-    unchanged, so this best-effort call is kept (harmless, matches mtoa's
-    own internal pause pattern) but `deleteUI` is what actually closes the
-    window - measured to work, twice, via both existence probes flipping
-    True -> False.
+    MEASURED (#721p2 probe, progress.md): the window is really named
+    "ArnoldRenderView" (both a `window` and a `workspaceControl` by that
+    name track each other exactly across open/close). `deleteUI` on it is
+    the one measured-effective stop - both existence probes flip
+    True -> False, twice, on a live re-test.
+
+    The ARV's "Run IPR" option was ALSO probed as a stop mechanism
+    (`cmds.arnoldRenderView(option=("Run IPR", "0"))`, the value mtoa's own
+    shipped source uses everywhere it touches this option) and is INERT
+    from script: `getoption("Run IPR")` stayed "1" after setting it to "0"
+    live, twice. It is deliberately NOT called here - do not re-add it
+    without a fresh measurement showing it actually changes state, and
+    never report an action this call did not itself verify happened.
     """
     actions = []
     try:
@@ -321,15 +323,6 @@ def stop_idle_ipr(cmds) -> list:
             return actions
     except Exception:
         return actions  # not a real cmds (headless fake): nothing to do
-    try:
-        if cmds.pluginInfo("mtoa", query=True, loaded=True):
-            try:
-                cmds.arnoldRenderView(option=("Run IPR", "0"))
-                actions.append("stopped the Arnold RenderView IPR")
-            except Exception:
-                pass
-    except Exception:
-        pass
     try:
         if cmds.window("ArnoldRenderView", exists=True):
             cmds.deleteUI("ArnoldRenderView")

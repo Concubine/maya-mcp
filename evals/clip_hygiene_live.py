@@ -83,12 +83,15 @@ def py(code, what, timeout_s=60.0):
 # The #721p2 probe's measured open call - a bare arnoldRenderView() call is
 # exactly what mtoa's own "Render with the Arnold RenderView" menu item does
 # (arnoldmenu.py: arnoldMtoARenderView), and it is what leaves Run IPR set.
+# No explicit option=('Run IPR', '1') here: the probe measured that write as
+# inert too (getoption's readback never moved either direction from script),
+# so it would only be decorative - the bare open call is what actually
+# leaves a window for stop_idle_ipr's deleteUI to find and close.
 OPEN_ARV = (
     "import maya.cmds as cmds\n"
     "cmds.loadPlugin('mtoa', quiet=True)\n"
     "cmds.arnoldRenderView(camera='perspShape', mode='open')\n"
     "cmds.arnoldRenderView()\n"
-    "cmds.arnoldRenderView(option=('Run IPR', '1'))\n"
     "cmds.window('ArnoldRenderView', exists=True)"
 )
 ARV_OPEN_CHECK = "cmds.window('ArnoldRenderView', exists=True)"

@@ -545,9 +545,10 @@ an open Arnold RenderView (IPR) re-renders on every scene mutation, which
 can stall keyframing for minutes. `author_clip` and `preview_clip` now also
 call `session.stop_idle_ipr` proactively - `author_clip` right before any
 key is written, `preview_clip` right after resolving which clip it is
-about to render - so an ARV left open from an earlier render no longer
-gets the chance to wedge the keyframe work at all; whatever it did lands in
-`warnings` with an `(#721)` tag.
+about to render - so an ARV left open from an earlier render no longer gets
+the chance to wedge what comes next: keyframing for `author_clip`,
+rendering and time-scrubbing for `preview_clip` (it writes no keys of its
+own). Whatever it did lands in `warnings` with an `(#721)` tag.
 
 **The self-contained rule, and its two kinds of pin.** All clips on a rig
 share one curve per channel, so a channel a clip never mentions would

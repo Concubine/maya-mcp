@@ -1284,6 +1284,15 @@ class TestPreviewClip:
             clip.preview_clip({"root": "root", "name": "idle"})
         assert fake.time_unit_calls == []
 
+    def test_preview_clip_stops_an_idle_ipr_and_warns(self, fake,
+                                                       monkeypatch):
+        self._wire(fake, monkeypatch)
+        monkeypatch.setattr(clip.session, "stop_idle_ipr",
+                            lambda cmds: ["closed the Arnold RenderView"])
+        out = clip.preview_clip({"root": "root", "name": "idle"})
+        assert any("closed the Arnold RenderView" in w and "#721" in w
+                   for w in out["warnings"])
+
 
 class TestRigidParentRig:
     """#720: a rig whose chunks are parented under joints with NO skinCluster
