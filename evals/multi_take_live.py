@@ -73,9 +73,15 @@ those signs were MEASURED, not derived, in that gate's first run; see its
 WALK_KEYS comment for the probe numbers. The wave arm literals are new to
 this gate and were checked against the rendered sheet (see the report).
 
-DESTRUCTIVE: calls new_scene. Port 9878, the agent-launched Maya, per the
-two-Maya policy - never point this at the user's 9877 (or the second
-disposable instance some sessions run on 9879).
+DESTRUCTIVE: calls new_scene. Port defaults to 9878, the disposable
+agent-launched Maya. A port number is NOT an identity (#648) - a task that
+launches its own dedicated Maya on a different port (e.g. 9877, per that
+task's own brief) may point MAYA_MCP_PORT there too, but MUST set
+MAYA_MCP_EXPECT_PID to the launched pid first: live_call.py's handshake
+then refuses to proceed if anything else answers that port, which is the
+actual safety property - a hardcoded port blocklist here previously stood
+in for that check and instead blocked task-6's own legitimate run against
+its dedicated 9877 Maya (fixed as part of that verification pass).
 
 Run:  uv run python evals/multi_take_live.py
 Exit: 0 pass, 1 fail, 2 no connection.
@@ -537,9 +543,12 @@ def save_preview(tag, result, meta):
 
 
 def main():
-    if PORT in (9877, 9879):
-        print("refusing to run on %d: this eval discards the open scene "
-              "(two-Maya policy). Launch a disposable Maya on 9878." % PORT)
+    if PORT != 9878 and not os.environ.get("MAYA_MCP_EXPECT_PID"):
+        print("refusing to run on %d without MAYA_MCP_EXPECT_PID set: this "
+              "eval discards the open scene (new_scene), and a port number "
+              "is not an identity (#648). Either run on the default 9878, "
+              "or set MAYA_MCP_EXPECT_PID to the pid of the Maya you "
+              "deliberately launched on %d." % (PORT, PORT))
         return 2
 
     os.makedirs(OUT_DIR, exist_ok=True)
