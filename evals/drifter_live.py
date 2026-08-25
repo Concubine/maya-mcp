@@ -17,8 +17,33 @@ What this gate is FOR - each is a seam no delivered asset has crossed:
 Measurements are FRAME-INVARIANT distances (drifter_metrics), never
 heights and never coordinates - #737's whole lesson.
 
-Usage:
+Usage - two modes, same verification (`main()`) either way:
+
     uv run python evals/drifter_live.py
+        Default mode. `main()` assumes the fixture (the 105-joint drifter,
+        its skin, both blend shapes, and all three clips) already exists in
+        the ANSWERING MAYA'S CURRENT SCENE - `verify_prebuilt_scene()` only
+        reads, it never builds, and refuses (BLOCKED) if anything is
+        missing. This is the original, unchanged contract: nothing about
+        this mode's behaviour changed for #714 Task 7.
+
+    uv run python evals/drifter_live.py --build
+        Builds the fixture first, in the answering Maya's CURRENT scene,
+        then runs the exact same verification. Runs, in order:
+        build_fixture() -> bind_and_weight() -> build_blendshapes() ->
+        author_takes() -> main(). This is how #714 Task 7's live gate was
+        actually reproduced end to end from a fresh Maya with no prior
+        state - see task-7-report.md.
+
+        --build MUTATES THE SCENE (new_scene, then ~105 joints, a skin
+        bind, two blend shape targets, three animation takes). Point
+        MAYA_MCP_PORT at a disposable/scratch Maya you launched yourself -
+        NEVER the user's live modelling session. It is not idempotent
+        against a scene that already has any of this fixture's named nodes
+        (drifter_body, drifter_root, ...) - run it only against a scene
+        that was just new_scene'd (build_fixture() does that itself as its
+        first step) or is otherwise known empty.
+
 Exit: 0 pass, 1 fail. Writes evals/drifter_live/baseline.json.
 """
 
@@ -1541,8 +1566,18 @@ def export_and_check(mesh: str, material: dict) -> dict:
     else:
         product_found = bool(file_claim.get("found_in_file"))
         eval_found = texture_facts["file_texture_basename_found"]
-        cross_check["file_cross_check_agree"] = (product_found == eval_found)
-        if product_found != eval_found:
+        agree = (product_found == eval_found)
+        cross_check["file_cross_check_agree"] = agree
+        # Explicit about WHICH agreement case this is - "both readers found
+        # it" and "both readers found nothing" are both `agree=True` but
+        # very different states, and only the former is what this fixture
+        # expects. The pre-existing check above already fails the gate on
+        # not-found regardless of this label; this is diagnostic only.
+        cross_check["file_cross_check_detail"] = (
+            "both found" if agree and product_found else
+            "neither found" if agree else
+            "DISAGREE")
+        if not agree:
             problems.append(
                 "cross-check 1 DISAGREEMENT on basename %r: product's "
                 "textures.file_maps reports found_in_file=%r, this eval's "
@@ -1561,14 +1596,51 @@ def export_and_check(mesh: str, material: dict) -> dict:
     cross_check["procedural_nodes"] = procedural_nodes
     cross_check["dropped_maps_terminals"] = dropped_terminal_names
     if drop_entry is None:
+        # No dropped_maps entry names any of noise_bump's nodes. That alone
+        # does not say WHICH way the readers disagree - consult the byte
+        # walk per node before writing a message, rather than asserting a
+        # drop this branch never measured (fix round 1: the DISAGREEMENT
+        # wording used to be printed here unconditionally, even for a node
+        # the bytes show as PRESENT).
+        found_map = texture_facts["procedural_node_names_found"]
+        confirmed_dropped = [n for n in procedural_nodes
+                             if found_map.get(n) is False]
+        present_in_bytes = [n for n in procedural_nodes
+                            if found_map.get(n) is True]
+        cross_check["dropped_terminal"] = None
+        cross_check["material"] = None
+        cross_check["slot"] = None
+        cross_check["warning_names_drop"] = False
         cross_check["drop_cross_check_agree"] = False
-        problems.append(
-            "cross-check 2: result['textures']['dropped_maps'] (%d entries, "
-            "terminals %r) names none of noise_bump's nodes %r - the "
-            "product's own claim walk missed a drop this eval's byte walk "
-            "confirms (procedural_node_names_found: %r)"
-            % (len(dropped_maps), dropped_terminal_names, procedural_nodes,
-               texture_facts["procedural_node_names_found"]))
+        if confirmed_dropped:
+            # Case (a): a real product defect - the bytes confirm at least
+            # one procedural node is gone, but the product's own claim walk
+            # never reported it as a drop.
+            problems.append(
+                "cross-check 2: result['textures']['dropped_maps'] (%d "
+                "entries, terminals %r) names none of noise_bump's nodes "
+                "%r, and this eval's independent byte walk CONFIRMS %r are "
+                "ABSENT from the exported bytes - the product's own claim "
+                "walk missed a real drop (procedural_node_names_found: %r)"
+                % (len(dropped_maps), dropped_terminal_names,
+                   procedural_nodes, confirmed_dropped, found_map))
+        else:
+            # Case (b): both readers agree nothing was dropped (the node(s)
+            # are still present in the bytes per THIS eval's own walk too).
+            # For this fixture that is still a gate failure - noise_bump is
+            # built specifically to be dropped - but it is not a
+            # disagreement between the two readers, so it must not be
+            # worded as one.
+            problems.append(
+                "cross-check 2: result['textures']['dropped_maps'] (%d "
+                "entries, terminals %r) names none of noise_bump's nodes "
+                "%r, and this eval's independent byte walk finds %r still "
+                "PRESENT in the exported bytes - both readers agree nothing "
+                "was dropped, which means the #714 drop model may be stale "
+                "for this fixture, not that the two readers disagree "
+                "(procedural_node_names_found: %r)"
+                % (len(dropped_maps), dropped_terminal_names,
+                   procedural_nodes, present_in_bytes, found_map))
     else:
         terminal = drop_entry.get("terminal")
         bytes_found = texture_facts["procedural_node_names_found"].get(terminal)
@@ -1800,14 +1872,43 @@ def main() -> int:
          "survived=%r" % (exported["texture_facts"]["file_texture_basename_found"],
                           exported["texture_facts"]["procedural_survived_names"]))
     cc = exported["cross_check"]
-    print("#714 task 7 cross-check: file_basename=%r agree=%r; "
+    print("#714 task 7 cross-check: file_basename=%r agree=%r (%s); "
          "dropped_terminal=%r agree=%r; warning_names_drop=%r "
          "(material=%r slot=%r)"
          % (cc.get("file_basename"), cc.get("file_cross_check_agree"),
+            cc.get("file_cross_check_detail"),
             cc.get("dropped_terminal"), cc.get("drop_cross_check_agree"),
             cc.get("warning_names_drop"), cc.get("material"), cc.get("slot")))
     return 1 if problems else 0
 
 
+def build_fresh_fixture() -> None:
+    """`--build`: construct the fixture this gate verifies, from scratch.
+
+    MUTATES THE ANSWERING MAYA'S CURRENT SCENE - see the module docstring's
+    `--build` warning. Order matches the sequence #714 Task 7 measured live
+    (task-7-report.md / the older task-7-rerun2-report.md this fixture's
+    naming descends from): build_fixture() covers geometry + skeleton +
+    combine + assert_joints_inside; bind_and_weight() and build_blendshapes()
+    are then run against the combined mesh by name; author_takes() solves
+    tendril_reach's IK pose and authors all three clips last, because
+    author_clip's padding rule is order-dependent (see author_takes'
+    docstring) and because pose_ik refuses once any clip already exists.
+    """
+    fixture = build_fixture()
+    mesh = fixture["mesh"]
+    print("build_fixture: %s %d verts, %d joints"
+         % (mesh, fixture["vertices"], fixture["joints"]))
+    skin = bind_and_weight(mesh)
+    print("bind_and_weight: unweighted=%r histogram=%r"
+         % (skin["unweighted"], skin["histogram"]))
+    blend = build_blendshapes(mesh)
+    print("build_blendshapes: %s %r" % (blend["node"], blend["aliases"]))
+    takes = author_takes()
+    print("author_takes: %r" % ([c["name"] for c in takes["clips"]]))
+
+
 if __name__ == "__main__":
+    if "--build" in sys.argv:
+        build_fresh_fixture()
     sys.exit(main())
