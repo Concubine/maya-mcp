@@ -564,14 +564,12 @@ class TestSelfContainedTakes:
         assert keys[float(end)] == pytest.approx(0.0)
 
     def test_a_posed_rig_warns_that_rest_is_not_the_bind_pose(self, fake):
-        """#718 review Fix 4: _capture_rest reads the rig's CURRENT pose,
-        which is the bind pose only when nobody posed the rig first. A
-        create_skeleton rest pose reads zero, so a non-zero capture is the
-        measurable signal that this rig was posed (e.g. via pose_skeleton)
-        before its first clip - and that has to be said, loudly."""
+        """#732: FakeCmds.dagPose returns [] (no bind pose known), so
+        _bind_rotations answers {} and every joint falls back to the
+        pre-#732 capture-current behavior - summarized, not per-joint."""
         fake.attrs["|root|mid.rotateZ"] = 10.0
         out = _author(fake, name="idle", keys=self._idle())
-        assert any("CURRENT pose" in w and "mid" in w and "10" in w
+        assert any("no readable bind pose" in w and "mid" in w
                    for w in out["warnings"]), out["warnings"]
 
     def test_zero_rest_and_root_translation_never_warn(self, fake):
@@ -868,6 +866,47 @@ class TestSelfContainedTakes:
         for plug, times in fake.keys.items():
             assert not any(0.0 <= t <= 30.0 for t in times), \
                 (plug, times)
+
+
+class TestBindPoseRest:
+    def test_rest_captures_the_bind_rotation_when_known(self, fake, monkeypatch):
+        # an "imported rig" whose bind pose carries rotation: current pose
+        # EQUALS bind, so no warning, and rest records the bind value.
+        monkeypatch.setattr(clip, "_bind_rotations",
+                            lambda cmds, root, joints:
+                            {"mid": [10.0, 0.0, 0.0]})
+        fake.attrs["|root|mid.rotateX"] = 10.0
+        out = _author(fake, keys=[
+            {"time_s": 0.0, "rotations": {"mid": [10, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [40, 0, 0]}}])
+        rest = json.loads(fake.string_attrs["|root"]["mcp_clip_rest"])
+        assert rest["mid.rotateX"] == 10.0
+        assert not any("posed" in w for w in out["warnings"])
+
+    def test_posed_away_from_a_known_bind_warns_and_pins_at_bind(
+            self, fake, monkeypatch):
+        monkeypatch.setattr(clip, "_bind_rotations",
+                            lambda cmds, root, joints:
+                            {"mid": [0.0, 0.0, 0.0]})
+        fake.attrs["|root|mid.rotateX"] = 25.0   # posed away from bind
+        out = _author(fake, keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [40, 0, 0]}}])
+        rest = json.loads(fake.string_attrs["|root"]["mcp_clip_rest"])
+        assert rest["mid.rotateX"] == 0.0        # BIND, not the posed 25
+        assert any("posed away from the bind pose" in w
+                   for w in out["warnings"])
+
+    def test_unknown_bind_falls_back_to_current_capture(self, fake):
+        # FakeCmds.dagPose returns [] -> _bind_rotations returns {} -> the
+        # pre-#732 behavior: capture current, warn (summarized) on non-zero.
+        fake.attrs["|root|mid.rotateX"] = 25.0
+        out = _author(fake, keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [40, 0, 0]}}])
+        rest = json.loads(fake.string_attrs["|root"]["mcp_clip_rest"])
+        assert rest["mid.rotateX"] == 25.0
+        assert any("no readable bind pose" in w for w in out["warnings"])
 
 
 class TestDelete:

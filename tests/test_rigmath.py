@@ -1,5 +1,7 @@
 """Pure rigging math (#602 phase 1): everything establishable without a scene."""
 
+import math
+
 import pytest
 
 from maya_plugin.dispatcher import HandlerError
@@ -418,3 +420,71 @@ class TestPoseIkChainGeometry:
             positions, {1: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]},
             [0, -1.5, 0], [0, -3, 0], 5.0)
         assert out == {}
+
+
+# --- #732: bind-pose rotation decomposition ---------------------------------
+
+
+def _rx(d):
+    r = math.radians(d); c, s = math.cos(r), math.sin(r)
+    return [[1, 0, 0], [0, c, s], [0, -s, c]]
+
+
+def _ry(d):
+    r = math.radians(d); c, s = math.cos(r), math.sin(r)
+    return [[c, 0, -s], [0, 1, 0], [s, 0, c]]
+
+
+def _rz(d):
+    r = math.radians(d); c, s = math.cos(r), math.sin(r)
+    return [[c, s, 0], [-s, c, 0], [0, 0, 1]]
+
+
+def _mul(a, b):
+    return [[sum(a[i][k] * b[k][j] for k in range(3)) for j in range(3)]
+            for i in range(3)]
+
+
+def _xyz(t):
+    return _mul(_mul(_rx(t[0]), _ry(t[1])), _rz(t[2]))
+
+
+def _xform16(rot3, translate=(1.0, 2.0, 3.0), scale=1.0):
+    m = [[rot3[i][j] * scale for j in range(3)] + [0.0] for i in range(3)]
+    m.append([translate[0], translate[1], translate[2], 1.0])
+    return [v for row in m for v in row]
+
+
+class TestBindRotationDeg:
+    def test_identity(self):
+        out = rigmath.bind_rotation_deg(_xform16(_xyz([0, 0, 0])),
+                                        [0, 0, 0], [0, 0, 0], 0)
+        assert all(abs(v) < 1e-9 for v in out)
+
+    def test_pure_rotate_no_orient(self):
+        out = rigmath.bind_rotation_deg(_xform16(_xyz([10, 20, 30])),
+                                        [0, 0, 0], [0, 0, 0], 0)
+        assert all(abs(a - b) < 1e-6 for a, b in zip(out, [10, 20, 30]))
+
+    def test_joint_orient_alone_reads_zero_rotate(self):
+        # the create_skeleton shape: orientation lives in jointOrient, the
+        # rotate channel is zero at bind.
+        jo = [0, -35, 12]
+        out = rigmath.bind_rotation_deg(_xform16(_xyz(jo)), jo, [0, 0, 0], 0)
+        assert all(abs(v) < 1e-6 for v in out)
+
+    def test_full_composition_round_trips(self):
+        # M_rot = RA . R . JO (row vectors); recover R.
+        ra, r, jo = [5, 0, 0], [10, 20, 30], [0, -35, 12]
+        rot = _mul(_mul(_xyz(ra), _xyz(r)), _xyz(jo))
+        out = rigmath.bind_rotation_deg(_xform16(rot), jo, ra, 0)
+        assert all(abs(a - b) < 1e-6 for a, b in zip(out, r))
+
+    def test_uniform_scale_is_normalized_out(self):
+        out = rigmath.bind_rotation_deg(
+            _xform16(_xyz([10, 20, 30]), scale=2.5), [0, 0, 0], [0, 0, 0], 0)
+        assert all(abs(a - b) < 1e-6 for a, b in zip(out, [10, 20, 30]))
+
+    def test_non_xyz_rotate_order_refuses(self):
+        assert rigmath.bind_rotation_deg(_xform16(_xyz([10, 0, 0])),
+                                         [0, 0, 0], [0, 0, 0], 3) is None

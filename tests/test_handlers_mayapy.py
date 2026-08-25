@@ -3645,6 +3645,64 @@ class TestClipExportInMaya:
             clip.delete_clip({"root": root_b})
 
 
+class TestBindPoseRestInMaya:
+    """#732 against real dagPose data. create_skeleton auto-orients local
+    X down the bone, so jointOrient is NON-zero and rotate is zero at
+    bind - decomposition must recover ~0. A hand-built rig with non-zero
+    rotate at bind is the imported-rig case the warning used to spam."""
+
+    def test_a_posed_create_skeleton_rig_pins_at_bind_and_warns(self, tmp_path):
+        import json
+        import maya.cmds as cmds
+        from maya_plugin.handlers import clip, rigging
+
+        base = cmds.ls(cmds.polyCube(name="bp_base", height=2,
+                                     subdivisionsHeight=4)[0], long=True)[0]
+        skel = rigging.create_skeleton({"joints": [
+            {"name": "bp_root", "position": [0.0, -1.0, 0.0]},
+            {"name": "bp_mid", "position": [0.0, 0.0, 0.0],
+             "parent": "bp_root"},
+            {"name": "bp_tip", "position": [0.0, 1.0, 0.0],
+             "parent": "bp_mid"}]})
+        rigging.bind_skin({"mesh": base, "root": skel["root"]})
+        rigging.pose_skeleton({"root": skel["root"],
+                               "rotations": {"bp_mid": [25, 0, 0]}})
+        out = clip.author_clip({
+            "root": skel["root"], "name": "idle", "fps": 30,
+            "keys": [
+                {"time_s": 0.0, "rotations": {"bp_mid": [0, 0, 0]}},
+                {"time_s": 1.0, "rotations": {"bp_mid": [0, 0, 30]}}]})
+        rest = json.loads(cmds.getAttr(skel["root"] + ".mcp_clip_rest"))
+        assert abs(rest["bp_mid.rotateX"]) < 1e-3   # BIND, not 25
+        assert any("posed away from the bind pose" in w
+                   for w in out["warnings"])
+        clip.delete_clip({"root": skel["root"]})
+
+    def test_a_bind_pose_with_rotation_does_not_warn(self, tmp_path):
+        import json
+        import maya.cmds as cmds
+        from maya_plugin.handlers import clip, rigging
+
+        cmds.select(clear=True)
+        r = cmds.joint(name="ir_root", position=[0, -1, 0])
+        m = cmds.joint(name="ir_mid", position=[0, 0, 0])
+        cmds.joint(name="ir_tip", position=[0, 1, 0])
+        cmds.setAttr(m + ".rotateX", 15.0)   # bind pose WITH rotation
+        base = cmds.ls(cmds.polyCube(name="ir_base", height=2,
+                                     subdivisionsHeight=4)[0], long=True)[0]
+        root_long = cmds.ls(r, long=True)[0]
+        rigging.bind_skin({"mesh": base, "root": root_long})
+        out = clip.author_clip({
+            "root": root_long, "name": "idle", "fps": 30,
+            "keys": [
+                {"time_s": 0.0, "rotations": {"ir_mid": [15, 0, 0]}},
+                {"time_s": 1.0, "rotations": {"ir_mid": [45, 0, 0]}}]})
+        rest = json.loads(cmds.getAttr(root_long + ".mcp_clip_rest"))
+        assert abs(rest["ir_mid.rotateX"] - 15.0) < 1e-3
+        assert not any("posed" in w for w in out["warnings"])
+        clip.delete_clip({"root": root_long})
+
+
 class TestMultiTakeExportInMaya:
     """#718's measurement battery. Same reset-per-test-scene,
     persistent-process rule as TestClipExportInMaya: one prefix per test.

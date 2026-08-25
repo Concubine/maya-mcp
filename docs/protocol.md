@@ -542,11 +542,20 @@ both directions:
 
 * **`padded_channels`** — channels some OTHER clip on the rig touches that
   THIS clip does not key anywhere in its own range. Pinned at their REST
-  value (the value recorded the moment the channel first became
-  curve-driven, or inferred with a warning for a scene that predates this
-  attribute) at this clip's own boundary frames, so the take cannot inherit
-  a neighbour's pose — a caller reading only this clip's take sees the rig
-  sitting at rest outside the motion it actually authors.
+  value, recorded the moment the channel first becomes curve-driven, at
+  this clip's own boundary frames, so the take cannot inherit a neighbour's
+  pose — a caller reading only this clip's take sees the rig sitting at
+  rest outside the motion it actually authors. **Rest is the BIND pose**
+  (#732) wherever the joint's dagPose bind matrix can be decomposed — the
+  default XYZ rotate order, with `jointOrient`/`rotateAxis` stripped out —
+  which is the common case for an imported rig whose bind pose legitimately
+  carries rotation; a warning fires only when the rig is measurably POSED
+  AWAY from that bind pose at the moment of first capture. A joint with no
+  readable bind entry (no dagPose, or a non-default rotate order) falls
+  back to the pre-#732 behavior — the rig's CURRENT pose at first capture —
+  with its own summarized warning when that capture is non-zero. A scene
+  authored before `mcp_clip_rest` existed at all still infers rest with a
+  warning, from the existing clip's first key.
 * **`held_channels`** — channels this clip DOES animate, but did not key
   exactly at one of its own boundary frames (a sparse declaration, or a
   fractional-time key that rounds short of the boundary). These are pinned

@@ -22,10 +22,11 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..dispatcher import HandlerError
-from . import capture, clipmath, naming, render, sculpt, sculpt_math, session, units
+from . import (capture, clipmath, naming, render, rigmath, sculpt,
+              sculpt_math, session, units)
 
 CLIP_ATTR = "mcp_clip"
 REST_ATTR = "mcp_clip_rest"
@@ -207,12 +208,55 @@ def _write_rest(cmds, root_long: str, rest: Dict[str, float]) -> None:
                  type="string")
 
 
-def _capture_rest(cmds, plug: str, rest: Dict[str, float]) -> None:
+def _bind_rotations(cmds, root_long: str,
+                    joints: List[str]) -> Dict[str, Optional[List[float]]]:
+    """short joint name -> the BIND pose's `.rotate` triple (UI angle
+    units), or None when it cannot be determined for that joint. {} when
+    nothing is bound (no dagPose). Reads the SAME pose node delete_clip
+    restores (#732)."""
+    poses = cmds.dagPose(root_long, query=True, bindPose=True) or []
+    if not poses:
+        return {}
+    pose = poses[0]
+    out: Dict[str, Optional[List[float]]] = {}
+    for j in joints:
+        out[_short(j)] = None
+        try:
+            plugs = cmds.listConnections(j + ".message", source=False,
+                                         destination=True, plugs=True,
+                                         type="dagPose") or []
+            idx = None
+            for p in plugs:
+                node, attr = p.split(".", 1)
+                if node == pose and attr.startswith("members["):
+                    idx = int(attr[len("members["):-1])
+                    break
+            if idx is None:
+                continue
+            xform = list(cmds.getAttr("%s.xformMatrix[%d]" % (pose, idx)))
+            orient = [units.ui_to_degrees(cmds, v)
+                      for v in cmds.getAttr(j + ".jointOrient")[0]]
+            axis = [units.ui_to_degrees(cmds, v)
+                    for v in cmds.getAttr(j + ".rotateAxis")[0]]
+            deg = rigmath.bind_rotation_deg(
+                xform, orient, axis, int(cmds.getAttr(j + ".rotateOrder")))
+            if deg is not None:
+                out[_short(j)] = [units.degrees_to_ui(cmds, v) for v in deg]
+        except Exception:
+            pass  # unreadable entry -> current-pose fallback for this joint
+    return out
+
+
+def _capture_rest(cmds, plug: str, rest: Dict[str, float],
+                  value: Optional[float] = None) -> None:
     """Record a channel's rest value the moment it becomes curve-driven.
 
     Read it later and a curve answers instead of the rest pose - which is
     why this is captured here, before the keying, and not derived on
     demand. A channel already driven (and already recorded) is left alone.
+
+    `value` overrides the current-pose read: the BIND rotation when the
+    dagPose decomposition knows it (#732).
     """
     key = _rest_key(plug)
     if key in rest:
@@ -220,7 +264,7 @@ def _capture_rest(cmds, plug: str, rest: Dict[str, float]) -> None:
     if cmds.listConnections(plug, source=True, destination=False,
                             type="animCurve"):
         return
-    rest[key] = float(cmds.getAttr(plug))
+    rest[key] = float(cmds.getAttr(plug)) if value is None else float(value)
 
 
 def _rest_value(cmds, plug: str, rest: Dict[str, float],
@@ -400,9 +444,13 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     }
     rest = _rest_map(cmds, root_long)
     rest_before = set(rest)
+    bind = _bind_rotations(cmds, root_long, joints)
     for short in mine["joints"]:
-        for plug in _rot_plugs(short):
-            _capture_rest(cmds, plug, rest)
+        triple = bind.get(short)
+        for plug, bind_v in zip(_rot_plugs(short),
+                                triple if triple is not None
+                                else (None, None, None)):
+            _capture_rest(cmds, plug, rest, value=bind_v)
     if mine["root_position_used"]:
         for plug in root_translate_plugs:
             _capture_rest(cmds, plug, rest)
@@ -410,33 +458,45 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
         # By rule, not by capture: weights-all-zero IS the reset (phase 5).
         rest.setdefault(_rest_key("%s.%s" % (alias_map[alias], alias)), 0.0)
 
-    # #718 review Fix 4: rest is the BIND pose by spec, but _capture_rest
-    # reads whatever the rig's CURRENT pose is - the same thing normally,
-    # except when the rig was deliberately posed (pose_skeleton) before its
-    # first clip, in which case every later clip's undeclared channels
-    # would be pinned at that posed value forever. A rig at the
-    # create_skeleton rest pose reads zero here, so a non-zero ROTATION
-    # value just captured is the measurable signal that it was posed - loud
-    # by design, since decomposing a dagPose's bind matrices is a far
-    # larger change than this fix. Root translation is excluded (a rig
-    # legitimately sits anywhere) and weight channels are excluded (they
-    # are recorded 0.0 by rule, never captured).
+    # #732: rest is the BIND pose where the dagPose can be decomposed
+    # (rigmath.bind_rotation_deg strips jointOrient/rotateAxis). The
+    # warning now fires only when the rig is measurably POSED AWAY from
+    # that bind pose at first capture - an imported rig whose bind pose
+    # legitimately carries rotation stays silent. Joints with no readable
+    # bind entry keep the pre-#732 behavior (capture current, warn on
+    # non-zero, since a create_skeleton rig reads zero at rest) - both
+    # warnings are summarized, never one line per joint. Root translation
+    # is excluded (a rig legitimately sits anywhere) and weight channels
+    # are excluded (recorded 0.0 by rule, never captured).
     newly_captured = {k: v for k, v in rest.items() if k not in rest_before}
-    posed_joints = sorted({
-        k.rsplit(".", 1)[0] for k, v in newly_captured.items()
-        if k.rsplit(".", 1)[1] in ROTATE_ATTRS and abs(v) > 1e-9})
-    if posed_joints:
-        detail = ", ".join(
-            "%s=(%s)" % (node, ", ".join(
-                "%g" % newly_captured.get("%s.%s" % (node, a), 0.0)
-                for a in ROTATE_ATTRS))
-            for node in posed_joints)
+    posed_away: List[str] = []
+    unknown_bind: List[str] = []
+    for short in sorted({k.rsplit(".", 1)[0] for k in newly_captured
+                         if k.rsplit(".", 1)[1] in ROTATE_ATTRS}):
+        plugs = _rot_plugs(short)
+        if not plugs:
+            continue
+        triple = bind.get(short)
+        if triple is not None:
+            current = [float(cmds.getAttr(p)) for p in plugs]
+            if any(abs(c - b) > 1e-4 for c, b in zip(current, triple)):
+                posed_away.append(short)
+        elif any(abs(newly_captured.get("%s.%s" % (short, a), 0.0)) > 1e-9
+                 for a in ROTATE_ATTRS):
+            unknown_bind.append(short)
+    if posed_away:
         warnings.append(
-            "rest was captured from this rig's CURRENT pose, not "
-            "necessarily its bind pose - %s (a rig at the create_skeleton "
-            "rest pose reads zero here, so a non-zero rest value means the "
-            "rig was posed, e.g. via pose_skeleton, before its first clip)"
-            % detail)
+            "%d joint(s) are posed away from the bind pose (e.g. %s) - "
+            "rest pins use the BIND pose, so boundary frames will not hold "
+            "the current pose" % (len(posed_away),
+                                  ", ".join(posed_away[:3])))
+    if unknown_bind:
+        warnings.append(
+            "rest was captured from this rig's CURRENT pose for %d "
+            "joint(s) with no readable bind pose (e.g. %s) - a non-zero "
+            "value here usually means the rig was posed, e.g. via "
+            "pose_skeleton, before its first clip"
+            % (len(unknown_bind), ", ".join(unknown_bind[:3])))
 
     # Re-authoring a name RE-APPENDS it at the tail (#718 decision 4): its
     # old range is cut, and no other clip's motion moves. Take ORDER in the
