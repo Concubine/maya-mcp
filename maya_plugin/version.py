@@ -169,6 +169,143 @@ def git_stamp(repo_dir: str) -> Dict[str, Any]:
     return {"commit": commit, "dirty": None if status is None else bool(status)}
 
 
+def _git_returncode(repo_dir: str, *args: str) -> Optional[int]:
+    """The exit status of a git command, or None when git could not run it.
+
+    Distinct from git_stamp's helper: `merge-base --is-ancestor` answers with
+    its EXIT CODE (0 yes, 1 no) and prints nothing, so a helper that only
+    returns stdout cannot read it. 128 - an unknown object - is neither yes nor
+    no, and must not be flattened into either.
+    """
+    try:
+        out = subprocess.run(
+            ("git",) + args, cwd=repo_dir, capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.returncode
+
+
+def commit_relation(
+    repo_dir: str, source_commit: Optional[str], deployed_commit: Optional[str]
+) -> str:
+    """How the source tree stands to the commit already deployed.
+
+    One of "same", "upgrade" (the deployed commit is an ancestor of the source),
+    "downgrade" (the source is an ancestor of the deployed commit), "divergent"
+    (neither reaches the other - separate branches), or "unknown".
+
+    "unknown" is a real answer, not a failure: a stamp from another clone, a
+    deleted branch, or a tree with no git at all lands here, and this module's
+    standing rule is that "cannot tell" is a different answer from "differs".
+    """
+    if not source_commit or not deployed_commit:
+        return "unknown"
+    if source_commit == deployed_commit:
+        return "same"
+    forward = _git_returncode(
+        repo_dir, "merge-base", "--is-ancestor", deployed_commit, source_commit
+    )
+    backward = _git_returncode(
+        repo_dir, "merge-base", "--is-ancestor", source_commit, deployed_commit
+    )
+    if forward not in (0, 1) or backward not in (0, 1):
+        return "unknown"
+    if forward == 0:
+        return "upgrade"
+    if backward == 0:
+        return "downgrade"
+    return "divergent"
+
+
+def module_regression(source_pkg: str, deployed_pkg: str) -> list:
+    """Modules the deployed copy has that the incoming source does not - but
+    ONLY when the source adds nothing of its own.
+
+    The git-free backstop. A tree that both removes and adds modules is a
+    refactor and passes; a tree whose module set is a strict SUBSET of what is
+    already deployed can only be a rollback, and that is detectable with no
+    repository at all - which is the shape a copied-around tree takes.
+    """
+    source = {relative for relative, _ in _iter_sources(source_pkg)}
+    deployed = {relative for relative, _ in _iter_sources(deployed_pkg)}
+    missing = sorted(deployed - source)
+    if not missing or (source - deployed):
+        return []
+    return missing
+
+
+FORCE_HINT = (
+    "If this rollback is deliberate, say so explicitly:\n"
+    "    python maya_plugin/install.py --yes --force"
+)
+
+
+def _refusal(reason: str, detail: list) -> str:
+    lines = ["", "!" * 72, "REFUSING to deploy: %s" % reason]
+    lines.extend(detail)
+    lines.append("")
+    lines.extend(FORCE_HINT.splitlines())
+    lines.append("!" * 72)
+    return "\n".join(lines)
+
+
+def deploy_guard(source_pkg: str, deployed_pkg: str, repo_dir: str) -> Optional[str]:
+    """Refusal text for an install that would REPLACE a newer deployed plugin
+    with an older one, or None to proceed.
+
+    The deployed copy is shared by every Maya on the machine and install.py
+    rmtree's it, so the last writer wins silently. A source tree on a divergent
+    branch - an art worktree, a stale clone - can strip whole handler modules
+    out of every session with no warning and no record. Reading the stamp that
+    is already there costs one subprocess and closes that hole.
+
+    Silent whenever the answer is genuinely "cannot tell": an unstamped copy
+    (installed before the handshake existed, or copied by hand), a missing
+    target, or a commit git does not recognise AND no capability regression to
+    show for it. Blocking on ignorance would strand ordinary upgrades.
+    """
+    if not os.path.isdir(deployed_pkg):
+        return None
+    stamp = read_stamp(deployed_pkg)
+    if stamp is None:
+        return None
+
+    source_commit = git_stamp(repo_dir)["commit"]
+    deployed_commit = stamp.get("commit")
+    relation = commit_relation(repo_dir, source_commit, deployed_commit)
+    if relation in ("same", "upgrade"):
+        return None
+
+    installed = stamp.get("installed_at") or "unknown"
+    detail = [
+        "  source   commit : %s" % ((source_commit or "no git - cannot tell")[:12]),
+        "  deployed commit : %s (installed %s)"
+        % ((deployed_commit or "unstamped")[:12], installed),
+        "  deployed at     : %s" % deployed_pkg,
+    ]
+
+    if relation == "downgrade":
+        return _refusal(
+            "the deployed plugin is NEWER than this source tree.", detail
+        )
+    if relation == "divergent":
+        return _refusal(
+            "this source tree and the deployed plugin diverge - neither commit "
+            "reaches the other, so this is a branch swap, not an upgrade.",
+            detail,
+        )
+
+    missing = module_regression(source_pkg, deployed_pkg)
+    if not missing:
+        return None
+    return _refusal(
+        "git cannot relate the two commits, and this source tree would REMOVE "
+        "%d module(s) while adding none - a capability regression." % len(missing),
+        detail + ["  would remove    : %s" % ", ".join(missing)],
+    )
+
+
 def compare(
     plugin: Optional[Dict[str, Any]],
     working_digest: Optional[str],

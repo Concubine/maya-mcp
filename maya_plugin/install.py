@@ -46,6 +46,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--yes", action="store_true", help="skip confirmation prompts")
     parser.add_argument(
+        "--force",
+        action="store_true",
+        help="deploy even when the guard judges it a rollback or a branch swap",
+    )
+    parser.add_argument(
         "--scripts-dir",
         default=default_scripts_dir(),
         help="Maya scripts directory (default: %(default)s)",
@@ -63,6 +68,21 @@ def main() -> int:
             % args.scripts_dir
         )
         return 1
+
+    # BEFORE the prompt and long before the rmtree: the deployed copy is shared
+    # by every Maya on this machine, and replacing a newer one with an older one
+    # is silent, machine-wide, and unrecorded unless something refuses here.
+    repo = os.path.dirname(source)
+    refusal = version.deploy_guard(source, target, repo)
+    if refusal:
+        if not args.force:
+            print(refusal)
+            return 1
+        print(
+            refusal.replace(version.FORCE_HINT, "").replace(
+                "REFUSING to deploy:", "--force given; deploying anyway over:"
+            )
+        )
 
     print("This will:")
     print("  1. copy  %s" % source)
@@ -82,7 +102,6 @@ def main() -> int:
     # Stamp the copy with what it was cut from. Without this a live check can
     # pass against a plugin that predates the code under test - the failure mode
     # that cost hours at M2.4 and again on the revision-2 art run.
-    repo = os.path.dirname(source)
     git = version.git_stamp(repo)
     stamp = version.write_stamp(target, commit=git["commit"], dirty=git["dirty"])
     print(
