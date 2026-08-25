@@ -4069,52 +4069,55 @@ class TestMultiTakeExportInMaya:
     def test_named_delete_measures_real_curve_removal(self):
         """Item 3 of the four owed measurements: delete_clip's
         `deleted_curves` depends on real Maya actually removing a curve
-        node once cutKey(..., clear=True) empties it of every key - only
-        the headless test fake asserts that behaviour today. This measures
-        it against a real Maya, and against the raw curve state before and
-        after, rather than trusting the reported number alone.
+        node once cutKey(..., clear=True) empties it of every key, or #730's
+        reap explicitly deletes it - only the headless test fake asserts
+        this behaviour today. This measures it against a real Maya, and
+        against the raw curve state before and after, rather than trusting
+        the reported number alone.
 
         MEASURED: in this two-clip scene, deleting "idle" reports
-        deleted_curves == 0. Real Maya does NOT delete either mt_mid's or
-        mt_tip's curve nodes here, because the self-contained rule (#718)
-        means every channel used anywhere on the rig carries keys spanning
-        the WHOLE timeline by construction: mt_mid keeps the two rest-pin
-        keys walk's own authoring pinned at frames 32/62 (outside idle's
-        cut range 0-30), and mt_tip keeps its own walk-authored keys at
-        32/47/62 (also outside the cut range) - cutKey(clear=True) removes
-        only the keys IN the cut range, and a curve with keys left on it
-        is not deleted. A curve node is only fully emptied, and thus
-        deleted, when the channel it drives is NOT touched by any
-        surviving clip's own keys or by the self-contained rule's pads -
-        structurally the case only for the LAST clip's teardown path
-        (delete_clip with no surviving clips), which the full-teardown
-        branch below measures instead.
+        deleted_curves >= 1 and reaped_channels == ["my_mid"] (#730).
+        mt_mid is a channel idle declared and no surviving clip (walk)
+        declares - it carries only walk's own rest-pin keys at frames
+        32/62 (outside idle's cut range 0-30), so #730 reaps its whole
+        curve rather than leaving those pins as dead weight. mt_tip is
+        untouched: walk still declares it, so the reap never considers it,
+        and idle's own cutKey range (0-30) only strips the back-filled
+        rest pins walk put at idle's boundaries, leaving walk's own
+        32/47/62 keys exactly as they were.
+
+        Pre-#730 history: this same delete used to report deleted_curves
+        == 0 and leave mt_mid's curve node in place, just missing idle's
+        own keys - "deleted_curves == 0 is structural" was the measured
+        truth THEN, before a channel no survivor declared was reaped.
         """
         import maya.cmds as cmds
 
         from maya_plugin.handlers import clip
 
-        base, root, idle, walk = self._two_clip_scene(cmds, "my")
-        mid = cmds.ls("my_mid", long=True)[0]
-        tip = cmds.ls("my_tip", long=True)[0]
-        mid_curves_before = set(cmds.listConnections(
-            mid + ".rotateX", source=True, destination=False,
-            type="animCurve") or [])
-        tip_curves_before = set(cmds.listConnections(
-            tip + ".rotateX", source=True, destination=False,
-            type="animCurve") or [])
+        prefix = "my"
+        base, root, idle, walk = self._two_clip_scene(cmds, prefix)
+        mid = cmds.ls(prefix + "_mid", long=True)[0]
+        tip = cmds.ls(prefix + "_tip", long=True)[0]
+        # walk back-filled mt_tip onto IDLE's own boundaries (0, 30) when
+        # walk introduced it (idle didn't declare it yet) - those two pins
+        # live inside idle's own doomed range and are correctly cut away
+        # by the existing per-range cutKey step below, unrelated to #730's
+        # reap. Exclude them so this checks only walk's own keys.
+        tip_keys_before = [t for t in cmds.keyframe(tip + ".rotateZ",
+                                                     query=True)
+                           if not (idle["start_frame"] <= t
+                                   <= idle["end_frame"])]
+
         out = clip.delete_clip({"root": root, "name": "idle"})
-        assert out["deleted_curves"] == 0
-        # the curve nodes themselves are the SAME objects, still present,
-        # just missing the keys idle owned
-        mid_curves_after = set(cmds.listConnections(
-            mid + ".rotateX", source=True, destination=False,
+        # #730: mt_mid is declared by no survivor - its whole curves go.
+        assert out["reaped_channels"] == [prefix + "_mid"]
+        assert out["deleted_curves"] >= 1
+        assert not (cmds.listConnections(
+            mid + ".rotateZ", source=True, destination=False,
             type="animCurve") or [])
-        tip_curves_after = set(cmds.listConnections(
-            tip + ".rotateX", source=True, destination=False,
-            type="animCurve") or [])
-        assert mid_curves_after == mid_curves_before
-        assert tip_curves_after == tip_curves_before
+        # walk's own channel is untouched: same key times as before.
+        assert cmds.keyframe(tip + ".rotateZ", query=True) == tip_keys_before
         # walk's own motion is untouched by deleting idle
         cmds.currentTime(47)
         assert abs(cmds.getAttr(tip + ".rotateZ") - 25.0) < 1e-3

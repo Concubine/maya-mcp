@@ -862,6 +862,7 @@ def delete_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     before = {m: _points(m) for m in meshes}
 
     deleted_curves = 0
+    reaped_channels: List[str] = []
     if kept:
         # ONE clip out of several: cut its range only. Gaps are NOT
         # re-packed (#718 decision 5) - a take is an explicit range, so a
@@ -878,6 +879,51 @@ def delete_clip(params: Dict[str, Any]) -> Dict[str, Any]:
             cmds.cutKey(plug, time=(doomed_record["start_frame"],
                                     doomed_record["end_frame"]
                                     + clipmath.GAP_FRAMES), clear=True)
+        # #730: the doomed clip's back-fill wrote rest pins for its own
+        # channels into the SURVIVING clips' ranges. A channel no survivor
+        # declares now carries only those pins - dead weight every take
+        # would bake. Reap the WHOLE curve, but only for channels the
+        # doomed record itself declared and no survivor does; a channel a
+        # survivor still uses is never touched, range or no range.
+        survivors = clipmath.channel_union(kept)
+        by_short: Dict[str, List[str]] = {}
+        for j in joints:
+            by_short.setdefault(_short(j), []).append(j)
+        orphan_plugs: List[str] = []
+        for short in doomed_record.get("joints", []):
+            if short in survivors["joints"]:
+                continue
+            matches = by_short.get(short) or []
+            if len(matches) != 1:
+                continue  # vanished or ambiguous: never guess (_rot_plugs rule)
+            orphan_plugs.extend("%s.%s" % (matches[0], a)
+                                for a in ROTATE_ATTRS)
+            reaped_channels.append(short)
+        for alias in doomed_record.get("weight_channels", []):
+            if alias in survivors["weight_channels"]:
+                continue
+            node = alias_map.get(alias)
+            if node is None or isinstance(node, HandlerError):
+                continue
+            orphan_plugs.append("%s.%s" % (node, alias))
+            reaped_channels.append(alias)
+        if (doomed_record.get("root_position_used")
+                and not survivors["root_position_used"]):
+            orphan_plugs.extend("%s.%s" % (root_long, a)
+                                for a in TRANSLATE_ATTRS)
+            reaped_channels.append("root_position")
+        orphan_curves = sorted({
+            c for plug in orphan_plugs
+            for c in cmds.listConnections(plug, source=True,
+                                          destination=False,
+                                          type="animCurve") or []})
+        if orphan_curves:
+            cmds.delete(*orphan_curves)
+            warnings.append(
+                "removed the whole curve(s) of %d channel(s) (%s) no "
+                "surviving clip declares - they carried only rest pins "
+                "inside the surviving clips' ranges (#730)"
+                % (len(reaped_channels), ", ".join(reaped_channels)))
         remaining = _anim_curves(cmds, _joint_plugs(joints) + weight_plugs)
         deleted_curves = len({c for curves in driven.values() for c in curves}
                              - {c for curves in remaining.values()
@@ -928,6 +974,7 @@ def delete_clip(params: Dict[str, Any]) -> Dict[str, Any]:
                  else (records[0]["name"] if records else None)),
         "clips": [r["name"] for r in kept],
         "deleted_curves": deleted_curves,
+        "reaped_channels": reaped_channels,
         "max_displacement": max_disp,
         "warnings": warnings,
     }

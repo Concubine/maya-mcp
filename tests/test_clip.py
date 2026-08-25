@@ -1014,6 +1014,54 @@ class TestDelete:
             assert float(frame) not in mid_rotZ_keys, \
                 (f"B's padding key at frame {frame} should be deleted")
 
+    def test_a_named_delete_reaps_channels_no_survivor_declares(self, fake):
+        # #730: idle keys mid, wave introduces tip, step keys mid again.
+        # Deleting wave must remove tip's whole curves - they carry only
+        # rest pins inside idle's and step's ranges - without touching a
+        # single key of idle's or step's own mid channel.
+        _author(fake, name="idle", keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [0, 0, 30]}}])
+        wave_rec = _author(fake, name="wave", keys=[
+            {"time_s": 0.0, "rotations": {"tip": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"tip": [0, 0, 45]}}])
+        _author(fake, name="step", keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [0, 0, -30]}}])
+        # wave never declares mid, so the pre-existing #718 padding rule
+        # also pins mid at rest at WAVE's OWN boundaries (32, 62) - a pin
+        # that lives entirely inside wave's own doomed range and is
+        # correctly cut away by the existing own-range cutKey step below,
+        # unrelated to #730's reap. Exclude it so this checks only the
+        # survivors' own authored keys are untouched.
+        mid_keys_before = {
+            t: v for t, v in fake.keys.get("|root|mid.rotateZ", {}).items()
+            if not (wave_rec["start_frame"] <= t <= wave_rec["end_frame"])}
+
+        out = clip.delete_clip({"root": "root", "name": "wave"})
+
+        assert out["clips"] == ["idle", "step"]
+        assert out["reaped_channels"] == ["tip"]
+        # tip's curves are gone ENTIRELY, not just cut in wave's range
+        assert not any(p.startswith("|root|mid|tip.") for p in fake.keys)
+        assert out["deleted_curves"] >= 3   # tip's three rotate curves
+        # the survivors' own keys are untouched
+        assert dict(fake.keys.get("|root|mid.rotateZ", {})) == mid_keys_before
+        assert any("no surviving clip declares" in w for w in out["warnings"])
+
+    def test_a_named_delete_of_a_declared_shared_channel_reaps_nothing(
+            self, fake):
+        # mid is declared by the survivor too - nothing may be reaped.
+        _author(fake, name="idle", keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [0, 0, 30]}}])
+        _author(fake, name="wave", keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [0, 0, 45]}}])
+        out = clip.delete_clip({"root": "root", "name": "wave"})
+        assert out["reaped_channels"] == []
+        assert "|root|mid.rotateZ" in fake.keys
+
 
 class TestGuards:
     def test_static_pose_guard_names_the_clip(self, fake):

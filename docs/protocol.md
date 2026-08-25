@@ -500,7 +500,7 @@ reports each channel's name and delta payload as read from the bytes.
 |---|---|---|
 | `author_clip` | `{ root, name, fps=30, keys: [{time_s, rotations?, blend_weights?, root_position?}], interpolation, loop, timeout_s=120 }` | `{ root, clip, fps, duration_s, frames, keyed_joints, keyed_weight_channels, root_position_keyed, interpolation, loop, start_frame, end_frame, clips, padded_channels, held_channels, back_filled, replaced, per_key, warnings }` |
 | `preview_clip` | `{ root, name, angle?, every_nth?, resolution?, renderer?, zoom? }` | `{ clip, fps, start_frame, end_frame, frames, images, ... }` |
-| `delete_clip` | `{ root, name? }` | `{ root, clip, clips, deleted_curves, max_displacement, warnings }` |
+| `delete_clip` | `{ root, name? }` | `{ root, clip, clips, deleted_curves, reaped_channels, max_displacement, warnings }` |
 
 `author_clip` keys the phase-1 pose map over time. **One rig carries as many
 named clips as the asset needs, laid end to end on ONE shared timeline** —
@@ -602,17 +602,15 @@ passed:
 
 Both report the measured displacement of the return.
 
-**`deleted_curves` on a NAMED, partial delete is structurally 0 while two or
-more clips remain on the rig — this is a measurement, not a bug.** The
-self-contained rule (above) keys every channel the rig uses at every clip's
-own boundary frames, so cutting one clip's frame range essentially never
-empties a curve outright: the curve still carries keys from the clips that
-remain, including the pins the deleted clip's neighbours hold at their own
-boundaries. `deleted_curves` counts curves that disappear ENTIRELY, and with
-other clips still declaring those same channels, that count is honestly
-zero. A future reader seeing 0 next to "deleted" should not "fix" this —
-the curves that emptied out are exactly the ones a full (unnamed) delete
-reports.
+**`deleted_curves` on a NAMED, partial delete counts two things.** Cutting
+the doomed clip's own frame range essentially never empties a shared curve
+(the surviving clips' keys and pins remain), BUT a channel that only the
+deleted clip declared is reaped whole (#730): the rest pins the deleted
+clip back-filled into the surviving clips' ranges are dead weight no take
+declares, so its curves are removed entirely and reported in
+`reaped_channels`. A partial delete of a clip whose channels are all
+shared with survivors still honestly reports `deleted_curves: 0` and
+`reaped_channels: []`.
 
 The rig's `playbackOptions` range is always set to the **full span** —
 frame 0 through the latest `end_frame` across every clip on the rig, not
