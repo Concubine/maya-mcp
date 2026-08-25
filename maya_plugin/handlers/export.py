@@ -156,12 +156,13 @@ SCALE_TOL = 1e-3
 # (2 measured clean; t718-10b-report.md). Step 1's probe (evals/
 # fbx_fps_probe.py) looked for an FBXProperty that resets the cache without
 # an unload - none exists: every candidate matching Rate|Sampling|Time in
-# the live property tree (including the two structurally-plausible ones,
+# the live property tree (including the two structurally inapplicable ones -
 # Export|AdvOptGrp|FileFormat|Motion_Base|MotionFrameRate and Export|
-# AdvOptGrp|Collada|FrameRate) baked at the stale rate, same as the
-# FBXResetExport control that already runs before every export.py preamble
-# and was never expected to help. So the reload happens only when the
-# scene's time unit differs from what the plugin cached at its last
+# AdvOptGrp|Collada|FrameRate, which belong to Motion Analysis and Collada
+# exporters respectively, not FBX export) baked at the stale rate, same as
+# the FBXResetExport control that already runs before every export.py
+# preamble and was never expected to help. So the reload happens only when
+# the scene's time unit differs from what the plugin cached at its last
 # genuine load. Known residual risk, accepted on the ticket: if something
 # OUTSIDE this module reloads fbxmaya while the scene sits at a different
 # rate than this tracker recorded, the tracker is stale and one export can

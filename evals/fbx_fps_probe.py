@@ -20,6 +20,13 @@ governs), #729's fix is a guard that only pays the reload cost when the
 scene's time unit actually changed (Step 3-A, fully specified in the task
 brief regardless of this script's outcome).
 
+Note: Auto-discovery of candidates from FBXProperties does not work
+in-process in this environment (FBX owns stdout), so the script falls back
+to its hardcoded fallback list. To capture the full FBX properties dump,
+run with external redirect: E:\\Autodesk\\Maya2027\\bin\\mayapy.exe
+evals\\fbx_fps_probe.py > output.txt. The measured dump is committed at
+evals/fbx_fps_probe_dump.txt.
+
 Method:
   1. Build a one-joint scene, author a 1.0s clip at 24 fps, export it for
      real (include_animation=True) - this is a genuine plugin LOAD (fresh
