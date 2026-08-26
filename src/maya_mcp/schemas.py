@@ -913,7 +913,10 @@ class DroppedMapFact(BaseModel):
     terminal_type: str
     via: List[str] = Field(default_factory=list, description=(
         "Intermediate node types between the terminal and the shader."))
-    meshes: List[str] = Field(default_factory=list)
+    meshes: List[str] = Field(default_factory=list, description=(
+        "Meshes wearing this material. FileMapFact carries no equivalent "
+        "field - deliberately: a dropped map is what needs mesh "
+        "attribution to be actionable, a surviving file map does not."))
 
 
 class TextureFacts(BaseModel):
@@ -942,7 +945,10 @@ class ExportFbxResult(BaseModel):
     Every field here is composed from the FBX bytes, never from the Maya scene.
     That is the point of the tool: the unit defect it guards is written by the
     exporter and is absent from the scene, so a scene-derived report would be
-    confidently wrong in exactly the case that matters.
+    confidently wrong in exactly the case that matters. `textures` is the one
+    deliberate exception: a dropped or missing map's ABSENCE cannot be read
+    from the bytes at all, so its report is composed from the scene's claim
+    against the bytes rather than from the bytes alone - see TextureFacts.
     """
 
     model_config = ConfigDict(extra="ignore")

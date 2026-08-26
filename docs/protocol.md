@@ -758,7 +758,12 @@ material/slot in `textures.dropped_maps`, with a matching entry in
 `warnings`. File-backed maps are byte-verified against the file's own
 Texture/Video records by image basename; a claimed file missing from the
 bytes REFUSES the export (that loss class has never been observed, so its
-absence means the exporter regressed). `require_baked_textures=true`
+absence means the exporter regressed). A Texture/Video record whose own
+filename this reader could not parse reports an empty basename instead of
+being dropped, and if any such records exist a `warnings` entry names the
+count — so a refusal naming a missing record can be told apart from a
+genuine parser gap rather than being read as an exporter regression.
+`require_baked_textures=true`
 (default `false`) turns any procedural claim into a pre-write refusal —
 before anything is exported, naming the offending material/slot/node —
 for callers who need every map to travel. Channel swizzle (picking one of
@@ -788,6 +793,13 @@ from the file), `file_maps`/`dropped_maps` (the per-claim detail behind the
 paragraph above), `unclaimed_records` (image basenames present in the
 file's own Texture/Video records that no scene claim maps to — a file node
 the exported selection never reached), and `unavailable_reason`.
+
+When the scene's claim walk itself failed, every basename in the file
+would otherwise be reported as unexplained by "no walked material claim
+explains" — a wording that has nothing to do with why the walk found
+nothing. That warning is suppressed in this case (`unavailable_reason`
+already names the real cause); the `unclaimed_records` field itself is
+unaffected and still lists those basenames as data.
 
 `apply_texture_recipe` warns at authoring time, not only at export: any
 recipe other than `file_texture` returns a `warnings` entry stating that

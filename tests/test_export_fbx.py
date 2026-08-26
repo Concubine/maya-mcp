@@ -1522,7 +1522,7 @@ class TestTextureViolations:
             _tfacts(["grain.png"]), [_file_claim()], False)
         assert bad == [] and warn == []
 
-    def test_a_missing_on_disk_file_claim_refuses_in_both_modes(self):
+    def test_a_file_claim_absent_from_the_bytes_refuses_in_both_modes(self):
         # Never-observed loss class: file-backed maps always survived in
         # every measurement, so its absence is an exporter regression and
         # refusing it breaks nobody.
@@ -1586,6 +1586,39 @@ class TestTextureViolations:
             tfacts, [_file_claim()], True)
         assert bad == []
         assert any("record truncated" in w for w in warn)
+
+    def test_an_unparseable_basename_warns_about_the_parser_gap(self):
+        # Important 1 (final review): texture_facts() reports a record it
+        # could not read a filename for with an empty basename rather than
+        # dropping it. Nothing else here names such a record, so the gate
+        # must say so itself rather than silently having no match for it.
+        tfacts = _tfacts([""], names=["mysteryTex"])
+        bad, warn = export.texture_violations(tfacts, [], False)
+        assert bad == []
+        assert any("could not parse" in w for w in warn)
+
+    def test_the_parser_gap_warning_pairs_with_a_missing_claim_violation(
+            self):
+        # The whole point of naming the count: when a claim ALSO refuses
+        # for "no Texture/Video record for it", the parser-gap warning must
+        # be sitting right beside it, since the refusal might be this
+        # reader's gap and not the exporter's.
+        tfacts = _tfacts([""], names=["mysteryTex"])
+        bad, warn = export.texture_violations(tfacts, [_file_claim()], False)
+        assert len(bad) == 1 and "grain.png" in bad[0]
+        assert any("could not parse" in w for w in warn)
+
+    def test_unclaimed_record_warnings_are_suppressed_when_the_walk_failed(
+            self):
+        # Minor 3 (final review): a failed claim walk claimed nothing, so
+        # every basename in the file would otherwise be reported as
+        # unexplained for a reason unrelated to this export. The caller's
+        # claims_unavailable warning already names the real cause.
+        bad, warn = export.texture_violations(
+            _tfacts(["mystery.png"]), [], False,
+            claims_unavailable="the walk broke")
+        assert bad == []
+        assert not any("mystery.png" in w for w in warn)
 
     def test_a_missing_file_claim_with_semantics_lost_does_not_also_claim_survival(
             self):
@@ -1767,3 +1800,43 @@ class TestClaimWalkFailure:
         reason = out["textures"]["unavailable_reason"]
         assert "boom" in reason
         assert "byte-reason-xyz" in reason
+
+    def test_a_video_only_file_still_reports_a_textures_block(
+            self, monkeypatch, tmp_path):
+        # Important 2 (final review): docs/protocol.md says `textures` is
+        # null only when there are no Texture AND no Video records - the
+        # original condition checked texture_records alone, so a
+        # Video-only file (0 Texture, >0 Video) reported no block at all.
+        node = fbxbytes.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1,
+                                geometry=7)
+        _install(monkeypatch, FakeCmds(), _facts([node]))
+        monkeypatch.setattr(export.texclaim, "material_claims",
+                            lambda _c, _s: [])
+        monkeypatch.setattr(
+            export.fbxbytes, "texture_facts",
+            lambda _f: {"texture_records": 0, "video_records": 1,
+                       "textures": [], "videos": [{"name": "v", "basename": "clip.mov"}],
+                       "unavailable_reason": None})
+        out = export.export_fbx(_params(tmp_path))
+        assert out["textures"] is not None
+        assert out["textures"]["video_records"] == 1
+
+    def test_a_byte_side_only_failure_still_reports_a_textures_block(
+            self, monkeypatch, tmp_path):
+        # Important 2 (final review): a byte-side-only failure (the scene
+        # claim walk succeeded with nothing to claim, but the bytes could
+        # not be parsed) used to lose its structured unavailable_reason by
+        # reporting no block at all.
+        node = fbxbytes.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1,
+                                geometry=7)
+        _install(monkeypatch, FakeCmds(), _facts([node]))
+        monkeypatch.setattr(export.texclaim, "material_claims",
+                            lambda _c, _s: [])
+        monkeypatch.setattr(
+            export.fbxbytes, "texture_facts",
+            lambda _f: {"texture_records": 0, "video_records": 0,
+                       "textures": [], "videos": [],
+                       "unavailable_reason": "byte-only-fail"})
+        out = export.export_fbx(_params(tmp_path))
+        assert out["textures"] is not None
+        assert out["textures"]["unavailable_reason"] == "byte-only-fail"

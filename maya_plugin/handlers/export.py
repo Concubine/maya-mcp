@@ -366,7 +366,7 @@ def shape_violations(sfacts, declared: List[str]) -> List[str]:
 _TEXTURE_PATTERN_TOKENS = ("<udim>", "<u>", "<v>", "<f>", "<frame0", "<tile>")
 
 
-def texture_violations(tfacts, claims, require_baked):
+def texture_violations(tfacts, claims, require_baked, claims_unavailable=None):
     """How the file's texture records disagree with what the scene claims.
 
     Returns (violations, warnings). The asymmetry is deliberate and
@@ -391,6 +391,13 @@ def texture_violations(tfacts, claims, require_baked):
     node name (this toolbox writes two different naming conventions and the
     exporter may rename), and never by record counts (one file node can
     drive several slots).
+
+    claims_unavailable, when truthy, means the SCENE-side claim walk itself
+    failed (texclaim.material_claims raised) - nothing was walked, so every
+    basename in the file would otherwise look "unclaimed". That is not
+    informative; the caller already reports claims_unavailable as its own
+    warning, so the unclaimed-record loop below is suppressed rather than
+    repeating a wrong explanation.
     """
     violations = []
     warnings = []
@@ -408,6 +415,24 @@ def texture_violations(tfacts, claims, require_baked):
     record_names = {(row.get("name") or "")
                     for row in tfacts["textures"] + tfacts["videos"]}
     claimed = set()
+
+    # #714 final review, Important 1: texture_facts() reports a record whose
+    # filename could not be parsed with an EMPTY basename instead of
+    # dropping it, precisely so a genuinely surviving file texture is not
+    # silently swallowed by a parser gap. But nothing else here ever names
+    # such a record - it is invisible to `in_file` above - so if some Maya
+    # version writes a filename spelling this reader does not recognize, a
+    # claim for a file that truly survived would refuse with "the file
+    # carries no Texture/Video record for it", pointing at the exporter when
+    # the real gap is this parser. Naming the count keeps that distinction
+    # next to any such refusal instead of contradicting it silently.
+    unparsed = sum(1 for row in tfacts["textures"] + tfacts["videos"]
+                   if not row.get("basename"))
+    if unparsed:
+        warnings.append(
+            "%d texture record(s) carry a filename this reader could not "
+            "parse - a missing-claim refusal may be a parser gap, not an "
+            "exporter regression" % unparsed)
 
     for claim in claims:
         where = "material %r slot %r (%s)" % (
@@ -487,11 +512,17 @@ def texture_violations(tfacts, claims, require_baked):
                         "the #714 drop model is stale and wants re-measuring"
                         % (where, terminal["node"]))
 
-    for basename in sorted(b for b in in_file if b and b not in claimed):
-        warnings.append(
-            "the file carries texture %r that no walked material claim "
-            "explains - the claim walk covers this toolbox's authored "
-            "slots only" % basename)
+    # Minor 3: a failed walk claimed nothing, so every basename would look
+    # "unclaimed" for a reason that has nothing to do with this file - the
+    # caller's claims_unavailable warning already names the real cause, and
+    # repeating "no walked material claim explains" beside it would point
+    # at the wrong culprit.
+    if not claims_unavailable:
+        for basename in sorted(b for b in in_file if b and b not in claimed):
+            warnings.append(
+                "the file carries texture %r that no walked material claim "
+                "explains - the claim walk covers this toolbox's authored "
+                "slots only" % basename)
 
     return violations, warnings
 
@@ -1073,7 +1104,8 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
         "curves travel with their joints." if anim_bad else "")
     tex_block = fbxbytes.texture_facts(facts)
     tex_bad, tex_warnings = texture_violations(tex_block, texture_claims,
-                                               require_baked)
+                                               require_baked,
+                                               claims_unavailable)
     if claims_unavailable:
         tex_warnings.append(claims_unavailable)
     violations += tex_bad
@@ -1120,8 +1152,17 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
     reported_textures = None
     # A failed claim walk still reports a block - claims_unavailable alone
     # must not look like a clean textureless export, or the failure this
-    # try/except exists to surface would go unreported by omission.
-    if texture_claims or tex_block["texture_records"] or claims_unavailable:
+    # try/except exists to surface would go unreported by omission. Two
+    # more cases the docs/protocol.md contract already covers but the
+    # original condition missed (#714 final review, Important 2): a
+    # Video-only file (0 Texture records, video_records > 0 - protocol.md
+    # says `textures` is null only when there are NO Texture/Video
+    # records, not just no Texture records), and a byte-side-only failure
+    # (tex_block["unavailable_reason"] set, nothing else) which otherwise
+    # loses its structured reason by reporting no block at all.
+    if (texture_claims or tex_block["texture_records"]
+            or tex_block["video_records"] or claims_unavailable
+            or tex_block["unavailable_reason"]):
         in_file = {(row.get("basename") or "").lower()
                    for row in tex_block["textures"] + tex_block["videos"]
                    if row.get("basename")}
