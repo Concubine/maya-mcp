@@ -432,6 +432,79 @@ class TestRenderScene:
             with pytest.raises(HandlerError):
                 render.resolve_zoom(bad)
 
+    def test_box_clearance_is_zero_inside_and_axis_aligned_outside(self):
+        box_min, box_max = [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]
+        assert render.box_clearance((0.0, 0.0, 0.0), box_min, box_max) == 0.0
+        assert render.box_clearance((0.5, -0.9, 0.2), box_min, box_max) == 0.0
+        assert render.box_clearance((0.0, 0.0, 3.0), box_min, box_max) == \
+            pytest.approx(2.0)
+        # Off a corner both axes count, which is why this is not just a
+        # centre-to-camera distance minus a radius.
+        assert render.box_clearance((4.0, 1.0, 5.0), box_min, box_max) == \
+            pytest.approx(5.0)
+
+    def test_a_comfortable_framing_keeps_mayas_own_near_plane(self):
+        # The cap is the point: everything that already rendered correctly must
+        # keep the exact plane it had.
+        box_min, box_max = [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]
+        position, _ = capture.camera_placement("front", box_min, box_max)
+        assert render.near_clip_for(position, box_min, box_max) == \
+            render.DEFAULT_NEAR_CLIP
+
+    def test_the_670_framing_puts_the_plane_in_front_of_the_subject(self):
+        # Measured in Maya 2027: a 0.08 ball at z=0.55 in front of a 0.5 ball,
+        # rendered at zoom 5, put the camera at z=0.6737 - 0.0437 in front of
+        # the subject, INSIDE the fixed 0.1 plane. The ball came back sliced
+        # flat; at zoom 4 (0.196 away) it rendered round.
+        box_min, box_max = [-0.5, -0.5, -0.5], [0.5, 0.5, 0.63]
+        position = (0.0, 0.0, 0.6737)
+        clearance = render.box_clearance(position, box_min, box_max)
+        assert clearance == pytest.approx(0.0437, abs=1e-4)
+        assert render.DEFAULT_NEAR_CLIP > clearance  # the defect, in one line
+        assert render.near_clip_for(position, box_min, box_max) < clearance
+
+    def test_the_plane_stays_above_the_minimum_maya_will_accept(self):
+        # Measured: setAttr REFUSES a nearClipPlane below 0.001 - it raises
+        # instead of clamping, so a plane derived from a camera inside the
+        # subject took the whole render down with it until the floor was
+        # raised to Maya's own (#670 live gate, zoom 8).
+        box_min, box_max = [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]
+        for inside in ((0.0, 0.0, 0.0), (0.0, 0.0, 0.5), (0.9, -0.9, 0.1)):
+            assert render.near_clip_for(inside, box_min, box_max) >= 0.001
+        # ...and a camera a millimetre off a tiny subject cannot dodge it either.
+        tiny_min, tiny_max = [-0.001, -0.001, -0.001], [0.001, 0.001, 0.001]
+        assert render.near_clip_for((0.0, 0.0, 0.0015), tiny_min, tiny_max) >= 0.001
+
+    def test_zoom_shrinks_the_near_plane_on_the_camera(self, fake_maya):
+        out = render.render_scene({"angles": ["front"], "zoom": 5.0})
+        camera = out["camera_positions"][0]["camera"]
+        near = fake_maya.attrs[camera + ".nearClipPlane"]
+        assert near < render.DEFAULT_NEAR_CLIP
+        assert out["camera_positions"][0]["near_clip"] == near
+
+    def test_a_camera_inside_the_framed_box_says_so(self, fake_maya):
+        out = render.render_scene({"angles": ["front"], "zoom": 8.0})
+        assert any("INSIDE the framed bounding box" in w
+                   for w in out["warnings"])
+
+    def test_a_normal_framing_warns_about_nothing(self, fake_maya):
+        out = render.render_scene({"angles": ["front"]})
+        assert out["warnings"] == []
+
+    def test_a_subject_closer_than_mayas_minimum_plane_is_named(self):
+        # Between "inside the box" and "comfortably framed" there is a band
+        # where the plane has already bottomed out at 0.001 and the subject is
+        # still in front of it. Nothing can be moved; saying so is the product.
+        box_min, box_max = [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]
+        position = (0.0, 0.0, 1.0005)
+        clearance = render.box_clearance(position, box_min, box_max)
+        assert clearance < render.MIN_NEAR_CLIP
+        # The plane cannot go where it would need to go, so it does not.
+        assert render.near_clip_for(position, box_min, box_max) > clearance
+        message = render.framing_warning(position, box_min, box_max, 6.0, "|ball")
+        assert message is not None
+        assert "no plane can fix that" in message
+
     def test_the_rig_follows_the_camera_and_is_put_back(self, monkeypatch, tmp_path):
         # setup_lighting builds a WORLD-locked rig while render_scene orbits, so
         # a side render came back nearly black: key at yaw +30, camera at 90.

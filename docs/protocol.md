@@ -185,7 +185,7 @@ Lighting and materials:
 
 | cmd | params | result |
 |---|---|---|
-| `render_scene` | `{ angles?, renderer?, resolution?, isolate?, target?, zoom?, relight?, samples?, fallback_light? }` | `{ images: [{angle, png_b64}], camera_positions: [...], renderer, samples, fallback_light, warnings }` |
+| `render_scene` | `{ angles?, renderer?, resolution?, isolate?, target?, zoom?, relight?, samples?, fallback_light? }` | `{ images: [{angle, png_b64}], camera_positions: [{angle, label, position, rotation, camera, near_clip}], renderer, samples, fallback_light, warnings }` |
 
 `render_scene` is the second eye. `capture_viewport` reads the VP2 viewport, so
 it is fast, needs a mapped window, and draws transmission as plain transparency -
@@ -246,6 +246,30 @@ directly rather than the IPR view - so any ARV window still open is a leak
 from something else, not from this call. What it did, if anything, is
 appended to `warnings` (e.g. `"closed the Arnold RenderView window after
 rendering - ..."`).
+
+**The near clip plane moves with the framing (#670).** The camera is built by
+`cmds.camera()`, whose `nearClipPlane` is an absolute 0.1 scene units — while
+the framing distance is `3.3627 × bounding-sphere radius` divided by `zoom`.
+One scales with the subject and the other does not, so a close enough framing
+walks the subject through a plane that never moved: measured, a zoom of 5 on a
+small subject returned a **black frame** (mean luma 0.6 of 255) because the
+whole thing sat inside the plane. `render.near_clip_for` therefore derives the
+plane from the camera's actual clearance to the framed *box* (half of it,
+capped at Maya's own 0.1, floored at the 0.001 `setAttr` refuses to go below —
+it raises rather than clamping, which took a whole render down). The cap is
+what keeps every framing that already worked byte-identical. The value used is
+reported per shot in `camera_positions[].near_clip`.
+
+Two cases no plane can fix are named in `warnings` instead of silently
+clamping the caller's `zoom`: the camera landing *inside* the framed box (past
+a zoom of about 3.4 the sight-line division puts it there, and what renders is
+the inside of the surface — smooth, lit and entirely plausible), and a subject
+closer than the 0.001 minimum.
+
+Note that **`hw2` ignores `nearClipPlane` altogether** — forced to a value
+deeper than the whole subject, an hw2 frame comes back pixel-identical, so it
+cannot see this defect or the fix. `arnold` honours it. Gate this with Arnold
+(`evals/near_clip_live.py`).
 
 ## Framing, and writing images to disk
 

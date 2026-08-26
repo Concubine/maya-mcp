@@ -141,6 +141,91 @@ def zoomed_position(position, bbox_min, bbox_max, zoom: float):
     )
 
 
+# Maya's own default on a fresh camera, and the ceiling we keep: at a normal
+# framing the plane stays exactly where it has always been.
+DEFAULT_NEAR_CLIP = 0.1
+# Maya's own floor, MEASURED: setAttr refuses anything below 0.001 with
+# "Cannot set the attribute ... below its minimum value of 0.001", and it
+# raises rather than clamping - so a near plane computed from a camera sitting
+# inside the subject took the whole render down with it (#670 live gate).
+MIN_NEAR_CLIP = 0.001
+
+
+def box_clearance(position, bbox_min, bbox_max) -> float:
+    """Distance from `position` to the framed bounding box; 0.0 when inside it.
+
+    The framing maths sizes its distance off the bounding SPHERE, which for
+    anything tall or flat sits far outside the geometry - a near plane derived
+    from it would be pushed in much harder than the subject needs. The box is
+    the tightest bound already in hand.
+    """
+    gaps = [
+        max(lo - p, 0.0, p - hi)
+        for p, lo, hi in zip(position, bbox_min, bbox_max)
+    ]
+    return math.sqrt(sum(g * g for g in gaps))
+
+
+def near_clip_for(position, bbox_min, bbox_max) -> float:
+    """Near clip plane for a camera at `position` framing that box.
+
+    Maya's default 0.1 is an ABSOLUTE distance while the framing distance
+    scales with the subject and then divides by zoom, so a close framing walks
+    the subject through a plane that never moved. Measured on #670: a ball
+    0.044 in front of the camera was cut away entirely and the frame came back
+    BLACK (mean luma 0.6 of 255), where the same framing with the plane below
+    renders at 119.7.
+
+    Renderer-dependent, and worth knowing before reproducing anything: hw2
+    ignores nearClipPlane outright - forced deeper than the whole subject, an
+    hw2 frame is pixel-identical - while arnold, the default and the renderer
+    anyone judging a material is using, honours it.
+
+    Half the clearance keeps the whole subject in front of the plane with
+    margin. Capping at Maya's default means this can only ever un-clip: a
+    subject that was already comfortably framed keeps the plane it had.
+    """
+    center = [(lo + hi) / 2.0 for lo, hi in zip(bbox_min, bbox_max)]
+    distance = math.dist(list(position), center)
+    clearance = box_clearance(position, bbox_min, bbox_max)
+    return min(
+        DEFAULT_NEAR_CLIP,
+        max(clearance / 2.0, distance / 1000.0, MIN_NEAR_CLIP),
+    )
+
+
+def framing_warning(position, bbox_min, bbox_max, zoom: float, label: str):
+    """Say so when the near plane cannot save this framing.
+
+    Two cases, both of which come back as a picture that looks fine:
+
+    - Past a zoom of about 3.4 the sight-line division puts the camera inside
+      the subject's own bounds, and what renders is the inside of the surface -
+      smooth, lit, entirely plausible, and not the thing anyone asked to see.
+    - Closer than Maya's 0.001 minimum there is no plane left to move, so the
+      subject is sliced no matter what we set.
+
+    No clamp in either case: the caller asked for that zoom and gets it, but
+    not silently.
+    """
+    clearance = box_clearance(position, bbox_min, bbox_max)
+    if clearance <= 0.0:
+        return (
+            "the camera sits INSIDE the framed bounding box for %s at zoom "
+            "%.2f: that frame may be showing the subject's interior, which "
+            "renders as a plausible surface. Lower the zoom to put the camera "
+            "back outside it." % (label, zoom)
+        )
+    if clearance <= MIN_NEAR_CLIP:
+        return (
+            "%s is %.4f from the camera at zoom %.2f, closer than the %.3f "
+            "minimum Maya allows for a near clip plane: the front of it is "
+            "clipped away and no plane can fix that. Lower the zoom."
+            % (label, clearance, zoom, MIN_NEAR_CLIP)
+        )
+    return None
+
+
 def frame_prefix(call_id: str, index: int, angle: str) -> str:
     """Image name for one frame.
 
@@ -755,6 +840,7 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
 
         images_out = []
         positions = []
+        framing_warnings: List[str] = []
         # (isolate, exclude) - the pair that decides what is visible.
         current_isolate: Optional[tuple] = None
         for index, shot in enumerate(shots):
@@ -810,6 +896,17 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
                     )
                 cmds.setAttr(temp_camera + ".translate", *position, type="double3")
                 cmds.setAttr(temp_camera + ".rotate", *rotation, type="double3")
+                # The plane has to move with the framing, not stay at the
+                # absolute 0.1 a fresh camera is born with (#670).
+                cmds.setAttr(
+                    temp_camera + ".nearClipPlane",
+                    near_clip_for(position, bbox_min, bbox_max),
+                )
+                unfixable = framing_warning(
+                    position, bbox_min, bbox_max, zoom, shot["label"]
+                )
+                if unfixable is not None:
+                    framing_warnings.append(unfixable)
 
             path = _render_frame(
                 cmds, temp_camera, frame_prefix(call_id, index, angle),
@@ -838,7 +935,8 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
             rot = cmds.getAttr(temp_camera + ".rotate")[0]
             positions.append(
                 {"angle": angle, "label": shot["label"], "position": list(pos),
-                 "rotation": list(rot), "camera": temp_camera}
+                 "rotation": list(rot), "camera": temp_camera,
+                 "near_clip": cmds.getAttr(temp_camera + ".nearClipPlane")}
             )
 
         out = {
@@ -849,6 +947,7 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
             "fallback_light": temp_light is not None,
             "zoom": zoom,
             "relit_lights": len(rig),
+            "warnings": framing_warnings,
         }
     finally:
         _restore_rig(cmds, rig)
