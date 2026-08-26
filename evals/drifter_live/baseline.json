@@ -24,7 +24,27 @@
     }
   ],
   "fbx": {
-    "bytes": 6120192,
+    "bytes": 5942688,
+    "cross_check": {
+      "drop_cross_check_agree": true,
+      "dropped_maps_terminals": [
+        "mcpTex_noise"
+      ],
+      "dropped_terminal": "mcpTex_noise",
+      "file_basename": "drifter_basecolor.png",
+      "file_cross_check_agree": true,
+      "file_cross_check_detail": "both found",
+      "file_maps_basenames": [
+        "drifter_basecolor.png"
+      ],
+      "material": "drifter_mat",
+      "procedural_nodes": [
+        "mcpTex_noise",
+        "mcpTex_bump"
+      ],
+      "slot": "normal",
+      "warning_names_drop": true
+    },
     "metres_per_unit": 1.0,
     "path": "D:\\devel\\maya-mcp\\evals\\drifter_live\\drifter.fbx",
     "shapes": {
@@ -62,12 +82,45 @@
     "texture_facts": {
       "file_texture_basename_found": true,
       "procedural_node_names_found": {
-        "mcpTex_bump_004": false,
-        "mcpTex_noise_004": false
+        "mcpTex_bump": false,
+        "mcpTex_noise": false
       },
       "procedural_survived_names": [],
       "texture_objects": 1,
       "video_objects": 1
+    },
+    "textures": {
+      "dropped_maps": [
+        {
+          "attr": "normalCamera",
+          "material": "drifter_mat",
+          "meshes": [
+            "|drifter_body|drifter_bodyShape"
+          ],
+          "slot": "normal",
+          "terminal": "mcpTex_noise",
+          "terminal_type": "noise",
+          "via": [
+            "bump2d"
+          ]
+        }
+      ],
+      "file_maps": [
+        {
+          "attr": "baseColor",
+          "basename": "drifter_basecolor.png",
+          "file_node": "mcpTex_file",
+          "found_in_file": true,
+          "material": "drifter_mat",
+          "on_disk": true,
+          "semantics_lost": [],
+          "slot": "color"
+        }
+      ],
+      "texture_records": 1,
+      "unavailable_reason": null,
+      "unclaimed_records": [],
+      "video_records": 1
     }
   },
   "fps": 30,
@@ -1392,7 +1445,7 @@
     "file_texture": {
       "mesh": "|drifter_body",
       "nodes": [
-        "mcpTex_file_004"
+        "mcpTex_file"
       ],
       "recipe": "file_texture",
       "slot": "color",
@@ -1403,19 +1456,19 @@
       "mesh": "|drifter_body",
       "shader": "standardSurface",
       "shading_group": "drifter_matSG",
-      "warnings": [
-        "reused existing material drifter_mat"
-      ]
+      "warnings": []
     },
     "procedural_probe": {
       "mesh": "|drifter_body",
       "nodes": [
-        "mcpTex_noise_004",
-        "mcpTex_bump_004"
+        "mcpTex_noise",
+        "mcpTex_bump"
       ],
       "recipe": "noise_bump",
       "slot": "normal",
-      "warnings": []
+      "warnings": [
+        "this recipe builds a procedural network that Maya's FBX exporter silently drops - maya_export_fbx reports it in textures.dropped_maps; use file textures (maya_assign_pbr or the file_texture recipe) for anything that must survive export"
+      ]
     },
     "texture_path": "D:\\devel\\maya-mcp\\evals\\drifter_live\\drifter_basecolor.png",
     "uv": {
@@ -1430,10 +1483,10 @@
           "inside_patch": true,
           "name": "|drifter_body",
           "uv_bounds": [
-            0.004965,
-            0.754973,
-            0.245034,
-            0.995027
+            0.004949,
+            0.754977,
+            0.245044,
+            0.995023
           ]
         }
       ],
@@ -1455,7 +1508,7 @@
     "uv_all_inside": true
   },
   "max_influences_bound": 8,
-  "maya_pid": 71008,
+  "maya_pid": 81388,
   "mesh": "drifter_body",
   "mirror_probe": {
     "error": {
@@ -1467,7 +1520,7 @@
     "result": null,
     "status": "error"
   },
-  "plugin_digest": "74d1cbae7bdbd12778821c5556a515eb2ada2acecf78644f36050ba096058bf6",
+  "plugin_digest": "b3db3d129e92c5505b9fc396f2cce0106333d4fa4d4bce0d83f5e5621f7e3fa2",
   "prebuilt_scene_probe": {
     "blend_aliases": [
       "bell_crease",
