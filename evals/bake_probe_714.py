@@ -20,9 +20,15 @@ phase 2 must refuse shared materials and bake per mesh.
 - P1: does convertSolidTx run under maya.standalone at all.
 - P2: THE GO/NO-GO. Bakes a `noise` recipe through (a) clean 0..1 UVs,
   (b) primitive/box-projection UVs, (c) a UV-less mesh (records the exact
-  failure mode - it becomes phase 2's refusal message), and (d) the same
-  UVs on two meshes at different world positions/scale, to decide the
-  design arm.
+  failure mode - it becomes phase 2's refusal message), (d) the same UVs
+  on two meshes differing only in their transform node, and (e) the same
+  UVs with the duplicate's actual local vertex positions changed (a
+  verified deformation, not just a moved transform) - (e) is the one that
+  actually decides the design arm. Every bake goes through a stale-output
+  guard (fix round 1): the destination is deleted and its absence asserted
+  before baking, and its presence asserted after, so a silent convertSolidTx
+  no-op is reported as "bake produced no file" rather than read back as a
+  previous run's PNG.
 - P3: the written PNG's IHDR (bit depth, colour type), plus whether the
   pre-bump scalar (noise.outColorR) bakes into something usable - bump-as-
   height viability.
@@ -254,6 +260,65 @@ def _last_line(exc_text):
     return (exc_text or "").strip().splitlines()[-1] if exc_text else "unknown error"
 
 
+class _StaleGuardError(RuntimeError):
+    """Raised when a bake's before/after file-existence assertions do not
+    hold. Never trusted silently - always surfaces through the caller's own
+    try/except as a measured 'bake produced no file' verdict."""
+
+
+def _bake_to_png(cmds, texture_attr, target, path, resolution=32,
+                  alpha=False):
+    """convertSolidTx with a stale-output guard on both sides.
+
+    P1 (below) already proves convertSolidTx can "run" - return normally -
+    without ever writing a file. Every probe in this script reuses a FIXED
+    output filename run-over-run, so a silent no-op bake would otherwise be
+    read back as a PREVIOUS run's PNG and reported as a false "identical
+    bytes" - exactly the stale-read confound the P2e mesh-independence
+    verdict must rule out (fix round 1, review finding #1). So: delete the
+    destination first and assert it is gone; call convertSolidTx; assert
+    the file exists afterward and therefore was created by THIS call, not
+    inherited. Either assertion failing raises _StaleGuardError, which the
+    caller's existing try/except turns into "bake produced no file" rather
+    than silently comparing stale data.
+    """
+    if os.path.exists(path):
+        os.remove(path)
+    if os.path.exists(path):
+        raise _StaleGuardError(
+            "could not clear %r before baking - a stale file would have "
+            "been read back as if it were this run's result" % path)
+    returned = cmds.convertSolidTx(
+        texture_attr, target, resolutionX=resolution, resolutionY=resolution,
+        fileImageName=path, fileFormat="png", alpha=alpha)
+    if not os.path.isfile(path):
+        raise _StaleGuardError(
+            "convertSolidTx(%r, %r) returned %r but produced no file at "
+            "%r - measured as 'bake produced no file', not silently read "
+            "back as a stale previous-run result" % (
+                texture_attr, target, returned, path))
+    return returned
+
+
+def _mesh_signature(cmds, shape):
+    """A before/after signature for a positive control on a deformation:
+    the world bounding box plus a few explicit per-vertex object-space
+    reads. Two signatures compare equal only if the mesh's actual geometry
+    is unchanged - an unverified deformation (wrong component string, DG
+    not evaluated) would otherwise yield the same downstream verdict by
+    accident (fix round 1, review finding #2)."""
+    bbox = tuple(round(v, 6) for v in cmds.exactWorldBoundingBox(shape))
+    num_verts = cmds.polyEvaluate(shape, vertex=True) or 0
+    sample_idx = sorted({0, num_verts // 2, max(num_verts - 1, 0)}) \
+        if num_verts else []
+    verts = {}
+    for i in sample_idx:
+        pos = cmds.xform("%s.vtx[%d]" % (shape, i), query=True,
+                         objectSpace=True, translation=True)
+        verts[i] = tuple(round(v, 6) for v in pos)
+    return {"bbox": bbox, "sample_vertices": verts}
+
+
 # --------------------------------------------------------------------------
 # P1
 # --------------------------------------------------------------------------
@@ -266,9 +331,8 @@ def probe_p1(cmds):
     result = {"path": path, "ran": False, "returned": None,
               "error": None, "size": None}
     try:
-        result["returned"] = cmds.convertSolidTx(
-            noise + ".outColor", plane, resolutionX=32, resolutionY=32,
-            fileImageName=path, fileFormat="png", alpha=False)
+        result["returned"] = _bake_to_png(cmds, noise + ".outColor", plane,
+                                          path)
         result["ran"] = True
     except Exception:
         result["error"] = traceback.format_exc()
@@ -308,10 +372,7 @@ def _bake_case(cmds, label, build_fn, delete_uvs=False):
     entry = {"path": path, "error": None, "png": None, "png_error": None,
               "size": None}
     try:
-        cmds.convertSolidTx(noise + ".outColor", transform,
-                            resolutionX=32, resolutionY=32,
-                            fileImageName=path, fileFormat="png",
-                            alpha=False)
+        _bake_to_png(cmds, noise + ".outColor", transform, path)
     except Exception:
         entry["error"] = traceback.format_exc()
     if os.path.isfile(path):
@@ -406,12 +467,8 @@ def probe_p2(cmds):
         cmds.setAttr(plane2 + ".scaleZ", 3.0)
         path1 = os.path.join(OUT_DIR, "p2d_plane1.png").replace("\\", "/")
         path2 = os.path.join(OUT_DIR, "p2d_plane2.png").replace("\\", "/")
-        cmds.convertSolidTx(noise + ".outColor", plane1, resolutionX=32,
-                            resolutionY=32, fileImageName=path1,
-                            fileFormat="png", alpha=False)
-        cmds.convertSolidTx(noise + ".outColor", plane2, resolutionX=32,
-                            resolutionY=32, fileImageName=path2,
-                            fileFormat="png", alpha=False)
+        _bake_to_png(cmds, noise + ".outColor", plane1, path1)
+        _bake_to_png(cmds, noise + ".outColor", plane2, path2)
         png1, png2 = _read_png(path1), _read_png(path2)
         identical = png1["rows"] == png2["rows"]
         d_entry["identical_bytes"] = identical
@@ -431,50 +488,82 @@ def probe_p2(cmds):
     print("P2d (transform independence): %s" % d_entry["verdict"])
 
     # (e) LOCAL-GEOMETRY dependence: same UVs, same noise INSTANCE, same
-    # transform, but the duplicate's actual VERTEX POSITIONS are pushed out
-    # of plane. This is what (d) could not isolate: does the bake read the
-    # mesh's real local 3D surface at all, or purely its UV parameter
-    # space? Identical bytes -> confirms pure 2D/UV-space sampling, so a
-    # material shared across DIFFERENTLY-SHAPED meshes with matching UVs
-    # bakes identically and could be reused. Different bytes -> the bake
-    # reads local 3D geometry, so even same-UV meshes of different actual
-    # shape need their own bake - this is the one that actually decides
-    # the design arm, not (d).
-    e_entry = {"error": None, "identical_bytes": None}
+    # transform, but the duplicate's actual VERTEX POSITIONS are given a
+    # non-uniform local displacement. This is what (d) could not isolate:
+    # does the bake read the mesh's real local 3D surface at all, or purely
+    # its UV parameter space? Identical bytes -> confirms pure 2D/UV-space
+    # sampling, so a material shared across DIFFERENTLY-SHAPED meshes with
+    # matching UVs bakes identically and could be reused. Different bytes
+    # -> the bake reads local 3D geometry, so even same-UV meshes of
+    # different actual shape need their own bake - this is the one that
+    # actually decides the design arm, not (d).
+    #
+    # This is the single measurement the GO/NO-GO's design arm rests on, so
+    # it carries two positive controls the review demanded (fix round 1):
+    # a POSITIVE CONTROL that the deformation actually applied (a before/
+    # after mesh signature - bbox plus explicit per-vertex object-space
+    # reads, printed both ways), and every bake goes through
+    # _bake_to_png's stale-output guard. If the deformation signature did
+    # not change, mesh-dependence is UNMEASURED here and the design arm
+    # falls back to the conservative choice (refuse shared materials) -
+    # that fallback is encoded below, not left to prose.
+    e_entry = {"error": None, "identical_bytes": None,
+               "deformation_applied": None}
     try:
         _fresh_scene(cmds)
         plane1 = _plane_with_uvs(cmds, "p2e_plane1")
         _shader, noise, _shape1 = _noise_material(cmds, plane1, "p2e")
         plane2 = cmds.duplicate(plane1, name="p2e_plane2")[0]
         shape2 = _shape_of(cmds, plane2)
+
+        sig_before = _mesh_signature(cmds, shape2)
         num_verts = cmds.polyEvaluate(shape2, vertex=True)
         for i in range(num_verts):
+            # Local Z: for a default polyPlane (lies in XZ, normal +Y) this
+            # is IN-PLANE, not a bump along the normal - it still gives
+            # every other vertex a real, non-uniform local displacement,
+            # which is all this test needs, but the displacement is not
+            # "out of plane" and P2e's verdict text below says so.
             cmds.move(0, 0, 1.5 * (1 if i % 2 == 0 else -1),
                      "%s.vtx[%d]" % (shape2, i), relative=True,
                      objectSpace=True)
-        path1 = os.path.join(OUT_DIR, "p2e_plane1.png").replace("\\", "/")
-        path2 = os.path.join(OUT_DIR, "p2e_plane2.png").replace("\\", "/")
-        cmds.convertSolidTx(noise + ".outColor", plane1, resolutionX=32,
-                            resolutionY=32, fileImageName=path1,
-                            fileFormat="png", alpha=False)
-        cmds.convertSolidTx(noise + ".outColor", plane2, resolutionX=32,
-                            resolutionY=32, fileImageName=path2,
-                            fileFormat="png", alpha=False)
-        png1, png2 = _read_png(path1), _read_png(path2)
-        identical = png1["rows"] == png2["rows"]
-        e_entry["identical_bytes"] = identical
-        if identical:
+        sig_after = _mesh_signature(cmds, shape2)
+        e_entry["signature_before"] = sig_before
+        e_entry["signature_after"] = sig_after
+        print("P2e deformation signature BEFORE: %s" % sig_before)
+        print("P2e deformation signature AFTER:  %s" % sig_after)
+        deformation_applied = sig_before != sig_after
+        e_entry["deformation_applied"] = deformation_applied
+
+        if not deformation_applied:
+            e_entry["identical_bytes"] = None
             e_entry["verdict"] = (
-                "MESH-INDEPENDENT (pure 2D/UV-space sampling) - identical "
-                "bytes even after deforming the duplicate's vertices out "
-                "of plane -> a material shared across differently-shaped "
-                "meshes with matching UVs can bake ONCE")
+                "DEFORMATION DID NOT APPLY (signature unchanged - see "
+                "printed before/after above) - mesh-dependence UNMEASURED; "
+                "falling back to the CONSERVATIVE design arm (refuse "
+                "shared materials)")
         else:
-            e_entry["verdict"] = (
-                "MESH-DEPENDENT (reads local 3D surface geometry) - "
-                "deforming the duplicate's vertices changed the bake even "
-                "though the UVs and transform were unchanged -> phase 2 "
-                "must refuse shared materials, one bake per mesh")
+            path1 = os.path.join(OUT_DIR, "p2e_plane1.png").replace("\\", "/")
+            path2 = os.path.join(OUT_DIR, "p2e_plane2.png").replace("\\", "/")
+            _bake_to_png(cmds, noise + ".outColor", plane1, path1)
+            _bake_to_png(cmds, noise + ".outColor", plane2, path2)
+            png1, png2 = _read_png(path1), _read_png(path2)
+            identical = png1["rows"] == png2["rows"]
+            e_entry["identical_bytes"] = identical
+            if identical:
+                e_entry["verdict"] = (
+                    "MESH-INDEPENDENT (pure 2D/UV-space sampling) - "
+                    "identical bytes even after a CONFIRMED (signature "
+                    "changed) local-geometry deformation of the duplicate "
+                    "-> a material shared across differently-shaped meshes "
+                    "with matching UVs can bake ONCE")
+            else:
+                e_entry["verdict"] = (
+                    "MESH-DEPENDENT (reads local 3D surface geometry) - a "
+                    "CONFIRMED local-geometry deformation changed the "
+                    "bake even though the UVs and transform were unchanged "
+                    "-> phase 2 must refuse shared materials, one bake per "
+                    "mesh")
     except Exception:
         e_entry["error"] = traceback.format_exc()
         e_entry["verdict"] = "could not run: %s" % _last_line(e_entry["error"])
@@ -482,10 +571,33 @@ def probe_p2(cmds):
     print("P2e (local-geometry dependence - selects the phase-2 design "
           "arm): %s" % e_entry["verdict"])
 
+    # The design-arm decision, encoded here (not left to main()'s prose):
+    # UNMEASURED (deformation didn't apply, or the probe errored) ->
+    # conservative fallback; measured mesh-independent -> permissive;
+    # measured mesh-dependent -> conservative (that's what it means).
+    if e_entry.get("deformation_applied") is True and \
+            e_entry.get("identical_bytes") is not None:
+        if e_entry["identical_bytes"]:
+            cases["design_arm"] = (
+                "PERMISSIVE - shared materials bake ONCE (mesh-independent "
+                "sampling, confirmed by a verified deformation)")
+        else:
+            cases["design_arm"] = (
+                "CONSERVATIVE - phase 2 MUST REFUSE shared materials, one "
+                "bake per mesh (mesh-dependent sampling)")
+    else:
+        cases["design_arm"] = (
+            "CONSERVATIVE (fallback) - mesh-dependence could not be "
+            "measured (%s), so phase 2 must refuse shared materials until "
+            "it can be" % ("deformation did not apply"
+                           if e_entry.get("deformation_applied") is False
+                           else "P2e did not complete"))
+
     go = bool(entry_b.get("png") and entry_b["png"]["non_uniform"])
     cases["go_no_go"] = "GO" if go else "NO-GO"
     print("P2 GO/NO-GO for phase 2: %s (decided by case b, box-projection "
           "UVs)" % cases["go_no_go"])
+    print("P2 design arm: %s" % cases["design_arm"])
     return cases
 
 
@@ -523,9 +635,7 @@ def probe_p3(cmds, p2_cases):
     scalar = {"method": "direct noise.outColorR", "error": None,
               "fallback_error": None, "png": None, "png_error": None}
     try:
-        cmds.convertSolidTx(noise + ".outColorR", plane, resolutionX=32,
-                            resolutionY=32, fileImageName=scalar_path,
-                            fileFormat="png", alpha=False)
+        _bake_to_png(cmds, noise + ".outColorR", plane, scalar_path)
     except Exception:
         scalar["error"] = traceback.format_exc()
         scalar["method"] = ("direct outColorR FAILED (%s); tried routing "
@@ -536,10 +646,8 @@ def probe_p3(cmds, p2_cases):
                 "lambert", asShader=True, name="p3_fallback_shd")
             cmds.connectAttr(noise + ".outColorR",
                              fallback_shader + ".translucence", force=True)
-            cmds.convertSolidTx(fallback_shader + ".translucence", plane,
-                                resolutionX=32, resolutionY=32,
-                                fileImageName=scalar_path, fileFormat="png",
-                                alpha=False)
+            _bake_to_png(cmds, fallback_shader + ".translucence", plane,
+                        scalar_path)
         except Exception:
             scalar["fallback_error"] = traceback.format_exc()
     if os.path.isfile(scalar_path):
@@ -604,6 +712,16 @@ def probe_p4(cmds, export_mod, fbxbytes_mod):
         result["texture_facts"] = tf
         result["basename"] = basename
         result["found"] = found
+        result["record_count_note"] = (
+            "texture_records=%d, video_records=%d for ONE wired file node "
+            "- more than the naive expectation of one Texture/one Video "
+            "record. Likely a bump-path exporter artifact (a guess: the "
+            "FBX exporter may write a second Texture/Video pair for the "
+            "implicit bump channel alongside the file's own connection). "
+            "NOT investigated further - flagged so the next reader doesn't "
+            "mistake this for a bug in this probe."
+            % (tf["texture_records"], tf["video_records"]))
+        print("P4 note: %s" % result["record_count_note"])
         if found:
             result["verdict"] = ("SURVIVES - basename %r present in the "
                                  "exported bytes (texture_records=%d, "
@@ -747,16 +865,12 @@ def main():
 
     go = bool(p2 and p2.get("go_no_go") == "GO")
     print("\nGO/NO-GO for phase 2: %s" % ("GO" if go else "NO-GO"))
-    e_entry = (p2 or {}).get("e_local_geometry_dependence") or {}
-    if e_entry.get("identical_bytes") is not None:
-        if e_entry["identical_bytes"]:
-            arm = "shared materials bake ONCE (mesh-independent sampling)"
-        else:
-            arm = ("phase 2 MUST REFUSE shared materials - one bake per "
-                  "mesh (mesh-dependent sampling)")
-        print("Design arm selected: %s" % arm)
-    else:
-        print("Design arm: could not be determined - see P2e's error above")
+    # The design-arm decision is computed inside probe_p2 itself (including
+    # its conservative fallback when P2e's deformation didn't verifiably
+    # apply) - main() only reports it, it does not re-derive it.
+    print("Design arm selected: %s" % (
+        (p2 or {}).get("design_arm")
+        or "could not be determined - P2 did not complete"))
 
     try:
         maya.standalone.uninitialize()
