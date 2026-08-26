@@ -510,3 +510,36 @@ class TestFixRound1:
 
         assert "cp" in str(excinfo.value)              # names the checkpoint
         assert excinfo.value.__cause__ is not None      # chained with `from exc`
+
+    def test_a_postcondition_walk_failure_names_the_checkpoint_and_says_modified(
+            self, fake, tmp_path, monkeypatch):
+        # fix round 2: material_claims is called TWICE - once inside
+        # plan_bakes (must succeed, or nothing would ever get planned) and
+        # once as the postcondition re-walk AFTER the scene is fully
+        # rewired. Only the second call is made to fail here.
+        monkeypatch.setattr(texbake, "_convert_solid_tx", _fake_bake(fake))
+        monkeypatch.setattr(texbake.pngprobe, "uniformity",
+                            lambda _p: {"pixel_count": 1024,
+                                        "distinct_values": 186,
+                                        "non_uniform": True,
+                                        "unavailable_reason": None})
+
+        real_claims = texbake.texclaim.material_claims
+        calls = []
+
+        def flaky_claims(cmds, shapes):
+            calls.append(1)
+            if len(calls) >= 2:
+                raise RuntimeError("boom")
+            return real_claims(cmds, shapes)
+
+        monkeypatch.setattr(texbake.texclaim, "material_claims", flaky_claims)
+
+        with pytest.raises(HandlerError, match="modified") as excinfo:
+            texbake.bake_textures(_params(tmp_path))
+
+        assert "postcondition" in str(excinfo.value)
+        assert "cp" in str(excinfo.value)               # names the checkpoint
+        assert excinfo.value.__cause__ is not None       # chained with `from exc`
+        # the scene WAS rewired before the postcondition walk blew up
+        assert any(dst == "skin_mat.baseColor" for _src, dst in fake.connected)

@@ -398,9 +398,6 @@ def _rewire(cmds, job: Dict[str, Any], final_path: str) -> Dict[str, Any]:
             "colorspace": "Raw" if raw else "sRGB"}
 
 
-_PASS_THROUGH_NODE_TYPES = ("bump2d", "reverse")
-
-
 def _orphan_candidates(cmds, job: Dict[str, Any]) -> List[str]:
     """Every node this job's OLD wiring might now orphan - captured BEFORE
     `_rewire` runs, because rewire overwrites the very connection this
@@ -413,11 +410,18 @@ def _orphan_candidates(cmds, job: Dict[str, Any]) -> List[str]:
     code's docstring promised "the replaced network's nodes" plural but
     only ever considered the terminal, so a via node accumulated as a
     permanent orphan). A place2dTexture feeding the terminal is included
-    too.
+    too. What counts as "pass-through" is read directly off
+    `texclaim.PASS_THROUGH_TYPES` (never copied locally) - a second, drifted
+    copy of that set is exactly how a future pass-through type would go
+    unrecognised here and its node would silently become the next
+    permanent orphan (the same drift `texclaim.AUTHORED_ATTRS` already
+    derives from the slot tables to avoid, ticket-wide).
 
-    bump2d is deliberately EXCLUDED even when it sits on this exact path:
-    `_rewire` keeps a normal slot's bump2d on purpose (bumpDepth is the
-    authored look), so it must never become a delete candidate here.
+    bump2d is deliberately EXCLUDED even though `texclaim.PASS_THROUGH_TYPES`
+    names it too and it does sit on this exact path for a normal slot:
+    that exclusion is texbake's OWN decision, not texclaim's - `_rewire`
+    keeps a normal slot's bump2d on purpose (bumpDepth is the authored
+    look), so it must never become a delete candidate here.
     """
     terminal = job["terminal_plug"].split(".")[0]
     candidates = [terminal]
@@ -434,7 +438,7 @@ def _orphan_candidates(cmds, job: Dict[str, Any]) -> List[str]:
                 if src in seen or src == job.get("bump_node"):
                     continue
                 try:
-                    if cmds.nodeType(src) in _PASS_THROUGH_NODE_TYPES:
+                    if cmds.nodeType(src) in texclaim.PASS_THROUGH_TYPES:
                         found = src
                         break
                 except Exception:  # noqa: BLE001 - unknown type is not it
@@ -591,8 +595,24 @@ def bake_textures(params: Dict[str, Any]) -> Dict[str, Any]:
 
     # Postcondition: the slot must no longer read as procedural. A bake
     # that "succeeded" while leaving the claim procedural is a bug in this
-    # tool, not a caller error - so it raises rather than warning.
-    remaining = texclaim.material_claims(cmds, settings["meshes"])
+    # tool, not a caller error - so it raises rather than warning. The
+    # scene is FULLY rewired by this point (phase B above is done), so
+    # this re-walk's own call is wrapped separately from the deliberate
+    # `still`-branch raise below: if material_claims itself throws for any
+    # reason other than the check it feeds, the caller must not get an
+    # unlabelled exception at a point where the scene has already changed
+    # and the postcondition could not even run (fix round 2).
+    try:
+        remaining = texclaim.material_claims(cmds, settings["meshes"])
+    except Exception as exc:
+        raise HandlerError(
+            "the bake completed and the scene was modified, but the "
+            "postcondition check itself could not run: %s: %s - "
+            "checkpoint %s has the pre-bake scene"
+            % (type(exc).__name__, exc, checkpoint["checkpoint_id"]),
+            hint="call maya_restore_checkpoint(checkpoint_id=%r) to "
+                 "recover, then inspect the network by hand"
+                 % checkpoint["checkpoint_id"]) from exc
     still = [c for c in remaining
              if c["classification"] == "procedural"
              and any(b["material"] == c["material"] and b["attr"] == c["attr"]
