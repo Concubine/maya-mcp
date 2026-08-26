@@ -54,3 +54,8 @@ evals/clip_export_determinism_live/
 # #729 Step 1 fps-cache probe: the seed/control/trial FBXs are throwaway,
 # rebuilt on every run of evals/fbx_fps_probe.py
 evals/fbx_fps_probe_out/
+
+# #714 Task 8 bake probes: the PNGs/FBXs are throwaway, rebuilt (and
+# explicitly deleted-and-reasserted-gone) on every run of
+# evals/bake_probe_714.py
+evals/bake_probe_714_out/

@@ -30,6 +30,7 @@ from ..dispatcher import HandlerError
 from . import clip as clip_mod
 from . import clipmath
 from . import fbxbytes
+from . import texclaim
 
 # The five statements, in order, with FBXResetExport first so no setting from a
 # previous export survives. Held as data rather than a code blob so
@@ -303,16 +304,23 @@ def skin_violations(sfacts) -> List[str]:
     return out
 
 
+def _exported_mesh_shapes(cmds, nodes) -> List[str]:
+    """Every non-intermediate mesh shape this export covers. A selected
+    export walks its own `nodes` (DAG-expanded, so a group export finds its
+    children); a whole-scene export walks every mesh shape in the scene.
+    One definition of "what this export covers", shared by
+    _scene_shape_aliases (blendShape targets) and the #714 texture claim
+    walk - two expansion rules here would be two things to keep in sync."""
+    if nodes:
+        return cmds.ls(nodes, dagObjects=True, type="mesh",
+                       long=True, noIntermediate=True) or []
+    return cmds.ls(type="mesh", long=True, noIntermediate=True) or []
+
+
 def _scene_shape_aliases(cmds, nodes) -> List[str]:
     """Weight aliases of every blendShape reachable from the exported
-    meshes - what the FILE must now carry. A selected export walks its own
-    `nodes` (DAG-expanded, so a group export finds its children); a
-    whole-scene export walks every non-intermediate mesh shape."""
-    if nodes:
-        shapes = cmds.ls(nodes, dagObjects=True, type="mesh",
-                         long=True, noIntermediate=True) or []
-    else:
-        shapes = cmds.ls(type="mesh", long=True, noIntermediate=True) or []
+    meshes - what the FILE must now carry."""
+    shapes = _exported_mesh_shapes(cmds, nodes)
     aliases: List[str] = []
     for shape in shapes:
         for bs in cmds.ls(cmds.listHistory(shape, pruneDagObjects=True)
@@ -349,6 +357,174 @@ def shape_violations(sfacts, declared: List[str]) -> List[str]:
         out.append("shape records unreadable: %s"
                    % sfacts["unavailable_reason"])
     return out
+
+
+# Tokens Maya expands itself (assign_pbr._PATTERN_TOKENS). Such a path names
+# no single file, so its basename cannot be matched whole - the comparison
+# falls back to the literal prefix and only ever warns (#714: the
+# exporter's token handling is unmeasured).
+_TEXTURE_PATTERN_TOKENS = ("<udim>", "<u>", "<v>", "<f>", "<frame0", "<tile>")
+
+
+def texture_violations(tfacts, claims, require_baked, claims_unavailable=None):
+    """How the file's texture records disagree with what the scene claims.
+
+    Returns (violations, warnings). The asymmetry is deliberate and
+    measured:
+
+    * A FILE-backed claim missing from the bytes is a loss class never
+      observed - every measurement shows file textures surviving as a
+      Texture+Video pair carrying the basename - so its absence means the
+      exporter regressed, and refusing it breaks no working pipeline.
+    * A PROCEDURAL claim missing from the bytes is the KNOWN behaviour
+      every golem-class delivery already relies on. Refusing it by default
+      would retroactively break correct pipelines, so it warns unless the
+      caller demands baked-only cargo.
+    * semantics_lost never refuses: the image ships and the consumer
+      rewires the channel. Refusing would refuse assign_pbr's own mask
+      workflow.
+    * A pattern-token path (<UDIM>, <U>, <V>, ...) names no single file, so
+      its expansion in the bytes is unmeasured - it therefore only ever
+      warns, never refuses, in either mode.
+
+    Comparison is by image BASENAME, case-insensitively (Windows), never by
+    node name (this toolbox writes two different naming conventions and the
+    exporter may rename), and never by record counts (one file node can
+    drive several slots).
+
+    claims_unavailable, when truthy, means the SCENE-side claim walk itself
+    failed (texclaim.material_claims raised) - nothing was walked, so every
+    basename in the file would otherwise look "unclaimed". That is not
+    informative; the caller already reports claims_unavailable as its own
+    warning, so the unclaimed-record loop below is suppressed rather than
+    repeating a wrong explanation.
+    """
+    violations = []
+    warnings = []
+
+    if tfacts.get("unavailable_reason"):
+        warnings.append(
+            "the file's texture records could not be read (%s) - texture "
+            "claims were NOT verified against the bytes"
+            % tfacts["unavailable_reason"])
+        return violations, warnings
+
+    in_file = {(row.get("basename") or "").lower()
+               for row in tfacts["textures"] + tfacts["videos"]
+               if row.get("basename")}
+    record_names = {(row.get("name") or "")
+                    for row in tfacts["textures"] + tfacts["videos"]}
+    claimed = set()
+
+    # #714 final review, Important 1: texture_facts() reports a record whose
+    # filename could not be parsed with an EMPTY basename instead of
+    # dropping it, precisely so a genuinely surviving file texture is not
+    # silently swallowed by a parser gap. But nothing else here ever names
+    # such a record - it is invisible to `in_file` above - so if some Maya
+    # version writes a filename spelling this reader does not recognize, a
+    # claim for a file that truly survived would refuse with "the file
+    # carries no Texture/Video record for it", pointing at the exporter when
+    # the real gap is this parser. Naming the count keeps that distinction
+    # next to any such refusal instead of contradicting it silently.
+    unparsed = sum(1 for row in tfacts["textures"] + tfacts["videos"]
+                   if not row.get("basename"))
+    if unparsed:
+        warnings.append(
+            "%d texture record(s) carry a filename this reader could not "
+            "parse - a missing-claim refusal may be a parser gap, not an "
+            "exporter regression" % unparsed)
+
+    for claim in claims:
+        where = "material %r slot %r (%s)" % (
+            claim["material"], claim["slot"] or "?", claim["attr"])
+        if claim["classification"] == "file":
+            # Gates the semantics_lost warning below. That warning describes
+            # what does NOT travel about an image that DID travel, so it is
+            # true the moment ANY terminal of a (possibly multi-terminal,
+            # e.g. a bump2d feeding two file-backed attributes) claim was
+            # found in the bytes - one surviving terminal is enough. It is
+            # false, and must be suppressed, only when NONE survived: there
+            # is then no surviving image for the warning to describe, and
+            # asserting it alongside "no record for it" would contradict
+            # that report.
+            any_found = False
+            for terminal in claim["terminals"]:
+                basename = (terminal.get("basename") or "")
+                claimed.add(basename.lower())
+                pattern = any(tok in basename.lower()
+                              for tok in _TEXTURE_PATTERN_TOKENS)
+                found = basename.lower() in in_file
+                if found:
+                    any_found = True
+                    continue
+                if pattern:
+                    warnings.append(
+                        "%s claims the image sequence %r, whose expansion "
+                        "in the file is unmeasured - no record matched"
+                        % (where, basename))
+                elif not terminal.get("on_disk"):
+                    warnings.append(
+                        "%s claims image %r, which is not on disk at export "
+                        "time - the file carries no record for it"
+                        % (where, basename))
+                else:
+                    violations.append(
+                        "%s claims file texture %r but the file carries no "
+                        "Texture/Video record for it"
+                        % (where, basename))
+            if claim["semantics_lost"] and any_found:
+                warnings.append(
+                    "%s survives as an image reference only - %s do not "
+                    "travel in FBX and must be re-created by the consumer"
+                    % (where, ", ".join(claim["semantics_lost"])))
+        else:
+            nodes = ", ".join(t["node"] for t in claim["terminals"])
+            if require_baked:
+                # require_baked_textures is a contract about the SCENE (only
+                # file-backed maps are declared to ship), not a prediction
+                # about the exporter - wording it as an exporter-capability
+                # claim ("cannot write") would contradict the stale-model
+                # warning below, which is exactly the evidence that the
+                # exporter's real behaviour here is unmeasured.
+                violations.append(
+                    "%s is driven by a procedural network (%s), which "
+                    "require_baked_textures forbids - only file-backed maps "
+                    "are known to survive FBX export" % (where, nodes))
+            else:
+                # Here, unlike the require_baked branch above, "silently
+                # drops" IS the measured claim (#714) - nothing below
+                # contradicts it, so it stays worded as fact.
+                warnings.append(
+                    "%s is driven by a procedural network (%s) that Maya's "
+                    "FBX exporter silently drops - the exported file does "
+                    "not carry this map" % (where, nodes))
+            for terminal in claim["terminals"]:
+                # Only non-file terminals: a layeredTexture mixing real
+                # files is itself procedural, so its terminals can include a
+                # file node whose name legitimately appears among the
+                # bytes' records - that is not evidence the drop model is
+                # stale.
+                if terminal["type"] == "file":
+                    continue
+                if terminal["node"] in record_names:
+                    warnings.append(
+                        "%s: %r appears among the file's texture records - "
+                        "the #714 drop model is stale and wants re-measuring"
+                        % (where, terminal["node"]))
+
+    # Minor 3: a failed walk claimed nothing, so every basename would look
+    # "unclaimed" for a reason that has nothing to do with this file - the
+    # caller's claims_unavailable warning already names the real cause, and
+    # repeating "no walked material claim explains" beside it would point
+    # at the wrong culprit.
+    if not claims_unavailable:
+        for basename in sorted(b for b in in_file if b and b not in claimed):
+            warnings.append(
+                "the file carries texture %r that no walked material claim "
+                "explains - the claim walk covers this toolbox's authored "
+                "slots only" % basename)
+
+    return violations, warnings
 
 
 def _scene_clips(cmds):
@@ -588,7 +764,7 @@ def anim_clip_facts(afacts, declared) -> List[Dict[str, Any]]:
 
 def _validate(
     params: Dict[str, Any],
-) -> Tuple[str, Optional[List[str]], bool, bool]:
+) -> Tuple[str, Optional[List[str]], bool, bool, bool]:
     """Check every parameter before touching Maya. A bad call must cost nothing."""
     path = params.get("path")
     if not isinstance(path, str) or not path.strip():
@@ -661,7 +837,14 @@ def _validate(
             raise HandlerError(
                 "nodes is an empty list, which would export nothing",
                 hint="omit nodes entirely to export the whole scene")
-    return path, nodes, include_skins, include_animation
+
+    require_baked = params.get("require_baked_textures", False)
+    if not isinstance(require_baked, bool):
+        raise HandlerError(
+            "require_baked_textures must be true or false",
+            hint="true refuses the export when any material slot is driven "
+                 "by a procedural network Maya's FBX exporter cannot write")
+    return path, nodes, include_skins, include_animation, require_baked
 
 
 def _cmds():
@@ -699,7 +882,8 @@ def _bounds(facts):
 
 def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
     global _fbx_loaded_time_unit
-    path, nodes, include_skins, include_animation = _validate(params)
+    path, nodes, include_skins, include_animation, require_baked = _validate(
+        params)
     cmds = _cmds()
     mel = _mel()
 
@@ -712,6 +896,53 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
                      "the scene actually contains")
 
     declared_shapes = _scene_shape_aliases(cmds, nodes)
+
+    # #714: what the SCENE says its materials carry. Read-only queries; the
+    # scene is never modified. Scoped to the exported shapes, like shape
+    # aliases and clips above.
+    claim_shapes = _exported_mesh_shapes(cmds, nodes)
+    # The walk touches cmds.listSets/listConnections/nodeType/attributeQuery
+    # with no guard of its own (only _file_terminal's two getAttr reads are
+    # wrapped) and Task 4 put it on the critical path of EVERY export,
+    # including whole-scene exports of scenes that never touched a shading
+    # network. This claim is a MEASUREMENT of the scene, and a measurement
+    # that fails must cost the measurement, not the export - the same
+    # precedent _bounds() sets for a rotation order its reader cannot
+    # compose. Never swallowed silently: claims_unavailable surfaces below,
+    # both in the strict pre-write refusal and in the reported result.
+    try:
+        texture_claims = texclaim.material_claims(cmds, claim_shapes)
+        claims_unavailable = None
+    except Exception as exc:          # noqa: BLE001 - never fail a good export
+        texture_claims = []
+        claims_unavailable = (
+            "the scene's texture claims could not be read (%s: %s)"
+            % (type(exc).__name__, exc))
+    if require_baked:
+        procedural = [c for c in texture_claims
+                      if c["classification"] == "procedural"]
+        if procedural:
+            raise HandlerError(
+                "require_baked_textures=true but %d material slot(s) are "
+                "driven by procedural networks: %s"
+                % (len(procedural),
+                   "; ".join("%s.%s (%s)"
+                             % (c["material"], c["attr"],
+                                ", ".join(t["node"] for t in c["terminals"]))
+                             for c in procedural[:4])),
+                hint="Maya's FBX exporter cannot write a procedural texture "
+                     "network. Author the map as a file texture "
+                     "(maya_assign_pbr, or the file_texture recipe), or "
+                     "export with require_baked_textures=false and accept "
+                     "that the look does not travel")
+        if claims_unavailable:
+            raise HandlerError(
+                "require_baked_textures=true but %s - the export cannot "
+                "prove the materials carry only file-backed maps"
+                % claims_unavailable,
+                hint="re-run without require_baked_textures to export "
+                     "anyway, or fix the scene condition named above")
+
     declared_clip = _scene_clips(cmds) if include_animation else None
     if include_animation and declared_clip is None:
         raise HandlerError(
@@ -871,6 +1102,18 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
         " For animation violations: the clip must exist (maya_author_clip) "
         "and a selected export ('nodes') must include the skeleton root - "
         "curves travel with their joints." if anim_bad else "")
+    tex_block = fbxbytes.texture_facts(facts)
+    tex_bad, tex_warnings = texture_violations(tex_block, texture_claims,
+                                               require_baked,
+                                               claims_unavailable)
+    if claims_unavailable:
+        tex_warnings.append(claims_unavailable)
+    violations += tex_bad
+    texture_hint = (
+        " For texture violations: a file texture's image must exist on disk "
+        "at export time and its mesh must be in the exported selection - "
+        "procedural networks (noise, ramp, layeredTexture) have no FBX "
+        "representation at all." if tex_bad else "")
     if violations:
         try:
             os.unlink(tmp_path)
@@ -889,7 +1132,8 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
                      "unit means one metre (linear_unit 'cm' in this repo's "
                      "convention). Deletion itself failed - remove %s by hand "
                      "before it reaches a delivery" % tmp_path
-                     + skin_hint + shape_hint + anim_hint) from unlink_exc
+                     + skin_hint + shape_hint + anim_hint
+                     + texture_hint) from unlink_exc
         raise HandlerError(
             "the exported FBX failed the unit gate and was never written to "
             "%s - the temp file was deleted, and any pre-existing file at "
@@ -900,10 +1144,65 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
                  "means one metre (linear_unit 'cm' in this repo's convention). "
                  "Nothing reaches %s until it passes - a wrong file on disk is "
                  "how maya-mcp #629 reached three deliveries" % path
-                 + skin_hint + shape_hint + anim_hint)
+                 + skin_hint + shape_hint + anim_hint + texture_hint)
 
     # Only now, with the gate passed, does the real path get touched.
     os.replace(tmp_path, path)
+
+    reported_textures = None
+    # A failed claim walk still reports a block - claims_unavailable alone
+    # must not look like a clean textureless export, or the failure this
+    # try/except exists to surface would go unreported by omission. Two
+    # more cases the docs/protocol.md contract already covers but the
+    # original condition missed (#714 final review, Important 2): a
+    # Video-only file (0 Texture records, video_records > 0 - protocol.md
+    # says `textures` is null only when there are NO Texture/Video
+    # records, not just no Texture records), and a byte-side-only failure
+    # (tex_block["unavailable_reason"] set, nothing else) which otherwise
+    # loses its structured reason by reporting no block at all.
+    if (texture_claims or tex_block["texture_records"]
+            or tex_block["video_records"] or claims_unavailable
+            or tex_block["unavailable_reason"]):
+        in_file = {(row.get("basename") or "").lower()
+                   for row in tex_block["textures"] + tex_block["videos"]
+                   if row.get("basename")}
+        file_maps = []
+        dropped_maps = []
+        for claim in texture_claims:
+            if claim["classification"] == "file":
+                for terminal in claim["terminals"]:
+                    basename = terminal.get("basename") or ""
+                    file_maps.append({
+                        "material": claim["material"],
+                        "attr": claim["attr"], "slot": claim["slot"],
+                        "file_node": terminal["node"], "basename": basename,
+                        "on_disk": bool(terminal.get("on_disk")),
+                        "found_in_file": basename.lower() in in_file,
+                        "semantics_lost": claim["semantics_lost"]})
+            else:
+                for terminal in claim["terminals"]:
+                    dropped_maps.append({
+                        "material": claim["material"],
+                        "attr": claim["attr"], "slot": claim["slot"],
+                        "terminal": terminal["node"],
+                        "terminal_type": terminal["type"],
+                        "via": claim["via"], "meshes": claim["meshes"]})
+        claimed = {(m["basename"] or "").lower() for m in file_maps}
+        # Both reasons are kept, joined, when both fire - the claim walk
+        # and the byte read are independent failures and neither should
+        # hide the other.
+        combined_unavailable = "; ".join(
+            r for r in (claims_unavailable, tex_block["unavailable_reason"])
+            if r) or None
+        reported_textures = {
+            "texture_records": tex_block["texture_records"],
+            "video_records": tex_block["video_records"],
+            "file_maps": file_maps,
+            "dropped_maps": dropped_maps,
+            "unclaimed_records": sorted(b for b in in_file
+                                        if b and b not in claimed),
+            "unavailable_reason": combined_unavailable,
+        }
 
     lo, hi, height, bounds_unavailable_reason = _bounds(facts)
     return {
@@ -923,4 +1222,6 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
         "shapes": (shapes_block
                    if declared_shapes or shapes_block["channels"] else None),
         "animation": reported_anim,
+        "textures": reported_textures,
+        "warnings": tex_warnings,
     }

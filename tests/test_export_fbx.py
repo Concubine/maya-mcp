@@ -373,13 +373,14 @@ def _params(tmp_path, **over):
 
 
 def test_a_good_call_normalises_the_path(tmp_path):
-    path, nodes, include_skins, include_animation = export._validate(
-        _params(tmp_path))
+    path, nodes, include_skins, include_animation, require_baked = (
+        export._validate(_params(tmp_path)))
     assert path.endswith("/out.fbx")
     assert "\\" not in path
     assert nodes is None
     assert include_skins is False
     assert include_animation is False
+    assert require_baked is False
 
 
 def test_metres_per_unit_has_no_default(tmp_path):
@@ -433,7 +434,7 @@ def test_an_empty_node_list_is_refused(tmp_path):
 
 
 def test_a_node_list_survives_validation(tmp_path):
-    _path, nodes, _skins, _anim = export._validate(
+    _path, nodes, _skins, _anim, _req_baked = export._validate(
         _params(tmp_path, nodes=["golem_C_pelvis"]))
     assert nodes == ["golem_C_pelvis"]
 
@@ -494,6 +495,16 @@ class FakeCmds:
     def listAttr(self, attr, **kw):
         """Stub for listAttr. For shape-less test scenes, return empty."""
         return []
+
+    def listSets(self, object=None, type=None):
+        """Stub for listSets - the texclaim walker's entry point. Empty by
+        default so an un-monkeypatched export never reaches a shader."""
+        return []
+
+    def attributeQuery(self, attr, node=None, exists=False):
+        """Stub for attributeQuery - the texclaim walker's slot probe.
+        False by default so an un-monkeypatched export claims nothing."""
+        return False
 
 
 class FakeMel:
@@ -1447,3 +1458,385 @@ class TestSceneClipsPredicate:
     def test_only_empty_attrs_means_no_clips(self):
         cmds = FakeClipSceneCmds({"|junk": "[]"})
         assert export._scene_clips(cmds) is None
+
+
+def _tfacts(basenames=(), names=()):
+    return {"texture_records": len(basenames), "video_records": len(basenames),
+            "textures": [{"name": n, "basename": b}
+                         for n, b in zip(names or basenames, basenames)],
+            "videos": [{"name": n, "basename": b}
+                       for n, b in zip(names or basenames, basenames)],
+            "unavailable_reason": None}
+
+
+def _file_claim(basename="grain.png", on_disk=True, semantics_lost=(),
+                material="skin_mat", attr="baseColor"):
+    return {"mesh": "|bodyShape", "meshes": ["|bodyShape"],
+            "material": material, "sg": "bodySG", "attr": attr,
+            "slot": "color", "classification": "file",
+            "terminals": [{"node": "tex", "type": "file",
+                           "file_path": "C:/t/" + basename,
+                           "basename": basename, "on_disk": on_disk,
+                           "colorspace": "sRGB"}],
+            "via": [], "semantics_lost": list(semantics_lost)}
+
+
+def _multi_file_claim(basename_a="diffuse.png", basename_b="grain.png",
+                      on_disk_b=False, semantics_lost=(),
+                      material="skin_mat", attr="baseColor"):
+    """A two-terminal file claim (fix round 2). texclaim legitimately
+    produces these: once the walk steps through a bump2d/reverse it queries
+    the bare node, so two file-fed attributes of one such node yield two
+    file terminals in one claim. Terminal A is basename_a (found by
+    default); terminal B is basename_b, defaulting to on_disk=False so it
+    only warns rather than violating."""
+    return {"mesh": "|bodyShape", "meshes": ["|bodyShape"],
+            "material": material, "sg": "bodySG", "attr": attr,
+            "slot": "color", "classification": "file",
+            "terminals": [
+                {"node": "texA", "type": "file",
+                 "file_path": "C:/t/" + basename_a,
+                 "basename": basename_a, "on_disk": True,
+                 "colorspace": "Raw"},
+                {"node": "texB", "type": "file",
+                 "file_path": "C:/t/" + basename_b,
+                 "basename": basename_b, "on_disk": on_disk_b,
+                 "colorspace": "sRGB"},
+            ],
+            "via": [], "semantics_lost": list(semantics_lost)}
+
+
+def _procedural_claim(terminal="mcpTex_noise", ttype="noise"):
+    return {"mesh": "|bodyShape", "meshes": ["|bodyShape"],
+            "material": "skin_mat", "sg": "bodySG", "attr": "normalCamera",
+            "slot": "normal", "classification": "procedural",
+            "terminals": [{"node": terminal, "type": ttype,
+                           "file_path": None, "basename": None,
+                           "on_disk": None, "colorspace": None}],
+            "via": ["bump2d"], "semantics_lost": []}
+
+
+class TestTextureViolations:
+    def test_a_surviving_file_claim_is_clean(self):
+        bad, warn = export.texture_violations(
+            _tfacts(["grain.png"]), [_file_claim()], False)
+        assert bad == [] and warn == []
+
+    def test_a_file_claim_absent_from_the_bytes_refuses_in_both_modes(self):
+        # Never-observed loss class: file-backed maps always survived in
+        # every measurement, so its absence is an exporter regression and
+        # refusing it breaks nobody.
+        for strict in (False, True):
+            bad, _warn = export.texture_violations(
+                _tfacts([]), [_file_claim()], strict)
+            assert len(bad) == 1
+            assert "grain.png" in bad[0] and "skin_mat" in bad[0]
+
+    def test_basename_matching_is_case_insensitive(self):
+        bad, _warn = export.texture_violations(
+            _tfacts(["GRAIN.PNG"]), [_file_claim("grain.png")], False)
+        assert bad == []
+
+    def test_a_claim_whose_image_is_not_on_disk_only_warns(self):
+        # The exporter's behaviour for a missing image is UNMEASURED
+        # (#714 probe P5) - warn until it is.
+        bad, warn = export.texture_violations(
+            _tfacts([]), [_file_claim(on_disk=False)], True)
+        assert bad == []
+        assert any("not on disk" in w for w in warn)
+
+    def test_a_procedural_claim_warns_by_default(self):
+        bad, warn = export.texture_violations(
+            _tfacts([]), [_procedural_claim()], False)
+        assert bad == []
+        assert any("mcpTex_noise" in w and "silently drops" in w
+                   for w in warn)
+
+    def test_a_procedural_claim_violates_under_require_baked(self):
+        bad, _warn = export.texture_violations(
+            _tfacts([]), [_procedural_claim()], True)
+        assert len(bad) == 1
+        assert "normalCamera" in bad[0] or "normal" in bad[0]
+
+    def test_semantics_lost_warns_and_never_refuses(self):
+        claim = _file_claim(semantics_lost=["channel swizzle outColorR"])
+        for strict in (False, True):
+            bad, warn = export.texture_violations(
+                _tfacts(["grain.png"]), [claim], strict)
+            assert bad == []
+            assert any("outColorR" in w for w in warn)
+
+    def test_an_unclaimed_record_warns(self):
+        bad, warn = export.texture_violations(
+            _tfacts(["mystery.png"]), [], False)
+        assert bad == []
+        assert any("mystery.png" in w for w in warn)
+
+    def test_a_procedural_name_in_the_bytes_warns_that_the_model_is_stale(
+            self):
+        bad, warn = export.texture_violations(
+            _tfacts(["x.png"], names=["mcpTex_noise"]),
+            [_procedural_claim()], False)
+        assert bad == []
+        assert any("stale" in w for w in warn)
+
+    def test_an_unreadable_texture_block_warns_and_refuses_nothing(self):
+        tfacts = dict(_tfacts([]), unavailable_reason="record truncated")
+        bad, warn = export.texture_violations(
+            tfacts, [_file_claim()], True)
+        assert bad == []
+        assert any("record truncated" in w for w in warn)
+
+    def test_an_unparseable_basename_warns_about_the_parser_gap(self):
+        # Important 1 (final review): texture_facts() reports a record it
+        # could not read a filename for with an empty basename rather than
+        # dropping it. Nothing else here names such a record, so the gate
+        # must say so itself rather than silently having no match for it.
+        tfacts = _tfacts([""], names=["mysteryTex"])
+        bad, warn = export.texture_violations(tfacts, [], False)
+        assert bad == []
+        assert any("could not parse" in w for w in warn)
+
+    def test_the_parser_gap_warning_pairs_with_a_missing_claim_violation(
+            self):
+        # The whole point of naming the count: when a claim ALSO refuses
+        # for "no Texture/Video record for it", the parser-gap warning must
+        # be sitting right beside it, since the refusal might be this
+        # reader's gap and not the exporter's.
+        tfacts = _tfacts([""], names=["mysteryTex"])
+        bad, warn = export.texture_violations(tfacts, [_file_claim()], False)
+        assert len(bad) == 1 and "grain.png" in bad[0]
+        assert any("could not parse" in w for w in warn)
+
+    def test_unclaimed_record_warnings_are_suppressed_when_the_walk_failed(
+            self):
+        # Minor 3 (final review): a failed claim walk claimed nothing, so
+        # every basename in the file would otherwise be reported as
+        # unexplained for a reason unrelated to this export. The caller's
+        # claims_unavailable warning already names the real cause.
+        bad, warn = export.texture_violations(
+            _tfacts(["mystery.png"]), [], False,
+            claims_unavailable="the walk broke")
+        assert bad == []
+        assert not any("mystery.png" in w for w in warn)
+
+    def test_a_missing_file_claim_with_semantics_lost_does_not_also_claim_survival(
+            self):
+        # Fix round 1, defect 1: the semantics_lost warning says the image
+        # SURVIVES as a reference. A basename absent from the bytes gets the
+        # violation only - asserting both at once would contradict itself.
+        claim = _file_claim(semantics_lost=["channel swizzle outColorR"])
+        bad, warn = export.texture_violations(_tfacts([]), [claim], False)
+        assert len(bad) == 1
+        assert not any("survives as an image reference" in w for w in warn)
+
+    def test_require_baked_violation_does_not_assert_exporter_capability(
+            self):
+        # Fix round 1, defect 2: require_baked_textures is a contract about
+        # the SCENE, not a prediction about the exporter - the refusal must
+        # not claim the exporter "cannot write" this while a same-result
+        # stale-model warning says that evidence is unmeasured.
+        bad, warn = export.texture_violations(
+            _tfacts(["x.png"], names=["mcpTex_noise"]),
+            [_procedural_claim()], True)
+        assert len(bad) == 1
+        assert "cannot write" not in bad[0]
+        assert "require_baked_textures" in bad[0]
+        assert any("stale" in w for w in warn)
+
+    def test_a_pattern_token_claim_only_warns(self):
+        bad, warn = export.texture_violations(
+            _tfacts([]), [_file_claim("body_<udim>.png")], False)
+        assert bad == []
+        assert any("body_<udim>.png" in w for w in warn)
+
+    def test_a_pattern_token_claim_only_warns_under_require_baked_too(self):
+        # The unmeasured-exporter-behaviour rule holds in both modes: a
+        # sequence token never refuses, even when the caller demands
+        # baked-only cargo.
+        bad, warn = export.texture_violations(
+            _tfacts([]), [_file_claim("body_<udim>.png")], True)
+        assert bad == []
+        assert any("body_<udim>.png" in w for w in warn)
+
+    def test_semantics_lost_is_reported_when_one_of_two_terminals_survives(
+            self):
+        # Fix round 2: the gate over-corrected to ALL terminals found. A
+        # multi-terminal claim (e.g. a bump2d feeding two file-backed
+        # attributes) can have one terminal survive in the bytes and one
+        # not (here: not on disk, so it only warns) - the surviving
+        # terminal's semantics_lost is still true and actionable, and must
+        # not be suppressed by the other terminal's unrelated warning.
+        claim = _multi_file_claim(semantics_lost=["Raw colorspace"])
+        bad, warn = export.texture_violations(
+            _tfacts(["diffuse.png"]), [claim], False)
+        assert bad == []
+        assert any("Raw colorspace" in w for w in warn)
+
+    def test_semantics_lost_is_suppressed_when_no_terminal_survives(self):
+        # The pre-fix contradiction stays fixed: with NO terminal found,
+        # "survives as an image reference only" would itself be false, so
+        # it must not be asserted.
+        claim = _multi_file_claim(semantics_lost=["Raw colorspace"])
+        bad, warn = export.texture_violations(_tfacts([]), [claim], False)
+        assert not any("Raw colorspace" in w for w in warn)
+
+    def test_stale_warning_skips_file_type_terminals_in_a_mixed_procedural_claim(
+            self):
+        # Regression for the type == "file" skip (fix round 1, Minor 4): a
+        # layeredTexture mixing real files is itself procedural, so a
+        # genuine file terminal's NAME can legitimately appear among the
+        # bytes' records without that being evidence the #714 drop model
+        # is stale.
+        claim = {"mesh": "|bodyShape", "meshes": ["|bodyShape"],
+                "material": "skin_mat", "sg": "bodySG",
+                "attr": "normalCamera", "slot": "normal",
+                "classification": "procedural",
+                "terminals": [
+                    {"node": "mixTex", "type": "file",
+                     "file_path": "C:/t/mixTex.png",
+                     "basename": "mixTex.png", "on_disk": True,
+                     "colorspace": "sRGB"},
+                    {"node": "layerNode", "type": "layeredTexture",
+                     "file_path": None, "basename": None,
+                     "on_disk": None, "colorspace": None},
+                ],
+                "via": ["bump2d"], "semantics_lost": []}
+        bad, warn = export.texture_violations(
+            _tfacts(["x.png"], names=["mixTex"]), [claim], False)
+        assert not any("stale" in w for w in warn)
+
+
+class TestRequireBakedTextures:
+    def test_it_must_be_a_bool(self, tmp_path):
+        with pytest.raises(HandlerError, match="require_baked_textures"):
+            export._validate(_params(tmp_path, require_baked_textures="yes"))
+
+    def test_a_procedural_claim_refuses_before_anything_is_written(
+            self, monkeypatch, tmp_path):
+        # Pre-write refusal: the cost-nothing principle. Nothing is written,
+        # so there is no temp file to clean up and no path to protect.
+        node = fbxbytes.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1,
+                                geometry=7)
+        cmds = FakeCmds()
+        _install(monkeypatch, cmds, _facts([node]))
+        monkeypatch.setattr(export.texclaim, "material_claims",
+                            lambda _c, _s: [_procedural_claim()])
+        params = _params(tmp_path, require_baked_textures=True)
+        with pytest.raises(HandlerError, match="procedural"):
+            export.export_fbx(params)
+        assert not any(c[0] == "file" for c in cmds.calls)
+
+    def test_a_procedural_claim_passes_by_default_and_is_named(
+            self, monkeypatch, tmp_path):
+        node = fbxbytes.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1,
+                                geometry=7)
+        cmds = FakeCmds()
+        _install(monkeypatch, cmds, _facts([node]))
+        monkeypatch.setattr(export.texclaim, "material_claims",
+                            lambda _c, _s: [_procedural_claim()])
+        out = export.export_fbx(_params(tmp_path))
+        assert out["textures"]["dropped_maps"][0]["terminal"] == "mcpTex_noise"
+        assert out["textures"]["dropped_maps"][0]["material"] == "skin_mat"
+        assert any("silently drops" in w for w in out["warnings"])
+
+    def test_a_textureless_export_reports_no_texture_block(
+            self, monkeypatch, tmp_path):
+        node = fbxbytes.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1,
+                                geometry=7)
+        _install(monkeypatch, FakeCmds(), _facts([node]))
+        monkeypatch.setattr(export.texclaim, "material_claims",
+                            lambda _c, _s: [])
+        out = export.export_fbx(_params(tmp_path))
+        assert out["textures"] is None
+        assert out["warnings"] == []
+
+
+def _raise_boom(_c, _s):
+    raise RuntimeError("boom")
+
+
+class TestClaimWalkFailure:
+    """The claim walk (texclaim.material_claims) is unguarded internally -
+    only _file_terminal's two getAttr reads are wrapped - and export_fbx
+    puts it on the critical path of EVERY export. The claim is a
+    MEASUREMENT of the scene (the _bounds() precedent): a failure there
+    must cost the measurement, not a good export."""
+
+    def test_a_failing_claim_walk_does_not_break_the_export(
+            self, monkeypatch, tmp_path):
+        node = fbxbytes.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1,
+                                geometry=7)
+        _install(monkeypatch, FakeCmds(), _facts([node]))
+        monkeypatch.setattr(export.texclaim, "material_claims", _raise_boom)
+        out = export.export_fbx(_params(tmp_path))
+        assert "boom" in out["textures"]["unavailable_reason"]
+        assert any("boom" in w for w in out["warnings"])
+
+    def test_a_failing_claim_walk_refuses_under_require_baked(
+            self, monkeypatch, tmp_path):
+        node = fbxbytes.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1,
+                                geometry=7)
+        cmds = FakeCmds()
+        _install(monkeypatch, cmds, _facts([node]))
+        monkeypatch.setattr(export.texclaim, "material_claims", _raise_boom)
+        params = _params(tmp_path, require_baked_textures=True)
+        with pytest.raises(HandlerError, match="could not be read"):
+            export.export_fbx(params)
+        assert not any(c[0] == "file" for c in cmds.calls)
+
+    def test_both_unavailable_reasons_are_reported_together(
+            self, monkeypatch, tmp_path):
+        node = fbxbytes.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1,
+                                geometry=7)
+        _install(monkeypatch, FakeCmds(), _facts([node]))
+        monkeypatch.setattr(export.texclaim, "material_claims", _raise_boom)
+        monkeypatch.setattr(
+            export.fbxbytes, "texture_facts",
+            lambda _f: {"texture_records": 0, "video_records": 0,
+                       "textures": [], "videos": [],
+                       "unavailable_reason": "byte-reason-xyz"})
+        out = export.export_fbx(_params(tmp_path))
+        reason = out["textures"]["unavailable_reason"]
+        assert "boom" in reason
+        assert "byte-reason-xyz" in reason
+
+    def test_a_video_only_file_still_reports_a_textures_block(
+            self, monkeypatch, tmp_path):
+        # Important 2 (final review): docs/protocol.md says `textures` is
+        # null only when there are no Texture AND no Video records - the
+        # original condition checked texture_records alone, so a
+        # Video-only file (0 Texture, >0 Video) reported no block at all.
+        node = fbxbytes.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1,
+                                geometry=7)
+        _install(monkeypatch, FakeCmds(), _facts([node]))
+        monkeypatch.setattr(export.texclaim, "material_claims",
+                            lambda _c, _s: [])
+        monkeypatch.setattr(
+            export.fbxbytes, "texture_facts",
+            lambda _f: {"texture_records": 0, "video_records": 1,
+                       "textures": [], "videos": [{"name": "v", "basename": "clip.mov"}],
+                       "unavailable_reason": None})
+        out = export.export_fbx(_params(tmp_path))
+        assert out["textures"] is not None
+        assert out["textures"]["video_records"] == 1
+
+    def test_a_byte_side_only_failure_still_reports_a_textures_block(
+            self, monkeypatch, tmp_path):
+        # Important 2 (final review): a byte-side-only failure (the scene
+        # claim walk succeeded with nothing to claim, but the bytes could
+        # not be parsed) used to lose its structured unavailable_reason by
+        # reporting no block at all.
+        node = fbxbytes.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1,
+                                geometry=7)
+        _install(monkeypatch, FakeCmds(), _facts([node]))
+        monkeypatch.setattr(export.texclaim, "material_claims",
+                            lambda _c, _s: [])
+        monkeypatch.setattr(
+            export.fbxbytes, "texture_facts",
+            lambda _f: {"texture_records": 0, "video_records": 0,
+                       "textures": [], "videos": [],
+                       "unavailable_reason": "byte-only-fail"})
+        out = export.export_fbx(_params(tmp_path))
+        assert out["textures"] is not None
+        assert out["textures"]["unavailable_reason"] == "byte-only-fail"

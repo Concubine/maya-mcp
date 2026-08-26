@@ -12,6 +12,7 @@ name, its properties, optional nested records, and a null terminator record -
 EndOffset == 0 marks the end of a sibling list.
 """
 import math
+import os
 import struct
 import zlib
 from dataclasses import dataclass, field
@@ -137,6 +138,15 @@ class FbxFacts:
     anim_stacks_by_uid: dict = field(default_factory=dict)
     anim_layers_by_uid: dict = field(default_factory=dict)
     takes: list = field(default_factory=list)
+    # Textures (#714). textures: Texture uid -> {"name", "filename"};
+    # videos: Video uid -> the same. Maya writes a file texture as a
+    # Texture object plus a Video object carrying the image path, and
+    # writes NOTHING for a procedural network - which is the whole defect
+    # #714 gates. Connections are deliberately not resolved: the gate
+    # compares image BASENAMES against the scene's claim, and the claim
+    # already knows which material each map belongs to.
+    textures: dict = field(default_factory=dict)
+    videos: dict = field(default_factory=dict)
 
 
 def _clean(raw):
@@ -218,7 +228,21 @@ def read_fbx(path):
                                 want_floats=False)
                 values.append(val)
 
-            if name == "Vertices" and values and isinstance(values[0], tuple):
+            if (name in ("FileName", "RelativeFilename", "Filename")
+                    and isinstance(node, tuple) and node[0] == "texnode"
+                    and values and isinstance(values[0], str)):
+                # The bare CHILD RECORD shape (a different Maya version's
+                # export than the nested P property above). MEASURED on
+                # the committed drifter fixture: Video's primary full-path
+                # field is spelled "Filename" (lowercase n) while Texture's
+                # is "FileName" - both write "RelativeFilename" the same
+                # way, so all three spellings are recognised here.
+                store = (facts.textures if node[2] == "Texture"
+                         else facts.videos)
+                current = store.get(node[1])
+                if current is not None and not current["filename"]:
+                    current["filename"] = values[0]
+            elif name == "Vertices" and values and isinstance(values[0], tuple):
                 if isinstance(node, tuple) and node[0] == "shape":
                     facts.shape_geoms[node[1]]["points"] = len(values[0]) // 3
                 else:
@@ -249,6 +273,24 @@ def read_fbx(path):
                         node.rotation_order = int(values[-1])
                     elif key == "InheritType":
                         node.inherit_type = int(values[-1])
+                elif isinstance(node, tuple) and node[0] == "texnode":
+                    # MEASURED on the committed drifter fixture: Video
+                    # writes its path as a nested Properties70 P "Path"/
+                    # "RelPath" pair (Texture does not - it only carries
+                    # UseMaterial there). Both objects ALSO carry the bare
+                    # FileName/RelativeFilename child records below, so
+                    # this file exercises both shapes at once; keep both,
+                    # Maya's other export paths write only one or the
+                    # other.
+                    if key in ("FileName", "RelativeFilename", "Path",
+                               "RelPath"):
+                        store = (facts.textures if node[2] == "Texture"
+                                 else facts.videos)
+                        current = store.get(node[1])
+                        if current is not None and not current["filename"]:
+                            value = values[-1]
+                            if isinstance(value, str):
+                                current["filename"] = value
 
             child = node
             if name == "Model":
@@ -290,6 +332,17 @@ def read_fbx(path):
                 strs = [v for v in values if isinstance(v, str)]
                 if strs and strs[-1] == "BindPose":
                     facts.bind_pose_count += 1
+            elif name in ("Texture", "Video"):
+                uid = values[0] if values and isinstance(values[0], int) else None
+                strs = [v for v in values if isinstance(v, str)]
+                if uid is not None:
+                    record = {"name": _clean(strs[0]) if strs else "?",
+                              "filename": ""}
+                    if name == "Texture":
+                        facts.textures[uid] = record
+                    else:
+                        facts.videos[uid] = record
+                    child = ("texnode", uid, name)
             elif name == "AnimationCurve":
                 uid = values[0] if values and isinstance(values[0], int) else None
                 if uid is not None:
@@ -779,3 +832,26 @@ def anim_facts(facts):
                                         e["take"] or "")),
         "unavailable_reason": "; ".join(reasons) or None,
     }
+
+
+def texture_facts(facts):
+    """Texture references the FILE carries (#714).
+
+    Basenames, not paths: the exporter may rewrite a path to a relative
+    form, and the basename is the part MEASURED to survive intact (the
+    committed drifter fixture carries the same basename in both the
+    absolute Path/FileName field and the relative RelPath/
+    RelativeFilename field). A record whose filename could not be read
+    reports an empty basename rather than being dropped - the gate then
+    says so instead of silently missing a match.
+    """
+    def rows(store):
+        return [{"name": rec["name"],
+                 "basename": os.path.basename(rec["filename"])}
+                for rec in store.values()]
+
+    return {"texture_records": len(facts.textures),
+            "video_records": len(facts.videos),
+            "textures": rows(facts.textures),
+            "videos": rows(facts.videos),
+            "unavailable_reason": None}

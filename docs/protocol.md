@@ -715,7 +715,7 @@ does not exist yet. `delete_clip` the rig that is not being exported.
 
 | cmd | params | result |
 |---|---|---|
-| `export_fbx` | `{ path, metres_per_unit, nodes?, include_skins?, include_animation? }` | `{ path, bytes, fbx_version, node_count, mesh_count, root_nodes, unit_scale_factor, metres_per_unit, world_bounds_min, world_bounds_max, height_m, bounds_unavailable_reason, skin, shapes, animation }` |
+| `export_fbx` | `{ path, metres_per_unit, nodes?, include_skins?, include_animation?, require_baked_textures? }` | `{ path, bytes, fbx_version, node_count, mesh_count, root_nodes, unit_scale_factor, metres_per_unit, world_bounds_min, world_bounds_max, height_m, bounds_unavailable_reason, skin, shapes, animation, textures, warnings }` |
 
 Every field of the result is read back **out of the written file**, never from the Maya scene — the unit defect this tool guards (#629) is produced by the exporter and is absent from the scene, so a scene-derived report would be confidently wrong in exactly the case that matters. The file is written to a sibling temp path and only reaches `path` once it passes; a refused export leaves whatever was already there untouched.
 
@@ -749,3 +749,67 @@ localScale 100 on every such joint and compounds it per level, silently
 (#703: a 12-joint serpent instantiated at world scale ~10^21 m with a clean
 console). `create_skeleton` turns SSC off at joint creation, so this fires
 only on skeletons authored outside the tool or predating the fix.
+
+`export_fbx` also reports what the scene's materials CLAIM to carry against
+what the bytes actually hold (#714). Procedural texture networks (noise,
+ramp, layeredTexture, ...) have no FBX representation at all — Maya's
+exporter silently drops them — and each dropped slot is reported per
+material/slot in `textures.dropped_maps`, with a matching entry in
+`warnings`. File-backed maps are byte-verified against the file's own
+Texture/Video records by image basename; a claimed file missing from the
+bytes REFUSES the export (that loss class has never been observed, so its
+absence means the exporter regressed). A Texture/Video record whose own
+filename this reader could not parse reports an empty basename instead of
+being dropped, and if any such records exist a `warnings` entry names the
+count — so a refusal naming a missing record can be told apart from a
+genuine parser gap rather than being read as an exporter regression.
+`require_baked_textures=true`
+(default `false`) turns any procedural claim into a pre-write refusal —
+before anything is exported, naming the offending material/slot/node —
+for callers who need every map to travel. Channel swizzle (picking one of
+R/G/B/A off a map), a `reverse` invert, and a `Raw` colorspace declaration
+are reported in each file map's `semantics_lost` and never gated: the
+image itself survives in FBX, only the wiring decision does not, and
+refusing it would refuse `assign_pbr`'s own mask workflow.
+
+The claim walk itself can fail (an unreadable shading graph) without
+failing the export — it costs the measurement, not the export, the same
+rule `_bounds` follows for a rotation order it cannot compose. When it
+does, `require_baked_textures=true` refuses pre-write on that too: a
+strict caller demanded proof that only file-backed maps are present, and
+with no claim there is no proof. Either way the failure lands in
+`textures.unavailable_reason` (the scene's claim could not be read, the
+file's texture records could not be parsed, or both, joined with `"; "`)
+and the same string is echoed into `warnings`. A set `unavailable_reason`
+means texture verification did **not** happen for this export — a
+successful export carrying one has reported strictly less than a clean
+one.
+
+`textures` itself is `null` when the export touches no material claims, no
+Texture/Video records, and the claim walk did not fail — an untextured
+export reports nothing here rather than an empty block. When present, it
+carries six fields: `texture_records`/`video_records` (raw counts read back
+from the file), `file_maps`/`dropped_maps` (the per-claim detail behind the
+paragraph above), `unclaimed_records` (image basenames present in the
+file's own Texture/Video records that no scene claim maps to — a file node
+the exported selection never reached), and `unavailable_reason`.
+
+When the scene's claim walk itself failed, every basename in the file
+would otherwise be reported as unexplained by "no walked material claim
+explains" — a wording that has nothing to do with why the walk found
+nothing. That warning is suppressed in this case (`unavailable_reason`
+already names the real cause); the `unclaimed_records` field itself is
+unaffected and still lists those basenames as data.
+
+`apply_texture_recipe` warns at authoring time, not only at export: any
+recipe other than `file_texture` returns a `warnings` entry stating that
+the network it just built has no FBX representation and naming
+`maya_export_fbx`'s `textures.dropped_maps` as where that loss will
+surface — so a look built procedurally is flagged before export is ever
+attempted, not only after.
+
+There is no `maya_bake_textures` tool yet. #714 phase 1 is byte-honest
+reporting only (this section); converting a procedural network into a
+file texture at export time is an unimplemented phase 2, gated on the GO
+its own probes recorded (`evals/bake_probe_714.py`) — nothing here should
+be read as that tool existing.

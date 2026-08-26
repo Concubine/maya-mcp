@@ -17,8 +17,33 @@ What this gate is FOR - each is a seam no delivered asset has crossed:
 Measurements are FRAME-INVARIANT distances (drifter_metrics), never
 heights and never coordinates - #737's whole lesson.
 
-Usage:
+Usage - two modes, same verification (`main()`) either way:
+
     uv run python evals/drifter_live.py
+        Default mode. `main()` assumes the fixture (the 105-joint drifter,
+        its skin, both blend shapes, and all three clips) already exists in
+        the ANSWERING MAYA'S CURRENT SCENE - `verify_prebuilt_scene()` only
+        reads, it never builds, and refuses (BLOCKED) if anything is
+        missing. This is the original, unchanged contract: nothing about
+        this mode's behaviour changed for #714 Task 7.
+
+    uv run python evals/drifter_live.py --build
+        Builds the fixture first, in the answering Maya's CURRENT scene,
+        then runs the exact same verification. Runs, in order:
+        build_fixture() -> bind_and_weight() -> build_blendshapes() ->
+        author_takes() -> main(). This is how #714 Task 7's live gate was
+        actually reproduced end to end from a fresh Maya with no prior
+        state - see task-7-report.md.
+
+        --build MUTATES THE SCENE (new_scene, then ~105 joints, a skin
+        bind, two blend shape targets, three animation takes). Point
+        MAYA_MCP_PORT at a disposable/scratch Maya you launched yourself -
+        NEVER the user's live modelling session. It is not idempotent
+        against a scene that already has any of this fixture's named nodes
+        (drifter_body, drifter_root, ...) - run it only against a scene
+        that was just new_scene'd (build_fixture() does that itself as its
+        first step) or is otherwise known empty.
+
 Exit: 0 pass, 1 fail. Writes evals/drifter_live/baseline.json.
 """
 
@@ -1510,8 +1535,145 @@ def export_and_check(mesh: str, material: dict) -> dict:
     # predicted, measured outcome (it does not survive) is the finding
     # itself, not a gate violation.
 
+    # #714 Task 7: cross-check the PRODUCT's own reported `textures` block
+    # against THIS eval's independent byte walk (_fbx_generic_records /
+    # _fbx_texture_facts above). This is the #718 byte-honesty pattern -
+    # replacing the independent walker with the product's own reader would
+    # make the gate agree with itself, which proves nothing. Three checks,
+    # each reporting the measured numbers behind its verdict.
+    reported = res.get("textures") or {}
+    file_maps = reported.get("file_maps") or []
+    dropped_maps = reported.get("dropped_maps") or []
+    reported_warnings = res.get("warnings") or []
+    cross_check = {}
+
+    # Cross-check 1: the file_texture basename, both readers.
+    target_basename = os.path.basename(TEXTURE_PATH)
+    file_claim = next(
+        (m for m in file_maps
+         if (m.get("basename") or "").lower() == target_basename.lower()),
+        None)
+    cross_check["file_basename"] = target_basename
+    cross_check["file_maps_basenames"] = [m.get("basename") for m in file_maps]
+    if file_claim is None:
+        cross_check["file_cross_check_agree"] = False
+        problems.append(
+            "cross-check 1: result['textures']['file_maps'] (%d entries: "
+            "%r) has no entry for basename %r - the product's own claim "
+            "walk lost the file_texture recipe"
+            % (len(file_maps), cross_check["file_maps_basenames"],
+               target_basename))
+    else:
+        product_found = bool(file_claim.get("found_in_file"))
+        eval_found = texture_facts["file_texture_basename_found"]
+        agree = (product_found == eval_found)
+        cross_check["file_cross_check_agree"] = agree
+        # Explicit about WHICH agreement case this is - "both readers found
+        # it" and "both readers found nothing" are both `agree=True` but
+        # very different states, and only the former is what this fixture
+        # expects. The pre-existing check above already fails the gate on
+        # not-found regardless of this label; this is diagnostic only.
+        cross_check["file_cross_check_detail"] = (
+            "both found" if agree and product_found else
+            "neither found" if agree else
+            "DISAGREE")
+        if not agree:
+            problems.append(
+                "cross-check 1 DISAGREEMENT on basename %r: product's "
+                "textures.file_maps reports found_in_file=%r, this eval's "
+                "independent byte walk reports "
+                "file_texture_basename_found=%r (%d Texture / %d Video "
+                "records scanned in the raw bytes)"
+                % (target_basename, product_found, eval_found,
+                   texture_facts["texture_objects"],
+                   texture_facts["video_objects"]))
+
+    # Cross-check 2: the noise_bump terminal the product claims was dropped.
+    dropped_terminal_names = [d.get("terminal") for d in dropped_maps]
+    drop_entry = next(
+        (d for d in dropped_maps if d.get("terminal") in procedural_nodes),
+        None)
+    cross_check["procedural_nodes"] = procedural_nodes
+    cross_check["dropped_maps_terminals"] = dropped_terminal_names
+    if drop_entry is None:
+        # No dropped_maps entry names any of noise_bump's nodes. That alone
+        # does not say WHICH way the readers disagree - consult the byte
+        # walk per node before writing a message, rather than asserting a
+        # drop this branch never measured (fix round 1: the DISAGREEMENT
+        # wording used to be printed here unconditionally, even for a node
+        # the bytes show as PRESENT).
+        found_map = texture_facts["procedural_node_names_found"]
+        confirmed_dropped = [n for n in procedural_nodes
+                             if found_map.get(n) is False]
+        present_in_bytes = [n for n in procedural_nodes
+                            if found_map.get(n) is True]
+        cross_check["dropped_terminal"] = None
+        cross_check["material"] = None
+        cross_check["slot"] = None
+        cross_check["warning_names_drop"] = False
+        cross_check["drop_cross_check_agree"] = False
+        if confirmed_dropped:
+            # Case (a): a real product defect - the bytes confirm at least
+            # one procedural node is gone, but the product's own claim walk
+            # never reported it as a drop.
+            problems.append(
+                "cross-check 2: result['textures']['dropped_maps'] (%d "
+                "entries, terminals %r) names none of noise_bump's nodes "
+                "%r, and this eval's independent byte walk CONFIRMS %r are "
+                "ABSENT from the exported bytes - the product's own claim "
+                "walk missed a real drop (procedural_node_names_found: %r)"
+                % (len(dropped_maps), dropped_terminal_names,
+                   procedural_nodes, confirmed_dropped, found_map))
+        else:
+            # Case (b): both readers agree nothing was dropped (the node(s)
+            # are still present in the bytes per THIS eval's own walk too).
+            # For this fixture that is still a gate failure - noise_bump is
+            # built specifically to be dropped - but it is not a
+            # disagreement between the two readers, so it must not be
+            # worded as one.
+            problems.append(
+                "cross-check 2: result['textures']['dropped_maps'] (%d "
+                "entries, terminals %r) names none of noise_bump's nodes "
+                "%r, and this eval's independent byte walk finds %r still "
+                "PRESENT in the exported bytes - both readers agree nothing "
+                "was dropped, which means the #714 drop model may be stale "
+                "for this fixture, not that the two readers disagree "
+                "(procedural_node_names_found: %r)"
+                % (len(dropped_maps), dropped_terminal_names,
+                   procedural_nodes, present_in_bytes, found_map))
+    else:
+        terminal = drop_entry.get("terminal")
+        bytes_found = texture_facts["procedural_node_names_found"].get(terminal)
+        cross_check["dropped_terminal"] = terminal
+        cross_check["drop_cross_check_agree"] = not bool(bytes_found)
+        if bytes_found:
+            problems.append(
+                "cross-check 2 DISAGREEMENT: product's dropped_maps names "
+                "%r as dropped, but this eval's independent byte walk "
+                "FOUND %r present in the exported bytes (occurrences: %r)"
+                % (terminal, terminal,
+                   texture_facts["procedural_node_names_found"]))
+
+        # Cross-check 3: warnings names the dropped material/slot.
+        material_name = drop_entry.get("material")
+        slot_name = drop_entry.get("slot") or drop_entry.get("attr")
+        named_in_warnings = any(
+            material_name and slot_name
+            and material_name in w and slot_name in w
+            for w in reported_warnings)
+        cross_check["material"] = material_name
+        cross_check["slot"] = slot_name
+        cross_check["warning_names_drop"] = named_in_warnings
+        if not named_in_warnings:
+            problems.append(
+                "cross-check 3: result['warnings'] (%d lines: %r) carries "
+                "no line naming dropped material %r slot %r"
+                % (len(reported_warnings), reported_warnings, material_name,
+                   slot_name))
+
     return {"export": res, "take_names": take_names, "shapes": shapes,
-            "texture_facts": texture_facts, "problems": problems}
+            "texture_facts": texture_facts, "cross_check": cross_check,
+            "problems": problems}
 
 
 # --- Task 8 orchestration: consume the already-built scene -----------------
@@ -1686,7 +1848,9 @@ def main() -> int:
                 "shapes": exported["shapes"],
                 "metres_per_unit": exported["export"].get("metres_per_unit"),
                 "bytes": exported["export"].get("bytes"),
-                "texture_facts": exported["texture_facts"]},
+                "texture_facts": exported["texture_facts"],
+                "textures": exported["export"].get("textures"),
+                "cross_check": exported["cross_check"]},
     }
     os.makedirs(OUT_DIR, exist_ok=True)
     with open(BASELINE_PATH, "w") as fh:
@@ -1707,8 +1871,44 @@ def main() -> int:
     print("#714 verdict: file_texture basename found=%r; procedural nodes "
          "survived=%r" % (exported["texture_facts"]["file_texture_basename_found"],
                           exported["texture_facts"]["procedural_survived_names"]))
+    cc = exported["cross_check"]
+    print("#714 task 7 cross-check: file_basename=%r agree=%r (%s); "
+         "dropped_terminal=%r agree=%r; warning_names_drop=%r "
+         "(material=%r slot=%r)"
+         % (cc.get("file_basename"), cc.get("file_cross_check_agree"),
+            cc.get("file_cross_check_detail"),
+            cc.get("dropped_terminal"), cc.get("drop_cross_check_agree"),
+            cc.get("warning_names_drop"), cc.get("material"), cc.get("slot")))
     return 1 if problems else 0
 
 
+def build_fresh_fixture() -> None:
+    """`--build`: construct the fixture this gate verifies, from scratch.
+
+    MUTATES THE ANSWERING MAYA'S CURRENT SCENE - see the module docstring's
+    `--build` warning. Order matches the sequence #714 Task 7 measured live
+    (task-7-report.md / the older task-7-rerun2-report.md this fixture's
+    naming descends from): build_fixture() covers geometry + skeleton +
+    combine + assert_joints_inside; bind_and_weight() and build_blendshapes()
+    are then run against the combined mesh by name; author_takes() solves
+    tendril_reach's IK pose and authors all three clips last, because
+    author_clip's padding rule is order-dependent (see author_takes'
+    docstring) and because pose_ik refuses once any clip already exists.
+    """
+    fixture = build_fixture()
+    mesh = fixture["mesh"]
+    print("build_fixture: %s %d verts, %d joints"
+         % (mesh, fixture["vertices"], fixture["joints"]))
+    skin = bind_and_weight(mesh)
+    print("bind_and_weight: unweighted=%r histogram=%r"
+         % (skin["unweighted"], skin["histogram"]))
+    blend = build_blendshapes(mesh)
+    print("build_blendshapes: %s %r" % (blend["node"], blend["aliases"]))
+    takes = author_takes()
+    print("author_takes: %r" % ([c["name"] for c in takes["clips"]]))
+
+
 if __name__ == "__main__":
+    if "--build" in sys.argv:
+        build_fresh_fixture()
     sys.exit(main())
