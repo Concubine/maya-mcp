@@ -357,6 +357,26 @@ def _rewire(cmds, job: Dict[str, Any], final_path: str) -> Dict[str, Any]:
     Raw colour space (assign_pbr's data-not-colour trap); a normal keeps
     its bump2d - bumpDepth is the authored look - and only its bumpValue
     source is replaced (probe P4 measured that path surviving export).
+
+    That source is outColorR, NOT outAlpha - fixed here, #714 Task 6 (the
+    live gate). pbr.py's own "it takes outAlpha" trap is about a DIFFERENT
+    wiring: a tangent-space normal MAP with bumpInterp=1, where Maya
+    special-cases an outAlpha connection to trace back to the file node's
+    RGB. The noise_bump recipe (the only source of a normal-slot claim
+    this tool bakes - plan_bakes requires a bump2d in the chain) leaves
+    bumpInterp at its default 0 ("Bump"/height mode), where bumpValue is a
+    literal scalar - exactly what _bake_source_plug already samples via
+    outColorR for a "normal" kind bake ("a height/scalar bake needs no
+    intermediate node"). Rewiring through outAlpha instead was measured
+    live (texbake_live.py, first run) to silently produce a FLAT surface:
+    _convert_solid_tx writes the bake with alpha=False (no alpha channel
+    at all), so a file node reading it reports a CONSTANT outAlpha=1.0
+    everywhere - none of the baked pixel data (which the bake write
+    correctly puts in the R channel) ever reaches bumpValue. Every byte
+    check passed (the PNG itself measured non_uniform, the FBX carried its
+    basename) while the render was provably wrong - the exact gap this
+    live gate exists to catch. outColorR keeps the write and read sides of
+    one bake consistent.
     """
     base = "%s_%s_baked" % (job["material"], job["slot"])
     node = cmds.shadingNode("file", asTexture=True,
@@ -379,9 +399,9 @@ def _rewire(cmds, job: Dict[str, Any], final_path: str) -> Dict[str, Any]:
             pass
 
     if job["kind"] == "normal" and job["bump_node"]:
-        cmds.connectAttr(node + ".outAlpha",
+        cmds.connectAttr(node + ".outColorR",
                          job["bump_node"] + ".bumpValue", force=True)
-        wired_plug = "outAlpha"
+        wired_plug = "outColorR"
         kept = [job["bump_node"]]
     elif job["kind"] == "scalar":
         cmds.connectAttr(node + ".outColorR",

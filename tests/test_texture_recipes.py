@@ -61,6 +61,22 @@ class FakeCmds:
             raise RuntimeError("forced polyEvaluate failure")
         return self.uv_count if uvcoord else 0
 
+    # Real Maya's numberOfChildren answers a list ([3]) for a compound
+    # (float3) attribute and None for a scalar one - texture_recipes'
+    # _wire_color_output (#714 Task 6) uses exactly that shape to pick
+    # outColor vs outColorR. baseColor/normalCamera are this fixture's only
+    # compound attrs; specularRoughness (the roughness slot) is the scalar
+    # case every file_texture/ramp_gradient-on-roughness test exercises.
+    _COMPOUND_ATTRS = {"baseColor", "normalCamera", "color", "emissionColor"}
+
+    def attributeQuery(self, attr, node=None, exists=False,
+                       numberOfChildren=False):
+        if exists:
+            return True
+        if numberOfChildren:
+            return [3] if attr in self._COMPOUND_ATTRS else None
+        return None
+
 
 def test_noise_bump_builds_and_connects_to_the_normal_slot(monkeypatch):
     fake = FakeCmds()
