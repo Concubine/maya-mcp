@@ -327,6 +327,46 @@ class TestCaptureViewport:
         assert max(first.size) == 256
         assert any("front" in t.text and "three_quarter" in t.text for t in text_blocks)
 
+    def test_a_blank_frame_warning_reaches_the_caller(self):
+        # #765 on top of #757's lesson: the handler names a blank frame, and
+        # a warning this wrapper never reads is a warning nobody sees. The
+        # image still comes back - naming it is the point, not refusing it.
+        conn = FakeConn(
+            responses={
+                "capture_viewport": {
+                    "images": [{"angle": "front", "png_b64": png_b64(64, 64),
+                                "blank": True}],
+                    "camera_positions": [{"angle": "front"}],
+                    "warnings": ["front came back BLANK - every pixel is "
+                                 "transparent, so nothing was drawn."],
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_capture_viewport",
+                                   {"angles": ["front"]}))
+        assert result.is_error is False
+        texts = [c.text for c in result.content if c.type == "text"]
+        assert any("BLANK" in t for t in texts), texts
+        assert len([c for c in result.content if c.type == "image"]) == 1
+
+    def test_a_turntable_blank_warning_reaches_the_caller(self):
+        conn = FakeConn(
+            responses={
+                "capture_turntable": {
+                    "images": [{"index": 0, "azimuth": 0.0,
+                                "png_b64": png_b64(64, 64), "blank": True}],
+                    "n_frames": 1,
+                    "warnings": ["azimuth 0 came back BLANK"],
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_capture_turntable", {"n_frames": 2}))
+        assert result.is_error is False
+        texts = [c.text for c in result.content if c.type == "text"]
+        assert any("BLANK" in t for t in texts), texts
+
     def test_marshals_all_capture_params(self):
         conn = FakeConn(
             responses={

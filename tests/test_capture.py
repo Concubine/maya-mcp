@@ -298,7 +298,7 @@ def test_lighting_scene_sets_displayLights_all_and_restores_it(monkeypatch):
     fake.editor_state["displayLights"] = "default"
     fake.editor_state["shadows"] = False
     monkeypatch.setattr(capture, "_cmds", lambda: fake)
-    monkeypatch.setattr(capture, "_grab_pixels", lambda *a, **k: b"fakepng")
+    monkeypatch.setattr(capture, "_grab_pixels", lambda *a, **k: (b"fakepng", {"blank": False, "unavailable_reason": None}))
 
     capture.capture_viewport({
         "angles": ["front"], "lighting": "scene", "shadows": True,
@@ -458,7 +458,7 @@ class TestIconHiding:
     ):
         cmds = FakeCaptureCmds()
         monkeypatch.setattr(capture, "_cmds", lambda: cmds)
-        monkeypatch.setattr(capture, "_grab_pixels", lambda *a, **k: b"fakepng")
+        monkeypatch.setattr(capture, "_grab_pixels", lambda *a, **k: (b"fakepng", {"blank": False, "unavailable_reason": None}))
 
         capture._capture_one(
             "current", "smoothShaded", True, "beauty", None, True, 256
@@ -488,7 +488,7 @@ class TestIconHiding:
     def test_result_carries_resolved_long_camera_name(self, monkeypatch):
         cmds = FakeCaptureCmds()
         monkeypatch.setattr(capture, "_cmds", lambda: cmds)
-        monkeypatch.setattr(capture, "_grab_pixels", lambda *a, **k: b"fakepng")
+        monkeypatch.setattr(capture, "_grab_pixels", lambda *a, **k: (b"fakepng", {"blank": False, "unavailable_reason": None}))
 
         shot = capture._capture_one(
             "current", "smoothShaded", True, "beauty", None, True, 256
@@ -506,7 +506,7 @@ class TestTempCamera:
     def test_temp_camera_created_then_renamed_not_named_kwarg(self, monkeypatch):
         cmds = FakeCaptureCmds()
         monkeypatch.setattr(capture, "_cmds", lambda: cmds)
-        monkeypatch.setattr(capture, "_grab_pixels", lambda *a, **k: b"fakepng")
+        monkeypatch.setattr(capture, "_grab_pixels", lambda *a, **k: (b"fakepng", {"blank": False, "unavailable_reason": None}))
 
         shot = capture._capture_one(
             "front", "smoothShaded", True, "beauty", None, True, 256
@@ -526,7 +526,7 @@ class TestTempCamera:
         cmds = FakeCaptureCmds()
         cmds.ambiguous_name = "mayaMcpTempCam"
         monkeypatch.setattr(capture, "_cmds", lambda: cmds)
-        monkeypatch.setattr(capture, "_grab_pixels", lambda *a, **k: b"fakepng")
+        monkeypatch.setattr(capture, "_grab_pixels", lambda *a, **k: (b"fakepng", {"blank": False, "unavailable_reason": None}))
 
         shot = capture._capture_one(
             "front", "smoothShaded", True, "beauty", None, True, 256
@@ -763,3 +763,121 @@ class TestCaptureViewportTarget:
         )
         with pytest.raises(HandlerError, match="target"):
             capture.capture_viewport({"target": [1, 2]})
+
+
+class TestBlankFrameIsNamed:
+    """#765: a picture of nothing came back with a success status.
+
+    The measured shape: every pixel transparent, RGB intact, so the frame
+    composited to flat white in any viewer while the handler reported nothing
+    at all. A live gate passed on it. These pin the reporting, not the cause -
+    the cause was never reproduced on a fresh Maya, which is exactly why the
+    report has to exist.
+    """
+
+    def _shot(self, blank, reason=None):
+        return {"png_b64": "ZmFrZQ==", "camera_position": [0, 0, 10],
+                "camera_rotation": [0, 0, 0], "camera": "|cam",
+                "blank": blank, "blank_unmeasurable": reason}
+
+    def test_a_blank_frame_is_named_in_warnings(self, monkeypatch):
+        monkeypatch.setattr(capture, "_capture_one",
+                            lambda *a, **k: self._shot(True))
+        result = capture.capture_viewport({"angles": ["front"]})
+        assert len(result["warnings"]) == 1
+        assert "BLANK" in result["warnings"][0]
+        assert "front" in result["warnings"][0]
+        # and the frame is still RETURNED - an empty scene is a legal request,
+        # so this names the frame rather than refusing the call
+        assert result["images"][0]["png_b64"] == "ZmFrZQ=="
+        assert result["images"][0]["blank"] is True
+
+    def test_a_drawn_frame_warns_about_nothing(self, monkeypatch):
+        monkeypatch.setattr(capture, "_capture_one",
+                            lambda *a, **k: self._shot(False))
+        result = capture.capture_viewport({"angles": ["front", "side"]})
+        assert result["warnings"] == []
+        assert all(img["blank"] is False for img in result["images"])
+
+    def test_only_the_blank_angles_are_named(self, monkeypatch):
+        shots = iter([self._shot(False), self._shot(True), self._shot(False)])
+        monkeypatch.setattr(capture, "_capture_one",
+                            lambda *a, **k: next(shots))
+        result = capture.capture_viewport(
+            {"angles": ["front", "side", "top"]})
+        assert len(result["warnings"]) == 1
+        assert "side" in result["warnings"][0]
+
+    def test_an_unmeasurable_frame_says_so_rather_than_passing(
+        self, monkeypatch
+    ):
+        # "I did not check" and "I checked and it is fine" must not look
+        # alike - silence is what this whole ticket is about.
+        monkeypatch.setattr(
+            capture, "_capture_one",
+            lambda *a, **k: self._shot(None, "ValueError: 16-bit"))
+        result = capture.capture_viewport({"angles": ["front"]})
+        assert len(result["warnings"]) == 1
+        assert "could not be measured" in result["warnings"][0]
+        assert "16-bit" in result["warnings"][0]
+
+    def test_a_turntable_names_its_blank_cells_too(self, monkeypatch):
+        # capture_turntable shares _capture_one, and a blank cell in a contact
+        # sheet reads as "that angle looks wrong", not "that angle drew
+        # nothing".
+        shots = iter([self._shot(True), self._shot(False)])
+        monkeypatch.setattr(capture, "_capture_one",
+                            lambda *a, **k: next(shots))
+        result = capture.capture_turntable({"n_frames": 2})
+        assert len(result["warnings"]) == 1
+        assert "azimuth 0" in result["warnings"][0]
+        assert [img["blank"] for img in result["images"]] == [True, False]
+
+
+class TestUnrealizedWindow:
+    """#765's cause: a main window that was never shown draws nothing.
+
+    Measured on a freshly launched Maya - 0 opaque pixels before `show()`,
+    9604 immediately after, on the identical scene and camera. These tests
+    can only pin the behaviour OUTSIDE Maya; the fix firing for real is
+    evals/capture_blank_live.py claim 1, which needs a Maya that has never
+    been looked at.
+    """
+
+    def test_outside_maya_it_does_nothing_rather_than_raising(self):
+        # No maya.OpenMayaUI to import here. A capture must never fail
+        # because the window check could not run - the blank report
+        # downstream is the backstop.
+        assert capture.ensure_viewport_realized() is None
+
+    def test_capture_viewport_survives_a_window_check_that_explodes(
+        self, monkeypatch
+    ):
+        def boom():
+            raise RuntimeError("no Qt in this build")
+
+        monkeypatch.setattr(capture, "ensure_viewport_realized", boom)
+        monkeypatch.setattr(
+            capture, "_capture_one",
+            lambda *a, **k: {"png_b64": "ZmFrZQ==", "camera_position": [0, 0, 1],
+                             "camera_rotation": [0, 0, 0], "camera": "|cam",
+                             "blank": False, "blank_unmeasurable": None})
+        with pytest.raises(RuntimeError):
+            capture.capture_viewport({"angles": ["front"]})
+
+    def test_the_note_is_reported_when_the_window_had_to_be_shown(
+        self, monkeypatch
+    ):
+        # Making a window appear is a visible side effect, and this tool's
+        # contract is that a capture has none - so it is said out loud.
+        monkeypatch.setattr(capture, "ensure_viewport_realized",
+                            lambda: "showed the window")
+        monkeypatch.setattr(
+            capture, "_capture_one",
+            lambda *a, **k: {"png_b64": "ZmFrZQ==", "camera_position": [0, 0, 1],
+                             "camera_rotation": [0, 0, 0], "camera": "|cam",
+                             "blank": False, "blank_unmeasurable": None})
+        result = capture.capture_viewport({"angles": ["front"]})
+        assert result["warnings"] == ["showed the window"]
+        turn = capture.capture_turntable({"n_frames": 2})
+        assert turn["warnings"] == ["showed the window"]

@@ -384,6 +384,11 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         content.append(
             "camera_positions: " + json.dumps(result.get("camera_positions", []))
         )
+        # A frame of nothing is a valid PNG and a success status. Saying so is
+        # the whole point of measuring it (#765) - and a warning the handler
+        # emits but this wrapper never reads is a warning nobody sees (#757).
+        for warning in result.get("warnings", []):
+            content.append("note: " + warning)
         wrote = _write_frames(
             out_path, [s["angle"] for s in shots],
             [base64.b64decode(s["png_b64"]) for s in shots],
@@ -451,6 +456,11 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 json.dumps([s["azimuth"] for s in result.get("images", [])]),
             ),
         ]
+        # Same reason as maya_capture_viewport: a blank cell in a contact
+        # sheet reads as "that angle looks wrong", not "that angle drew
+        # nothing" (#765).
+        for warning in result.get("warnings", []):
+            content.append("note: " + warning)
         wrote = _write_frames(out_path, ["sheet"], [sheet])
         if wrote:
             content.append(wrote)

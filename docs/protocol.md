@@ -75,7 +75,7 @@ Failure — tracebacks are sacred, never truncated:
 | `execute_python` | `{ code, timeout_s?, risky? }` | `{ stdout, stderr, result_repr, traceback, namespace_keys, checkpoint? }` |
 | `reset_namespace` | `{}` | `{ reset: true }` |
 | `get_scene_graph` | `{ filter?, max_objects?, cursor? }` | `{ objects: [...], total, cursor }` |
-| `capture_viewport` | `{ angles?, shading?, wireframe_overlay?, buffer?, isolate?, target?, frame_all?, resolution? }` | `{ images: [{angle, png_b64}], camera_positions: [...] }` |
+| `capture_viewport` | `{ angles?, shading?, wireframe_overlay?, buffer?, isolate?, target?, frame_all?, resolution? }` | `{ images: [{angle, png_b64, blank}], camera_positions: [...], warnings }` |
 
 `ping` answers two questions a caller cannot answer for itself: `plugin` says
 which *code* is live (feed it to `version.compare`), `process` says which
@@ -198,7 +198,7 @@ Perception:
 | cmd | params | result |
 |---|---|---|
 | `get_object_info` | `{ name, include? }` | `{ name, transform?, mesh_stats?, uvs?, shading?, history? }` |
-| `capture_turntable` | `{ target?, n_frames?, resolution?, shading?, lighting?, shadows? }` | `{ images: [{index, azimuth, png_b64}], n_frames }` |
+| `capture_turntable` | `{ target?, n_frames?, resolution?, shading?, lighting?, shadows? }` | `{ images: [{index, azimuth, png_b64, blank}], n_frames, warnings }` |
 
 Lighting and materials:
 
@@ -213,6 +213,20 @@ Lighting and materials:
 | cmd | params | result |
 |---|---|---|
 | `render_scene` | `{ angles?, renderer?, resolution?, isolate?, target?, zoom?, relight?, samples?, fallback_light? }` | `{ images: [{angle, png_b64}], camera_positions: [{angle, label, position, rotation, camera, near_clip}], renderer, samples, fallback_light, warnings }` |
+
+### A frame that draws nothing says so (#765)
+
+Every captured frame carries **`blank`**, and a blank one is named in **`warnings`**. The frame is still returned — capturing an empty scene is a legal request — but it is never handed back as a plain success again.
+
+The defect this closes: `capture_viewport` returned frames in which every pixel was transparent. Real RGB, zero alpha, so any viewer composited them to flat white while the tool reported success. A #669 live gate passed with one of those white squares in it, under its own instruction to "now LOOK at this".
+
+**Pixel variety cannot detect it** — the broken frames carried 13 distinct pixel values against 15 for a correct capture of a cube. Opaque coverage can: **0 against 18872**. That is the same measure `render_scene`'s blank guard has always used; `capture_viewport` simply never had one. `blank` is `null` when the frame could not be measured at all, and that is reported too — "I did not check" and "I checked and it is fine" must not look alike.
+
+**The cause, and the other half of the fix.** A Maya whose main window has **never been shown** draws nothing into an offscreen playblast — and every agent-launched Maya starts that way. `offScreen=True` does not save it and neither does the `M3dView.readColorBuffer` fallback. The discriminator is `isVisible()`, not `isMinimized()`: the blind session measured `minimized=False, visible=False`, which is why chasing minimisation led nowhere. One `show()` fixes it permanently for that process, and minimising the window again afterwards does not break it, because the surface stays valid once created.
+
+So `capture_viewport` and `capture_turntable` now show an unrealized window before capturing, and **say that they did** — making a window appear is a visible side effect, and a capture's contract is that it has none. It only ever fires on a window nobody is looking at: an interactive session has a visible window by definition.
+
+The blank report remains the backstop for every other cause, including ones nobody has met yet.
 
 `render_scene` is the second eye. `capture_viewport` reads the VP2 viewport, so
 it is fast, needs a mapped window, and draws transmission as plain transparency -
