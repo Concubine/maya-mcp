@@ -59,3 +59,7 @@ evals/fbx_fps_probe_out/
 # explicitly deleted-and-reasserted-gone) on every run of
 # evals/bake_probe_714.py
 evals/bake_probe_714_out/
+
+# #714 phase 2 Task 6 live gate: before/after renders and FBXs, rebuilt on
+# every run of evals/texbake_live.py --build
+evals/texbake_live/
