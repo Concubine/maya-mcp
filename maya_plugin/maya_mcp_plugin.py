@@ -218,6 +218,7 @@ def _build_handlers() -> Dict[str, Any]:
         "author_clip": clip.author_clip,
         "delete_clip": clip.delete_clip,
         "preview_clip": clip.preview_clip,
+        "measure_clip": clip.measure_clip,
     }
 
 

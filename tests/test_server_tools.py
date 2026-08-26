@@ -107,6 +107,7 @@ class TestRegistration:
             "maya_set_blendshape_weights",
             "maya_author_clip",
             "maya_delete_clip",
+            "maya_measure_clip",
             "maya_preview_clip",
         }
 
@@ -291,6 +292,39 @@ class TestRenderScene:
         result = run(mcp.call_tool("maya_render_scene", {"angles": ["front"]}))
         text = " ".join(c.text for c in result.content if c.type == "text")
         assert "note: closed the Arnold RenderView window" in text
+
+
+class TestMeasureClip:
+    def test_marshals_params_and_returns_typed_metrics(self):
+        conn = FakeConn(responses={"measure_clip": {
+            "name": "walk", "fps": 30, "frames_sampled": 31, "loop": True,
+            "rig_height": 1.0,
+            "thresholds": {"contact_height": 0.02, "contact_speed": 0.35,
+                           "slide_warn": 0.02},
+            "joints": {"L_foot": {
+                "path_length": 2.1, "peak_speed": 3.385,
+                "peak_speed_frame": 7, "max_accel": 53.16,
+                "max_accel_frame": 8, "height_range": [0.0, 0.11],
+                "loop_closure": 0.0002}},
+            "contacts": {"L_foot": {"runs": [[15, 30]], "max_slide": 0.0}},
+            "symmetry": [{"left": "L_foot", "right": "R_foot",
+                          "peak_speed_ratio": 1.0}],
+            "warnings": ["R_foot SLIDES 0.0973 through a plant"],
+        }})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool(
+            "maya_measure_clip", {"root": "|hips", "name": "walk"}))
+        assert result.is_error is False
+        assert conn.calls[0]["cmd"] == "measure_clip"
+        assert conn.calls[0]["params"] == {
+            "root": "|hips", "name": "walk", "joints": None,
+            "contact_joints": None,
+        }
+        out = result.structured_content
+        assert out["joints"]["L_foot"]["peak_speed_frame"] == 7
+        assert out["contacts"]["L_foot"]["runs"] == [[15, 30]]
+        # the slide warning REACHES the caller - #757's lesson, again
+        assert any("SLIDES" in w for w in out["warnings"])
 
 
 class TestCaptureViewport:
