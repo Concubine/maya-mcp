@@ -1004,7 +1004,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
 
         Nothing is changed unless every requested bake succeeds and is
         verified to have sampled something; a checkpoint is taken before the
-        rewire either way."""
+        rewire, EXCEPT on the no-op path where every requested slot is
+        already file-backed - then nothing is baked and checkpoint_id is
+        null (see skipped_file_backed)."""
         return BakeTexturesResult.model_validate(
             maya.request(
                 "bake_textures",

@@ -15,6 +15,7 @@ class FakeCmds:
         self.deleted = []
         self.fail_on = None
         self.uv_count = 4  # default: the mesh has UVs
+        self.raise_on_poly_evaluate = False
 
     def ls(self, name=None, long=False, **kw):
         return [o for o in self.objects if o == name or o.split("|")[-1] == name]
@@ -56,6 +57,8 @@ class FakeCmds:
             self.objects.discard(n)
 
     def polyEvaluate(self, node, uvcoord=False, **kw):
+        if self.raise_on_poly_evaluate:
+            raise RuntimeError("forced polyEvaluate failure")
         return self.uv_count if uvcoord else 0
 
 
@@ -157,6 +160,22 @@ def test_procedural_recipe_on_a_uv_less_mesh_warns_bake_will_refuse_it(monkeypat
         {"mesh": "|torso", "recipe": "noise_bump"}
     )
     assert any("no UVs" in w and "maya_uv_atlas" in w for w in result["warnings"])
+
+
+def test_uv_probe_raising_does_not_crash_an_already_succeeded_recipe(monkeypatch):
+    # Fix round 1: the no-UV check sits AFTER the recipe's own nodes already
+    # exist - a polyEvaluate that raises (a corrupt mesh, a stale reference)
+    # is a different problem from "no UVs" and must not crash a call whose
+    # texture was in fact applied. Skip the warning, not the result.
+    fake = FakeCmds()
+    fake.raise_on_poly_evaluate = True
+    monkeypatch.setattr(texture_recipes, "_cmds", lambda: fake)
+    result = texture_recipes.apply_texture_recipe(
+        {"mesh": "|torso", "recipe": "noise_bump"}
+    )
+    assert result["recipe"] == "noise_bump"
+    assert any("silently drops" in w for w in result["warnings"])
+    assert not any("no UVs" in w for w in result["warnings"])
 
 
 def test_the_file_texture_recipe_does_not_warn(monkeypatch):

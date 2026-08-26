@@ -153,7 +153,17 @@ def apply_texture_recipe(params: Dict[str, Any]) -> Dict[str, Any]:
             "exporter silently drops - maya_export_fbx reports it in "
             "textures.dropped_maps; maya_bake_textures converts it to a "
             "file texture that does survive")
-        if not (cmds.polyEvaluate(shape, uvcoord=True) or 0):
+        # The recipe's own nodes already exist by this point - a polyEvaluate
+        # that RAISES (a corrupt mesh, a stale reference) is a different
+        # problem from "no UVs" (texbake._uv_count draws the same
+        # distinction) and must not crash a call that already succeeded.
+        # Skip the warning, not the result; maya_bake_textures will still
+        # refuse accurately later if UVs really are missing.
+        try:
+            has_uvs = bool(cmds.polyEvaluate(shape, uvcoord=True) or 0)
+        except Exception:
+            has_uvs = True
+        if not has_uvs:
             warnings.append(
                 "this mesh has no UVs, so maya_bake_textures will refuse it "
                 "- maya_uv_atlas creates a layout (project='box' is enough "
