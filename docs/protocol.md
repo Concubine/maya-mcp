@@ -779,3 +779,25 @@ and the same string is echoed into `warnings`. A set `unavailable_reason`
 means texture verification did **not** happen for this export — a
 successful export carrying one has reported strictly less than a clean
 one.
+
+`textures` itself is `null` when the export touches no material claims, no
+Texture/Video records, and the claim walk did not fail — an untextured
+export reports nothing here rather than an empty block. When present, it
+carries six fields: `texture_records`/`video_records` (raw counts read back
+from the file), `file_maps`/`dropped_maps` (the per-claim detail behind the
+paragraph above), `unclaimed_records` (image basenames present in the
+file's own Texture/Video records that no scene claim maps to — a file node
+the exported selection never reached), and `unavailable_reason`.
+
+`apply_texture_recipe` warns at authoring time, not only at export: any
+recipe other than `file_texture` returns a `warnings` entry stating that
+the network it just built has no FBX representation and naming
+`maya_export_fbx`'s `textures.dropped_maps` as where that loss will
+surface — so a look built procedurally is flagged before export is ever
+attempted, not only after.
+
+There is no `maya_bake_textures` tool yet. #714 phase 1 is byte-honest
+reporting only (this section); converting a procedural network into a
+file texture at export time is an unimplemented phase 2, gated on the GO
+its own probes recorded (`evals/bake_probe_714.py`) — nothing here should
+be read as that tool existing.
