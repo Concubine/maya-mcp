@@ -73,16 +73,66 @@ lpoly = cmds.nurbsToPoly(lofted[0], constructionHistory=False, format=2,
 probe("loft_poly_faces", cmds.polyEvaluate(lpoly[0], face=True))
 
 # --- (d) sweepMeshFromCurve / sweep operations --------------------------
+import os
+import maya.mel as mel  # noqa: E402
+
 cmds.file(new=True, force=True)
 path = cmds.curve(ep=[(0, 0, 0), (0, 1, 0.3), (0, 2, 0.2), (0, 3, 0.8)],
                   degree=3)
-# Check what sweep commands are available
-probe("sweep_available_in_cmds", [c for c in dir(cmds) if 'sweep' in c.lower()])
 
-# Try sweepMeshFromCurve first (expected from brief)
+# Check what sweep commands are available before loading
+probe("sweep_available_in_cmds_before_load", [c for c in dir(cmds) if 'sweep' in c.lower()])
+
+# Check plugin paths for sweep plugins
+plugin_paths = cmds.pluginInfo(query=True, listPluginsPath=True) or []
+sweep_plugin_candidates = [p for p in plugin_paths if "sweep" in p.lower()]
+probe("sweep_plugin_paths_count", len(plugin_paths))
+probe("sweep_plugin_candidates_from_path", sweep_plugin_candidates)
+
+# List sweep plugins in the plugin directories
+sweep_plugins_in_dirs = []
+for ppath in plugin_paths:
+    if os.path.isdir(ppath):
+        try:
+            files = os.listdir(ppath)
+            sweep_files = [f for f in files if "sweep" in f.lower()]
+            if sweep_files:
+                sweep_plugins_in_dirs.extend(sweep_files)
+        except:
+            pass
+probe("sweep_plugins_in_plugin_dirs", sweep_plugins_in_dirs)
+
+# Try to load sweep plugin
+plugin_loaded = False
+loaded_plugin_name = None
+for plugin_attempt in ("sweep", "sweep.mll", "sweepMesh", "sweepMesh.mll"):
+    try:
+        cmds.loadPlugin(plugin_attempt, quiet=True)
+        plugin_loaded = True
+        loaded_plugin_name = plugin_attempt
+        probe("sweep_plugin_loaded", plugin_attempt)
+        break
+    except Exception as e:
+        pass
+
+if not plugin_loaded:
+    probe("sweep_plugin_load_status", "failed to load any sweep plugin variant")
+
+# Check if sweepMeshFromCurve is now available via cmds
+probe("sweepMeshFromCurve_in_cmds_after_load", hasattr(cmds, "sweepMeshFromCurve"))
+
+# Check via mel
+try:
+    mel_exists = mel.eval('exists "sweepMeshFromCurve"')
+    probe("sweepMeshFromCurve_in_mel", mel_exists)
+except Exception as e:
+    probe("sweepMeshFromCurve_mel_check_error", str(e))
+
+# Try sweepMeshFromCurve via cmds (may be loaded now)
 try:
     sweep = cmds.sweepMeshFromCurve(path)
     probe("sweepMeshFromCurve_works", True)
+    probe("sweep_requires_plugin", loaded_plugin_name)
     probe("sweep_return", sweep)
     probe("sweep_meshes", cmds.ls(type="mesh", long=True))
     creators = cmds.ls(type="sweepMeshCreator")
@@ -100,7 +150,31 @@ try:
             except Exception as exc:  # noqa: BLE001 - compound attrs print as errors
                 probe("sweep_attr %s" % a, "UNREADABLE: %s" % exc)
 except AttributeError as e:
-    probe("sweepMeshFromCurve_available", False)
-    probe("sweepMeshFromCurve_error", str(e))
+    probe("sweepMeshFromCurve_available_after_load", False)
+    probe("sweepMeshFromCurve_error_after_load", str(e))
+    # Try via mel.eval if cmds still doesn't have it
+    try:
+        sweep_mel_result = mel.eval('sweepMeshFromCurve %s' % path)
+        probe("sweepMeshFromCurve_via_mel_works", True)
+        probe("sweep_requires_plugin", loaded_plugin_name)
+        probe("sweep_mel_result", sweep_mel_result)
+        probe("sweep_meshes", cmds.ls(type="mesh", long=True))
+        creators = cmds.ls(type="sweepMeshCreator")
+        probe("sweep_creator_nodes", creators)
+        if creators:
+            attrs = cmds.listAttr(creators[0], keyable=False, hasData=True) or []
+            interesting = [a for a in attrs if any(
+                k in a.lower() for k in
+                ("profile", "taper", "twist", "scale", "poly", "precision",
+                 "segment", "interpolation", "sweep", "distance", "cap"))]
+            probe("sweep_creator_attrs", sorted(interesting))
+            for a in sorted(interesting):
+                try:
+                    probe("sweep_attr %s" % a, cmds.getAttr("%s.%s" % (creators[0], a)))
+                except Exception as exc:  # noqa: BLE001 - compound attrs print as errors
+                    probe("sweep_attr %s" % a, "UNREADABLE: %s" % exc)
+    except Exception as mel_e:
+        probe("sweepMeshFromCurve_unavailable_cmds_and_mel", "both failed")
+        probe("sweepMeshFromCurve_mel_error", str(mel_e))
 
 print("PROBE done")
