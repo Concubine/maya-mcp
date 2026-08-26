@@ -256,3 +256,73 @@ class TestFilterRoundTrip:
         path.write_bytes(png)
         with pytest.raises(ValueError, match="filter"):
             pngprobe.read_png(str(path))
+
+
+class TestOpacity:
+    """#765: the frame that measured "fine" and showed nothing.
+
+    The numbers in these tests are the measured ones. A broken viewport
+    capture of a cube carried 13 distinct pixel values; a correct capture of
+    the same cube carried 15. Distinctness cannot separate them. Opaque
+    coverage separates them absolutely: 0 against 18872.
+    """
+
+    def _rgba(self, path, rows):
+        return _png(path, rows, colour_type=6)
+
+    def test_a_frame_with_zero_alpha_everywhere_is_blank(self, tmp_path):
+        # Real RGB, no alpha anywhere - the exact shape of the #765 frames.
+        # A viewer composites this to flat white; a human calls it blank.
+        rows = [[(90, 90, 90, 0), (60, 60, 60, 0)],
+                [(30, 30, 30, 0), (200, 10, 10, 0)]]
+        out = pngprobe.opacity(self._rgba(tmp_path / "ghost.png", rows))
+        assert out["blank"] is True
+        assert out["unavailable_reason"] is None
+
+    def test_one_opaque_pixel_is_enough_to_not_be_blank(self, tmp_path):
+        rows = [[(0, 0, 0, 0), (0, 0, 0, 0)],
+                [(0, 0, 0, 0), (90, 90, 90, 255)]]
+        out = pngprobe.opacity(self._rgba(tmp_path / "speck.png", rows))
+        assert out["blank"] is False
+        assert out["opaque_found"] is True
+
+    def test_a_barely_visible_alpha_still_counts_as_background(self, tmp_path):
+        # The floor matches images.pixel_stats' so "blank" means one thing on
+        # both sides of the wire.
+        rows = [[(200, 200, 200, 8), (200, 200, 200, 3)]]
+        assert pngprobe.opacity(
+            self._rgba(tmp_path / "haze.png", rows))["blank"] is True
+
+    def test_a_subject_smaller_than_the_sample_grid_is_still_found(
+        self, tmp_path
+    ):
+        # The cheap pass samples every 4th row and column, so a single opaque
+        # pixel at an unsampled position must still be caught by the second,
+        # exhaustive pass - claiming a frame is blank is the expensive claim
+        # and is never made on a sample.
+        rows = [[(0, 0, 0, 0)] * 9 for _ in range(9)]
+        rows[5][6] = (255, 255, 255, 255)
+        out = pngprobe.opacity(self._rgba(tmp_path / "needle.png", rows))
+        assert out["blank"] is False
+
+    def test_an_image_without_alpha_falls_back_to_non_black(self, tmp_path):
+        # An RGB PNG has no alpha to go on; black is the background a capture
+        # leaves behind, the same fallback images.pixel_stats makes.
+        assert pngprobe.opacity(
+            _png(tmp_path / "black.png", [[(0, 0, 0), (0, 0, 0)]])
+        )["blank"] is True
+        assert pngprobe.opacity(
+            _png(tmp_path / "lit.png", [[(0, 0, 0), (1, 0, 0)]])
+        )["blank"] is False
+
+    def test_an_unreadable_file_reports_rather_than_raising(self, tmp_path):
+        path = tmp_path / "junk.png"
+        path.write_bytes(b"not a png at all")
+        out = pngprobe.opacity(str(path))
+        assert out["blank"] is None
+        assert out["unavailable_reason"]
+
+    def test_a_missing_file_reports_rather_than_raising(self, tmp_path):
+        out = pngprobe.opacity(str(tmp_path / "nope.png"))
+        assert out["blank"] is None
+        assert "no file" in out["unavailable_reason"]

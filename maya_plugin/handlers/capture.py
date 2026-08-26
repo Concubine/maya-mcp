@@ -21,7 +21,7 @@ import tempfile
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from ..dispatcher import HandlerError
-from . import naming
+from . import naming, pngprobe
 
 VALID_ANGLES = ("front", "side", "back", "top", "three_quarter", "current")
 VALID_SHADING = ("smoothShaded", "flatShaded", "wireframe", "textured")
@@ -145,6 +145,77 @@ def _names(params: Dict[str, Any], key: str, example: str) -> Optional[List[str]
     return value or None
 
 
+def ensure_viewport_realized() -> Optional[str]:
+    """Show Maya's main window if it has never been shown, and say so.
+
+    MEASURED, and it is the cause of #765: a Maya whose main window has not
+    been realized draws NOTHING into an offscreen playblast. Every pixel comes
+    back transparent - `offScreen=True` does not save it, and neither does the
+    M3dView fallback. One `show()` fixes it permanently for that process: the
+    same capture that returned 0 opaque pixels returns 9604 immediately after,
+    and MINIMISING the window again afterwards does not break it, because the
+    surface stays valid once created.
+
+    The discriminator is `isVisible()`, not `isMinimized()` - the blind
+    session measured minimized=False, visible=False, which is why chasing
+    minimisation first led nowhere.
+
+    This only ever fires on a window nobody is looking at, so it cannot
+    disturb an interactive session: a Maya somebody is using has a visible
+    window by definition. It is still REPORTED, because making a window
+    appear on someone's screen is a side effect and this tool's contract is
+    that it has none.
+
+    Returns the note to warn with, or None when nothing needed doing (which
+    includes "this Maya has no Qt to ask" - the blank check downstream is the
+    backstop for every cause this cannot see).
+    """
+    try:
+        from maya.OpenMayaUI import MQtUtil  # noqa: PLC0415 - Maya-only
+        from shiboken6 import wrapInstance  # noqa: PLC0415
+        from PySide6.QtWidgets import QWidget  # noqa: PLC0415
+
+        pointer = MQtUtil.mainWindow()
+        if pointer is None:
+            return None
+        window = wrapInstance(int(pointer), QWidget)
+        if window.isVisible():
+            return None
+        window.show()
+    except Exception:  # noqa: BLE001 - see docstring; never fail a capture
+        return None
+    return ("Maya's main window had never been shown, which makes the "
+            "viewport draw nothing into a capture (maya-mcp #765), so this "
+            "call showed it. That is a visible change to the screen and the "
+            "only one a capture makes.")
+
+
+def blank_warnings(shot: Dict[str, Any], label: str) -> List[str]:
+    """Say it out loud when a frame drew nothing (#765).
+
+    NOT a refusal. A capture of an empty scene is a legitimate request and
+    measures identically to a broken one - both are zero opaque pixels - so
+    the honest move is to name it and let the caller decide, the way
+    `render_sheet` names its blank cells. What is NOT acceptable is the old
+    behaviour: handing back a picture of nothing with a success status, which
+    is how a whole live gate came to pass on a white square.
+
+    A frame that could not be measured is reported too. "I did not check" and
+    "I checked and it is fine" are different answers and must not look alike.
+    """
+    if shot.get("blank") is True:
+        return ["%s came back BLANK - every pixel is transparent, so nothing "
+                "was drawn. The scene may be empty or the subject outside the "
+                "frame; if neither is true, the viewport itself drew nothing "
+                "(maya-mcp #765) and an offline `render_scene` will still "
+                "work. Do not judge anything from this frame." % label]
+    if shot.get("blank") is None:
+        return ["%s could not be measured for blankness (%s), so whether it "
+                "shows anything is unknown"
+                % (label, shot.get("blank_unmeasurable"))]
+    return []
+
+
 def capture_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
     angles = resolve_angles(params.get("angles"))
     shading = params.get("shading", "smoothShaded")
@@ -180,12 +251,15 @@ def capture_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
 
     images = []
     camera_positions = []
+    warnings: List[str] = [w for w in [ensure_viewport_realized()] if w]
     for angle in angles:
         shot = _capture_one(
             angle, shading, wireframe_overlay, buffer, isolate, frame_all, resolution,
             lighting, shadows, frame_on=target,
         )
-        images.append({"angle": angle, "png_b64": shot["png_b64"]})
+        images.append({"angle": angle, "png_b64": shot["png_b64"],
+                       "blank": shot.get("blank")})
+        warnings.extend(blank_warnings(shot, angle))
         camera_positions.append(
             {
                 "angle": angle,
@@ -194,7 +268,8 @@ def capture_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
                 "camera": shot["camera"],
             }
         )
-    return {"images": images, "camera_positions": camera_positions}
+    return {"images": images, "camera_positions": camera_positions,
+            "warnings": warnings}
 
 
 TURNTABLE_DEFAULT_FRAMES = 8
@@ -236,6 +311,7 @@ def capture_turntable(params: Dict[str, Any]) -> Dict[str, Any]:
     shadows = bool(params.get("shadows", False))
 
     images_out = []
+    warnings: List[str] = [w for w in [ensure_viewport_realized()] if w]
     for i in range(n_frames):
         azimuth = 360.0 * i / n_frames
         shot = _capture_one(
@@ -243,9 +319,11 @@ def capture_turntable(params: Dict[str, Any]) -> Dict[str, Any]:
             resolution, lighting, shadows,
         )
         images_out.append(
-            {"index": i, "azimuth": azimuth, "png_b64": shot["png_b64"]}
+            {"index": i, "azimuth": azimuth, "png_b64": shot["png_b64"],
+             "blank": shot.get("blank")}
         )
-    return {"images": images_out, "n_frames": n_frames}
+        warnings.extend(blank_warnings(shot, "azimuth %.0f" % azimuth))
+    return {"images": images_out, "n_frames": n_frames, "warnings": warnings}
 
 
 capture_turntable.no_undo_chunk = True
@@ -585,7 +663,7 @@ def _capture_one(
             # materials.
             cmds.refresh(force=True)
 
-        png_bytes = _grab_pixels(cmds, panel, resolution)
+        png_bytes, opacity = _grab_pixels(cmds, panel, resolution)
 
         pos = cmds.getAttr(capture_cam + ".translate")[0]
         rot = cmds.getAttr(capture_cam + ".rotate")[0]
@@ -599,6 +677,8 @@ def _capture_one(
             "camera_position": list(pos),
             "camera_rotation": list(rot),
             "camera": camera_long,
+            "blank": opacity.get("blank"),
+            "blank_unmeasurable": opacity.get("unavailable_reason"),
         }
     finally:
         state.restore()
@@ -613,8 +693,16 @@ def _capture_one(
             pass
 
 
-def _grab_pixels(cmds, panel: str, resolution: int) -> bytes:
-    """Playblast a single frame offscreen; fall back to M3dView.readColorBuffer."""
+def _grab_pixels(cmds, panel: str, resolution: int):
+    """Playblast a single frame offscreen; fall back to M3dView.readColorBuffer.
+
+    Returns the PNG bytes AND what `pngprobe.opacity` makes of them. The
+    measurement happens here because it is the only place the frame exists as
+    a file, and it happens at ALL because a playblast can succeed, write a
+    valid PNG, and still have drawn nothing (#765): the guard below only
+    catches the case where no file appears, which is the failure that never
+    actually happened.
+    """
     fd, path = tempfile.mkstemp(suffix=".png", prefix="maya_mcp_")
     os.close(fd)
     os.unlink(path)  # playblast wants to create the file itself
@@ -643,8 +731,9 @@ def _grab_pixels(cmds, panel: str, resolution: int) -> bytes:
                 "viewport capture produced no image (playblast and M3dView both failed)",
                 hint="make sure a viewport is visible and not minimized, then retry",
             )
+        opacity = pngprobe.opacity(path)
         with open(path, "rb") as fh:
-            return fh.read()
+            return fh.read(), opacity
     finally:
         if os.path.exists(path):
             os.unlink(path)

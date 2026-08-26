@@ -178,3 +178,74 @@ def uniformity(path) -> Dict[str, Any]:
     distinct = len(seen)
     return {"pixel_count": scanned, "distinct_values": distinct,
             "non_uniform": distinct > 1, "unavailable_reason": None}
+
+
+# A pixel this transparent is background, not subject. Matches the alpha floor
+# the MCP server's own `images.pixel_stats` uses, so "blank" means one thing
+# on both sides of the wire.
+_ALPHA_FLOOR = 8
+# Rows and columns taken by the cheap first pass. A subject covering 0.1% of
+# the frame still lands ~65 samples in a 768px capture, so the fast pass finds
+# anything a viewer could see; anything it misses gets the exhaustive pass.
+_SAMPLE_STEP = 4
+
+
+def _opaque_in_row(row, stride: int, step: int) -> bool:
+    if stride == 4:
+        return any(row[x * stride + 3] > _ALPHA_FLOOR
+                   for x in range(0, len(row) // stride, step))
+    # No alpha channel to go on: black is the background a capture leaves
+    # behind, the same fallback images.pixel_stats makes.
+    return any(any(row[x * stride:x * stride + 3])
+               for x in range(0, len(row) // stride, step))
+
+
+def opacity(path) -> Dict[str, Any]:
+    """Did this frame draw ANYTHING, or is it a picture of nothing?
+
+    The failure this exists to catch, measured on maya-mcp #765: a viewport
+    playblast that returns success and writes a valid PNG carrying real RGB
+    but an alpha channel that is zero EVERYWHERE. Every pixel is transparent,
+    so a viewer composites it to flat white and a human reads it as "blank",
+    while pixel-value tests see plenty of variety - the broken frames measured
+    13 distinct values against 15 for a correct capture of a cube, so
+    `uniformity` cannot tell them apart. Opaque coverage can: 0 against 18872.
+
+    Never raises; an unreadable file reports blank=None with a reason, so a
+    caller says "could not measure this frame" rather than either crashing or
+    claiming the frame is fine.
+
+    Two passes, because the cheap answer is only trustworthy in one direction.
+    A sampled scan proves NOT-blank as soon as it hits one opaque pixel, which
+    is the common case and costs almost nothing. Claiming a frame IS blank is
+    the expensive claim, so it is only made after walking every pixel.
+    """
+    path = str(path)
+    if not os.path.isfile(path):
+        return {"blank": None, "opaque_found": False, "scanned": 0,
+                "unavailable_reason": "no file at %s" % path}
+    try:
+        width, height, _bit_depth, _colour_type, stride, idat = (
+            _read_header_and_idat(path))
+        raw = zlib.decompress(idat)
+    except Exception as exc:  # noqa: BLE001 - any read failure is reportable
+        return {"blank": None, "opaque_found": False, "scanned": 0,
+                "unavailable_reason": "%s: %s" % (type(exc).__name__, exc)}
+
+    for step in (_SAMPLE_STEP, 1):
+        scanned = 0
+        try:
+            for index, row in enumerate(
+                _unfilter_rows(raw, width, height, stride)
+            ):
+                if step > 1 and index % step:
+                    continue
+                scanned += len(row) // stride // step
+                if _opaque_in_row(row, stride, step):
+                    return {"blank": False, "opaque_found": True,
+                            "scanned": scanned, "unavailable_reason": None}
+        except Exception as exc:  # noqa: BLE001 - any read failure is reportable
+            return {"blank": None, "opaque_found": False, "scanned": scanned,
+                    "unavailable_reason": "%s: %s" % (type(exc).__name__, exc)}
+    return {"blank": True, "opaque_found": False, "scanned": width * height,
+            "unavailable_reason": None}
