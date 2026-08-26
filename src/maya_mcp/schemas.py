@@ -1472,3 +1472,74 @@ class AuthorPhysicsResult(BaseModel):
     total_volume: float = Field(
         description="Sum of measured |volume| over every body in this call.")
     warnings: List[str] = Field(default_factory=list)
+
+
+class ClipJointKinematics(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    path_length: float = Field(description="Total world distance travelled.")
+    peak_speed: float = Field(description="Highest per-frame speed, units/s.")
+    peak_speed_frame: int = Field(description="Frame index of that peak.")
+    max_accel: float = Field(description="Largest |dv|/dt in the clip.")
+    max_accel_frame: int = Field(description="Frame index of that spike.")
+    height_range: List[float] = Field(description="[lowest, highest] world Y.")
+    loop_closure: float = Field(
+        description="World distance between the first and last frame - "
+                    "near zero for a clip that loops cleanly."
+    )
+
+
+class ClipContact(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    runs: List[List[int]] = Field(
+        description="Inclusive [first, last] frame spans where this joint "
+                    "reads as planted (near its lowest point and nearly "
+                    "still). Inferred, not declared."
+    )
+    max_slide: float = Field(
+        description="Furthest any single plant wanders in the ground plane. "
+                    "A planted foot should hold; this is the number that "
+                    "says whether it did."
+    )
+
+
+class ClipSymmetry(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    left: str
+    right: str
+    peak_speed_ratio: float = Field(
+        description="Larger peak over smaller: 1.0 = symmetric effort. The "
+                    "#773 probe measured a popped key as 2.4 against its "
+                    "mirror limb."
+    )
+
+
+class MeasureClipResult(BaseModel):
+    """Motion metrics for one clip (#773).
+
+    The numbers behind preview_clip's pictures. Unambiguous defects (a foot
+    sliding through its plant) arrive as warnings; everything else is raw
+    numbers with worst-frame indices, because 'too fast' is the caller's
+    judgement, not the tool's.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    fps: int
+    frames_sampled: int
+    loop: bool
+    rig_height: float = Field(
+        description="World-Y span of the rig at the clip's first frame - "
+                    "the scale every relative threshold hangs off."
+    )
+    thresholds: dict = Field(
+        description="The derived absolute thresholds used, so every verdict "
+                    "can be re-derived from the numbers."
+    )
+    joints: Dict[str, ClipJointKinematics]
+    contacts: Dict[str, ClipContact]
+    symmetry: List[ClipSymmetry] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)

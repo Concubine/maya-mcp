@@ -579,6 +579,21 @@ reports each channel's name and delta payload as read from the bytes.
 |---|---|---|
 | `author_clip` | `{ root, name, fps=30, keys: [{time_s, rotations?, blend_weights?, root_position?}], interpolation, loop, timeout_s=120 }` | `{ root, clip, fps, duration_s, frames, keyed_joints, keyed_weight_channels, root_position_keyed, interpolation, loop, start_frame, end_frame, clips, padded_channels, held_channels, back_filled, replaced, per_key, warnings }` |
 | `preview_clip` | `{ root, name, angle?, every_nth?, resolution?, renderer?, zoom? }` | `{ clip, fps, start_frame, end_frame, frames, images, warnings, ... }` |
+| `measure_clip` | `{ root, name?, joints?, contact_joints? }` | `{ name, fps, frames_sampled, loop, rig_height, thresholds, joints: {kinematics...}, contacts: {runs, max_slide}, symmetry, warnings }` |
+
+### Motion has numbers now (#773)
+
+`preview_clip` is the eye; `measure_clip` is the ruler. It samples every joint's world position at every frame of one clip and reports what a measured probe proved **discriminates** between a good clip and a deliberately broken one (a drifting plant + a popped key, on a real rig):
+
+* **Per-joint kinematics** — path length, peak speed and max |accel| with **worst-frame indices**, height range, loop closure. The probe's popped limb read 8.05 peak against its clean mirror's 3.39.
+* **Contact and slide** — plant runs are *inferred* (near the joint's own lowest point AND slower than 35% of rig height per second; the clip format declares no plants), and each run's **net ground-plane drift** is measured. The broken plant slid 0.097 on a 1.0-height rig; the clean one exactly 0.0. A slide past 2% of rig height is named in `warnings` — the one verdict unambiguous enough to be the tool's rather than the caller's.
+* **Left/right symmetry** — peak-speed ratio per `L_`/`R_` joint pair: 1.0 clean, 2.4 with the popped key. This is the pop detector, and it exists because the obvious alternative measurably failed: an accel-spike-to-median ratio scored the GOOD clip *higher* (20.0 vs 10.3), since a clip with a rest phase has a near-zero median. Raw numbers plus the mirror comparison discriminate; self-normalised ratios do not.
+
+Thresholds are all **relative to `rig_height`** and reported back in `thresholds`, so every verdict can be re-derived. The contact speed limit is deliberately never a fraction of the joint's own peak: a foot that does nothing but drift has a peak that IS the drift, and a self-relative threshold would grant it zero contact frames and hide the exact defect this exists to catch.
+
+`name` may be omitted when the rig carries exactly one clip. `contact_joints` defaults to the **leaf** joints — the ends of chains are what touches the ground. Perception only: no checkpoint, current time restored.
+
+What this deliberately is not: a score. Whether a peak speed is *too fast* is the caller's judgement; the tool's job is that nothing about the motion is invisible any more.
 | `delete_clip` | `{ root, name? }` | `{ root, clip, clips, deleted_curves, reaped_channels, max_displacement, warnings }` |
 
 `author_clip` keys the phase-1 pose map over time. **One rig carries as many

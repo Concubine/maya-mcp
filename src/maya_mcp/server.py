@@ -51,6 +51,7 @@ from .schemas import (
     ExportFbxResult,
     LightingResult,
     MaterialResult,
+    MeasureClipResult,
     NameResult,
     PrimitiveResult,
     NewSceneResult,
@@ -2458,6 +2459,46 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         return DeleteClipResult.model_validate(
             maya.request("delete_clip", {"root": root, "name": name},
                          timeout_s=BOOL_TIMEOUT_S)
+        )
+
+    @mcp.tool(
+        title="Measure clip motion",
+        annotations=ToolAnnotations(
+            read_only_hint=True, destructive_hint=False, idempotent_hint=True
+        ),
+    )
+    def maya_measure_clip(
+        root: Annotated[str, Field(description="Skeleton root joint.")],
+        name: Annotated[Optional[str], Field(description=(
+            "Which clip to measure. May be omitted when the rig carries "
+            "exactly one; otherwise refused with the names present."
+        ))] = None,
+        joints: Annotated[Optional[List[str]], Field(description=(
+            "Joints to report kinematics for; defaults to the whole "
+            "hierarchy under root."
+        ))] = None,
+        contact_joints: Annotated[Optional[List[str]], Field(description=(
+            "Joints whose ground contact and slide are measured; defaults "
+            "to the LEAF joints - the ends of chains are what touches the "
+            "ground."
+        ))] = None,
+    ) -> MeasureClipResult:
+        """Motion metrics for one clip - the numbers behind maya_preview_clip's
+        pictures (#773).
+
+        Samples every joint's world position at every frame and reports
+        per-joint kinematics (peak speed / max accel with worst-frame
+        indices), inferred contact runs and their slide, left/right
+        peak-speed symmetry, and loop closure. A foot that slides through
+        its plant is named in warnings; judgement-call numbers are reported
+        raw. Perception only - nothing in the scene is touched."""
+        return MeasureClipResult.model_validate(
+            maya.request(
+                "measure_clip",
+                {"root": root, "name": name, "joints": joints,
+                 "contact_joints": contact_joints},
+                timeout_s=SCENE_TIMEOUT_S,
+            )
         )
 
     @mcp.tool(

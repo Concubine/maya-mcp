@@ -4844,3 +4844,120 @@ class TestBakeTexturesInMaya:
         assert entry["deleted_nodes"] == [ramp]
         assert not cmds.objExists(ramp)
         assert not any(ramp in w for w in out["warnings"])
+
+
+class TestMeasureClipInMaya:
+    """measure_clip (#773): the metrics discriminate on a REAL rig.
+
+    The fixture reproduces the #773 probe: a two-leg walk-in-place clip and
+    the same clip with a drifting plant and a popped key. The probe measured
+    slide 0.0 vs 0.097 and peak speed 3.39 vs 8.05 on this exact shape.
+    NOTE the bend axis: create_skeleton auto-orients local X down the bone,
+    so legs swing on rotateY - [rx,0,0] keys would silently twist instead
+    (the probe's own first fixture made that mistake).
+    """
+
+    JOINTS = [
+        {"name": "hips", "position": [0, 1.0, 0]},
+        {"name": "L_thigh", "parent": "hips", "position": [0.12, 0.95, 0]},
+        {"name": "L_shin", "parent": "L_thigh", "position": [0.12, 0.5, 0]},
+        {"name": "L_foot", "parent": "L_shin", "position": [0.12, 0.08, 0.05]},
+        {"name": "R_thigh", "parent": "hips", "position": [-0.12, 0.95, 0]},
+        {"name": "R_shin", "parent": "R_thigh", "position": [-0.12, 0.5, 0]},
+        {"name": "R_foot", "parent": "R_shin", "position": [-0.12, 0.08, 0.05]},
+    ]
+
+    @staticmethod
+    def _keys(broken):
+        import math as m
+        out = []
+        for i in range(11):
+            t = i / 10.0
+
+            def leg(sw_start):
+                ph = (t - sw_start) % 1.0
+                if ph < 0.5:
+                    s = m.sin(ph / 0.5 * m.pi)
+                    return (-25.0 * s, 35.0 * s)
+                return (0.0, 0.0)
+
+            lt, ls = leg(0.0)
+            rt, rs = leg(0.5)
+            if broken and t < 0.5:
+                rt = 8.0 * (t / 0.5)  # the plant drifts instead of holding
+            out.append({"time_s": t, "rotations": {
+                "L_thigh": [0, lt, 0], "L_shin": [0, ls, 0],
+                "R_thigh": [0, rt, 0], "R_shin": [0, rs, 0]}})
+        if broken:
+            out[3]["rotations"]["L_thigh"][1] += 40.0  # the pop
+        return out
+
+    def _rig_with(self, name, broken):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import clip, rigging
+
+        cmds.file(new=True, force=True)
+        root = rigging.create_skeleton({"joints": self.JOINTS})["root"]
+        clip.author_clip({"root": root, "name": name, "fps": 30,
+                          "interpolation": "smooth", "loop": True,
+                          "keys": self._keys(broken)})
+        return root
+
+    def test_a_clean_walk_measures_clean(self):
+        from maya_plugin.handlers import clip
+
+        root = self._rig_with("walk", broken=False)
+        out = clip.measure_clip({"root": root})  # single clip: name optional
+        assert out["name"] == "walk"
+        assert out["frames_sampled"] == 31
+        assert out["warnings"] == []
+        # both feet planted half the cycle, sliding nowhere
+        for foot in ("L_foot", "R_foot"):
+            assert out["contacts"][foot]["runs"], foot
+            assert out["contacts"][foot]["max_slide"] < 1e-4, foot
+        # symmetric effort, and the pairing found both mirrored chains
+        pairs = {(s["left"], s["right"]) for s in out["symmetry"]}
+        assert ("L_foot", "R_foot") in pairs
+        assert all(s["peak_speed_ratio"] < 1.05 for s in out["symmetry"])
+        # a looping clip closes
+        assert out["loop"] is True
+        assert out["joints"]["L_foot"]["loop_closure"] < 1e-3
+
+    def test_the_broken_walk_is_named_and_numbered(self):
+        from maya_plugin.handlers import clip
+
+        root = self._rig_with("walk", broken=True)
+        out = clip.measure_clip({"root": root, "name": "walk"})
+        # the drifting plant is WARNED about by joint name
+        assert any("R_foot" in w and "SLIDES" in w for w in out["warnings"]), \
+            out["warnings"]
+        assert out["contacts"]["R_foot"]["max_slide"] > \
+            out["thresholds"]["slide_warn"]
+        # the pop shows as asymmetry between the mirrored feet
+        feet = next(s for s in out["symmetry"]
+                    if (s["left"], s["right"]) == ("L_foot", "R_foot"))
+        assert feet["peak_speed_ratio"] > 1.5
+        # and as a worst-frame the caller can go look at
+        popped = out["joints"]["L_foot"]
+        clean = clip.measure_clip({"root": self._rig_with("walk", False)})
+        assert popped["peak_speed"] > 1.5 * clean["joints"]["L_foot"]["peak_speed"]
+
+    def test_an_unread_param_is_refused(self):
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import clip
+
+        root = self._rig_with("walk", broken=False)
+        with pytest.raises(HandlerError) as exc:
+            clip.measure_clip({"root": root, "clip": "walk"})
+        assert "does not take 'clip'" in str(exc.value)
+
+    def test_perception_leaves_the_time_where_it_was(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import clip
+
+        root = self._rig_with("walk", broken=False)
+        cmds.currentTime(7)
+        clip.measure_clip({"root": root})
+        assert cmds.currentTime(query=True) == 7

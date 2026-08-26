@@ -1178,3 +1178,153 @@ def preview_clip(params: Dict[str, Any]) -> Dict[str, Any]:
 
 
 preview_clip.no_undo_chunk = True
+
+
+# Every top-level key measure_clip reads; anything else is refused (#764).
+MEASURE_CLIP_KEYS = ("root", "name", "joints", "contact_joints")
+
+
+def measure_clip(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Motion metrics for one clip - the numbers behind the pictures (#773).
+
+    preview_clip is the eye; this is the ruler. It samples every requested
+    joint's world position at every frame of the clip and reports what the
+    #773 probe proved DISCRIMINATES between a good clip and a broken one:
+    per-joint kinematics, inferred contact runs and their slide, left/right
+    peak-speed symmetry, and loop closure. What it deliberately does NOT do
+    is score the clip: a foot sliding through its plant is unambiguous and
+    is warned about; whether a peak speed is "too fast" is a judgement the
+    caller owns, so those come back as raw numbers with worst-frame indices.
+
+    Perception: no checkpoint, current time restored, nothing mutated.
+    """
+    from ..dispatcher import require_known_keys  # noqa: PLC0415
+    from . import motionmath, rigging  # noqa: PLC0415
+
+    require_known_keys(params, MEASURE_CLIP_KEYS, "measure_clip")
+    cmds = _cmds()
+    root_long = rigging._require_joint(cmds, params.get("root"))
+    records = clip_meta(cmds, root_long)
+    if not records:
+        raise HandlerError(
+            "no clip exists on %s" % root_long,
+            hint="author_clip creates one; measure_clip measures it")
+    name = params.get("name")
+    if name is None and len(records) == 1:
+        meta = records[0]
+    else:
+        meta = next((r for r in records if r["name"] == name), None)
+    if meta is None:
+        raise HandlerError(
+            "no clip named %r on %s (has: %s)"
+            % (name, _short(root_long),
+               ", ".join(repr(r["name"]) for r in records)),
+            hint="a rig carries several clips - pass the one to measure")
+
+    fps = float(meta.get("fps", 30))
+    start_frame = int(meta["start_frame"])
+    end_frame = int(meta["end_frame"])
+    if end_frame <= start_frame:
+        raise HandlerError("the clip has zero duration",
+                           hint="re-author it; this is broken metadata, "
+                                "not a measurement problem")
+
+    hierarchy = rigging._hierarchy_joints(cmds, root_long)
+    by_short = {_short(j): j for j in hierarchy}
+
+    def resolve(key: str, default: List[str]) -> List[str]:
+        wanted = params.get(key)
+        if wanted is None:
+            return default
+        if (not isinstance(wanted, list) or not wanted
+                or not all(isinstance(n, str) for n in wanted)):
+            raise HandlerError("%s must be a non-empty list of joint names"
+                               % key)
+        out = []
+        for entry in wanted:
+            short = _short(entry)
+            if short not in by_short:
+                raise HandlerError(
+                    "%s: %r is not a joint under %s"
+                    % (key, entry, _short(root_long)),
+                    hint="joints here: %s" % ", ".join(sorted(by_short)))
+            out.append(by_short[short])
+        return out
+
+    joints = resolve("joints", hierarchy)
+    # Contact defaults to the LEAF joints - the ends of chains are what
+    # touches the ground; a hip in contact would mean a very different clip.
+    children_of = {j: cmds.listRelatives(j, children=True, type="joint",
+                                         fullPath=True) or []
+                   for j in hierarchy}
+    leaves = [j for j in hierarchy if not children_of[j]]
+    contact_joints = resolve("contact_joints", leaves)
+
+    sample_set = sorted(set(joints) | set(contact_joints))
+    previous_time = cmds.currentTime(query=True)
+    tracks: Dict[str, List[List[float]]] = {j: [] for j in sample_set}
+    try:
+        for frame in range(start_frame, end_frame + 1):
+            cmds.currentTime(frame)
+            for j in sample_set:
+                tracks[j].append([float(v) for v in cmds.xform(
+                    j, query=True, worldSpace=True, translation=True)])
+    finally:
+        cmds.currentTime(previous_time)
+
+    # Rig height from the first sampled frame: the scale every relative
+    # threshold hangs off, reported so the numbers can be re-derived.
+    first = [tracks[j][0] for j in sample_set]
+    rig_height = max(p[1] for p in first) - min(p[1] for p in first)
+
+    warnings: List[str] = []
+    joints_out: Dict[str, Any] = {}
+    for j in joints:
+        kin = motionmath.joint_kinematics(tracks[j], fps)
+        kin["loop_closure"] = motionmath.loop_closure(tracks[j])
+        joints_out[_short(j)] = kin
+
+    contacts_out: Dict[str, Any] = {}
+    slide_warn_at = motionmath.SLIDE_WARN_FRAC * rig_height
+    for j in contact_joints:
+        runs = motionmath.contact_runs(tracks[j], fps, rig_height)
+        slide = motionmath.max_slide(tracks[j], runs)
+        contacts_out[_short(j)] = {
+            "runs": [[start_frame + a, start_frame + b] for a, b in runs],
+            "max_slide": slide,
+        }
+        if runs and rig_height > 0 and slide > slide_warn_at:
+            warnings.append(
+                "%s SLIDES %.4f through a plant (%.1f%% of the rig's %.3f "
+                "height) - a planted foot holds its ground position, and "
+                "this one wanders. The runs are in the result; re-key the "
+                "plant to hold." % (_short(j), slide,
+                                    100.0 * slide / rig_height, rig_height))
+
+    symmetry = []
+    pairs = motionmath.mirror_pairs([_short(j) for j in joints])
+    for left, right in pairs:
+        ratio = motionmath.symmetry_ratio(
+            joints_out[left]["peak_speed"], joints_out[right]["peak_speed"])
+        symmetry.append({"left": left, "right": right,
+                         "peak_speed_ratio": ratio})
+
+    return {
+        "name": meta["name"],
+        "fps": int(fps),
+        "frames_sampled": end_frame - start_frame + 1,
+        "loop": bool(meta.get("loop")),
+        "rig_height": rig_height,
+        "thresholds": {
+            "contact_height": motionmath.CONTACT_HEIGHT_FRAC * rig_height,
+            "contact_speed": motionmath.CONTACT_SPEED_FRAC * rig_height,
+            "slide_warn": slide_warn_at,
+        },
+        "joints": joints_out,
+        "contacts": contacts_out,
+        "symmetry": symmetry,
+        "warnings": warnings,
+    }
+
+
+measure_clip.no_undo_chunk = True
