@@ -23,7 +23,7 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..dispatcher import HandlerError
-from . import naming, pbr, texclaim
+from . import naming, pbr, pngprobe, session, texclaim
 
 RESOLUTIONS = (256, 512, 1024, 2048, 4096)
 DEFAULT_RESOLUTION = 1024
@@ -303,3 +303,196 @@ def _has_placement(cmds, node: str) -> bool:
         return any(cmds.nodeType(n) == "place2dTexture" for n in sources)
     except Exception:  # noqa: BLE001 - unknown placement is reported as none
         return False
+
+
+def _convert_solid_tx(cmds, source_plug: str, target: str, path: str,
+                      resolution: int) -> None:
+    """The bake itself, isolated so tests can drive the surrounding
+    machinery without Maya.
+
+    The delete-first/assert-after discipline is the probe's: convertSolidTx
+    can return normally WITHOUT writing a file, and a fixed output name
+    would then read back a previous run's image as if it were this one.
+    """
+    if os.path.exists(path):
+        os.remove(path)
+    cmds.convertSolidTx(source_plug, target, resolutionX=resolution,
+                        resolutionY=resolution, fileImageName=path,
+                        fileFormat="png", alpha=False)
+
+
+def _verify_bake(path: str, job: Dict[str, Any]) -> Dict[str, Any]:
+    """Did this bake actually sample anything? Refuses on the two measured
+    ways a bake can be worthless: no file at all, and a flat image."""
+    if not os.path.isfile(path):
+        raise HandlerError(
+            "the bake of %s.%s produced no file - convertSolidTx returned "
+            "without writing %s" % (job["material"], job["attr"], path),
+            hint="nothing in the scene was changed; check that the mesh has "
+                 "UVs and that the texture network evaluates")
+    check = pngprobe.uniformity(path)
+    if check["non_uniform"] is None:
+        raise HandlerError(
+            "the bake of %s.%s could not be measured (%s) - refusing to "
+            "rewire the scene to an image this tool cannot verify"
+            % (job["material"], job["attr"], check["unavailable_reason"]),
+            hint="nothing was changed; the file is at %s if you want to "
+                 "look at it yourself" % path)
+    if not check["non_uniform"]:
+        raise HandlerError(
+            "the bake of %s.%s is flat - every one of its %d pixels is the "
+            "same value, which means the network sampled nothing"
+            % (job["material"], job["attr"], check["pixel_count"]),
+            hint="the usual cause is UV space: maya_uv_atlas gives the mesh "
+                 "a layout the bake can sample through. Nothing in the scene "
+                 "was changed")
+    return check
+
+
+def _rewire(cmds, job: Dict[str, Any], final_path: str) -> Dict[str, Any]:
+    """Replace the procedural chain with a file node reading the bake.
+
+    Per-slot shapes are the ones MEASURED to survive an FBX export:
+    a colour slot takes file.outColor; a scalar takes file.outColorR with
+    Raw colour space (assign_pbr's data-not-colour trap); a normal keeps
+    its bump2d - bumpDepth is the authored look - and only its bumpValue
+    source is replaced (probe P4 measured that path surviving export).
+    """
+    base = "%s_%s_baked" % (job["material"], job["slot"])
+    node = cmds.shadingNode("file", asTexture=True,
+                            name=naming.unique_name(cmds, base))
+    cmds.setAttr(node + ".fileTextureName", final_path, type="string")
+    raw = job["kind"] in ("scalar", "normal")
+    if raw:
+        cmds.setAttr(node + ".colorSpace", "Raw", type="string")
+        # Without this, Maya's colour-management rules re-apply sRGB on
+        # scene open and quietly undo the line above (the pbr precedent).
+        cmds.setAttr(node + ".ignoreColorSpaceFileRules", True)
+
+    place = cmds.shadingNode("place2dTexture", asUtility=True,
+                             name=naming.unique_name(cmds, base + "_p2d"))
+    for src, dst in pbr._PLACE2D_LINKS:
+        try:
+            cmds.connectAttr("%s.%s" % (place, src), "%s.%s" % (node, dst),
+                             force=True)
+        except Exception:  # noqa: BLE001 - attribute sets differ by version
+            pass
+
+    if job["kind"] == "normal" and job["bump_node"]:
+        cmds.connectAttr(node + ".outAlpha",
+                         job["bump_node"] + ".bumpValue", force=True)
+        wired_plug = "outAlpha"
+        kept = [job["bump_node"]]
+    elif job["kind"] == "scalar":
+        cmds.connectAttr(node + ".outColorR",
+                         "%s.%s" % (job["material"], job["attr"]), force=True)
+        wired_plug = "outColorR"
+        kept = []
+    else:
+        cmds.connectAttr(node + ".outColor",
+                         "%s.%s" % (job["material"], job["attr"]), force=True)
+        wired_plug = "outColor"
+        kept = []
+    return {"file_node": node, "place": place, "wired_plug": wired_plug,
+            "kept_intermediates": kept,
+            "colorspace": "Raw" if raw else "sRGB"}
+
+
+def _doomed_nodes(cmds, job: Dict[str, Any]) -> List[str]:
+    """The replaced network's nodes, minus anything still feeding something
+    else. apply_texture_recipe's zero-orphans value, inverted: delete what
+    this call orphaned, never what somebody else is using."""
+    terminal = job["terminal_plug"].split(".")[0]
+    doomed = []
+    for node in [terminal]:
+        outputs = cmds.listConnections(node, source=False,
+                                       destination=True) or []
+        others = [o for o in outputs
+                  if o != job["material"] and o not in job["via"]
+                  and o != job["bump_node"]]
+        if others:
+            continue
+        doomed.append(node)
+    return doomed
+
+
+def bake_textures(params: Dict[str, Any]) -> Dict[str, Any]:
+    cmds = _cmds()
+    settings = validate(params, cmds)
+    jobs, warnings = plan_bakes(cmds, settings["meshes"], settings["slots"])
+
+    # --- phase A: bake and verify, mutating NOTHING -------------------
+    staged: List[Dict[str, Any]] = []
+    try:
+        for job in jobs:
+            part = os.path.join(settings["out_dir"],
+                                job["basename"] + ".part.png")
+            _convert_solid_tx(cmds, job["terminal_plug"], job["mesh"], part,
+                              settings["resolution"])
+            check = _verify_bake(part, job)
+            staged.append({"job": job, "part": part, "check": check})
+    except Exception:
+        for entry in staged:
+            try:
+                os.unlink(entry["part"])
+            except OSError:
+                pass
+        # the failing job's own part file, if it got that far
+        for job in jobs:
+            part = os.path.join(settings["out_dir"],
+                                job["basename"] + ".part.png")
+            if os.path.exists(part) and not any(e["part"] == part
+                                                for e in staged):
+                try:
+                    os.unlink(part)
+                except OSError:
+                    pass
+        raise
+
+    # --- phase B: every bake verified, so commit ----------------------
+    checkpoint = session.auto_checkpoint("bake_textures")
+    baked = []
+    for entry in staged:
+        job, part = entry["job"], entry["part"]
+        final_path = os.path.join(settings["out_dir"], job["basename"])
+        os.replace(part, final_path)
+        doomed = _doomed_nodes(cmds, job)
+        wiring = _rewire(cmds, job, final_path.replace("\\", "/"))
+        if doomed:
+            cmds.delete(*doomed)
+        baked.append({
+            "material": job["material"], "slot": job["slot"],
+            "attr": job["attr"], "file": final_path,
+            "basename": job["basename"], "resolution": settings["resolution"],
+            "colorspace": wiring["colorspace"],
+            "wired_plug": wiring["wired_plug"],
+            "kept_intermediates": wiring["kept_intermediates"],
+            "deleted_nodes": doomed, "pixel_check": entry["check"],
+        })
+
+    # Postcondition: the slot must no longer read as procedural. A bake
+    # that "succeeded" while leaving the claim procedural is a bug in this
+    # tool, not a caller error - so it raises rather than warning.
+    remaining = texclaim.material_claims(cmds, settings["meshes"])
+    still = [c for c in remaining
+             if c["classification"] == "procedural"
+             and any(b["material"] == c["material"] and b["attr"] == c["attr"]
+                     for b in baked)]
+    if still:
+        raise HandlerError(
+            "POSTCONDITION FAILED: %s still reads as procedural after "
+            "baking - the scene has been modified and a checkpoint (%s) "
+            "was taken before the change"
+            % (", ".join("%s.%s" % (c["material"], c["attr"]) for c in still),
+               checkpoint["checkpoint_id"]),
+            hint="maya_restore_checkpoint returns the scene; this is a bug "
+                 "in maya_bake_textures, please report the network shape")
+
+    return {
+        "meshes": settings["meshes"], "out_dir": settings["out_dir"],
+        "resolution": settings["resolution"], "baked": baked,
+        "skipped_file_backed": [w for w in warnings
+                                if "already file-backed" in w],
+        "checkpoint_id": checkpoint["checkpoint_id"],
+        "warnings": warnings,
+    }

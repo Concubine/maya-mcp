@@ -6,10 +6,23 @@ image), so the tool must catch that itself; and a normal slot with no
 bump2d in the chain has no measured surviving wiring shape.
 """
 
+import os
+
 import pytest
 
 from maya_plugin.dispatcher import HandlerError
 from maya_plugin.handlers import texbake
+
+
+def _fake_bake(fake):
+    """Stand in for convertSolidTx: write a real (tiny) PNG at the path the
+    tool asked for, so the part-file/commit machinery is exercised for
+    real while the pixels come from the monkeypatched uniformity check."""
+    def _bake(cmds, source_plug, target, path, resolution):
+        with open(path, "wb") as fh:
+            fh.write(b"\x89PNG\r\n\x1a\n" + b"x" * 64)
+        fake.baked_calls.append((source_plug, target, path, resolution))
+    return _bake
 
 
 class FakeCmds:
@@ -24,6 +37,11 @@ class FakeCmds:
         self.conns = {"bodySG.surfaceShader": ["skin_mat.outColor"],
                       "skin_mat.baseColor": ["mcpTex_noise.outColor"]}
         self.existing_attrs = {"skin_mat.baseColor"}
+        self.connected = []
+        self.deleted = []
+        self.checkpoints = []
+        self.baked_calls = []
+        self.created = []
 
     # resolution ------------------------------------------------------
     def ls(self, name=None, long=False, **kw):
@@ -62,11 +80,34 @@ class FakeCmds:
     def getAttr(self, plug):
         return ""
 
+    # mutation (two-phase bake) ---------------------------------------
+    def shadingNode(self, node_type, name=None, asTexture=False,
+                    asUtility=False, **kw):
+        self.types[name] = node_type
+        self.created.append(name)
+        return name
+
+    def setAttr(self, plug, *values, **kw):
+        pass
+
+    def connectAttr(self, src, dst, force=False):
+        self.connected.append((src, dst))
+        self.conns[dst] = [src]
+
+    def delete(self, *nodes):
+        for n in nodes:
+            self.deleted.append(n)
+            self.types.pop(n, None)
+
 
 @pytest.fixture
 def fake(monkeypatch):
     cmds = FakeCmds()
     monkeypatch.setattr(texbake, "_cmds", lambda: cmds)
+    monkeypatch.setattr(texbake.session, "auto_checkpoint",
+                        lambda reason: (cmds.checkpoints.append(reason)
+                                        or {"checkpoint_id": "cp",
+                                            "path": "cp.ma"}))
     return cmds
 
 
@@ -238,3 +279,68 @@ class TestMeshesRobustness:
     def test_a_bool_meshes_value_refuses_cleanly(self, fake, tmp_path):
         with pytest.raises(HandlerError, match="meshes"):
             texbake.validate(_params(tmp_path, meshes=True), fake)
+
+
+class TestTwoPhaseBake:
+    """Phase A writes and verifies with ZERO scene mutation; phase B
+    rewires only if every bake verified. A caller is therefore always in
+    one of exactly two states."""
+
+    def test_a_failed_bake_leaves_the_scene_untouched(self, fake, tmp_path,
+                                                       monkeypatch):
+        monkeypatch.setattr(texbake, "_convert_solid_tx",
+                            lambda *a, **kw: None)   # writes no file
+        with pytest.raises(HandlerError, match="produced no file"):
+            texbake.bake_textures(_params(tmp_path))
+        assert fake.connected == []          # nothing rewired
+        assert fake.deleted == []            # nothing deleted
+        assert fake.checkpoints == []        # not even a checkpoint
+
+    def test_a_degenerate_bake_refuses_before_rewiring(self, fake, tmp_path,
+                                                        monkeypatch):
+        # MEASURED failure mode: a flat image is what a UV-less mesh bakes.
+        # The UV guard catches that case; this proves the pixel check is a
+        # real second net, not decoration.
+        monkeypatch.setattr(texbake, "_convert_solid_tx", _fake_bake(fake))
+        monkeypatch.setattr(texbake.pngprobe, "uniformity",
+                            lambda _p: {"pixel_count": 1024,
+                                        "distinct_values": 1,
+                                        "non_uniform": False,
+                                        "unavailable_reason": None})
+        with pytest.raises(HandlerError, match="flat"):
+            texbake.bake_textures(_params(tmp_path))
+        assert fake.connected == []
+        assert not list(tmp_path.glob("*.part.png"))   # swept
+
+    def test_a_good_bake_rewires_and_commits(self, fake, tmp_path,
+                                             monkeypatch):
+        monkeypatch.setattr(texbake, "_convert_solid_tx", _fake_bake(fake))
+        monkeypatch.setattr(texbake.pngprobe, "uniformity",
+                            lambda _p: {"pixel_count": 1024,
+                                        "distinct_values": 186,
+                                        "non_uniform": True,
+                                        "unavailable_reason": None})
+        out = texbake.bake_textures(_params(tmp_path))
+
+        assert len(out["baked"]) == 1
+        entry = out["baked"][0]
+        assert entry["basename"] == "skin_mat_color_baked.png"
+        assert os.path.isfile(entry["file"])          # committed, not .part
+        assert not list(tmp_path.glob("*.part.png"))  # nothing left behind
+        assert entry["pixel_check"]["non_uniform"] is True
+        assert out["checkpoint_id"]                   # checkpointed first
+        # the shader now reads the baked file, and the old noise is gone
+        assert any(dst == "skin_mat.baseColor" for _src, dst in fake.connected)
+        assert "mcpTex_noise" in fake.deleted
+
+    def test_an_unmeasurable_bake_refuses_rather_than_shipping(
+            self, fake, tmp_path, monkeypatch):
+        monkeypatch.setattr(texbake, "_convert_solid_tx", _fake_bake(fake))
+        monkeypatch.setattr(texbake.pngprobe, "uniformity",
+                            lambda _p: {"pixel_count": 0,
+                                        "distinct_values": 0,
+                                        "non_uniform": None,
+                                        "unavailable_reason": "unreadable"})
+        with pytest.raises(HandlerError, match="could not be measured"):
+            texbake.bake_textures(_params(tmp_path))
+        assert fake.connected == []
