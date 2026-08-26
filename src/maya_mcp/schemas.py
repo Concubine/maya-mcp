@@ -1036,8 +1036,15 @@ class PixelCheck(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    pixel_count: int
-    distinct_values: int
+    pixel_count: int = Field(description=(
+        "Total pixels in the image (width x height). Always exact, even "
+        "when the scan below short-circuited."))
+    distinct_values: int = Field(description=(
+        "Distinct pixel values seen. Exact for a flat image (1) or an "
+        "unmeasurable one (0); for a non-uniform image the scan stops as "
+        "soon as a second distinct value is found, so this is capped at 2 "
+        "rather than a true count - non_uniform is already proven at that "
+        "point and nothing downstream reads a larger number."))
     non_uniform: Optional[bool] = Field(default=None, description=(
         "True when the image carries more than one distinct pixel value. "
         "False means the bake is flat - the network sampled nothing, which "
@@ -1063,8 +1070,12 @@ class BakedMap(BaseModel):
         "'Raw' for scalar and normal data, 'sRGB' for colour. Data read as "
         "colour renders quietly wrong."))
     wired_plug: str = Field(description=(
-        "Which plug of the new file node drives the slot: outColor, "
-        "outColorR, or outAlpha (into the kept bump2d)."))
+        "Which plug of the new file node drives the slot - the only two "
+        "wirings _rewire produces: 'outColor' for a colour slot, or "
+        "'outColorR' for a scalar slot or a normal slot's kept bump2d "
+        "(bumpValue is a literal scalar there, not the tangent-space "
+        "outAlpha wiring - that one was measured live to bake a flat, "
+        "wrong surface, #714 Task 6)."))
     kept_intermediates: List[str] = Field(default_factory=list, description=(
         "Nodes deliberately preserved - a normal slot keeps its bump2d "
         "because bumpDepth is part of the authored look."))

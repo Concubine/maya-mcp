@@ -236,6 +236,12 @@ def plan_bakes(cmds, shapes: List[str],
             "via": list(claim["via"]), "bump_node": bump_node,
             "basename": "%s_%s_baked.png" % (claim["material"], slot),
         })
+        outside = _outside_wearers(cmds, claim["sg"], shapes)
+        if outside:
+            warnings.append(
+                "%s is also worn by %s, which this call did not name; "
+                "baking rewires the material, so their look changes too"
+                % (claim["material"], ", ".join(sorted(outside))))
         if len(claim["meshes"]) > 1:
             warnings.append(
                 "%s is worn by %d meshes (%s) - baking it changes the look "
@@ -297,6 +303,45 @@ def _bump_node_for(cmds, claim: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _outside_wearers(cmds, sg: str, requested_shapes: List[str]) -> List[str]:
+    """Mesh shapes that really wear `sg`, besides the ones this call asked
+    to bake - queried from the shading group's ACTUAL membership, not from
+    `texclaim.material_claims`, which only ever accumulates wearers among
+    the shapes it was handed (`claim["meshes"]` cannot see a shape outside
+    the request by construction). The rewire is material-level, so a mesh
+    the caller never named still gets its look changed by it - this is the
+    query that can actually see that mesh.
+
+    Guarded end to end: a shading group that cannot answer this query must
+    not crash a bake - it degrades to reporting no outside wearers, same as
+    a scene where the SG really is worn only by the requested meshes.
+    """
+    try:
+        members = cmds.sets(sg, query=True) or []
+    except Exception:  # noqa: BLE001 - an unqueryable SG warns about nothing
+        return []
+    requested = set(requested_shapes)
+    requested_short = {s.split("|")[-1] for s in requested_shapes}
+    outside: List[str] = []
+    for member in members:
+        obj = member.split(".")[0]  # strip a component suffix like .f[0:3]
+        shape = obj
+        try:
+            if cmds.nodeType(obj) != "mesh":
+                kids = cmds.listRelatives(obj, shapes=True, fullPath=True,
+                                          noIntermediate=True) or []
+                if not kids:
+                    continue
+                shape = kids[0]
+        except Exception:  # noqa: BLE001 - an unresolvable member is skipped
+            continue
+        if shape in requested or shape.split("|")[-1] in requested_short:
+            continue
+        if shape not in outside:
+            outside.append(shape)
+    return outside
+
+
 def _has_placement(cmds, node: str) -> bool:
     try:
         sources = cmds.listConnections(node, source=True, destination=False) or []
@@ -323,7 +368,15 @@ def _convert_solid_tx(cmds, source_plug: str, target: str, path: str,
 
 def _verify_bake(path: str, job: Dict[str, Any]) -> Dict[str, Any]:
     """Did this bake actually sample anything? Refuses on the two measured
-    ways a bake can be worthless: no file at all, and a flat image."""
+    ways a bake can be worthless: no file at all, and a flat image.
+
+    The unmeasurable and flat cases raise with `keep_evidence=True` set on
+    the exception. bake_textures's phase-A except reads that flag and
+    exempts exactly this part file from its cleanup sweep - unlike the
+    no-file case (nothing to keep), the bake DID write something here, and
+    it is exactly the file someone will want to look at when this tool
+    could not verify or trust it itself.
+    """
     if not os.path.isfile(path):
         raise HandlerError(
             "the bake of %s.%s produced no file - convertSolidTx returned "
@@ -332,20 +385,24 @@ def _verify_bake(path: str, job: Dict[str, Any]) -> Dict[str, Any]:
                  "UVs and that the texture network evaluates")
     check = pngprobe.uniformity(path)
     if check["non_uniform"] is None:
-        raise HandlerError(
+        err = HandlerError(
             "the bake of %s.%s could not be measured (%s) - refusing to "
             "rewire the scene to an image this tool cannot verify"
             % (job["material"], job["attr"], check["unavailable_reason"]),
-            hint="nothing was changed; the file is at %s if you want to "
-                 "look at it yourself" % path)
+            hint="nothing else was changed; %s is left on disk for "
+                 "inspection" % path)
+        err.keep_evidence = True
+        raise err
     if not check["non_uniform"]:
-        raise HandlerError(
+        err = HandlerError(
             "the bake of %s.%s is flat - every one of its %d pixels is the "
             "same value, which means the network sampled nothing"
             % (job["material"], job["attr"], check["pixel_count"]),
             hint="the usual cause is UV space: maya_uv_atlas gives the mesh "
-                 "a layout the bake can sample through. Nothing in the scene "
-                 "was changed")
+                 "a layout the bake can sample through. Nothing else was "
+                 "changed; %s is left on disk for inspection" % path)
+        err.keep_evidence = True
+        raise err
     return check
 
 
@@ -601,8 +658,19 @@ def bake_textures(params: Dict[str, Any]) -> Dict[str, Any]:
                               settings["resolution"])
             check = _verify_bake(part, job)
             staged.append({"job": job, "part": part, "check": check})
-    except Exception:
+    except Exception as exc:
+        # _verify_bake's unmeasurable/flat refusals mark themselves
+        # `keep_evidence` - the bake DID write something there, and it is
+        # exactly the file someone will want to look at when this tool
+        # could not trust it. That failing part is always `attempted[-1]`:
+        # it was appended right before the call that raised, and nothing
+        # after it was ever attempted. Any other job's part file is swept
+        # as usual (fix round 1, finding #2 - this loop covers only what
+        # phase A actually reached).
+        keep = getattr(exc, "keep_evidence", False)
         for part in attempted:
+            if keep and part == attempted[-1]:
+                continue
             try:
                 os.unlink(part)
             except OSError:

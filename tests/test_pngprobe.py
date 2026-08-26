@@ -61,7 +61,11 @@ class TestUniformity:
                     [[(1, 1, 1), (2, 2, 2)], [(3, 3, 3), (4, 4, 4)]])
         out = pngprobe.uniformity(path)
         assert out["pixel_count"] == 4
-        assert out["distinct_values"] == 4
+        # The streaming scan stops as soon as a SECOND distinct value is
+        # found (review fix #714 Important 4) - non_uniform is already
+        # proven at that point, so distinct_values is capped at 2 rather
+        # than paying to keep counting the other two pixels.
+        assert out["distinct_values"] == 2
         assert out["non_uniform"] is True
         assert out["unavailable_reason"] is None
 
@@ -85,6 +89,66 @@ class TestUniformity:
         out = pngprobe.uniformity(str(tmp_path / "nope.png"))
         assert out["non_uniform"] is None
         assert "nope.png" in out["unavailable_reason"]
+
+
+class TestStreamingUniformity:
+    """#714 review Important 4: read_png materializes every pixel as a
+    Python tuple, ~1.2GB transient at the advertised 4096 bake resolution.
+    uniformity must never build that list - it streams the unfiltered rows
+    and stops as soon as a second distinct value proves non_uniform."""
+
+    def test_a_flat_images_streaming_answer_matches_read_png_exactly(
+            self, tmp_path):
+        # The flat case can never short-circuit (there is no second
+        # distinct value to find), so streaming and read_png-based
+        # counting must agree exactly here, not just up to a cap.
+        rows = [[(7, 7, 7), (7, 7, 7)], [(7, 7, 7), (7, 7, 7)]]
+        path = _png(tmp_path / "flat2.png", rows)
+        streamed = pngprobe.uniformity(path)
+        png = pngprobe.read_png(path)
+        assert streamed["pixel_count"] == len(png["pixels"]) == 4
+        assert streamed["distinct_values"] == len(set(png["pixels"])) == 1
+        assert streamed["non_uniform"] is False
+
+    def test_a_non_uniform_scan_never_reaches_the_last_row(
+            self, tmp_path, monkeypatch):
+        # A tall image whose first row already carries two colours - the
+        # streaming scan must never ask _unfilter_rows for the later rows.
+        # That is the whole point of the fix: a 4096-tall bake must not
+        # pay to unfilter and box every one of its rows just to learn it
+        # is non-uniform.
+        height = 200
+        rows = ([[(1, 1, 1), (2, 2, 2)]]
+               + [[(9, 9, 9), (9, 9, 9)]] * (height - 1))
+        path = _png(tmp_path / "tall.png", rows)
+
+        real = pngprobe._unfilter_rows
+        seen_rows = []
+
+        def spy(raw, width, h, stride):
+            for row in real(raw, width, h, stride):
+                seen_rows.append(row)
+                yield row
+
+        monkeypatch.setattr(pngprobe, "_unfilter_rows", spy)
+        out = pngprobe.uniformity(path)
+
+        assert out["non_uniform"] is True
+        assert out["pixel_count"] == 2 * height   # total is still exact
+        assert len(seen_rows) < height             # never reached the tail
+
+    def test_no_full_pixels_list_is_ever_built(self, tmp_path, monkeypatch):
+        # read_png is the ONLY place allowed to build a `pixels` list of
+        # boxed tuples - uniformity must not call it at all.
+        rows = [[(1, 1, 1), (2, 2, 2)], [(3, 3, 3), (4, 4, 4)]]
+        path = _png(tmp_path / "spied.png", rows)
+
+        def boom(_path):
+            raise AssertionError("uniformity must not call read_png")
+
+        monkeypatch.setattr(pngprobe, "read_png", boom)
+        out = pngprobe.uniformity(path)
+        assert out["non_uniform"] is True
 
 
 def _paeth_predictor(a, b, c):

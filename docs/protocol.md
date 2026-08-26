@@ -852,3 +852,13 @@ slot is already file-backed, nothing is baked and `checkpoint_id` is
 `null` rather than a spent checkpoint-ring slot for no change;
 `skipped_file_backed` names what needed no work, so a caller can tell
 "nothing needed baking" from "nothing happened."
+
+The rewire is material-level, so it can reach further than the meshes
+named in the call: if the same shading group is also assigned to a mesh
+the caller never listed, that mesh's look changes too. `plan_bakes` queries
+the shading group's **actual** membership (`cmds.sets(sg, query=True)`),
+not just the requested-shape claim, and warns naming the outside wearer(s)
+specifically when it finds one — this is separate from, and does not
+replace, the "worn by several requested meshes" warning above. A shading
+group that cannot answer the membership query degrades to no warning
+rather than failing the bake.

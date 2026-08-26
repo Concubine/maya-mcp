@@ -33,7 +33,8 @@ class FakeCmds:
         self.uv_count = uv_count
         self.meshes = {"|body": "|bodyShape"}
         self.types = {"skin_mat": "standardSurface", "mcpTex_noise": "noise"}
-        self.sets = {"|bodyShape": ["bodySG"]}
+        self.shape_sgs = {"|bodyShape": ["bodySG"]}
+        self.sg_members = {"bodySG": ["|bodyShape"]}
         self.conns = {"bodySG.surfaceShader": ["skin_mat.outColor"],
                       "skin_mat.baseColor": ["mcpTex_noise.outColor"]}
         self.existing_attrs = {"skin_mat.baseColor"}
@@ -65,7 +66,14 @@ class FakeCmds:
 
     # graph -----------------------------------------------------------
     def listSets(self, object=None, type=None):
-        return list(self.sets.get(object, []))
+        return list(self.shape_sgs.get(object, []))
+
+    def sets(self, name, query=False, **kw):
+        """Query-mode only - this fake never needs the edit/create forms
+        the real bake tool does not use."""
+        if query:
+            return list(self.sg_members.get(name, []))
+        raise NotImplementedError("FakeCmds.sets only supports query=True")
 
     def listConnections(self, plug, source=False, destination=True,
                         plugs=False, **kw):
@@ -258,6 +266,55 @@ class TestPlan:
             texbake.plan_bakes(fake, params["meshes"], params["slots"])
 
 
+class TestOutsideWearerWarning:
+    """The rewire is material-level: a mesh the caller never named still
+    gets its look changed if it wears the same shading group. The warning
+    must fire on THAT mesh, not on a second mesh the caller explicitly
+    asked to bake alongside the first (the backwards behaviour the review
+    caught - `claim["meshes"]` only ever accumulates wearers among the
+    REQUESTED shapes, so it cannot see an outside wearer at all)."""
+
+    def test_a_mesh_outside_the_request_that_shares_the_sg_is_named(
+            self, fake, tmp_path):
+        fake.meshes["|other"] = "|otherShape"
+        fake.sg_members["bodySG"] = ["|bodyShape", "|otherShape"]
+
+        params = texbake.validate(_params(tmp_path), fake)  # only |body
+        _jobs, warnings = texbake.plan_bakes(fake, params["meshes"],
+                                             params["slots"])
+
+        assert any("also worn by" in w and "|otherShape" in w
+                  for w in warnings)
+
+    def test_a_second_requested_mesh_does_not_trigger_the_outside_warning(
+            self, fake, tmp_path):
+        fake.meshes["|other"] = "|otherShape"
+        fake.shape_sgs["|otherShape"] = ["bodySG"]
+        fake.sg_members["bodySG"] = ["|bodyShape", "|otherShape"]
+
+        params = texbake.validate(
+            _params(tmp_path, meshes=["|body", "|other"]), fake)
+        _jobs, warnings = texbake.plan_bakes(fake, params["meshes"],
+                                             params["slots"])
+
+        assert not any("also worn by" in w for w in warnings)
+        assert any("worn by 2 meshes" in w for w in warnings)
+
+    def test_an_unqueryable_sg_degrades_to_no_warning_not_a_crash(
+            self, fake, tmp_path, monkeypatch):
+        def boom(name, query=False, **kw):
+            raise RuntimeError("kMFnSet: object does not exist")
+
+        monkeypatch.setattr(fake, "sets", boom)
+        params = texbake.validate(_params(tmp_path), fake)
+
+        jobs, warnings = texbake.plan_bakes(fake, params["meshes"],
+                                            params["slots"])
+
+        assert len(jobs) == 1
+        assert not any("also worn by" in w for w in warnings)
+
+
 class TestGuardStructure:
     """## Fix round 1: the empty-jobs refusal is gated on the explicit
     `skipped_file_backed` flag, not on `warnings` being non-empty -
@@ -354,10 +411,41 @@ class TestTwoPhaseBake:
                                         "distinct_values": 1,
                                         "non_uniform": False,
                                         "unavailable_reason": None})
-        with pytest.raises(HandlerError, match="flat"):
+        with pytest.raises(HandlerError, match="flat") as excinfo:
             texbake.bake_textures(_params(tmp_path))
         assert fake.connected == []
-        assert not list(tmp_path.glob("*.part.png"))   # swept
+        # Review fix: the flat bake IS evidence, and its hint names the
+        # file - so unlike an ordinary failed attempt, it is deliberately
+        # left on disk rather than swept.
+        parts = list(tmp_path.glob("*.part.png"))
+        assert len(parts) == 1
+        assert str(parts[0]) in (excinfo.value.hint or "")
+
+    def test_an_unmeasurable_bakes_part_file_is_kept_for_inspection(
+            self, fake, tmp_path, monkeypatch):
+        monkeypatch.setattr(texbake, "_convert_solid_tx", _fake_bake(fake))
+        monkeypatch.setattr(texbake.pngprobe, "uniformity",
+                            lambda _p: {"pixel_count": 0,
+                                        "distinct_values": 0,
+                                        "non_uniform": None,
+                                        "unavailable_reason": "unreadable"})
+        with pytest.raises(HandlerError, match="could not be measured") as excinfo:
+            texbake.bake_textures(_params(tmp_path))
+        assert fake.connected == []
+        parts = list(tmp_path.glob("*.part.png"))
+        assert len(parts) == 1
+        assert str(parts[0]) in (excinfo.value.hint or "")
+
+    def test_a_no_file_bakes_part_path_is_still_swept(self, fake, tmp_path,
+                                                       monkeypatch):
+        # The keep_evidence exemption is specific to the unmeasurable/flat
+        # cases, where the bake actually wrote something worth looking at.
+        # A bake that produced no file at all has nothing to keep.
+        monkeypatch.setattr(texbake, "_convert_solid_tx",
+                            lambda *a, **kw: None)   # writes no file
+        with pytest.raises(HandlerError, match="produced no file"):
+            texbake.bake_textures(_params(tmp_path))
+        assert not list(tmp_path.glob("*.part.png"))
 
     def test_a_good_bake_rewires_and_commits(self, fake, tmp_path,
                                              monkeypatch):

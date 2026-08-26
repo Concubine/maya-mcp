@@ -1723,9 +1723,12 @@ class TestRequireBakedTextures:
         monkeypatch.setattr(export.texclaim, "material_claims",
                             lambda _c, _s: [_procedural_claim()])
         params = _params(tmp_path, require_baked_textures=True)
-        with pytest.raises(HandlerError, match="procedural"):
+        with pytest.raises(HandlerError, match="procedural") as excinfo:
             export.export_fbx(params)
         assert not any(c[0] == "file" for c in cmds.calls)
+        # The review's fix: an agent hitting this refusal is pointed at the
+        # tool that can actually cure it, not just at re-authoring by hand.
+        assert "maya_bake_textures" in (excinfo.value.hint or "")
 
     def test_a_procedural_claim_passes_by_default_and_is_named(
             self, monkeypatch, tmp_path):
@@ -1739,6 +1742,7 @@ class TestRequireBakedTextures:
         assert out["textures"]["dropped_maps"][0]["terminal"] == "mcpTex_noise"
         assert out["textures"]["dropped_maps"][0]["material"] == "skin_mat"
         assert any("silently drops" in w for w in out["warnings"])
+        assert any("maya_bake_textures" in w for w in out["warnings"])
 
     def test_a_textureless_export_reports_no_texture_block(
             self, monkeypatch, tmp_path):
