@@ -398,22 +398,110 @@ def _rewire(cmds, job: Dict[str, Any], final_path: str) -> Dict[str, Any]:
             "colorspace": "Raw" if raw else "sRGB"}
 
 
-def _doomed_nodes(cmds, job: Dict[str, Any]) -> List[str]:
-    """The replaced network's nodes, minus anything still feeding something
-    else. apply_texture_recipe's zero-orphans value, inverted: delete what
-    this call orphaned, never what somebody else is using."""
+_PASS_THROUGH_NODE_TYPES = ("bump2d", "reverse")
+
+
+def _orphan_candidates(cmds, job: Dict[str, Any]) -> List[str]:
+    """Every node this job's OLD wiring might now orphan - captured BEFORE
+    `_rewire` runs, because rewire overwrites the very connection this
+    walk follows.
+
+    The terminal is already known by name (`job["terminal_plug"]`). Any
+    pass-through node between it and the slot (a hand-built `reverse`
+    invert, say) is walked live rather than read from `job["via"]`, which
+    records only TYPES, not instances (fix round 1, finding #5: the old
+    code's docstring promised "the replaced network's nodes" plural but
+    only ever considered the terminal, so a via node accumulated as a
+    permanent orphan). A place2dTexture feeding the terminal is included
+    too.
+
+    bump2d is deliberately EXCLUDED even when it sits on this exact path:
+    `_rewire` keeps a normal slot's bump2d on purpose (bumpDepth is the
+    authored look), so it must never become a delete candidate here.
+    """
     terminal = job["terminal_plug"].split(".")[0]
-    doomed = []
-    for node in [terminal]:
-        outputs = cmds.listConnections(node, source=False,
-                                       destination=True) or []
-        others = [o for o in outputs
-                  if o != job["material"] and o not in job["via"]
-                  and o != job["bump_node"]]
-        if others:
-            continue
-        doomed.append(node)
-    return doomed
+    candidates = [terminal]
+    if job["via"]:
+        start = (job["bump_node"] if job["kind"] == "normal"
+                else "%s.%s" % (job["material"], job["attr"]))
+        current = start
+        seen = set()
+        for _ in range(len(job["via"]) + 1):
+            sources = cmds.listConnections(current, source=True,
+                                           destination=False) or []
+            found = None
+            for src in sources:
+                if src in seen or src == job.get("bump_node"):
+                    continue
+                try:
+                    if cmds.nodeType(src) in _PASS_THROUGH_NODE_TYPES:
+                        found = src
+                        break
+                except Exception:  # noqa: BLE001 - unknown type is not it
+                    continue
+            if found is None:
+                break
+            seen.add(found)
+            candidates.append(found)
+            if found == terminal:
+                break
+            current = found
+    try:
+        upstream = cmds.listConnections(terminal, source=True,
+                                        destination=False) or []
+        for node in upstream:
+            if cmds.nodeType(node) == "place2dTexture":
+                candidates.append(node)
+    except Exception:  # noqa: BLE001 - unknown placement is not a candidate
+        pass
+    return list(dict.fromkeys(candidates))  # de-dup, keep discovery order
+
+
+def _sweep_orphans(cmds, candidates: List[str],
+                   job: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+    """Delete whichever of `candidates` no longer has any outgoing
+    connection, now that `_rewire` has replaced the edge that used to
+    reach the slot. `cmds.listConnections(node, source=False,
+    destination=True)` empty means nothing uses it any more.
+
+    Iterated to a fixpoint rather than computed in one carefully-ordered
+    pass: deleting the downstream-most orphan (a `reverse` sitting between
+    the terminal and the slot, say) can make its own upstream feeder (the
+    terminal) newly orphaned, and repeating until nothing new is found
+    handles that without depending on getting a dependency order right by
+    construction - the two-phase brief's own suggested alternative to a
+    hand-ordered single pass.
+
+    A candidate that survives (still feeds something) is reported by name
+    with what still uses it, turned into a warning by the caller - a
+    silent keep would hide exactly the case fix round 1 was about: a
+    shared terminal must not be destroyed for a slot that was not baked.
+    """
+    remaining = list(dict.fromkeys(candidates))
+    deleted: List[str] = []
+    survivors: List[Tuple[str, List[str]]] = []
+    changed = True
+    while changed and remaining:
+        changed = False
+        survivors = []
+        for node in remaining:
+            if not cmds.objExists(node):
+                continue
+            outputs = cmds.listConnections(node, source=False,
+                                           destination=True) or []
+            if outputs:
+                survivors.append((node, outputs))
+                continue
+            cmds.delete(node)
+            deleted.append(node)
+            changed = True
+        remaining = [n for n, _ in survivors]
+    warnings = [
+        "%s was not deleted after baking %s.%s - still used by %s"
+        % (node, job["material"], job["attr"], ", ".join(sorted(set(outs))))
+        for node, outs in survivors
+    ]
+    return deleted, warnings
 
 
 def bake_textures(params: Dict[str, Any]) -> Dict[str, Any]:
@@ -421,54 +509,85 @@ def bake_textures(params: Dict[str, Any]) -> Dict[str, Any]:
     settings = validate(params, cmds)
     jobs, warnings = plan_bakes(cmds, settings["meshes"], settings["slots"])
 
+    # Fix round 1, finding #3: every slot already file-backed is a genuine
+    # no-op (plan_bakes only reaches here with jobs==[] via that path -
+    # anything else refuses inside plan_bakes). Taking a checkpoint here
+    # would claim a mutation that never happened AND burn a slot in the
+    # bounded checkpoint ring for nothing - return before phase B even
+    # starts, with checkpoint_id explicitly None rather than a value that
+    # implies work was done.
+    if not jobs:
+        return {
+            "meshes": settings["meshes"], "out_dir": settings["out_dir"],
+            "resolution": settings["resolution"], "baked": [],
+            "skipped_file_backed": [w for w in warnings
+                                    if "already file-backed" in w],
+            "checkpoint_id": None,
+            "warnings": warnings,
+        }
+
     # --- phase A: bake and verify, mutating NOTHING -------------------
+    # `attempted` is appended to BEFORE each bake call, so the sweep below
+    # covers exactly the jobs phase A actually reached - including the
+    # failing job itself - and never a job it never got to (fix round 1,
+    # finding #2: the old sweep re-derived every job's path and could
+    # unlink a stray file at a job it had not attempted yet).
     staged: List[Dict[str, Any]] = []
+    attempted: List[str] = []
     try:
         for job in jobs:
             part = os.path.join(settings["out_dir"],
                                 job["basename"] + ".part.png")
+            attempted.append(part)
             _convert_solid_tx(cmds, job["terminal_plug"], job["mesh"], part,
                               settings["resolution"])
             check = _verify_bake(part, job)
             staged.append({"job": job, "part": part, "check": check})
     except Exception:
-        for entry in staged:
+        for part in attempted:
             try:
-                os.unlink(entry["part"])
+                os.unlink(part)
             except OSError:
                 pass
-        # the failing job's own part file, if it got that far
-        for job in jobs:
-            part = os.path.join(settings["out_dir"],
-                                job["basename"] + ".part.png")
-            if os.path.exists(part) and not any(e["part"] == part
-                                                for e in staged):
-                try:
-                    os.unlink(part)
-                except OSError:
-                    pass
         raise
 
     # --- phase B: every bake verified, so commit ----------------------
     checkpoint = session.auto_checkpoint("bake_textures")
     baked = []
-    for entry in staged:
-        job, part = entry["job"], entry["part"]
-        final_path = os.path.join(settings["out_dir"], job["basename"])
-        os.replace(part, final_path)
-        doomed = _doomed_nodes(cmds, job)
-        wiring = _rewire(cmds, job, final_path.replace("\\", "/"))
-        if doomed:
-            cmds.delete(*doomed)
-        baked.append({
-            "material": job["material"], "slot": job["slot"],
-            "attr": job["attr"], "file": final_path,
-            "basename": job["basename"], "resolution": settings["resolution"],
-            "colorspace": wiring["colorspace"],
-            "wired_plug": wiring["wired_plug"],
-            "kept_intermediates": wiring["kept_intermediates"],
-            "deleted_nodes": doomed, "pixel_check": entry["check"],
-        })
+    try:
+        for entry in staged:
+            job, part = entry["job"], entry["part"]
+            final_path = os.path.join(settings["out_dir"], job["basename"])
+            os.replace(part, final_path)
+            # Candidates are gathered BEFORE _rewire - it overwrites the
+            # very connection this walk follows (fix round 1, finding #1).
+            candidates = _orphan_candidates(cmds, job)
+            wiring = _rewire(cmds, job, final_path.replace("\\", "/"))
+            doomed, kept_warnings = _sweep_orphans(cmds, candidates, job)
+            warnings.extend(kept_warnings)
+            baked.append({
+                "material": job["material"], "slot": job["slot"],
+                "attr": job["attr"], "file": final_path,
+                "basename": job["basename"],
+                "resolution": settings["resolution"],
+                "colorspace": wiring["colorspace"],
+                "wired_plug": wiring["wired_plug"],
+                "kept_intermediates": wiring["kept_intermediates"],
+                "deleted_nodes": doomed, "pixel_check": entry["check"],
+            })
+    except Exception as exc:
+        # Fix round 1, finding #4: os.replace/_rewire/_sweep_orphans can
+        # all raise with the scene ALREADY partly or fully rewired, and
+        # until now only the postcondition raise below said so. Every
+        # exception through this block gets relabelled the same way,
+        # chained so the original traceback is not lost.
+        raise HandlerError(
+            "the scene has been modified while committing baked texture(s) "
+            "and then this happened: %s: %s - checkpoint %s has the "
+            "pre-bake scene"
+            % (type(exc).__name__, exc, checkpoint["checkpoint_id"]),
+            hint="call maya_restore_checkpoint(checkpoint_id=%r) to "
+                 "recover" % checkpoint["checkpoint_id"]) from exc
 
     # Postcondition: the slot must no longer read as procedural. A bake
     # that "succeeded" while leaving the claim procedural is a bug in this
