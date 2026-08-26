@@ -52,6 +52,7 @@ from .schemas import (
     LightingResult,
     MaterialResult,
     NameResult,
+    PrimitiveResult,
     NewSceneResult,
     ObjectInfoResult,
     OpenSceneResult,
@@ -1057,23 +1058,40 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         translate: Vec3 = None,
         rotate: Vec3 = None,
         scale: Vec3 = None,
-        divisions: Annotated[int, Field(ge=1, le=200, description=(
-            "1 = Maya defaults; higher multiplies subdivision counts. This is a "
-            "MULTIPLIER, and it costs very different amounts per kind: a cube "
-            "spends it linearly per axis (6*d^2 faces) while a sphere or torus "
+        divisions: Annotated[Optional[int], Field(ge=1, le=200, description=(
+            "Uniform MULTIPLIER on Maya's default subdivision counts; omit for "
+            "1. It costs very different amounts per kind: a cube spends it "
+            "linearly per axis (6*d^2 faces) while a sphere or torus "
             "multiplies it by 20 on BOTH axes (400*d^2), so divisions=50 is a "
-            "1M-face sphere but a 15k-face cube. Results are capped at 1,000,000 "
-            "faces; over that the call is refused with the highest divisions that "
-            "kind allows, rather than building a mesh that hangs Maya."
-        ))] = 1,
-    ) -> NameResult:
+            "1M-face sphere but a 15k-face cube. On a cylinder or cone it buys "
+            "20 AROUND per 1 ALONG, so a long thin limb cannot resolve its "
+            "length this way - use `subdivisions` for that. Results are capped "
+            "at 1,000,000 faces; over that the call is refused with the "
+            "highest divisions that kind allows, rather than building a mesh "
+            "that hangs Maya."
+        ))] = None,
+        subdivisions: Annotated[Optional[List[int]], Field(description=(
+            "LITERAL subdivision count per axis, instead of `divisions` - "
+            "passing both is refused, since they are different currencies. "
+            "Axis order per kind: cube [width, height, depth]; plane [width, "
+            "depth]; sphere/cylinder/cone [around, along]; torus [ring, tube]; "
+            "prism/pyramid [along]; octahedron/icosahedron take none (fixed "
+            "face count). This is how a limb gets rows ALONG its length "
+            "without paying for the circumference: [12, 16] on a cylinder is "
+            "194 faces where divisions=16 is 5122 for the same 16 rows. "
+            "Minimums are enforced (3 on every 'around'/'ring'/'tube' axis, "
+            "and on a sphere's 'along'): MEASURED, Maya silently substitutes "
+            "its own default of 20 for anything lower rather than clamping."
+        ))] = None,
+    ) -> PrimitiveResult:
         """Create a polygon primitive at an optional transform (no construction
         history)."""
-        return NameResult.model_validate(
+        return PrimitiveResult.model_validate(
             maya.request(
                 "create_primitive",
                 {"kind": kind, "name": name, "translate": translate,
-                 "rotate": rotate, "scale": scale, "divisions": divisions},
+                 "rotate": rotate, "scale": scale, "divisions": divisions,
+                 "subdivisions": subdivisions},
                 timeout_s=SCENE_TIMEOUT_S,
             )
         )
@@ -1437,7 +1455,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "top), or the full flare params. Baked - no deformer survives.\n"
             "  chunk   which object this part belongs to. Parts sharing a chunk "
             "are united into one object named after it.\n"
-            "  divisions, name  as in maya_create_primitive"
+            "  divisions, subdivisions, name  as in maya_create_primitive "
+            "(per-part; `subdivisions` is the literal per-axis count and "
+            "cannot be combined with `divisions`)"
         ))],
         atlas: Annotated[Optional[dict], Field(description=(
             "UV packing applied to each part before merging: {cols, rows, "

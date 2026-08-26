@@ -72,7 +72,13 @@ class FakeCmds:
         raise AssertionError("unexpected nodeType call")
 
     def polyCube(self, name=None, constructionHistory=False, **kw):
-        self.calls.append(("polyCube", name, kw))
+        return self._create("polyCube", name, kw)
+
+    def polyCylinder(self, name=None, constructionHistory=False, **kw):
+        return self._create("polyCylinder", name, kw)
+
+    def _create(self, command, name, kw):
+        self.calls.append((command, name, kw))
         long_name = "|" + name
         self.objects.add(long_name)
         self.xf[long_name] = ((0, 0, 0), (0, 0, 0), (1, 1, 1))
@@ -253,6 +259,115 @@ def test_resolve_center_still_accepts_plain_numbers():
     assert sculpt._resolve_center(
         None, None, {"op": "soft_move", "center": [1, 2.5, -3]}
     ) == [1.0, 2.5, -3.0]
+
+
+def test_a_cylinder_caps_each_end_with_ONE_ngon_not_a_fan():
+    # #669, measured (evals/divisions_probe_669.py claim 1): the old formula
+    # charged caps * subdivisionsAxis for the ends, as if Maya fanned them.
+    # It does not - a default cylinder is 22 faces, not 60, and a default cone
+    # is 21, not 40. The over-count fed assemble's shared face budget.
+    assert modeling.projected_faces("cylinder", 1) == 22
+    assert modeling.projected_faces("cylinder", 2) == 82
+    assert modeling.projected_faces("cylinder", 4) == 322
+    assert modeling.projected_faces("cone", 1) == 21
+    assert modeling.projected_faces("cone", 2) == 81
+    assert modeling.projected_faces("cone", 4) == 321
+
+
+def test_the_multiplier_is_defined_in_exactly_one_place():
+    # projected_faces is now faces_for(axes_for_divisions(...)), so the
+    # multiplier cannot drift from what the builder passes to Maya.
+    for kind in modeling.PRIMITIVE_KINDS:
+        for d in (1, 3, 7):
+            assert modeling.projected_faces(kind, d) == modeling.faces_for(
+                kind, modeling.axes_for_divisions(kind, d)
+            ), kind
+
+
+def test_axes_for_divisions_states_the_cylinder_coupling():
+    # 20 around per 1 along - the whole complaint of #669, in one number.
+    assert modeling.axes_for_divisions("cylinder", 8) == (160, 8)
+    assert modeling.axes_for_divisions("cone", 8) == (160, 8)
+    assert modeling.axes_for_divisions("sphere", 2) == (40, 40)
+    assert modeling.axes_for_divisions("cube", 3) == (3, 3, 3)
+    assert modeling.axes_for_divisions("octahedron", 9) == ()
+
+
+def test_per_axis_subdivisions_buy_length_without_the_circumference():
+    # The measured pair from the ticket: the same 16 rows along a cylinder,
+    # 26x cheaper when the circumference is not dragged along with them.
+    assert modeling.faces_for("cylinder", (320, 16)) == 5122
+    assert modeling.faces_for("cylinder", (12, 16)) == 194
+
+
+def test_subdivisions_resolves_to_the_literal_counts_asked_for():
+    assert modeling.resolve_subdivisions(
+        "cylinder", {"subdivisions": [12, 16]}
+    ) == (12, 16)
+    assert modeling.resolve_subdivisions("cube", {"subdivisions": [4, 1, 2]}) == (4, 1, 2)
+    # no divisions and no subdivisions is Maya's own defaults, as before
+    assert modeling.resolve_subdivisions("cylinder", {}) == (20, 1)
+
+
+def test_subdivisions_and_divisions_together_are_refused():
+    # They are different currencies. Ranking one over the other silently is
+    # the substitution this whole ticket is about.
+    with pytest.raises(HandlerError) as exc:
+        modeling.resolve_subdivisions(
+            "cylinder", {"divisions": 4, "subdivisions": [12, 16]}
+        )
+    assert "not both" in str(exc.value)
+
+
+def test_subdivisions_below_mayas_silent_default_are_refused():
+    # MEASURED: polyCylinder(subdivisionsAxis=2) does not clamp to 3 and does
+    # not raise - it builds 20 sides. A validator that passed 2 through would
+    # hand the caller a mesh 10x denser than asked for, silently.
+    with pytest.raises(HandlerError) as exc:
+        modeling.resolve_subdivisions("cylinder", {"subdivisions": [2, 16]})
+    assert "around" in str(exc.value)
+    assert "20" in exc.value.hint
+    # a sphere's 'along' axis is a closed loop and has the same minimum
+    with pytest.raises(HandlerError):
+        modeling.resolve_subdivisions("sphere", {"subdivisions": [12, 2]})
+    # but a cylinder stacks rows between two caps, so one row is a real answer
+    assert modeling.resolve_subdivisions("cylinder", {"subdivisions": [12, 1]}) == (12, 1)
+
+
+def test_subdivisions_of_the_wrong_length_names_the_axes():
+    with pytest.raises(HandlerError) as exc:
+        modeling.resolve_subdivisions("cube", {"subdivisions": [4, 4]})
+    assert "3 integers" in str(exc.value)
+    assert "width, height, depth" in exc.value.hint
+
+
+def test_subdivisions_on_a_platonic_solid_is_refused_not_ignored():
+    # polyPlatonicSolid has no subdivision flag to spend. Accepting the key
+    # and doing nothing with it is the #764 defect class.
+    with pytest.raises(HandlerError) as exc:
+        modeling.resolve_subdivisions("octahedron", {"subdivisions": [4, 4]})
+    assert "no subdivision axes" in str(exc.value)
+
+
+def test_create_primitive_reports_what_it_actually_built(monkeypatch):
+    # divisions=4 on a cylinder means 80 around and 4 along, which the caller
+    # cannot see from the call site. The result says so.
+    fake = FakeCmds()
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    out = modeling.create_primitive({"kind": "cylinder", "name": "c", "divisions": 4})
+    assert out["subdivisions"] == [80, 4]
+    assert out["faces"] == modeling.faces_for("cylinder", (80, 4))
+
+
+def test_create_primitive_passes_per_axis_counts_to_maya(monkeypatch):
+    fake = FakeCmds()
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    modeling.create_primitive(
+        {"kind": "cylinder", "name": "limb", "subdivisions": [12, 16]}
+    )
+    call = [c for c in fake.calls if c[0] == "polyCylinder"][0]
+    assert call[2]["subdivisionsAxis"] == 12
+    assert call[2]["subdivisionsHeight"] == 16
 
 
 def test_projected_faces_matches_the_creator_multipliers():

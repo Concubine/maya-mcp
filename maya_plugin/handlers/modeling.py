@@ -41,38 +41,103 @@ MAX_DIVISIONS = 200
 # highest `divisions` their chosen kind actually allows.
 MAX_PRIMITIVE_FACES = 1_000_000
 
+# Each kind's independently subdividable axes, in the order `subdivisions`
+# takes them, with the smallest count Maya HONOURS on each.
+#
+# The minimum is not cosmetic and it is not 1. Measured on this Maya
+# (evals/divisions_probe_669.py, claims 3 and 5): given a `subdivisionsAxis`
+# below 3, polySphere/polyCylinder/polyCone/polyTorus do not clamp to 3 and do
+# not raise - they silently substitute their own DEFAULT of 20. A caller who
+# asks for a 2-sided tube gets a 20-sided one and is told nothing. The same is
+# true of `subdivisionsHeight` on sphere and torus, whose "along" axis is a
+# closed loop and needs three segments to exist at all. Cylinder and cone
+# stack their rows between two caps, so one row is a real answer there.
+#
+# Torus's second axis is around the TUBE, not along a length - the names are
+# what the refusals print, so they say what the number actually does.
+SUBDIVISION_AXES: Dict[str, Tuple[Tuple[str, int], ...]] = {
+    "cube": (("width", 1), ("height", 1), ("depth", 1)),
+    # polyPlane lies in XZ: its "height" flag subdivides Z, not Y.
+    "plane": (("width", 1), ("depth", 1)),
+    "sphere": (("around", 3), ("along", 3)),
+    "cylinder": (("around", 3), ("along", 1)),
+    "cone": (("around", 3), ("along", 1)),
+    "torus": (("ring", 3), ("tube", 3)),
+    "prism": (("along", 1),),
+    "pyramid": (("along", 1),),
+    # polyPlatonicSolid takes radius and axis only - there is no subdivision
+    # flag to spend, so these two kinds have no axes at all.
+    "octahedron": (),
+    "icosahedron": (),
+}
 
-def projected_faces(kind: str, divisions: int) -> int:
-    """Faces `kind` will have at `divisions`. Pure - unit-testable without Maya.
 
-    Mirrors the creator lambdas below exactly; keep the two in step.
+def axes_for_divisions(kind: str, divisions: int) -> Tuple[int, ...]:
+    """The per-axis counts the `divisions` multiplier means for `kind`.
+
+    The single place the multiplier is defined. Everything else - the face
+    projection, the builder, the reported result - reads per-axis counts, so
+    `divisions` and `subdivisions` cannot drift apart.
     """
     d = divisions
-    if kind == "cube":
-        return 6 * d * d
-    if kind == "plane":
-        return d * d
+    if kind in ("cube",):
+        return (d, d, d)
+    if kind in ("plane",):
+        return (d, d)
     if kind in ("sphere", "torus"):
-        return (20 * d) * (20 * d)
+        return (20 * d, 20 * d)
     if kind in ("cylinder", "cone"):
-        # side quads plus the cap fan(s): cylinder caps both ends, cone one.
-        caps = 2 if kind == "cylinder" else 1
-        return (20 * d) * d + caps * (20 * d)
+        # The #669 coupling, stated in one line: 20 around per 1 along.
+        return (20 * d, d)
+    if kind in ("prism", "pyramid"):
+        return (d,)
     if kind in ("octahedron", "icosahedron"):
-        # polyPlatonicSolid has no subdivision flags at all (radius/axis only)
-        # - divisions has NO effect on face count for these two kinds. Fixed
-        # counts measured live in mayapy (Maya's solidType: 1=icosahedron,
-        # 2=octahedron in this Maya version).
+        return ()
+    raise HandlerError("unknown primitive kind %r" % kind)
+
+
+def faces_for(kind: str, axes: Tuple[int, ...]) -> int:
+    """Faces `kind` will have at these per-axis counts. Pure - no Maya needed.
+
+    MEASURED against a real Maya for every kind, at several counts each
+    (evals/divisions_probe_669.py claims 1 and 4, and the mayapy suite's
+    TestPrimitiveFaceCounts, which builds each one and counts).
+
+    The cylinder and cone rows are a CORRECTION: the old arithmetic charged
+    `caps * subdivisionsAxis` for the end caps, as if Maya fanned them into
+    triangles. It does not - `polyCylinder` closes each end with a single
+    n-gon, so a default cylinder is 22 faces where this function used to
+    predict 60. That over-count fed the shared face budget `assemble` spends
+    across all its parts, so it refused builds that would have been fine.
+    """
+    if kind == "cube":
+        w, h, d = axes
+        return 2 * (w * h + h * d + w * d)
+    if kind == "plane":
+        return axes[0] * axes[1]
+    if kind in ("sphere", "torus"):
+        return axes[0] * axes[1]
+    if kind in ("cylinder", "cone"):
+        # side quads (cone: triangles into the apex) plus ONE n-gon per cap.
+        caps = 2 if kind == "cylinder" else 1
+        return axes[0] * axes[1] + caps
+    if kind in ("octahedron", "icosahedron"):
+        # Fixed counts measured live in mayapy (Maya's solidType: 1 =
+        # icosahedron, 2 = octahedron in this Maya version).
         return 8 if kind == "octahedron" else 20
     if kind in ("prism", "pyramid"):
-        # Measured live in mayapy with subdivisionsCaps=0 (each cap a single
-        # flat n-gon face, not Maya's optional fan-subdivided one): sides =
-        # ns*sh either way; prism has TWO caps, pyramid has ONE (apex is a
-        # point with no cap of its own).
+        # Measured with subdivisionsCaps=0 (each cap a single flat n-gon, not
+        # Maya's optional fan-subdivided one): prism has TWO caps, pyramid has
+        # ONE (the apex is a point with no cap of its own).
         ns = _PRISM_SIDES if kind == "prism" else _PYRAMID_SIDES
         caps = 2 if kind == "prism" else 1
-        return ns * d + caps
+        return ns * axes[0] + caps
     raise HandlerError("unknown primitive kind %r" % kind)
+
+
+def projected_faces(kind: str, divisions: int) -> int:
+    """Faces `kind` will have at `divisions`. Pure - unit-testable without Maya."""
+    return faces_for(kind, axes_for_divisions(kind, divisions))
 
 
 def max_divisions_for(kind: str) -> int:
@@ -83,6 +148,116 @@ def max_divisions_for(kind: str) -> int:
             break
         allowed = d
     return allowed
+
+
+def _axis_list(kind: str) -> str:
+    return ", ".join(name for name, _ in SUBDIVISION_AXES[kind])
+
+
+def resolve_subdivisions(
+    kind: str, params: Dict[str, Any], where: str = ""
+) -> Tuple[int, ...]:
+    """The per-axis subdivision counts this call asks for, validated.
+
+    Two ways in, and they are different currencies, so passing both is refused
+    rather than silently ranked:
+
+    * `divisions` - the historical MULTIPLIER, unchanged. Convenient, but on
+      cylinder and cone it buys 20 around per 1 along, so a long thin limb
+      cannot resolve its LENGTH without an absurd circumference (#669: 16 rows
+      along a cylinder costs 5122 faces this way against 194 with a
+      circumference a limb actually needs - 26x).
+    * `subdivisions` - LITERAL counts, one per axis of this kind, in
+      SUBDIVISION_AXES order.
+
+    Every refusal names the axes of the kind in hand, because the axis count
+    and the minimums differ per kind and a bare "invalid" would send the
+    caller guessing.
+    """
+    prefix = (where + " ") if where else ""
+    axes_spec = SUBDIVISION_AXES[kind]
+    subdivisions = params.get("subdivisions")
+    divisions = params.get("divisions")
+    if subdivisions is not None and divisions is not None:
+        raise HandlerError(
+            "%spass either divisions or subdivisions, not both" % prefix,
+            hint="they are different currencies: `divisions` is a multiplier "
+            "(a cylinder spends it 20 around per 1 along), `subdivisions` is "
+            "the literal count per axis. Guessing which one you meant is "
+            "exactly the silent substitution this refuses.",
+        )
+
+    if subdivisions is None:
+        if divisions is None:
+            divisions = 1
+        if not isinstance(divisions, int) or isinstance(divisions, bool) or not (
+            1 <= divisions <= MAX_DIVISIONS
+        ):
+            raise HandlerError(
+                "%sdivisions must be an integer 1..%d" % (prefix, MAX_DIVISIONS),
+                hint="1 = Maya defaults; higher multiplies subdivision counts. "
+                "For per-axis control pass `subdivisions` instead"
+                + (": [%s]" % _axis_list(kind) if axes_spec else ""),
+            )
+        return axes_for_divisions(kind, divisions)
+
+    if not axes_spec:
+        raise HandlerError(
+            "%s%s has no subdivision axes, so `subdivisions` means nothing "
+            "for it" % (prefix, kind),
+            hint="polyPlatonicSolid takes radius and axis only - an "
+            "octahedron is always 8 faces and an icosahedron always 20. "
+            "Refine one with maya_sculpt_ops op 'smooth' instead.",
+        )
+    if (
+        not isinstance(subdivisions, (list, tuple))
+        or len(subdivisions) != len(axes_spec)
+        or not all(isinstance(v, int) and not isinstance(v, bool)
+                   for v in subdivisions)
+    ):
+        raise HandlerError(
+            "%ssubdivisions for a %s must be %d integers, got %r"
+            % (prefix, kind, len(axes_spec), subdivisions),
+            hint="the axes of a %s are [%s]" % (kind, _axis_list(kind)),
+        )
+    for value, (axis_name, minimum) in zip(subdivisions, axes_spec):
+        if value < minimum:
+            if minimum > 1:
+                hint = (
+                    "MEASURED on this Maya: a subdivision count below the "
+                    "minimum is neither clamped nor refused - Maya silently "
+                    "substitutes its own DEFAULT of 20. Asking for %d would "
+                    "build 20 and say nothing, so this refuses instead."
+                    % value
+                )
+            else:
+                hint = ("a %s needs at least %d on its %s axis"
+                        % (kind, minimum, axis_name))
+            raise HandlerError(
+                "%ssubdivisions %s=%d is below the %d Maya honours on a %s"
+                % (prefix, axis_name, value, minimum, kind),
+                hint=hint,
+            )
+    return tuple(int(v) for v in subdivisions)
+
+
+def check_face_budget(kind: str, axes: Tuple[int, ...], where: str = "") -> int:
+    """Refuse a build that would hang Maya, and say what to turn down."""
+    faces = faces_for(kind, axes)
+    if faces > MAX_PRIMITIVE_FACES:
+        prefix = (where + " ") if where else ""
+        raise HandlerError(
+            "%sthat would build a %s with about %d faces, over the %d-face "
+            "limit" % (prefix, kind, faces, MAX_PRIMITIVE_FACES),
+            hint="the highest `divisions` for a %s is %d, or pass "
+            "`subdivisions` and spend the faces where the shape needs them "
+            "([%s] for a %s). `divisions` is a multiplier and costs far more "
+            "on some kinds than others - a sphere multiplies it by 20 on BOTH "
+            "axes, a cube does not. Build it coarse and refine with "
+            "maya_sculpt_ops op 'smooth'."
+            % (kind, max_divisions_for(kind), _axis_list(kind) or "none", kind),
+        )
+    return faces
 
 
 def _cmds():
@@ -138,44 +313,44 @@ def create_primitive(params: Dict[str, Any]) -> Dict[str, Any]:
             "missing required param 'name'",
             hint="pass the object name to create, e.g. name='golem_torso'",
         )
-    divisions = params.get("divisions", 1)
-    if not isinstance(divisions, int) or isinstance(divisions, bool) or not (
-        1 <= divisions <= MAX_DIVISIONS
-    ):
-        raise HandlerError(
-            "divisions must be an integer 1..%d" % MAX_DIVISIONS,
-            hint="1 = Maya defaults; higher multiplies subdivision counts",
-        )
-    faces = projected_faces(kind, divisions)
-    if faces > MAX_PRIMITIVE_FACES:
-        raise HandlerError(
-            "divisions=%d would build a %s with about %d faces, over the "
-            "%d-face limit" % (divisions, kind, faces, MAX_PRIMITIVE_FACES),
-            hint="the highest divisions for a %s is %d; `divisions` is a "
-            "multiplier and costs far more on some kinds than others "
-            "(a sphere multiplies it by 20 on both axes, a cube does not). "
-            "Build it coarse and refine with maya_sculpt_ops op 'smooth'."
-            % (kind, max_divisions_for(kind)),
-        )
+    axes = resolve_subdivisions(kind, params)
+    faces = check_face_budget(kind, axes)
     cmds = _cmds()
     name = naming.unique_name(cmds, requested)
-    long_name = _long(cmds, build_unit_primitive(cmds, kind, name, divisions))
+    long_name = _long(cmds, build_unit_primitive(cmds, kind, name, axes=axes))
     _apply_xform(
         cmds, long_name,
         _vec3(params, "translate"), _vec3(params, "rotate"), _vec3(params, "scale"),
         relative=False,
     )
     ledger.record(cmds, long_name)
-    return {"name": long_name, "warnings": []}
+    # The resolved counts come back because `divisions` is a multiplier whose
+    # per-kind meaning is invisible from the call site: a caller who asked for
+    # 4 has no way to know it bought 80 around and 4 along until it is told.
+    return {
+        "name": long_name,
+        "subdivisions": list(axes),
+        "faces": faces,
+        "warnings": [],
+    }
 
 
-def build_unit_primitive(cmds, kind: str, name: str, divisions: int = 1) -> str:
+def build_unit_primitive(
+    cmds, kind: str, name: str, divisions: int = 1,
+    axes: Optional[Tuple[int, ...]] = None,
+) -> str:
     """Create `kind` filling a 1-unit box, at the origin, and return its name.
 
     Split out of create_primitive so bulk builders (assemble) share ONE unit-box
     normalisation rather than re-deriving Maya's per-kind default sizes. Assumes
-    `kind`, `divisions` and `name` are already validated.
+    `kind`, `name` and the subdivision counts are already validated.
+
+    `axes` is the per-axis subdivision counts in SUBDIVISION_AXES order; the
+    `divisions` multiplier is kept for callers that never needed per-axis
+    control, and resolves through the same one place.
     """
+    if axes is None:
+        axes = axes_for_divisions(kind, divisions)
     # Every kind is built to fill a 1-unit box - largest dimension exactly 1 -
     # so `scale` means the same thing whichever kind you pick. Maya's own
     # defaults do not agree: measured in mayapy, cube 1.0 across,
@@ -200,31 +375,31 @@ def build_unit_primitive(cmds, kind: str, name: str, divisions: int = 1) -> str:
         "cube": lambda: cmds.polyCube(
             name=name, constructionHistory=False,
             width=1.0, height=1.0, depth=1.0,
-            subdivisionsWidth=divisions, subdivisionsHeight=divisions,
-            subdivisionsDepth=divisions,
+            subdivisionsWidth=axes[0], subdivisionsHeight=axes[1],
+            subdivisionsDepth=axes[2],
         ),
         "plane": lambda: cmds.polyPlane(
             name=name, constructionHistory=False, width=1.0, height=1.0,
-            subdivisionsWidth=divisions, subdivisionsHeight=divisions,
+            subdivisionsWidth=axes[0], subdivisionsHeight=axes[1],
         ),
         "sphere": lambda: cmds.polySphere(
             name=name, constructionHistory=False, radius=0.5,
-            subdivisionsAxis=20 * divisions, subdivisionsHeight=20 * divisions,
+            subdivisionsAxis=axes[0], subdivisionsHeight=axes[1],
         ),
         "cylinder": lambda: cmds.polyCylinder(
             name=name, constructionHistory=False, radius=0.5, height=1.0,
-            subdivisionsAxis=20 * divisions, subdivisionsHeight=divisions,
+            subdivisionsAxis=axes[0], subdivisionsHeight=axes[1],
         ),
         "cone": lambda: cmds.polyCone(
             name=name, constructionHistory=False, radius=0.5, height=1.0,
-            subdivisionsAxis=20 * divisions, subdivisionsHeight=divisions,
+            subdivisionsAxis=axes[0], subdivisionsHeight=axes[1],
         ),
         # Outer diameter = 2 * (radius + sectionRadius); a third and a sixth
         # keep Maya's 2:1 ring-to-tube proportion inside a unit width.
         "torus": lambda: cmds.polyTorus(
             name=name, constructionHistory=False,
             radius=1.0 / 3.0, sectionRadius=1.0 / 6.0,
-            subdivisionsAxis=20 * divisions, subdivisionsHeight=20 * divisions,
+            subdivisionsAxis=axes[0], subdivisionsHeight=axes[1],
         ),
         # solidType: 1=icosahedron, 2=octahedron (this Maya version) - no
         # subdivision flags exist, so divisions is accepted but has no effect.
@@ -241,7 +416,7 @@ def build_unit_primitive(cmds, kind: str, name: str, divisions: int = 1) -> str:
         "prism": lambda: cmds.polyPrism(
             name=name, constructionHistory=False,
             sideLength=1.0, length=1.0,
-            numberOfSides=_PRISM_SIDES, subdivisionsHeight=divisions,
+            numberOfSides=_PRISM_SIDES, subdivisionsHeight=axes[0],
             subdivisionsCaps=0,
         ),
         # A pyramid's height follows its side length, so a unit-wide pyramid is
@@ -249,7 +424,7 @@ def build_unit_primitive(cmds, kind: str, name: str, divisions: int = 1) -> str:
         "pyramid": lambda: cmds.polyPyramid(
             name=name, constructionHistory=False,
             sideLength=1.0 / _PYRAMID_WIDTH_AT_UNIT_SIDE,
-            numberOfSides=_PYRAMID_SIDES, subdivisionsHeight=divisions,
+            numberOfSides=_PYRAMID_SIDES, subdivisionsHeight=axes[0],
             subdivisionsCaps=0,
         ),
     }

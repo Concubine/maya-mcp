@@ -550,9 +550,34 @@ class TestModelingTools:
         assert conn.calls[0]["cmd"] == "create_primitive"
         assert conn.calls[0]["params"] == {
             "kind": "cube", "name": "golem_arm", "translate": [1, 2, 3],
-            "rotate": None, "scale": None, "divisions": 1,
+            "rotate": None, "scale": None, "divisions": None,
+            "subdivisions": None,
         }
         assert result.structured_content["name"] == "|golem_arm"
+
+    def test_maya_create_primitive_forwards_per_axis_subdivisions(self):
+        # #669: an unset `divisions` must arrive as None rather than 1, or the
+        # handler would see both currencies on every call and refuse them all.
+        conn = FakeConn(
+            responses={"create_primitive": {
+                "name": "|limb", "subdivisions": [12, 16], "faces": 194,
+                "warnings": [],
+            }}
+        )
+        mcp = server_mod.create_server(conn)
+        result = run(
+            mcp.call_tool(
+                "maya_create_primitive",
+                {"kind": "cylinder", "name": "limb", "subdivisions": [12, 16]},
+            )
+        )
+        assert result.is_error is False
+        assert conn.calls[0]["params"]["subdivisions"] == [12, 16]
+        assert conn.calls[0]["params"]["divisions"] is None
+        # and what was built comes back through the wrapper's own model - a
+        # result field missing from the model is a field nobody sees (#757).
+        assert result.structured_content["subdivisions"] == [12, 16]
+        assert result.structured_content["faces"] == 194
 
     def test_maya_boolean_op_forwards_params(self):
         conn = FakeConn(

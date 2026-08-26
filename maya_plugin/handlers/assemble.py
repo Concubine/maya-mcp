@@ -130,12 +130,12 @@ def validate_parts(
         if not isinstance(part, dict):
             raise HandlerError("%s must be an object, got %r" % (where, part))
         unknown = set(part) - {"kind", "pos", "dim", "rotate", "patch", "taper",
-                               "chunk", "divisions", "name"}
+                               "chunk", "divisions", "subdivisions", "name"}
         if unknown:
             raise HandlerError(
                 "%s has unknown keys: %s" % (where, ", ".join(sorted(unknown))),
                 hint="valid: kind, pos, dim, rotate, patch, taper, chunk, "
-                "divisions, name",
+                "divisions, subdivisions, name",
             )
 
         kind = part.get("kind", "cube")
@@ -144,20 +144,17 @@ def validate_parts(
                 "%s has unknown kind %r" % (where, kind),
                 hint="valid kinds: %s" % ", ".join(modeling.PRIMITIVE_KINDS),
             )
-        divisions = part.get("divisions", 1)
-        if not isinstance(divisions, int) or isinstance(divisions, bool) or not (
-            1 <= divisions <= modeling.MAX_DIVISIONS
-        ):
-            raise HandlerError(
-                "%s divisions must be an integer 1..%d"
-                % (where, modeling.MAX_DIVISIONS)
-            )
-        total_faces += modeling.projected_faces(kind, divisions)
+        # Same resolver as create_primitive, so a part reads the same as a
+        # standalone build and neither one can drift from the other (#669).
+        axes = modeling.resolve_subdivisions(kind, part, where)
+        total_faces += modeling.check_face_budget(kind, axes, where)
         if total_faces > MAX_TOTAL_FACES:
             raise HandlerError(
                 "the parts add up to more than %d faces" % MAX_TOTAL_FACES,
                 hint="`divisions` is a multiplier and costs far more on some "
-                "kinds than others - a sphere multiplies it by 20 on BOTH axes",
+                "kinds than others - a sphere multiplies it by 20 on BOTH "
+                "axes. Per-axis `subdivisions` spends faces only where the "
+                "part needs them.",
             )
 
         dim = _vec3(part.get("dim"), where + ".dim")
@@ -181,7 +178,7 @@ def validate_parts(
         resolved.append({
             "index": index,
             "kind": kind,
-            "divisions": divisions,
+            "axes": axes,
             "pos": _vec3(part.get("pos"), where + ".pos", default=[0.0, 0.0, 0.0]),
             "dim": dim,
             "rotate": _vec3(part.get("rotate"), where + ".rotate"),
@@ -332,7 +329,7 @@ def assemble(params: Dict[str, Any]) -> Dict[str, Any]:
         requested = part["name"] or "%s_p%04d" % (part["chunk"], part["index"])
         name = naming.unique_name(cmds, requested)
         node = modeling.build_unit_primitive(cmds, part["kind"], name,
-                                             part["divisions"])
+                                             axes=part["axes"])
         node = (cmds.ls(node, long=True) or [node])[0]
         cmds.xform(node, scale=part["dim"])
         if part["rotate"] is not None:

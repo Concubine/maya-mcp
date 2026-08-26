@@ -124,13 +124,40 @@ Scene ops:
 
 | cmd | params | result |
 |---|---|---|
-| `create_primitive` | `{ kind, name, translate?, rotate?, scale?, divisions? }` | `{ name, warnings }` |
+| `create_primitive` | `{ kind, name, translate?, rotate?, scale?, divisions? \| subdivisions? }` | `{ name, subdivisions, faces, warnings }` |
 | `duplicate` | `{ name, new_name, translate?, rotate?, scale? }` | `{ name, warnings }` |
 | `transform` | `{ names, translate?, rotate?, scale?, relative? }` | `{ objects: [...], warnings }` |
 | `group` | `{ names, group_name }` | `{ name, warnings }` |
 | `parent` | `{ child, parent }` | `{ name, warnings }` |
 | `rename` | `{ name, new_name }` | `{ name, warnings }` |
 | `delete_objects` | `{ names }` | `{ deleted: [...], warnings }` |
+
+### Resolution: `divisions` is a multiplier, `subdivisions` is a count (#669)
+
+`create_primitive` takes **either** of two ways to say how dense the mesh should be, never both — they are different currencies and ranking one over the other silently is the substitution this whole area is about.
+
+* **`divisions`** — the uniform MULTIPLIER on Maya's own defaults. Unchanged, and still the right answer for anything roughly isotropic. Its cost differs wildly per kind: a cube spends it linearly per axis, a sphere or torus multiplies it by 20 on BOTH axes.
+* **`subdivisions`** — the LITERAL count per axis, one integer per axis of the kind in hand, in this order:
+
+| kind | axes | minimums |
+|---|---|---|
+| `cube` | `[width, height, depth]` | 1, 1, 1 |
+| `plane` | `[width, depth]` (Maya's "height" flag subdivides Z) | 1, 1 |
+| `sphere` | `[around, along]` | 3, 3 |
+| `cylinder`, `cone` | `[around, along]` | 3, 1 |
+| `torus` | `[ring, tube]` | 3, 3 |
+| `prism`, `pyramid` | `[along]` | 1 |
+| `octahedron`, `icosahedron` | none — `polyPlatonicSolid` has no subdivision flag, so passing `subdivisions` is **refused** rather than ignored | — |
+
+The reason this exists: `divisions` on a cylinder or cone buys **20 around for every 1 along**. A long thin limb needs rows along its length and almost nothing around it, so the only way to get them was to pay for a circumference no shape needed — measured, 16 rows along a cylinder costs **5122 faces** that way against **194** with a 12-sided tube, and both bend identically (`evals/divisions_live.py`).
+
+**The minimums are enforced, and they are not decoration.** MEASURED on this Maya: given a `subdivisionsAxis` below 3, `polySphere`/`polyCylinder`/`polyCone`/`polyTorus` neither clamp nor raise — they silently substitute their own **default of 20**. A caller asking for a 2-sided tube would get a 20-sided one and be told nothing, so the tool refuses instead.
+
+The result reports **`subdivisions`** (the per-axis counts as built) and **`faces`**, because the multiplier's per-kind meaning is invisible from the call site: `divisions: 4` on a cylinder buys 80 around and 4 along, and nothing else in the result said so.
+
+The face projection those counts are budgeted against was **wrong for cylinder and cone** until #669: it charged a fan of triangles per end cap, where Maya closes each with a single n-gon, so a default cylinder was predicted at 60 faces and builds 22. It survived because the only real-Maya face-count assertions covered the platonic solids, prism and pyramid — the mayapy suite now checks every kind.
+
+`assemble` parts take the same two keys with the same meanings and the same refusals.
 
 Modeling and sculpting:
 
