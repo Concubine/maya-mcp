@@ -151,8 +151,13 @@ def apply_texture_recipe(params: Dict[str, Any]) -> Dict[str, Any]:
         warnings.append(
             "this recipe builds a procedural network that Maya's FBX "
             "exporter silently drops - maya_export_fbx reports it in "
-            "textures.dropped_maps; use file textures (maya_assign_pbr or "
-            "the file_texture recipe) for anything that must survive export")
+            "textures.dropped_maps; maya_bake_textures converts it to a "
+            "file texture that does survive")
+        if not (cmds.polyEvaluate(shape, uvcoord=True) or 0):
+            warnings.append(
+                "this mesh has no UVs, so maya_bake_textures will refuse it "
+                "- maya_uv_atlas creates a layout (project='box' is enough "
+                "for tiling detail)")
 
     return {
         "mesh": mesh_long,

@@ -1031,6 +1031,75 @@ class ExportFbxResult(BaseModel):
         "Measured caveats about the written file - today, texture losses."))
 
 
+class PixelCheck(BaseModel):
+    """Whether the baked image actually sampled anything."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    pixel_count: int
+    distinct_values: int
+    non_uniform: Optional[bool] = Field(default=None, description=(
+        "True when the image carries more than one distinct pixel value. "
+        "False means the bake is flat - the network sampled nothing, which "
+        "is what a UV-less mesh produces (Maya does not refuse it). None "
+        "means the image could not be read; see unavailable_reason."))
+    unavailable_reason: Optional[str] = None
+
+
+class BakedMap(BaseModel):
+    """One procedural network, now a file texture the FBX can carry."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    material: str
+    slot: str
+    attr: str
+    file: str = Field(description="Absolute path of the image written.")
+    basename: str = Field(description=(
+        "The name a consumer sees in the FBX's Texture/Video records - the "
+        "same string maya_export_fbx reports in textures.file_maps."))
+    resolution: int
+    colorspace: str = Field(description=(
+        "'Raw' for scalar and normal data, 'sRGB' for colour. Data read as "
+        "colour renders quietly wrong."))
+    wired_plug: str = Field(description=(
+        "Which plug of the new file node drives the slot: outColor, "
+        "outColorR, or outAlpha (into the kept bump2d)."))
+    kept_intermediates: List[str] = Field(default_factory=list, description=(
+        "Nodes deliberately preserved - a normal slot keeps its bump2d "
+        "because bumpDepth is part of the authored look."))
+    deleted_nodes: List[str] = Field(default_factory=list, description=(
+        "The replaced procedural nodes. Nodes still feeding something else "
+        "are left alone and named in warnings."))
+    pixel_check: PixelCheck
+
+
+class BakeTexturesResult(BaseModel):
+    """What maya_bake_textures changed in the scene, and where the images went.
+
+    The rewire is PERSISTENT: the next render shows exactly what an export
+    will carry. Re-judge it before exporting - that is the whole point of
+    baking as a scene edit rather than an export-time trick.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    meshes: List[str]
+    out_dir: str
+    resolution: int
+    baked: List[BakedMap] = Field(default_factory=list)
+    skipped_file_backed: List[str] = Field(default_factory=list, description=(
+        "Slots that already read from a file and needed no bake."))
+    checkpoint_id: Optional[str] = Field(default=None, description=(
+        "Taken before the scene was modified; maya_restore_checkpoint "
+        "returns the pre-bake state. Null when every requested slot was "
+        "already file-backed and nothing was baked - a checkpoint of no "
+        "change would both misreport the call and spend a slot in the "
+        "bounded checkpoint ring for nothing; see skipped_file_backed for "
+        "what happened instead."))
+    warnings: List[str] = Field(default_factory=list)
+
+
 class SkeletonJoint(BaseModel):
     model_config = ConfigDict(extra="ignore")
 

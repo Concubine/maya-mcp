@@ -716,6 +716,7 @@ does not exist yet. `delete_clip` the rig that is not being exported.
 | cmd | params | result |
 |---|---|---|
 | `export_fbx` | `{ path, metres_per_unit, nodes?, include_skins?, include_animation?, require_baked_textures? }` | `{ path, bytes, fbx_version, node_count, mesh_count, root_nodes, unit_scale_factor, metres_per_unit, world_bounds_min, world_bounds_max, height_m, bounds_unavailable_reason, skin, shapes, animation, textures, warnings }` |
+| `bake_textures` | `{ meshes, out_dir, resolution?, slots? }` | `{ meshes, out_dir, resolution, baked: [...], skipped_file_backed, checkpoint_id, warnings }` |
 
 Every field of the result is read back **out of the written file**, never from the Maya scene — the unit defect this tool guards (#629) is produced by the exporter and is absent from the scene, so a scene-derived report would be confidently wrong in exactly the case that matters. The file is written to a sibling temp path and only reaches `path` once it passes; a refused export leaves whatever was already there untouched.
 
@@ -802,14 +803,30 @@ already names the real cause); the `unclaimed_records` field itself is
 unaffected and still lists those basenames as data.
 
 `apply_texture_recipe` warns at authoring time, not only at export: any
-recipe other than `file_texture` returns a `warnings` entry stating that
-the network it just built has no FBX representation and naming
-`maya_export_fbx`'s `textures.dropped_maps` as where that loss will
-surface — so a look built procedurally is flagged before export is ever
-attempted, not only after.
+recipe other than `file_texture` returns a `warnings` entry naming
+`maya_bake_textures` as the fix — the network it just built has no FBX
+representation, and the bake tool converts it to a file texture that does
+survive. When the mesh has no UVs, a second warning fires alongside it:
+`maya_bake_textures` refuses a UV-less mesh outright (below), so the
+recipe says so up front rather than leaving it to be discovered cold at
+bake time — `maya_uv_atlas` is named as the fix for that one.
 
-There is no `maya_bake_textures` tool yet. #714 phase 1 is byte-honest
-reporting only (this section); converting a procedural network into a
-file texture at export time is an unimplemented phase 2, gated on the GO
-its own probes recorded (`evals/bake_probe_714.py`) — nothing here should
-be read as that tool existing.
+`maya_bake_textures` (`{ meshes, out_dir, resolution?, slots? }`) turns
+exactly the procedural networks `dropped_maps` names into file textures
+and **rewires the scene** to use them. The rewire is persistent — the
+next render, and the next `maya_export_fbx`, show exactly what the bake
+produced, so re-judge the render before exporting rather than trusting
+the bake blind. Nothing in the scene changes unless every requested bake
+both succeeds and is verified to have sampled something; a checkpoint is
+taken before the rewire either way, and `maya_restore_checkpoint` returns
+the pre-bake scene. A mesh with no UVs is refused outright: a bake
+samples through UV space, and Maya's own `convertSolidTx` does not error
+on a UV-less mesh — it silently writes a flat, useless image — so this
+tool refuses rather than shipping that quietly wrong. A material worn by
+several of the requested meshes bakes **once**: the bake samples through
+UV space, not world geometry (measured), so a shared material's image is
+identical regardless of which mesh triggered it. When every requested
+slot is already file-backed, nothing is baked and `checkpoint_id` is
+`null` rather than a spent checkpoint-ring slot for no change;
+`skipped_file_backed` names what needed no work, so a caller can tell
+"nothing needed baking" from "nothing happened."

@@ -32,6 +32,7 @@ from .schemas import (
     AssembleResult,
     AuthorClipResult,
     AuthorPhysicsResult,
+    BakeTexturesResult,
     BlendshapeTargetSpec,
     ClipKeySpec,
     CombineResult,
@@ -963,6 +964,52 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                  "nodes": nodes, "include_skins": include_skins,
                  "include_animation": include_animation,
                  "require_baked_textures": require_baked_textures},
+                timeout_s=EXPORT_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Bake procedural textures to files",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_bake_textures(
+        meshes: Annotated[List[str], Field(description=(
+            "Meshes whose materials should be baked. A material worn by "
+            "several of them is baked ONCE - the bake samples through UV "
+            "space, not world geometry (measured)."
+        ))],
+        out_dir: Annotated[str, Field(description=(
+            "Absolute directory the images are written to. It must already "
+            "exist; there is no default, because a guessed location is how "
+            "bake files get lost from a delivery."
+        ))],
+        resolution: Annotated[int, Field(description=(
+            "Square bake size: 256, 512, 1024, 2048 or 4096."
+        ))] = 1024,
+        slots: Annotated[Optional[List[str]], Field(description=(
+            "Limit the bake to these slots (color, emission_color, "
+            "metalness, roughness, normal). Omit to bake every procedural "
+            "slot found."
+        ))] = None,
+    ) -> BakeTexturesResult:
+        """Turn procedural texture networks into file textures the FBX can carry.
+
+        Maya's FBX exporter cannot write a procedural network at all, so a
+        noise/ramp/layered look is judged in renders and then silently
+        missing from the exported file. This bakes those networks to images
+        and REWIRES THE SCENE to use them, so the next render is what
+        actually ships - re-judge it, then export.
+
+        Nothing is changed unless every requested bake succeeds and is
+        verified to have sampled something; a checkpoint is taken before the
+        rewire either way."""
+        return BakeTexturesResult.model_validate(
+            maya.request(
+                "bake_textures",
+                {"meshes": meshes, "out_dir": out_dir,
+                 "resolution": resolution, "slots": slots},
                 timeout_s=EXPORT_TIMEOUT_S,
             )
         )

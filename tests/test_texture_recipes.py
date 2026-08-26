@@ -14,6 +14,7 @@ class FakeCmds:
         self.connections = []
         self.deleted = []
         self.fail_on = None
+        self.uv_count = 4  # default: the mesh has UVs
 
     def ls(self, name=None, long=False, **kw):
         return [o for o in self.objects if o == name or o.split("|")[-1] == name]
@@ -53,6 +54,9 @@ class FakeCmds:
         for n in names:
             self.deleted.append(n)
             self.objects.discard(n)
+
+    def polyEvaluate(self, node, uvcoord=False, **kw):
+        return self.uv_count if uvcoord else 0
 
 
 def test_noise_bump_builds_and_connects_to_the_normal_slot(monkeypatch):
@@ -131,13 +135,28 @@ def test_file_texture_requires_a_path(monkeypatch):
 def test_procedural_recipes_warn_that_the_map_will_not_export(monkeypatch):
     # #714: Maya's FBX exporter silently drops procedural networks - the
     # recipe that builds one must say so up front, not leave it to be
-    # discovered later in maya_export_fbx's dropped_maps.
+    # discovered later in maya_export_fbx's dropped_maps. Phase 2: now that
+    # maya_bake_textures exists, the warning names it as the remedy.
     fake = FakeCmds()
     monkeypatch.setattr(texture_recipes, "_cmds", lambda: fake)
     result = texture_recipes.apply_texture_recipe(
         {"mesh": "|torso", "recipe": "noise_bump"}
     )
-    assert any("silently drops" in w for w in result["warnings"])
+    assert any("silently drops" in w and "maya_bake_textures" in w
+               for w in result["warnings"])
+
+
+def test_procedural_recipe_on_a_uv_less_mesh_warns_bake_will_refuse_it(monkeypatch):
+    # #714 phase 2: maya_bake_textures refuses a UV-less mesh outright - the
+    # recipe gives that signal up front rather than leaving it to be
+    # discovered at bake time.
+    fake = FakeCmds()
+    fake.uv_count = 0
+    monkeypatch.setattr(texture_recipes, "_cmds", lambda: fake)
+    result = texture_recipes.apply_texture_recipe(
+        {"mesh": "|torso", "recipe": "noise_bump"}
+    )
+    assert any("no UVs" in w and "maya_uv_atlas" in w for w in result["warnings"])
 
 
 def test_the_file_texture_recipe_does_not_warn(monkeypatch):
