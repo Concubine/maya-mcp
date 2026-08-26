@@ -292,6 +292,92 @@ class TestModelingInMaya:
         modeling.delete_objects({"names": ["|gp_grp"]})
         assert not cmds.objExists("gp_grp")
 
+    def test_every_kind_builds_the_face_count_the_budget_predicted(self):
+        # #669: the face projection is what the 1M-face ceiling and assemble's
+        # 4M-face budget are spent against, and it was WRONG for cylinder and
+        # cone for as long as it existed - it charged a fan of triangles for
+        # each end cap where Maya closes one with a single n-gon (22 faces
+        # predicted as 60). It survived because the only real-Maya face
+        # assertions covered the platonic solids, prism and pyramid. This
+        # covers every kind, so the next drift fails here instead of quietly
+        # inflating a budget.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        for kind in modeling.PRIMITIVE_KINDS:
+            for divisions in (1, 2, 3):
+                built = modeling.create_primitive({
+                    "kind": kind, "divisions": divisions,
+                    "name": "fc_%s_%d" % (kind, divisions),
+                })
+                assert cmds.polyEvaluate(built["name"], face=True) == (
+                    modeling.projected_faces(kind, divisions)
+                ), (kind, divisions)
+                # and the result reports what it built, not what was asked for
+                assert built["faces"] == modeling.projected_faces(kind, divisions)
+                assert built["subdivisions"] == list(
+                    modeling.axes_for_divisions(kind, divisions)
+                )
+
+    def test_per_axis_subdivisions_reach_maya_as_asked(self):
+        # The #669 fix itself: rows ALONG a cylinder without paying for the
+        # circumference. Both meshes carry 16 rows; the coupled one costs 26x.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        free = modeling.create_primitive({
+            "kind": "cylinder", "name": "limb_free", "subdivisions": [12, 16],
+        })
+        assert cmds.polyEvaluate(free["name"], face=True) == 194
+        assert free["subdivisions"] == [12, 16]
+
+        coupled = modeling.create_primitive({
+            "kind": "cylinder", "name": "limb_coupled", "divisions": 16,
+        })
+        assert cmds.polyEvaluate(coupled["name"], face=True) == 5122
+
+        # every other multi-axis kind spends its axes independently too
+        for kind, axes, expected in (
+            ("cube", [4, 1, 1], 18),
+            ("plane", [8, 2], 16),
+            ("cone", [12, 6], 73),
+            ("torus", [12, 6], 72),
+            ("sphere", [12, 6], 72),
+            ("prism", [6], 20),
+            ("pyramid", [6], 25),
+        ):
+            built = modeling.create_primitive({
+                "kind": kind, "name": "ax_%s" % kind, "subdivisions": axes,
+            })
+            assert cmds.polyEvaluate(built["name"], face=True) == expected, kind
+            assert modeling.faces_for(kind, tuple(axes)) == expected, kind
+
+    def test_maya_silently_substitutes_its_default_below_the_minimum(self):
+        # The measurement the minimums rest on, kept live: asking polyCylinder
+        # for 2 sides does not clamp to 3 and does not raise - Maya builds its
+        # own default of 20. If a future Maya starts refusing (or clamping)
+        # instead, this fails and the refusal in resolve_subdivisions can be
+        # re-derived rather than trusted.
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import modeling
+
+        raw = cmds.polyCylinder(
+            name="silent_default", constructionHistory=False,
+            radius=0.5, height=1.0, subdivisionsAxis=2, subdivisionsHeight=1,
+        )[0]
+        assert cmds.polyEvaluate(raw, face=True) == 22  # 20 sides + 2 caps
+
+        with pytest.raises(HandlerError) as exc:
+            modeling.create_primitive({
+                "kind": "cylinder", "name": "refused", "subdivisions": [2, 1],
+            })
+        assert "around" in str(exc.value)
+        assert not cmds.objExists("refused")
+
     def test_platonic_solid_kinds_build_with_fixed_low_poly_face_counts(self):
         # F2: octahedron/icosahedron have no subdivision flags in Maya - the
         # real face count must match projected_faces regardless of divisions,

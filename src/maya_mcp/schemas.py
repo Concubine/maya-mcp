@@ -215,6 +215,32 @@ class NameResult(BaseModel):
     warnings: List[str] = Field(default_factory=list)
 
 
+class PrimitiveResult(NameResult):
+    """What create_primitive actually built, not just what it was asked for.
+
+    `divisions` is a multiplier whose per-kind meaning is invisible from the
+    call site - divisions=4 on a cylinder buys 80 around and 4 along - so the
+    resolved counts come back rather than leaving the caller to re-derive
+    them (maya-mcp #669). A result field absent from this model is a field the
+    caller never sees (#757), so both are declared here.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    subdivisions: Optional[List[int]] = Field(
+        default=None,
+        description="Subdivision count per axis as built, in this kind's axis "
+                    "order (cube [width, height, depth]; plane [width, depth]; "
+                    "sphere/cylinder/cone [around, along]; torus [ring, tube]; "
+                    "prism/pyramid [along]). Empty for the platonic solids, "
+                    "which have no subdivision flags at all.",
+    )
+    faces: Optional[int] = Field(
+        default=None,
+        description="Face count of the mesh just built.",
+    )
+
+
 class TransformedObject(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
