@@ -461,12 +461,43 @@ def _orphan_candidates(cmds, job: Dict[str, Any]) -> List[str]:
     return list(dict.fromkeys(candidates))  # de-dup, keep discovery order
 
 
+# Maya wires EVERY node created with asTexture=True or asUtility=True into
+# one of its OWN bookkeeping sets at creation time, before this tool ever
+# connects it to anything - MEASURED under mayapy (Maya 2027): a freshly
+# created `ramp`/`noise`/`file` node with literally zero other connections
+# already reads back defaultTextureList1.textures[N]
+# (cmds.listConnections(node, destination=True) == ['defaultTextureList1']),
+# and a freshly created `bump2d`/`place2dTexture` already reads back
+# defaultRenderUtilityList1.utilities[N] the same way. Without this
+# exclusion, `_sweep_orphans`'s "does this node still have any outgoing
+# connection" check could NEVER see an empty list for ANY node type
+# `_orphan_candidates` ever produces - nothing this tool orphans would ever
+# actually be deleted, silently contradicting this module's own docstring
+# promise ("delete the replaced chains"). #714 Task 5 real-Maya finding.
+_MAYA_BOOKKEEPING_LIST_TYPES = ("defaultTextureList", "defaultRenderUtilityList")
+
+
+def _real_outputs(cmds, node: str) -> List[str]:
+    """`node`'s outgoing connections with Maya's own per-node-type
+    bookkeeping list excluded - see _MAYA_BOOKKEEPING_LIST_TYPES."""
+    outputs = cmds.listConnections(node, source=False, destination=True) or []
+    real = []
+    for out in outputs:
+        try:
+            if cmds.nodeType(out) in _MAYA_BOOKKEEPING_LIST_TYPES:
+                continue
+        except Exception:  # noqa: BLE001 - a node that cannot answer its own
+            pass          # type is not a bookkeeping list; keep it as real
+        real.append(out)
+    return real
+
+
 def _sweep_orphans(cmds, candidates: List[str],
                    job: Dict[str, Any]) -> Tuple[List[str], List[str]]:
-    """Delete whichever of `candidates` no longer has any outgoing
+    """Delete whichever of `candidates` no longer has any REAL outgoing
     connection, now that `_rewire` has replaced the edge that used to
-    reach the slot. `cmds.listConnections(node, source=False,
-    destination=True)` empty means nothing uses it any more.
+    reach the slot. `_real_outputs` empty means nothing but Maya's own
+    bookkeeping uses it any more.
 
     Iterated to a fixpoint rather than computed in one carefully-ordered
     pass: deleting the downstream-most orphan (a `reverse` sitting between
@@ -476,8 +507,8 @@ def _sweep_orphans(cmds, candidates: List[str],
     construction - the two-phase brief's own suggested alternative to a
     hand-ordered single pass.
 
-    A candidate that survives (still feeds something) is reported by name
-    with what still uses it, turned into a warning by the caller - a
+    A candidate that survives (still feeds something real) is reported by
+    name with what still uses it, turned into a warning by the caller - a
     silent keep would hide exactly the case fix round 1 was about: a
     shared terminal must not be destroyed for a slot that was not baked.
     """
@@ -491,8 +522,7 @@ def _sweep_orphans(cmds, candidates: List[str],
         for node in remaining:
             if not cmds.objExists(node):
                 continue
-            outputs = cmds.listConnections(node, source=False,
-                                           destination=True) or []
+            outputs = _real_outputs(cmds, node)
             if outputs:
                 survivors.append((node, outputs))
                 continue
