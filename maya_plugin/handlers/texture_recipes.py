@@ -78,10 +78,31 @@ def _noise_bump(cmds, tracker, shader, attr, params) -> None:
     cmds.connectAttr(bump + ".outNormal", "%s.%s" % (shader, attr), force=True)
 
 
+def _wire_color_output(cmds, node: str, shader: str, attr: str) -> None:
+    """Connect `node.outColor` to `shader.attr`, using the red channel when
+    `attr` is a scalar.
+
+    A texture node's colour output is a float3 (`outColor`). Connecting
+    that directly to a SCALAR attribute - `standardSurface.specularRoughness`
+    is the one this toolbox's own slot table (`material.SHADER_SLOTS`)
+    exposes - is refused outright by Maya: "Data types of source and
+    destination are not compatible" (MEASURED live, #714 Task 6, building
+    the texbake_live gate's three-different-slots fixture: ramp_gradient on
+    "roughness" is exactly this case). `outColorR` is a scalar and connects
+    cleanly - the same channel `texbake._bake_source_plug` already uses for
+    a baked scalar/normal slot, so a baked and an unbaked scalar map read
+    the same channel of their source node.
+    """
+    compound = bool(cmds.attributeQuery(attr, node=shader,
+                                        numberOfChildren=True))
+    source = node + (".outColor" if compound else ".outColorR")
+    cmds.connectAttr(source, "%s.%s" % (shader, attr), force=True)
+
+
 def _ramp_gradient(cmds, tracker, shader, attr, params) -> None:
     ramp = tracker(cmds.shadingNode("ramp", asTexture=True,
                                     name=naming.unique_name(cmds, "mcpTex_ramp")))
-    cmds.connectAttr(ramp + ".outColor", "%s.%s" % (shader, attr), force=True)
+    _wire_color_output(cmds, ramp, shader, attr)
 
 
 def _layered_mask(cmds, tracker, shader, attr, params) -> None:
@@ -104,7 +125,7 @@ def _file_texture(cmds, tracker, shader, attr, params) -> None:
     node = tracker(cmds.shadingNode("file", asTexture=True,
                                     name=naming.unique_name(cmds, "mcpTex_file")))
     cmds.setAttr(node + ".fileTextureName", str(path), type="string")
-    cmds.connectAttr(node + ".outColor", "%s.%s" % (shader, attr), force=True)
+    _wire_color_output(cmds, node, shader, attr)
 
 
 _BUILDERS: Dict[str, Callable] = {
@@ -151,8 +172,23 @@ def apply_texture_recipe(params: Dict[str, Any]) -> Dict[str, Any]:
         warnings.append(
             "this recipe builds a procedural network that Maya's FBX "
             "exporter silently drops - maya_export_fbx reports it in "
-            "textures.dropped_maps; use file textures (maya_assign_pbr or "
-            "the file_texture recipe) for anything that must survive export")
+            "textures.dropped_maps; maya_bake_textures converts it to a "
+            "file texture that does survive")
+        # The recipe's own nodes already exist by this point - a polyEvaluate
+        # that RAISES (a corrupt mesh, a stale reference) is a different
+        # problem from "no UVs" (texbake._uv_count draws the same
+        # distinction) and must not crash a call that already succeeded.
+        # Skip the warning, not the result; maya_bake_textures will still
+        # refuse accurately later if UVs really are missing.
+        try:
+            has_uvs = bool(cmds.polyEvaluate(shape, uvcoord=True) or 0)
+        except Exception:
+            has_uvs = True
+        if not has_uvs:
+            warnings.append(
+                "this mesh has no UVs, so maya_bake_textures will refuse it "
+                "- maya_uv_atlas creates a layout (project='box' is enough "
+                "for tiling detail)")
 
     return {
         "mesh": mesh_long,

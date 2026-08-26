@@ -497,7 +497,8 @@ def texture_violations(tfacts, claims, require_baked, claims_unavailable=None):
                 warnings.append(
                     "%s is driven by a procedural network (%s) that Maya's "
                     "FBX exporter silently drops - the exported file does "
-                    "not carry this map" % (where, nodes))
+                    "not carry this map. maya_bake_textures turns it into a "
+                    "file texture that does travel" % (where, nodes))
             for terminal in claim["terminals"]:
                 # Only non-file terminals: a layeredTexture mixing real
                 # files is itself procedural, so its terminals can include a
@@ -931,8 +932,10 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
                                 ", ".join(t["node"] for t in c["terminals"]))
                              for c in procedural[:4])),
                 hint="Maya's FBX exporter cannot write a procedural texture "
-                     "network. Author the map as a file texture "
-                     "(maya_assign_pbr, or the file_texture recipe), or "
+                     "network. maya_bake_textures turns it into a file "
+                     "texture that does travel; re-author the map by hand "
+                     "(maya_assign_pbr, or the file_texture recipe) only if "
+                     "you want a different look than what is baked. Or "
                      "export with require_baked_textures=false and accept "
                      "that the look does not travel")
         if claims_unavailable:

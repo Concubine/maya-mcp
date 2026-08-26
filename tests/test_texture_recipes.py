@@ -14,6 +14,8 @@ class FakeCmds:
         self.connections = []
         self.deleted = []
         self.fail_on = None
+        self.uv_count = 4  # default: the mesh has UVs
+        self.raise_on_poly_evaluate = False
 
     def ls(self, name=None, long=False, **kw):
         return [o for o in self.objects if o == name or o.split("|")[-1] == name]
@@ -53,6 +55,27 @@ class FakeCmds:
         for n in names:
             self.deleted.append(n)
             self.objects.discard(n)
+
+    def polyEvaluate(self, node, uvcoord=False, **kw):
+        if self.raise_on_poly_evaluate:
+            raise RuntimeError("forced polyEvaluate failure")
+        return self.uv_count if uvcoord else 0
+
+    # Real Maya's numberOfChildren answers a list ([3]) for a compound
+    # (float3) attribute and None for a scalar one - texture_recipes'
+    # _wire_color_output (#714 Task 6) uses exactly that shape to pick
+    # outColor vs outColorR. baseColor/normalCamera are this fixture's only
+    # compound attrs; specularRoughness (the roughness slot) is the scalar
+    # case every file_texture/ramp_gradient-on-roughness test exercises.
+    _COMPOUND_ATTRS = {"baseColor", "normalCamera", "color", "emissionColor"}
+
+    def attributeQuery(self, attr, node=None, exists=False,
+                       numberOfChildren=False):
+        if exists:
+            return True
+        if numberOfChildren:
+            return [3] if attr in self._COMPOUND_ATTRS else None
+        return None
 
 
 def test_noise_bump_builds_and_connects_to_the_normal_slot(monkeypatch):
@@ -131,13 +154,44 @@ def test_file_texture_requires_a_path(monkeypatch):
 def test_procedural_recipes_warn_that_the_map_will_not_export(monkeypatch):
     # #714: Maya's FBX exporter silently drops procedural networks - the
     # recipe that builds one must say so up front, not leave it to be
-    # discovered later in maya_export_fbx's dropped_maps.
+    # discovered later in maya_export_fbx's dropped_maps. Phase 2: now that
+    # maya_bake_textures exists, the warning names it as the remedy.
     fake = FakeCmds()
     monkeypatch.setattr(texture_recipes, "_cmds", lambda: fake)
     result = texture_recipes.apply_texture_recipe(
         {"mesh": "|torso", "recipe": "noise_bump"}
     )
+    assert any("silently drops" in w and "maya_bake_textures" in w
+               for w in result["warnings"])
+
+
+def test_procedural_recipe_on_a_uv_less_mesh_warns_bake_will_refuse_it(monkeypatch):
+    # #714 phase 2: maya_bake_textures refuses a UV-less mesh outright - the
+    # recipe gives that signal up front rather than leaving it to be
+    # discovered at bake time.
+    fake = FakeCmds()
+    fake.uv_count = 0
+    monkeypatch.setattr(texture_recipes, "_cmds", lambda: fake)
+    result = texture_recipes.apply_texture_recipe(
+        {"mesh": "|torso", "recipe": "noise_bump"}
+    )
+    assert any("no UVs" in w and "maya_uv_atlas" in w for w in result["warnings"])
+
+
+def test_uv_probe_raising_does_not_crash_an_already_succeeded_recipe(monkeypatch):
+    # Fix round 1: the no-UV check sits AFTER the recipe's own nodes already
+    # exist - a polyEvaluate that raises (a corrupt mesh, a stale reference)
+    # is a different problem from "no UVs" and must not crash a call whose
+    # texture was in fact applied. Skip the warning, not the result.
+    fake = FakeCmds()
+    fake.raise_on_poly_evaluate = True
+    monkeypatch.setattr(texture_recipes, "_cmds", lambda: fake)
+    result = texture_recipes.apply_texture_recipe(
+        {"mesh": "|torso", "recipe": "noise_bump"}
+    )
+    assert result["recipe"] == "noise_bump"
     assert any("silently drops" in w for w in result["warnings"])
+    assert not any("no UVs" in w for w in result["warnings"])
 
 
 def test_the_file_texture_recipe_does_not_warn(monkeypatch):

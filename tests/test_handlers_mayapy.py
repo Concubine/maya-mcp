@@ -4496,3 +4496,265 @@ class TestTextureHonestyInMaya:
         terminals = sorted(d["terminal"] for d in dropped)
         assert terminals == sorted([noise1, noise2])
         assert all(d["via"] == ["bump2d"] for d in dropped)
+
+
+class TestBakeTexturesInMaya:
+    """#714 phase 2 against a real exporter. The claim under test is the
+    whole point of the ticket: a procedural look that CANNOT survive an
+    FBX export does survive once baked."""
+
+    def test_a_baked_noise_survives_the_export_that_dropped_it(self, tmp_path):
+        import os
+
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import (export, material, texbake,
+                                          texture_recipes, uvatlas)
+
+        mesh = cmds.ls(cmds.polyCube(name="bake_cube")[0], long=True)[0]
+        uvatlas.uv_atlas({"names": [mesh], "project": "box"})
+        material.assign_material({"mesh": mesh, "material": "bake_mat",
+                                  "shader": "standardSurface"})
+        recipe = texture_recipes.apply_texture_recipe({
+            "mesh": mesh, "recipe": "ramp_gradient"})
+        ramp = [n for n in recipe["nodes"] if "ramp" in n][0]
+
+        # BEFORE: the export drops it and says so (phase 1's report).
+        before_path = str(tmp_path / "before.fbx").replace("\\", "/")
+        before = export.export_fbx({"path": before_path,
+                                    "metres_per_unit": 1.0, "nodes": [mesh]})
+        assert [d["terminal"] for d in before["textures"]["dropped_maps"]] \
+            == [ramp]
+
+        out_dir = str(tmp_path).replace("\\", "/")
+        baked = texbake.bake_textures({"meshes": [mesh], "out_dir": out_dir})
+        assert len(baked["baked"]) == 1
+        entry = baked["baked"][0]
+        assert entry["pixel_check"]["non_uniform"] is True
+        assert os.path.isfile(entry["file"])
+
+        # AFTER: nothing is dropped, and the image is IN the bytes.
+        after_path = str(tmp_path / "after.fbx").replace("\\", "/")
+        after = export.export_fbx({"path": after_path,
+                                   "metres_per_unit": 1.0, "nodes": [mesh]})
+        assert after["textures"]["dropped_maps"] == []
+        names = [m["basename"] for m in after["textures"]["file_maps"]]
+        assert entry["basename"] in names
+        assert all(m["found_in_file"] for m in after["textures"]["file_maps"])
+        with open(after_path, "rb") as fh:
+            assert entry["basename"].encode() in fh.read()
+
+    def test_a_baked_scene_passes_require_baked_textures(self, tmp_path):
+        """The contract phase 1 gave a delivery gate now has a way to be
+        satisfied rather than only refused."""
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import (export, material, texbake,
+                                          texture_recipes, uvatlas)
+
+        mesh = cmds.ls(cmds.polyCube(name="strict_bake")[0], long=True)[0]
+        uvatlas.uv_atlas({"names": [mesh], "project": "box"})
+        material.assign_material({"mesh": mesh, "material": "strict_bake_mat",
+                                  "shader": "standardSurface"})
+        texture_recipes.apply_texture_recipe({"mesh": mesh,
+                                              "recipe": "noise_bump"})
+        texbake.bake_textures({"meshes": [mesh],
+                               "out_dir": str(tmp_path).replace("\\", "/")})
+        path = str(tmp_path / "strict.fbx").replace("\\", "/")
+        out = export.export_fbx({"path": path, "metres_per_unit": 1.0,
+                                 "nodes": [mesh],
+                                 "require_baked_textures": True})
+        assert out["textures"]["dropped_maps"] == []
+
+    def test_a_uvless_mesh_is_refused_and_nothing_is_written(self, tmp_path):
+        """MEASURED (probe P2c): convertSolidTx does NOT raise here - it
+        writes a flat image. The refusal is ours, and it must fire before
+        any file appears."""
+        import os
+
+        import maya.cmds as cmds
+        import pytest as _pytest
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import (material, texbake, texture_recipes)
+
+        mesh = cmds.ls(cmds.polyCube(name="nouv_cube")[0], long=True)[0]
+        shape = cmds.listRelatives(mesh, shapes=True, fullPath=True)[0]
+        cmds.polyMapDel(shape + ".map[*]")
+        material.assign_material({"mesh": mesh, "material": "nouv_mat",
+                                  "shader": "standardSurface"})
+        texture_recipes.apply_texture_recipe({"mesh": mesh,
+                                              "recipe": "ramp_gradient"})
+        out_dir = str(tmp_path).replace("\\", "/")
+        with _pytest.raises(HandlerError, match="no UVs"):
+            texbake.bake_textures({"meshes": [mesh], "out_dir": out_dir})
+        assert os.listdir(out_dir) == []
+
+    def test_a_shared_material_bakes_once_for_both_meshes(self, tmp_path):
+        """MEASURED (probe P2d/P2e): sampling is mesh-independent, so one
+        image serves every wearer - and both meshes must end up reading it."""
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import (material, texbake, texclaim,
+                                          texture_recipes, uvatlas)
+
+        a = cmds.ls(cmds.polyCube(name="share_a")[0], long=True)[0]
+        b = cmds.ls(cmds.polyCube(name="share_b")[0], long=True)[0]
+        for mesh in (a, b):
+            uvatlas.uv_atlas({"names": [mesh], "project": "box"})
+        material.assign_material({"mesh": a, "material": "shared_mat",
+                                  "shader": "standardSurface"})
+        material.assign_material({"mesh": b, "material": "shared_mat",
+                                  "shader": "standardSurface"})
+        texture_recipes.apply_texture_recipe({"mesh": a,
+                                              "recipe": "ramp_gradient"})
+        out = texbake.bake_textures({"meshes": [a, b],
+                                     "out_dir": str(tmp_path).replace("\\", "/")})
+        assert len(out["baked"]) == 1
+        shapes = [cmds.listRelatives(m, shapes=True, fullPath=True)[0]
+                  for m in (a, b)]
+        claims = texclaim.material_claims(cmds, shapes)
+        assert claims and all(c["classification"] == "file" for c in claims)
+
+    def test_a_shared_terminal_survives_baking_only_one_of_its_two_slots(
+            self, tmp_path):
+        """Task 3's fix round found this defect by READING the plan's code,
+        not by running it: a terminal driving TWO attributes of the SAME
+        material (one ramp feeding both baseColor and metalness) looked
+        orphaned to the original `_doomed_nodes` because it compared
+        destination NODE names, not plugs - baking only the color slot
+        would have deleted the ramp and silently broken the un-baked
+        metalness wiring. The fix (`_orphan_candidates` + `_sweep_orphans`,
+        rewire-then-check-remaining-outputs, fixpoint-iterated) had never
+        run against real Maya until this test.
+
+        Builds exactly that shape by hand: ramp_gradient wires
+        ramp.outColor -> baseColor as usual, then this test additionally
+        wires ramp.outColorR -> metalness (a second, independent
+        connection off the SAME node). Baking with slots=["color"] only
+        must leave the ramp alive and the metalness connection untouched.
+
+        REAL-MAYA FINDING (a genuine product defect, fixed by this task,
+        not merely observed): MEASURED under mayapy (Maya 2027), a freshly
+        created `ramp` node with ZERO other wiring already answers
+        cmds.listConnections(ramp, destination=True) == ['defaultTextureList1']
+        - Maya wires every asTexture=True/asUtility=True node into its own
+        bookkeeping list (defaultTextureList1 for textures,
+        defaultRenderUtilityList1 for utilities/place2dTexture) at creation
+        time, before this tool connects it to anything. `_sweep_orphans`'s
+        original "any outgoing connection at all -> survives" check could
+        therefore NEVER see an empty list for ANY candidate node type this
+        tool ever produces - nothing baked would ever actually be deleted,
+        contradicting texbake's own module docstring ("delete the replaced
+        chains") on every single bake, not just this shared-terminal case.
+        Fixed in texbake.py: `_real_outputs`/`_MAYA_BOOKKEEPING_LIST_TYPES`
+        now filter out defaultTextureList/defaultRenderUtilityList
+        destinations before deciding survival. The warning text this test
+        asserts on ("still used by survive_mat") is the POST-FIX text -
+        pre-fix it read "still used by defaultTextureList1, survive_mat"
+        for this test AND would have read "still used by defaultTextureList1"
+        (with deleted_nodes==[]) even for the ordinary, nothing-else-uses-it
+        case the sibling deletion test below now proves actually deletes."""
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import (material, texbake, texclaim,
+                                          texture_recipes, uvatlas)
+
+        mesh = cmds.ls(cmds.polyCube(name="survive_cube")[0], long=True)[0]
+        uvatlas.uv_atlas({"names": [mesh], "project": "box"})
+        # NOTE: assign_material's explicit-name param is "name", not
+        # "material" (MEASURED here: the rest of this file's pervasive
+        # "material": "..." key is inert - it silently falls through to
+        # the mesh-derived default and every other test in this file never
+        # happened to depend on the literal name). This test needs the
+        # real name to hand-wire a second connection onto it below.
+        material.assign_material({"mesh": mesh, "name": "survive_mat",
+                                  "shader": "standardSurface"})
+        recipe = texture_recipes.apply_texture_recipe({
+            "mesh": mesh, "recipe": "ramp_gradient"})
+        ramp = [n for n in recipe["nodes"] if "ramp" in n][0]
+        # The second attribute this same ramp now drives - independent of
+        # the recipe's own baseColor wiring, off the same source node.
+        cmds.connectAttr(ramp + ".outColorR", "survive_mat.metalness",
+                         force=True)
+
+        out_dir = str(tmp_path).replace("\\", "/")
+        out = texbake.bake_textures({"meshes": [mesh], "out_dir": out_dir,
+                                     "slots": ["color"]})
+        assert len(out["baked"]) == 1
+        entry = out["baked"][0]
+        assert entry["slot"] == "color"
+
+        # The ramp must survive: it still feeds the un-baked metalness slot.
+        # MEASURED: the warning names exactly "survive_mat" as the survivor
+        # - defaultTextureList1 is filtered out by the bookkeeping-list fix
+        # above, so this text proves the ramp is being kept for the REAL
+        # reason (metalness), not merely because Maya's own list is still
+        # attached to it (which is true of every texture node, always).
+        assert cmds.objExists(ramp)
+        assert entry["deleted_nodes"] == []
+        assert ("%s was not deleted after baking survive_mat.baseColor - "
+               "still used by survive_mat" % ramp) in out["warnings"]
+
+        # metalness's wiring is untouched - still reading the same ramp.
+        metalness_src = cmds.listConnections(
+            "survive_mat.metalness", source=True, destination=False,
+            plugs=True) or []
+        assert metalness_src == [ramp + ".outColorR"]
+
+        # baseColor, meanwhile, now reads the baked file - not the ramp.
+        color_src = cmds.listConnections(
+            "survive_mat.baseColor", source=True, destination=False) or []
+        assert color_src and color_src[0] != ramp
+        assert cmds.nodeType(color_src[0]) == "file"
+
+        # And the postcondition the tool itself enforces agrees: baseColor
+        # now claims as file-backed, metalness still claims procedural.
+        shape = cmds.listRelatives(mesh, shapes=True, fullPath=True)[0]
+        claims = {c["attr"]: c["classification"]
+                 for c in texclaim.material_claims(cmds, [shape])}
+        assert claims["baseColor"] == "file"
+        assert claims["metalness"] == "procedural"
+
+    def test_an_unshared_terminal_is_actually_deleted_after_baking(
+            self, tmp_path):
+        """The other half of the same real-Maya finding: it is not enough
+        for the shared-terminal case to WARN and keep the ramp - the
+        ordinary, nothing-else-uses-it case must actually delete it, or
+        the bookkeeping-list fix above would just be trading one silent
+        wrong answer (never deletes) for a different one (never warns but
+        still never deletes). No FakeCmds test can prove this: the fake
+        never modelled defaultTextureList1's automatic wiring in the first
+        place, so a fake-cmds `_sweep_orphans` unit test cannot tell "the
+        real Maya list was correctly filtered out" apart from "there was
+        never anything to filter". Only real Maya can show the node is
+        actually gone afterwards.
+
+        MEASURED under mayapy (Maya 2027): pre-fix, this exact scenario
+        (a lone ramp driving only baseColor, nothing else connected to it
+        at all besides Maya's own defaultTextureList1) left the ramp alive
+        with deleted_nodes==[] and a spurious "still used by
+        defaultTextureList1" warning - the ramp was NEVER actually an
+        orphan candidate that could be swept, for any bake, ever. Post-fix:
+        deleted_nodes==[ramp], objExists(ramp) is False, and warnings
+        carries no "was not deleted" entry for it."""
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import (material, texbake,
+                                          texture_recipes, uvatlas)
+
+        mesh = cmds.ls(cmds.polyCube(name="delete_cube")[0], long=True)[0]
+        uvatlas.uv_atlas({"names": [mesh], "project": "box"})
+        material.assign_material({"mesh": mesh, "name": "delete_mat",
+                                  "shader": "standardSurface"})
+        recipe = texture_recipes.apply_texture_recipe({
+            "mesh": mesh, "recipe": "ramp_gradient"})
+        ramp = [n for n in recipe["nodes"] if "ramp" in n][0]
+
+        out = texbake.bake_textures({"meshes": [mesh],
+                                     "out_dir": str(tmp_path).replace("\\", "/")})
+        assert len(out["baked"]) == 1
+        entry = out["baked"][0]
+        assert entry["deleted_nodes"] == [ramp]
+        assert not cmds.objExists(ramp)
+        assert not any(ramp in w for w in out["warnings"])

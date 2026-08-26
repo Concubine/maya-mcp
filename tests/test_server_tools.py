@@ -66,6 +66,7 @@ class TestRegistration:
             "maya_open_scene",
             "maya_save_scene",
             "maya_export_fbx",
+            "maya_bake_textures",
             "maya_reset_namespace",
             "maya_create_primitive",
             "maya_duplicate",
@@ -1384,6 +1385,70 @@ class TestApplyTextureRecipeForwardsWarnings:
             "exporter silently drops"]
 
 
+class TestBakeTextures:
+    def test_bake_textures_forwards_the_baked_list(self):
+        """#714 phase 2: BakeTexturesResult is extra='ignore', so an undeclared
+        field is dropped silently on the way to the caller (the #757 class)."""
+        result = _bake_result_with(
+            baked=[{"material": "skin_mat", "slot": "color", "attr": "baseColor",
+                    "file": "C:/out/skin_mat_color_baked.png",
+                    "basename": "skin_mat_color_baked.png", "resolution": 1024,
+                    "colorspace": "sRGB", "wired_plug": "outColor",
+                    "kept_intermediates": [], "deleted_nodes": ["mcpTex_noise"],
+                    "pixel_check": {"pixel_count": 1048576,
+                                    "distinct_values": 186,
+                                    "non_uniform": True,
+                                    "unavailable_reason": None}}],
+            warnings=["skin_mat is worn by 2 meshes"])
+        assert result.baked[0].basename == "skin_mat_color_baked.png"
+        assert result.baked[0].pixel_check.non_uniform is True
+        assert result.baked[0].deleted_nodes == ["mcpTex_noise"]
+        assert result.checkpoint_id
+        assert result.warnings
+
+    def test_bake_textures_passes_its_params_to_the_wire(self):
+        sent = _bake_capture_request(lambda tool: tool(
+            meshes=["|body"], out_dir="C:/out", resolution=2048,
+            slots=["color"]))
+        assert sent["params"] == {"meshes": ["|body"], "out_dir": "C:/out",
+                                  "resolution": 2048, "slots": ["color"]}
+
+    def test_no_op_checkpoint_id_is_null_and_still_validates(self):
+        """Task 3's review round: a scene where every requested slot is
+        already file-backed bakes nothing, so the handler returns
+        checkpoint_id=None rather than spending a slot in the bounded
+        checkpoint ring on a checkpoint of no change. BakeTexturesResult
+        must validate that null rather than requiring a str."""
+        result = _bake_result_with(
+            baked=[], checkpoint_id=None,
+            skipped_file_backed=[
+                "skin_mat.baseColor is already file-backed - nothing to bake"],
+            warnings=[
+                "skin_mat.baseColor is already file-backed - nothing to bake"])
+        assert result.checkpoint_id is None
+        assert result.baked == []
+
+    def test_no_op_result_still_carries_its_explanation(self):
+        """A caller must be able to tell 'nothing needed baking' from
+        'nothing happened' - skipped_file_backed is what carries that
+        distinction across the wire."""
+        result = _bake_result_with(
+            baked=[], checkpoint_id=None,
+            skipped_file_backed=[
+                "skin_mat.baseColor is already file-backed - nothing to bake"],
+            warnings=[
+                "skin_mat.baseColor is already file-backed - nothing to bake"])
+        assert result.skipped_file_backed == [
+            "skin_mat.baseColor is already file-backed - nothing to bake"]
+
+    def test_annotations(self):
+        mcp = server_mod.create_server(FakeConn())
+        by_name = {t.name: t for t in run(mcp.list_tools())}
+        bake = by_name["maya_bake_textures"].annotations
+        assert (bake.read_only_hint, bake.destructive_hint,
+                bake.idempotent_hint) == (False, True, False)
+
+
 class TestLightingPresets:
     def test_environment_preset_is_reachable_and_needs_no_file(self):
         conn = FakeConn(responses={"setup_lighting": {
@@ -1939,6 +2004,39 @@ def _capture_request(fn):
     conn = FakeConn(responses={"export_fbx": _export_result_stub()})
     mcp = server_mod.create_server(conn)
     fn(lambda **kwargs: run(mcp.call_tool("maya_export_fbx", kwargs)))
+    return conn.calls[0]
+
+
+def _bake_result_stub():
+    return {
+        "meshes": ["|body"], "out_dir": "C:/out", "resolution": 1024,
+        "baked": [], "skipped_file_backed": [],
+        "checkpoint_id": "001_auto_bake_textures", "warnings": [],
+    }
+
+
+def _bake_result_with(**overrides):
+    """Push a handler response through the real maya_bake_textures tool and
+    back into BakeTexturesResult - proving a field the wire carries survives
+    the round trip rather than vanishing at the extra='ignore' boundary
+    (#757)."""
+    conn = FakeConn(
+        responses={"bake_textures": dict(_bake_result_stub(), **overrides)}
+    )
+    mcp = server_mod.create_server(conn)
+    result = run(
+        mcp.call_tool("maya_bake_textures",
+                      {"meshes": ["|body"], "out_dir": "C:/out"})
+    )
+    return schemas.BakeTexturesResult(**result.structured_content)
+
+
+def _bake_capture_request(fn):
+    """Call fn(tool), where tool(**kwargs) invokes maya_bake_textures through
+    the real server, and return the params FakeConn recorded."""
+    conn = FakeConn(responses={"bake_textures": _bake_result_stub()})
+    mcp = server_mod.create_server(conn)
+    fn(lambda **kwargs: run(mcp.call_tool("maya_bake_textures", kwargs)))
     return conn.calls[0]
 
 

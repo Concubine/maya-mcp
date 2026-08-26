@@ -716,6 +716,7 @@ does not exist yet. `delete_clip` the rig that is not being exported.
 | cmd | params | result |
 |---|---|---|
 | `export_fbx` | `{ path, metres_per_unit, nodes?, include_skins?, include_animation?, require_baked_textures? }` | `{ path, bytes, fbx_version, node_count, mesh_count, root_nodes, unit_scale_factor, metres_per_unit, world_bounds_min, world_bounds_max, height_m, bounds_unavailable_reason, skin, shapes, animation, textures, warnings }` |
+| `bake_textures` | `{ meshes, out_dir, resolution?, slots? }` | `{ meshes, out_dir, resolution, baked: [...], skipped_file_backed, checkpoint_id, warnings }` |
 
 Every field of the result is read back **out of the written file**, never from the Maya scene — the unit defect this tool guards (#629) is produced by the exporter and is absent from the scene, so a scene-derived report would be confidently wrong in exactly the case that matters. The file is written to a sibling temp path and only reaches `path` once it passes; a refused export leaves whatever was already there untouched.
 
@@ -755,7 +756,9 @@ what the bytes actually hold (#714). Procedural texture networks (noise,
 ramp, layeredTexture, ...) have no FBX representation at all — Maya's
 exporter silently drops them — and each dropped slot is reported per
 material/slot in `textures.dropped_maps`, with a matching entry in
-`warnings`. File-backed maps are byte-verified against the file's own
+`warnings`. `maya_bake_textures` is the remedy: it turns exactly the
+networks `dropped_maps` names into file textures the exporter does carry
+(below). File-backed maps are byte-verified against the file's own
 Texture/Video records by image basename; a claimed file missing from the
 bytes REFUSES the export (that loss class has never been observed, so its
 absence means the exporter regressed). A Texture/Video record whose own
@@ -802,14 +805,60 @@ already names the real cause); the `unclaimed_records` field itself is
 unaffected and still lists those basenames as data.
 
 `apply_texture_recipe` warns at authoring time, not only at export: any
-recipe other than `file_texture` returns a `warnings` entry stating that
-the network it just built has no FBX representation and naming
-`maya_export_fbx`'s `textures.dropped_maps` as where that loss will
-surface — so a look built procedurally is flagged before export is ever
-attempted, not only after.
+recipe other than `file_texture` returns a `warnings` entry naming
+`maya_bake_textures` as the fix — the network it just built has no FBX
+representation, and the bake tool converts it to a file texture that does
+survive. When the mesh has no UVs, a second warning fires alongside it:
+`maya_bake_textures` refuses a UV-less mesh outright (below), so the
+recipe says so up front rather than leaving it to be discovered cold at
+bake time — `maya_uv_atlas` is named as the fix for that one.
 
-There is no `maya_bake_textures` tool yet. #714 phase 1 is byte-honest
-reporting only (this section); converting a procedural network into a
-file texture at export time is an unimplemented phase 2, gated on the GO
-its own probes recorded (`evals/bake_probe_714.py`) — nothing here should
-be read as that tool existing.
+`maya_bake_textures` (`{ meshes, out_dir, resolution?, slots? }`) turns
+exactly the procedural networks `dropped_maps` names into file textures
+and **rewires the scene** to use them. `out_dir` must be an absolute path
+that already exists — this tool does not create directories, the same
+rule `export_fbx` follows: a guessed or auto-made location is how bake
+files get lost from a delivery. `resolution` is one of `256`, `512`,
+`1024`, `2048`, `4096` (default `1024`); `slots` restricts the bake to
+the named PBR slots and defaults to every procedural one the mesh(es)
+carry. The rewire is persistent — the next render, and the next
+`maya_export_fbx`, show exactly what the bake produced, so re-judge the
+render before exporting rather than trusting the bake blind.
+
+The bake is two-phase. Phase A bakes and pixel-verifies every job against
+a `.part.png` file with nothing in the scene touched yet; only once every
+job in the batch clears that check does phase B run. A phase A failure
+leaves the scene completely untouched (its `.part.png` files are removed)
+and takes no checkpoint — there is nothing yet to roll back. Phase B takes
+the checkpoint first, then commits each rewire and sweeps newly orphaned
+nodes; if phase B itself fails partway, the scene is left only partially
+rewired and the raised error **names the checkpoint id in its own
+message**, since `maya_restore_checkpoint` is the only way back at that
+point.
+
+A mesh with no UVs is refused outright: a bake
+samples through UV space, and Maya's own `convertSolidTx` does not error
+on a UV-less mesh — it silently writes a flat, useless image — so this
+tool refuses rather than shipping that quietly wrong. A material worn by
+several of the requested meshes bakes **once**: the bake samples through
+UV space, not world geometry (measured), so a shared material's image is
+identical regardless of which mesh triggered it — but that measurement
+was taken on placement-less networks only. A network driven through a
+place2dTexture with non-default placement is not covered by it; such a
+job carries a warning rather than a refusal, since the bake is still
+written once per material by construction and the warning is what a
+reviewer needs to re-measure if it ever matters. When every requested
+slot is already file-backed, nothing is baked and `checkpoint_id` is
+`null` rather than a spent checkpoint-ring slot for no change;
+`skipped_file_backed` names what needed no work, so a caller can tell
+"nothing needed baking" from "nothing happened."
+
+The rewire is material-level, so it can reach further than the meshes
+named in the call: if the same shading group is also assigned to a mesh
+the caller never listed, that mesh's look changes too. `plan_bakes` queries
+the shading group's **actual** membership (`cmds.sets(sg, query=True)`),
+not just the requested-shape claim, and warns naming the outside wearer(s)
+specifically when it finds one — this is separate from, and does not
+replace, the "worn by several requested meshes" warning above. A shading
+group that cannot answer the membership query degrades to no warning
+rather than failing the bake.
