@@ -461,35 +461,39 @@ def _orphan_candidates(cmds, job: Dict[str, Any]) -> List[str]:
     return list(dict.fromkeys(candidates))  # de-dup, keep discovery order
 
 
-# Maya wires EVERY node created with asTexture=True or asUtility=True into
-# one of its OWN bookkeeping sets at creation time, before this tool ever
-# connects it to anything - MEASURED under mayapy (Maya 2027): a freshly
-# created `ramp`/`noise`/`file` node with literally zero other connections
-# already reads back defaultTextureList1.textures[N]
+# Maya auto-wires EVERY node created with asTexture=True or asUtility=True
+# into one of its own bookkeeping SINGLETONS at creation time, before this
+# tool ever connects it to anything - MEASURED under mayapy (Maya 2027): a
+# freshly created `ramp`/`noise`/`file` node with literally zero other
+# connections already reads back defaultTextureList1.textures[N]
 # (cmds.listConnections(node, destination=True) == ['defaultTextureList1']),
 # and a freshly created `bump2d`/`place2dTexture` already reads back
-# defaultRenderUtilityList1.utilities[N] the same way. Without this
-# exclusion, `_sweep_orphans`'s "does this node still have any outgoing
-# connection" check could NEVER see an empty list for ANY node type
-# `_orphan_candidates` ever produces - nothing this tool orphans would ever
-# actually be deleted, silently contradicting this module's own docstring
-# promise ("delete the replaced chains"). #714 Task 5 real-Maya finding.
-_MAYA_BOOKKEEPING_LIST_TYPES = ("defaultTextureList", "defaultRenderUtilityList")
+# defaultRenderUtilityList1.utilities[N] the same way. There is exactly one
+# of each per session in every scene this was measured against. Without
+# this exclusion, `_sweep_orphans`'s "does this node still have any
+# outgoing connection" check could NEVER see an empty list for ANY node
+# type `_orphan_candidates` ever produces - nothing this tool orphans would
+# ever actually be deleted, silently contradicting this module's own
+# docstring promise ("delete the replaced chains"). #714 phase 2 Task 5
+# real-Maya finding.
+#
+# Matched by NAME, deliberately, not by nodeType: only these two measured
+# singletons are known to behave this way. A type match would additionally
+# ignore any hypothetical second node of the same type nobody has ever
+# measured - on a DESTRUCTIVE path, in the same module whose Task 3 history
+# is precisely a false-orphan bug caused by comparing at the wrong
+# granularity (node identity instead of plug identity). If a scene is ever
+# found with a differently-named or duplicated bookkeeping node, that is a
+# new measurement this constant must grow to name, not a reason to widen
+# the match to a type.
+_MAYA_BOOKKEEPING_NODES = ("defaultTextureList1", "defaultRenderUtilityList1")
 
 
 def _real_outputs(cmds, node: str) -> List[str]:
-    """`node`'s outgoing connections with Maya's own per-node-type
-    bookkeeping list excluded - see _MAYA_BOOKKEEPING_LIST_TYPES."""
+    """`node`'s outgoing connections with Maya's own bookkeeping singletons
+    excluded - see _MAYA_BOOKKEEPING_NODES."""
     outputs = cmds.listConnections(node, source=False, destination=True) or []
-    real = []
-    for out in outputs:
-        try:
-            if cmds.nodeType(out) in _MAYA_BOOKKEEPING_LIST_TYPES:
-                continue
-        except Exception:  # noqa: BLE001 - a node that cannot answer its own
-            pass          # type is not a bookkeeping list; keep it as real
-        real.append(out)
-    return real
+    return [out for out in outputs if out not in _MAYA_BOOKKEEPING_NODES]
 
 
 def _sweep_orphans(cmds, candidates: List[str],
