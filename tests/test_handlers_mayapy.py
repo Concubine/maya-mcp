@@ -4377,7 +4377,7 @@ class TestTextureHonestyInMaya:
 
         image = self._png(str(tmp_path / "grain.png").replace("\\", "/"))
         mesh = cmds.ls(cmds.polyCube(name="tex_cube")[0], long=True)[0]
-        material.assign_material({"mesh": mesh, "material": "tex_mat",
+        material.assign_material({"mesh": mesh, "name": "tex_mat",
                                   "shader": "standardSurface"})
         texture_recipes.apply_texture_recipe({
             "mesh": mesh, "recipe": "file_texture",
@@ -4410,7 +4410,7 @@ class TestTextureHonestyInMaya:
         from maya_plugin.handlers import export, material, texture_recipes
 
         mesh = cmds.ls(cmds.polyCube(name="proc_cube")[0], long=True)[0]
-        material.assign_material({"mesh": mesh, "material": "proc_mat",
+        material.assign_material({"mesh": mesh, "name": "proc_mat",
                                   "shader": "standardSurface"})
         recipe = texture_recipes.apply_texture_recipe({
             "mesh": mesh, "recipe": "noise_bump"})
@@ -4448,7 +4448,7 @@ class TestTextureHonestyInMaya:
         from maya_plugin.handlers import export, material, texture_recipes
 
         mesh = cmds.ls(cmds.polyCube(name="strict_cube")[0], long=True)[0]
-        material.assign_material({"mesh": mesh, "material": "strict_mat",
+        material.assign_material({"mesh": mesh, "name": "strict_mat",
                                   "shader": "standardSurface"})
         texture_recipes.apply_texture_recipe({"mesh": mesh,
                                               "recipe": "ramp_gradient"})
@@ -4476,7 +4476,7 @@ class TestTextureHonestyInMaya:
 
         image = self._png(str(tmp_path / "whole.png").replace("\\", "/"))
         mesh = cmds.ls(cmds.polyCube(name="whole_cube")[0], long=True)[0]
-        material.assign_material({"mesh": mesh, "material": "whole_mat",
+        material.assign_material({"mesh": mesh, "name": "whole_mat",
                                   "shader": "standardSurface"})
         texture_recipes.apply_texture_recipe({
             "mesh": mesh, "recipe": "file_texture",
@@ -4558,7 +4558,7 @@ class TestTextureHonestyInMaya:
         from maya_plugin.handlers import export, material, texture_recipes
 
         mesh = cmds.ls(cmds.polyCube(name="two_in_cube")[0], long=True)[0]
-        material.assign_material({"mesh": mesh, "material": "two_in_mat",
+        material.assign_material({"mesh": mesh, "name": "two_in_mat",
                                   "shader": "standardSurface"})
         recipe = texture_recipes.apply_texture_recipe({
             "mesh": mesh, "recipe": "noise_bump"})
@@ -4599,7 +4599,7 @@ class TestBakeTexturesInMaya:
 
         mesh = cmds.ls(cmds.polyCube(name="bake_cube")[0], long=True)[0]
         uvatlas.uv_atlas({"names": [mesh], "project": "box"})
-        material.assign_material({"mesh": mesh, "material": "bake_mat",
+        material.assign_material({"mesh": mesh, "name": "bake_mat",
                                   "shader": "standardSurface"})
         recipe = texture_recipes.apply_texture_recipe({
             "mesh": mesh, "recipe": "ramp_gradient"})
@@ -4640,7 +4640,7 @@ class TestBakeTexturesInMaya:
 
         mesh = cmds.ls(cmds.polyCube(name="strict_bake")[0], long=True)[0]
         uvatlas.uv_atlas({"names": [mesh], "project": "box"})
-        material.assign_material({"mesh": mesh, "material": "strict_bake_mat",
+        material.assign_material({"mesh": mesh, "name": "strict_bake_mat",
                                   "shader": "standardSurface"})
         texture_recipes.apply_texture_recipe({"mesh": mesh,
                                               "recipe": "noise_bump"})
@@ -4667,7 +4667,7 @@ class TestBakeTexturesInMaya:
         mesh = cmds.ls(cmds.polyCube(name="nouv_cube")[0], long=True)[0]
         shape = cmds.listRelatives(mesh, shapes=True, fullPath=True)[0]
         cmds.polyMapDel(shape + ".map[*]")
-        material.assign_material({"mesh": mesh, "material": "nouv_mat",
+        material.assign_material({"mesh": mesh, "name": "nouv_mat",
                                   "shader": "standardSurface"})
         texture_recipes.apply_texture_recipe({"mesh": mesh,
                                               "recipe": "ramp_gradient"})
@@ -4688,9 +4688,9 @@ class TestBakeTexturesInMaya:
         b = cmds.ls(cmds.polyCube(name="share_b")[0], long=True)[0]
         for mesh in (a, b):
             uvatlas.uv_atlas({"names": [mesh], "project": "box"})
-        material.assign_material({"mesh": a, "material": "shared_mat",
+        material.assign_material({"mesh": a, "name": "shared_mat",
                                   "shader": "standardSurface"})
-        material.assign_material({"mesh": b, "material": "shared_mat",
+        material.assign_material({"mesh": b, "name": "shared_mat",
                                   "shader": "standardSurface"})
         texture_recipes.apply_texture_recipe({"mesh": a,
                                               "recipe": "ramp_gradient"})
@@ -4748,12 +4748,12 @@ class TestBakeTexturesInMaya:
 
         mesh = cmds.ls(cmds.polyCube(name="survive_cube")[0], long=True)[0]
         uvatlas.uv_atlas({"names": [mesh], "project": "box"})
-        # NOTE: assign_material's explicit-name param is "name", not
-        # "material" (MEASURED here: the rest of this file's pervasive
-        # "material": "..." key is inert - it silently falls through to
-        # the mesh-derived default and every other test in this file never
-        # happened to depend on the literal name). This test needs the
-        # real name to hand-wire a second connection onto it below.
+        # assign_material's explicit-name param is "name". It used to accept
+        # (and silently ignore) "material", which is what the rest of this
+        # file passed - every one of those tests created a differently-named
+        # material than it believed it was creating, and passed anyway
+        # because they read the name back out of the result. #764 turned that
+        # into a refusal and repointed them all at "name".
         material.assign_material({"mesh": mesh, "name": "survive_mat",
                                   "shader": "standardSurface"})
         recipe = texture_recipes.apply_texture_recipe({

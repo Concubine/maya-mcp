@@ -291,3 +291,30 @@ class FakeCmds:
 
     def listSets(self, object=None, type=None):
         return [sg for sg, members in self.sg_members.items() if object in members]
+
+
+def test_assign_material_refuses_the_material_synonym(monkeypatch):
+    # #764. `material` is the name the result reports back, so it reads like
+    # the obvious input key - and it was silently ignored, handing back a
+    # mesh-derived default name instead. Refusal over guessing: an alias
+    # would keep two spellings alive for the same idea.
+    fake = FakeCmds()
+    monkeypatch.setattr(material, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        material.assign_material({
+            "mesh": "|torso", "shader": "lambert", "material": "clay",
+        })
+    assert "does not take 'material'" in str(exc.value)
+    assert "'name'" in exc.value.hint
+    # and nothing was built before the refusal
+    assert fake.calls == []
+
+
+def test_assign_material_still_takes_every_key_it_reads(monkeypatch):
+    fake = FakeCmds()
+    monkeypatch.setattr(material, "_cmds", lambda: fake)
+    result = material.assign_material({
+        "mesh": "|torso", "shader": "lambert", "name": "clay",
+        "params": {"color": [1, 0, 0]},
+    })
+    assert result["material"] == "clay"
