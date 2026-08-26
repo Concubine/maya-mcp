@@ -756,7 +756,9 @@ what the bytes actually hold (#714). Procedural texture networks (noise,
 ramp, layeredTexture, ...) have no FBX representation at all — Maya's
 exporter silently drops them — and each dropped slot is reported per
 material/slot in `textures.dropped_maps`, with a matching entry in
-`warnings`. File-backed maps are byte-verified against the file's own
+`warnings`. `maya_bake_textures` is the remedy: it turns exactly the
+networks `dropped_maps` names into file textures the exporter does carry
+(below). File-backed maps are byte-verified against the file's own
 Texture/Video records by image basename; a claimed file missing from the
 bytes REFUSES the export (that loss class has never been observed, so its
 absence means the exporter regressed). A Texture/Video record whose own
@@ -813,19 +815,39 @@ bake time — `maya_uv_atlas` is named as the fix for that one.
 
 `maya_bake_textures` (`{ meshes, out_dir, resolution?, slots? }`) turns
 exactly the procedural networks `dropped_maps` names into file textures
-and **rewires the scene** to use them. The rewire is persistent — the
-next render, and the next `maya_export_fbx`, show exactly what the bake
-produced, so re-judge the render before exporting rather than trusting
-the bake blind. Nothing in the scene changes unless every requested bake
-both succeeds and is verified to have sampled something; a checkpoint is
-taken before the rewire either way, and `maya_restore_checkpoint` returns
-the pre-bake scene. A mesh with no UVs is refused outright: a bake
+and **rewires the scene** to use them. `out_dir` must be an absolute path
+that already exists — this tool does not create directories, the same
+rule `export_fbx` follows: a guessed or auto-made location is how bake
+files get lost from a delivery. `resolution` is one of `256`, `512`,
+`1024`, `2048`, `4096` (default `1024`); `slots` restricts the bake to
+the named PBR slots and defaults to every procedural one the mesh(es)
+carry. The rewire is persistent — the next render, and the next
+`maya_export_fbx`, show exactly what the bake produced, so re-judge the
+render before exporting rather than trusting the bake blind.
+
+The bake is two-phase. Phase A bakes and pixel-verifies every job against
+a `.part.png` file with nothing in the scene touched yet; only once every
+job in the batch clears that check does phase B run. A phase A failure
+leaves the scene completely untouched (its `.part.png` files are removed)
+and takes no checkpoint — there is nothing yet to roll back. Phase B takes
+the checkpoint first, then commits each rewire and sweeps newly orphaned
+nodes; if phase B itself fails partway, the scene is left only partially
+rewired and the raised error **names the checkpoint id in its own
+message**, since `maya_restore_checkpoint` is the only way back at that
+point.
+
+A mesh with no UVs is refused outright: a bake
 samples through UV space, and Maya's own `convertSolidTx` does not error
 on a UV-less mesh — it silently writes a flat, useless image — so this
 tool refuses rather than shipping that quietly wrong. A material worn by
 several of the requested meshes bakes **once**: the bake samples through
 UV space, not world geometry (measured), so a shared material's image is
-identical regardless of which mesh triggered it. When every requested
+identical regardless of which mesh triggered it — but that measurement
+was taken on placement-less networks only. A network driven through a
+place2dTexture with non-default placement is not covered by it; such a
+job carries a warning rather than a refusal, since the bake is still
+written once per material by construction and the warning is what a
+reviewer needs to re-measure if it ever matters. When every requested
 slot is already file-backed, nothing is baked and `checkpoint_id` is
 `null` rather than a spent checkpoint-ring slot for no change;
 `skipped_file_backed` names what needed no work, so a caller can tell
