@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from ..dispatcher import HandlerError
+from ..dispatcher import HandlerError, require_known_keys
 from . import meshcheck, naming
 
 SHADERS = ("standardSurface", "lambert", "blinn")
@@ -173,7 +173,19 @@ def _shading_group_of(cmds, mat: str) -> Optional[str]:
     return conns[0] if conns else None
 
 
+# Every top-level key assign_material reads. Anything else is refused rather
+# than ignored (#764): `material` is the synonym that actually got passed, and
+# an unread key does not fail, it succeeds and does something else.
+ASSIGN_MATERIAL_KEYS = ("mesh", "shader", "params", "name")
+# `material` is what the RESULT calls the shader it made, which is exactly why
+# callers reached for it as the input key. Recorded rather than guessed at:
+# no string-similarity test relates it to `name`.
+ASSIGN_MATERIAL_SYNONYMS = {"material": "name"}
+
+
 def assign_material(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, ASSIGN_MATERIAL_KEYS, "assign_material",
+                       ASSIGN_MATERIAL_SYNONYMS)
     cmds = _cmds()
     mesh_long, shape = naming.require_mesh(cmds, str(params.get("mesh") or ""))
     shader = params.get("shader", "standardSurface")

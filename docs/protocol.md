@@ -206,6 +206,10 @@ Lighting and materials:
 |---|---|---|
 | `setup_lighting` | `{ preset, intensity?, hdri_path?, replace_existing? }` | `{ preset, lights: [...], removed: [...], checkpoint_id?, warnings }` |
 | `assign_material` | `{ mesh, shader?, params?, name? }` | `{ mesh, material, shading_group, shader, warnings }` |
+
+`assign_material` **refuses a top-level param it does not read** (#764), naming the key that was meant: `material` is called `name` here. It is the result field that gets called `material`, which is exactly why callers reached for it as the input key — and it was silently ignored, so the material quietly got the mesh-derived default name instead. Eleven tests in this repo passed `material=`; every one created a differently-named material than it believed it was creating, and every one passed, because they read the name back out of the result rather than pinning it. An unread key does not fail — it succeeds and does something else.
+
+Note that this is currently the **only** command that checks its top-level keys; the MCP tool wrappers type their parameters, so an MCP consumer cannot send an unknown one, but a direct TCP caller (an eval, an art script) can. See the follow-up ticket for the general sweep.
 | `apply_texture_recipe` | `{ mesh, recipe, params?, slot? }` | `{ mesh, recipe, slot, nodes: [...], warnings }` |
 
 ## Commands (M2.2)

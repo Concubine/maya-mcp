@@ -54,6 +54,46 @@ class HandlerError(Exception):
         self.hint = hint
 
 
+def require_known_keys(params, allowed, command: str, synonyms=None) -> None:
+    """Refuse a param this command does not read, naming what was meant.
+
+    A key a handler never looks at is worse than a wrong value: a wrong value
+    fails, an unread key succeeds and does something else. Measured on #764 -
+    `assign_material` reads its explicit-name param as `name`, and eleven
+    tests passed `material=` instead. Every one of them created a
+    differently-named material than it believed it was creating, and every one
+    of them PASSED, because they read the name back out of the result rather
+    than pinning it. Nothing anywhere said a word.
+
+    `synonyms` maps a wrong key to the right one for the cases that have
+    actually been seen. It exists because the realistic cause is a plausible
+    SYNONYM, not a typo, and no string-similarity test finds one: `material`
+    and `name` share not a single letter in position. A caller who reaches for
+    the wrong word will reach for it again next time, so the answer is
+    recorded rather than guessed at. Prefix matching stays as the fallback for
+    ordinary typos.
+    """
+    unknown = sorted(set(params) - set(allowed))
+    if not unknown:
+        return
+    synonyms = synonyms or {}
+    hints = []
+    for key in unknown:
+        if key in synonyms:
+            hints.append("%r is called %r here" % (key, synonyms[key]))
+            continue
+        near = [a for a in sorted(allowed)
+                if a.startswith(key[:3]) or key.startswith(a[:3])]
+        if near:
+            hints.append("%r - did you mean %s?"
+                         % (key, " or ".join(repr(n) for n in near)))
+    raise HandlerError(
+        "%s does not take %s" % (command, ", ".join(repr(k) for k in unknown)),
+        hint=("; ".join(hints) + ". " if hints else "")
+        + "valid params: %s" % ", ".join(sorted(allowed)),
+    )
+
+
 class Dispatcher:
     def __init__(
         self,

@@ -11,7 +11,7 @@ import time
 import pytest
 
 from maya_plugin import protocol
-from maya_plugin.dispatcher import Dispatcher, HandlerError
+from maya_plugin.dispatcher import Dispatcher, HandlerError, require_known_keys
 
 
 def make_dispatcher(handlers, **kwargs):
@@ -337,3 +337,50 @@ def test_no_undo_chunk_handler_skips_hooks():
         assert calls == ["open", "close"]  # unchanged: hooks skipped
     finally:
         d.shutdown()
+
+
+class TestRequireKnownKeys:
+    """#764: an unread param does not fail, it succeeds and does something else.
+
+    Measured: eleven tests passed `material=` to a handler whose explicit-name
+    param is `name`. Every one created a differently-named material than it
+    believed it was creating, and every one PASSED, because they read the name
+    back out of the result rather than pinning it.
+    """
+
+    def test_it_says_nothing_when_every_key_is_read(self):
+        assert require_known_keys(
+            {"mesh": "|a", "name": "m"}, ("mesh", "shader", "name"),
+            "assign_material") is None
+
+    def test_an_unread_key_is_refused_by_name(self):
+        with pytest.raises(HandlerError) as exc:
+            require_known_keys({"mesh": "|a", "material": "m"},
+                               ("mesh", "shader", "name"), "assign_material")
+        assert "assign_material does not take 'material'" in str(exc.value)
+
+    def test_the_hint_names_the_key_that_was_meant(self):
+        # The realistic cause is a plausible SYNONYM, not a typo - and a
+        # synonym is exactly what re-reading the call site cannot reveal.
+        with pytest.raises(HandlerError) as exc:
+            require_known_keys({"nam": "m"}, ("mesh", "name"), "assign_material")
+        assert "did you mean 'name'?" in exc.value.hint
+
+    def test_a_key_with_no_near_miss_still_lists_what_is_valid(self):
+        with pytest.raises(HandlerError) as exc:
+            require_known_keys({"colour": "red"}, ("mesh", "name"), "x")
+        assert "valid params: mesh, name" in exc.value.hint
+
+    def test_every_unread_key_is_named_not_just_the_first(self):
+        with pytest.raises(HandlerError) as exc:
+            require_known_keys({"a": 1, "b": 2}, ("mesh",), "x")
+        assert "'a'" in str(exc.value) and "'b'" in str(exc.value)
+
+    def test_a_recorded_synonym_is_named_outright(self):
+        # The measured #764 case: `material` and `name` share not a single
+        # letter in position, so no similarity test finds it. The answer is
+        # recorded rather than guessed at.
+        with pytest.raises(HandlerError) as exc:
+            require_known_keys({"material": "clay"}, ("mesh", "name"),
+                               "assign_material", {"material": "name"})
+        assert "'material' is called 'name' here" in exc.value.hint
