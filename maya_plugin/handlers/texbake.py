@@ -38,12 +38,23 @@ def _cmds():
 def validate(params: Dict[str, Any], cmds) -> Dict[str, Any]:
     """Everything checkable before a single node is touched."""
     raw = params.get("meshes")
-    names = [raw] if isinstance(raw, str) else list(raw or [])
+    _meshes_hint = ("pass the mesh(es) whose materials should be baked; "
+                    "maya_get_scene_graph lists what the scene contains")
+    if isinstance(raw, str):
+        names = [raw]
+    elif raw is None:
+        names = []
+    elif isinstance(raw, (list, tuple)):
+        names = list(raw)
+    else:
+        # A truthy non-iterable (meshes=5, meshes=True) must not reach
+        # list(raw or []) below - that raises a bare TypeError instead of
+        # this tool's own HandlerError.
+        raise HandlerError("missing required param 'meshes'",
+                           hint=_meshes_hint)
     if not names or not all(isinstance(n, str) and n.strip() for n in names):
-        raise HandlerError(
-            "missing required param 'meshes'",
-            hint="pass the mesh(es) whose materials should be baked; "
-                 "maya_get_scene_graph lists what the scene contains")
+        raise HandlerError("missing required param 'meshes'",
+                           hint=_meshes_hint)
 
     shapes = []
     for name in names:
@@ -94,10 +105,21 @@ def validate(params: Dict[str, Any], cmds) -> Dict[str, Any]:
 
 
 def _uv_count(cmds, shape: str) -> int:
+    """Number of UV coordinates on `shape`.
+
+    A mesh with genuinely no UV set answers 0 here with no exception -
+    that is the legitimate "no UVs" case the caller turns into a refusal.
+    A `polyEvaluate` call that RAISES is a different problem (a corrupt
+    mesh, a stale reference) and must not be laundered into that same "no
+    UVs" diagnosis - this tool must not claim a diagnosis it did not make.
+    """
     try:
         return int(cmds.polyEvaluate(shape, uvcoord=True) or 0)
-    except Exception:  # noqa: BLE001 - a shape that cannot answer has none
-        return 0
+    except Exception as exc:  # noqa: BLE001 - re-raised below with its own message
+        raise HandlerError(
+            "could not determine the UV count for %s: %s" % (shape, exc),
+            hint="this is not the no-UVs refusal - polyEvaluate itself "
+                 "failed; inspect %s in Maya directly" % shape)
 
 
 def plan_bakes(cmds, shapes: List[str],
@@ -129,6 +151,16 @@ def plan_bakes(cmds, shapes: List[str],
     claims = texclaim.material_claims(cmds, shapes)
     jobs: List[Dict[str, Any]] = []
     warnings: List[str] = []
+    # The ONE legitimate reason plan_bakes can end with an empty `jobs` and
+    # still not refuse: every claim it looked at was already file-backed.
+    # Tracked as its own flag rather than inferred from `warnings` being
+    # non-empty - `warnings` is a generic bag that OTHER paths (placement,
+    # shared-mesh) also write into, always alongside a job. Gating the
+    # final refusal on that bag instead of this flag would mean a future
+    # skip-with-warning path added without updating this flag gets silently
+    # treated as "something happened, don't refuse" even though nothing was
+    # planned. See _refuse_if_nothing_to_bake and its direct unit tests.
+    skipped_file_backed = False
     seen = set()
     for claim in claims:
         slot = claim["slot"]
@@ -138,13 +170,26 @@ def plan_bakes(cmds, shapes: List[str],
             warnings.append(
                 "%s.%s is already file-backed - nothing to bake"
                 % (claim["material"], claim["attr"]))
+            skipped_file_backed = True
             continue
         key = (claim["material"], claim["attr"])
         if key in seen:
             continue
         seen.add(key)
 
-        kind = pbr.SLOTS[slot][1] if slot in pbr.SLOTS else "color"
+        if slot not in pbr.SLOTS:
+            # No real texclaim walk produces this today (SLOT_FOR_ATTR is
+            # derived from the same tables as pbr.SLOTS), but a future
+            # material.SHADER_SLOTS entry could. Refusing here rather than
+            # defaulting to "color" matters: a scalar/normal network baked
+            # as a "color" kind samples outColor where _bake_source_plug
+            # needs outColorR, which is a wrong bake with no refusal at all.
+            raise HandlerError(
+                "%s.%s claims slot %r, which this tool has no measured "
+                "wiring shape for" % (claim["material"], claim["attr"], slot),
+                hint="pbr.SLOTS names every slot this tool knows how to "
+                     "bake; extend it before baking a new one")
+        kind = pbr.SLOTS[slot][1]
         terminals = claim["terminals"]
         if len(terminals) != 1:
             raise HandlerError(
@@ -199,18 +244,29 @@ def plan_bakes(cmds, shapes: List[str],
                 % (claim["material"], len(claim["meshes"]),
                    ", ".join(claim["meshes"])))
 
-    if not jobs and not warnings:
-        # Truly nothing: no claim at all (not even a file-backed one) on the
-        # requested mesh(es). A file-backed-only scene is NOT this case - it
-        # exits above with jobs=[] and a "nothing to bake" warning per slot,
-        # which is a legitimate no-op, not a refusal.
-        raise HandlerError(
-            "no procedural texture network to bake on the requested "
-            "mesh(es)%s" % (" for slot(s) %s" % ", ".join(slots)
-                            if slots else ""),
-            hint="maya_export_fbx's textures.dropped_maps names what a "
-                 "scene actually carries; a file-backed slot needs no bake")
+    _refuse_if_nothing_to_bake(jobs, skipped_file_backed, slots)
     return jobs, warnings
+
+
+def _refuse_if_nothing_to_bake(jobs: List[Dict[str, Any]],
+                               skipped_file_backed: bool,
+                               slots: Optional[List[str]]) -> None:
+    """The final refusal, isolated so its condition is a fact about `jobs`
+    and `skipped_file_backed` ONLY - never about the shape of `warnings`,
+    which other call sites are free to extend for unrelated reasons.
+
+    A file-backed-only scene is NOT "nothing to bake": that already exits
+    plan_bakes's loop with jobs=[] and skipped_file_backed=True, which is a
+    legitimate no-op. Refuse only when neither fired at all.
+    """
+    if jobs or skipped_file_backed:
+        return
+    raise HandlerError(
+        "no procedural texture network to bake on the requested "
+        "mesh(es)%s" % (" for slot(s) %s" % ", ".join(slots)
+                        if slots else ""),
+        hint="maya_export_fbx's textures.dropped_maps names what a "
+             "scene actually carries; a file-backed slot needs no bake")
 
 
 def _bake_source_plug(terminal: Dict[str, Any], kind: str) -> str:

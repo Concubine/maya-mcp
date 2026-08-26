@@ -168,3 +168,73 @@ class TestPlan:
         params = texbake.validate(_params(tmp_path, slots=["roughness"]), fake)
         with pytest.raises(HandlerError, match="no procedural"):
             texbake.plan_bakes(fake, params["meshes"], params["slots"])
+
+
+class TestGuardStructure:
+    """## Fix round 1: the empty-jobs refusal is gated on the explicit
+    `skipped_file_backed` flag, not on `warnings` being non-empty -
+    `warnings` is a bag other paths (placement, shared-mesh) write into
+    too, always alongside a job. No claim shape in plan_bakes today can
+    produce "a warning but no job for a reason other than file-backed", so
+    this pins the guard function directly with synthetic inputs rather
+    than trying to fabricate a claim that reaches it.
+    """
+
+    def test_no_jobs_and_no_file_backed_skip_refuses(self):
+        with pytest.raises(HandlerError, match="no procedural"):
+            texbake._refuse_if_nothing_to_bake([], False, None)
+
+    def test_no_jobs_but_a_file_backed_skip_does_not_refuse(self):
+        texbake._refuse_if_nothing_to_bake([], True, None)  # must not raise
+
+    def test_a_job_present_does_not_refuse_even_without_the_flag(self):
+        texbake._refuse_if_nothing_to_bake(
+            [{"material": "m"}], False, None)  # must not raise
+
+
+class TestUnknownSlotRefuses:
+    def test_an_unknown_slot_on_the_claim_refuses_rather_than_guessing(
+            self, fake, tmp_path, monkeypatch):
+        # Synthetic: no real texclaim walk produces a slot outside
+        # pbr.SLOTS today (SLOT_FOR_ATTR is derived from the same tables),
+        # but a future material.SHADER_SLOTS entry could. Fabricate the
+        # claim material_claims would then hand back, and pin the refusal
+        # that replaced a silent "color" default (which would have baked
+        # outColor where a scalar/normal slot needs outColorR).
+        def fake_claims(cmds, shapes):
+            return [{
+                "mesh": "|bodyShape", "meshes": ["|bodyShape"],
+                "material": "skin_mat", "sg": "bodySG", "attr": "shininess",
+                "slot": "shininess", "classification": "procedural",
+                "terminals": [{"node": "mcpTex_noise", "type": "noise",
+                               "file_path": None, "basename": None,
+                               "on_disk": None, "colorspace": None}],
+                "via": [], "semantics_lost": [],
+            }]
+
+        monkeypatch.setattr(texbake.texclaim, "material_claims", fake_claims)
+        params = texbake.validate(_params(tmp_path), fake)
+        with pytest.raises(HandlerError, match="shininess"):
+            texbake.plan_bakes(fake, params["meshes"], params["slots"])
+
+
+class TestUVCountFailureIsReported:
+    def test_a_polyevaluate_failure_is_not_diagnosed_as_no_uvs(
+            self, fake, tmp_path, monkeypatch):
+        def boom(node, uvcoord=False, **kw):
+            raise RuntimeError("kMFnMesh: object does not exist")
+
+        monkeypatch.setattr(fake, "polyEvaluate", boom)
+        params = texbake.validate(_params(tmp_path), fake)
+        with pytest.raises(HandlerError, match="could not determine"):
+            texbake.plan_bakes(fake, params["meshes"], params["slots"])
+
+
+class TestMeshesRobustness:
+    def test_a_non_iterable_meshes_value_refuses_cleanly(self, fake, tmp_path):
+        with pytest.raises(HandlerError, match="meshes"):
+            texbake.validate(_params(tmp_path, meshes=5), fake)
+
+    def test_a_bool_meshes_value_refuses_cleanly(self, fake, tmp_path):
+        with pytest.raises(HandlerError, match="meshes"):
+            texbake.validate(_params(tmp_path, meshes=True), fake)
