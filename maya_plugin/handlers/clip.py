@@ -293,6 +293,36 @@ def _rest_value(cmds, plug: str, rest: Dict[str, float],
     return value
 
 
+def cut_replaced_range(cmds, joints: List[str], replaced: Dict[str, Any],
+                       weight_plugs: Optional[List[str]] = None) -> None:
+    """Clear a REPLACED clip's old keys on every channel it might have used.
+
+    Widened past `end_frame` by GAP_FRAMES (#718 final review Fix 2):
+    `end_frame` is `int(round(measured_end))` (#636), which rounds DOWN
+    whenever the last key's fractional part is below 0.5 - a key at
+    end_frame+0.4 (e.g. measured_end=14.4, end_frame=14) then sits outside
+    (start_frame, end_frame) and would survive an unwidened cut, holding
+    the REPLACED version's value and polluting whatever gets keyed into
+    the same range next. Widening is free: no take's range ever includes
+    the unowned gap frame (clipmath.GAP_FRAMES), so nothing legitimate
+    lives there either.
+
+    Extracted from author_clip's re-author path (#774 Task 3 review,
+    the way register_clip was) so retarget_clip's own replace-same-name
+    path cuts identically rather than re-deriving the same shape - a
+    second, slightly-different cut here would be exactly the kind of
+    almost-matching duplicate this codebase measures its way out of.
+    `joints` is the FULL hierarchy the caller keys against (author_clip's
+    `_hierarchy_joints(root_long)`, retarget_clip's `target_joints`), not
+    just the channels the replaced record happened to declare - the same
+    over-inclusive plug set author_clip has always cut against.
+    """
+    for plug in sorted(set(_joint_plugs(joints) + list(weight_plugs or []))):
+        cmds.cutKey(plug, time=(replaced["start_frame"],
+                               replaced["end_frame"] + clipmath.GAP_FRAMES),
+                    clear=True)
+
+
 def register_clip(cmds, root_long: str, name: str, fps: int, start: int,
                   end: int, loop: bool = False, interpolation: str = "linear",
                   joints: Optional[List[str]] = None,
@@ -564,21 +594,7 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     # consumer reads.
     replaced, kept = clipmath.drop_record(records, name)
     if replaced is not None:
-        for plug in sorted(set(_joint_plugs(joints) + weight_plugs)):
-            # #718 final review Fix 2: widened past `end_frame` by
-            # GAP_FRAMES. `end_frame` is `int(round(measured_end))`
-            # (#636), which rounds DOWN whenever the last key's fractional
-            # part is below 0.5 - a key at end_frame+0.4 (e.g.
-            # measured_end=14.4, end_frame=14) then sits outside
-            # (start_frame, end_frame) and survives this cut, holding the
-            # REPLACED version's value and polluting the re-authored take
-            # between end_frame and that stray key. Widening is free: no
-            # take's range ever includes the unowned gap frame
-            # (clipmath.GAP_FRAMES), so nothing legitimate lives there
-            # either.
-            cmds.cutKey(plug, time=(replaced["start_frame"],
-                                    replaced["end_frame"]
-                                    + clipmath.GAP_FRAMES), clear=True)
+        cut_replaced_range(cmds, joints, replaced, weight_plugs)
 
     start_frame = clipmath.next_start_frame(kept)
 

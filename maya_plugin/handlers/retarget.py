@@ -293,16 +293,28 @@ def _key_source_motion(cmds, joints_spec: Sequence[Dict[str, Any]],
                                      value=units.degrees_to_ui(cmds, value))
 
 
-def _characterize(cmds, mel, name_hint: str, slot_joints: Dict[str, str]) -> str:
+def _characterize(cmds, mel, name_hint: str, slot_joints: Dict[str, str],
+                  created: List[str]) -> str:
     """hikCreateCharacter -> assign every slot -> lock -> VERIFY the lock.
 
     `hikCharacterLock` not raising is not evidence it worked (#774 Task 1's
     landmine: it silently no-ops without `mayaCharacterization` also
     loaded) - `hikIsDefinitionLocked` is always read back and a false there
     is a refusal, never a warning.
+
+    #774 review CRITICAL 1: a lock failure (or any exception from
+    `setCharacterObject`/`hikSetCurrentCharacter` below) used to raise
+    BEFORE this function returned the character's name - the caller's own
+    `target_char`/`source_char` variable stayed at its pre-call `None`, so
+    `_teardown_hik` never saw the name and skipped deleting a character
+    `hikCreateCharacter` had already created. `created` is the caller's own
+    list; the name is appended the INSTANT `hikCreateCharacter` returns it -
+    before any fallible call - so every character this function ever
+    creates is reachable by teardown regardless of what fails afterward.
     """
     char = mel.eval('hikCreateCharacter("%s")'
                     % naming.unique_name(cmds, name_hint))
+    created.append(char)
     for slot, joint in slot_joints.items():
         mel.eval('setCharacterObject("%s", "%s", %d, 0)'
                  % (joint, char, _HIK_SLOT_IDS[slot]))
@@ -327,6 +339,13 @@ def _teardown_hik(cmds, mel, characters: Sequence[Optional[str]], ns: str,
     measured to leave 0 leftover nodes. Runs on every exit (success or
     failure) via the caller's try/finally; never raises itself, since a
     teardown failure must not mask the real error already propagating.
+
+    `characters` is the caller's OWN append-as-created list (see
+    `_characterize`'s docstring, #774 review CRITICAL 1) - every name a
+    `hikCreateCharacter` call actually returned, whether or not that
+    character went on to lock successfully. The `if not char: continue`
+    below stays as a defensive no-op for a falsy entry, but nothing normal
+    should ever produce one now.
     """
     for char in characters:
         if not char:
@@ -559,9 +578,24 @@ def _retarget_bvh(path: str, root_param: str, name: str,
 
     records = _apply_shared_guards(cmds, root_long, target_joints, bake_fps,
                                    warnings)
+    # #774 review IMPORTANT 3: re-retargeting an EXISTING clip name must cut
+    # its old range first, mirroring author_clip's own re-author path
+    # (clip.cut_replaced_range, extracted from there) - otherwise the old
+    # bake's keys never go away and the new bake's keys land ALONGSIDE them,
+    # accumulating one extra copy per re-retarget. `kept` (not `records`)
+    # is what the new bake gets appended after, same as author_clip: the
+    # freed range is not reused, the new bake goes to the tail of every
+    # OTHER clip.
+    replaced, kept = clipmath.drop_record(records, name)
 
     session.auto_checkpoint("retarget_clip")
     _set_bake_unit(cmds, bake_fps, warnings)
+    if replaced is not None:
+        clip.cut_replaced_range(cmds, target_joints, replaced)
+        warnings.append(
+            "re-retargeted clip %r: cleared its old frames %d-%d before "
+            "baking the new range - no other clip's motion changed"
+            % (name, replaced["start_frame"], replaced["end_frame"]))
 
     target_hips_height = float(cmds.xform(
         target_slot_joints["Hips"], query=True, worldSpace=True,
@@ -585,12 +619,11 @@ def _retarget_bvh(path: str, root_param: str, name: str,
 
     duration_s = (end_row - start_row) * bvh["frame_time"]
     num_bake_frames = int(round(duration_s * bake_fps)) + 1
-    target_start_frame = clipmath.next_start_frame(records)
+    target_start_frame = clipmath.next_start_frame(kept)
     bake_end_frame = target_start_frame + num_bake_frames - 1
 
     ns = "mocap_src_%s" % name
-    target_char: Optional[str] = None
-    source_char: Optional[str] = None
+    characters: List[str] = []
     try:
         joint_nodes = _create_source_joints(cmds, bvh["joints"], ns,
                                             scale_factor)
@@ -604,16 +637,16 @@ def _retarget_bvh(path: str, root_param: str, name: str,
         cmds.loadPlugin(_HIK_CHARACTERIZATION_PLUGIN, quiet=True)
 
         target_char = _characterize(cmds, mel, "retarget_target",
-                                    target_slot_joints)
+                                    target_slot_joints, characters)
         source_char = _characterize(cmds, mel, "retarget_source",
-                                    source_slot_joints)
+                                    source_slot_joints, characters)
         mel.eval('hikSetCharacterInput("%s", "%s")' % (target_char, source_char))
 
         cmds.bakeResults(list(target_slot_joints.values()),
                          time=(target_start_frame, bake_end_frame),
                          sampleBy=1, simulation=True)
     finally:
-        _teardown_hik(cmds, mel, (target_char, source_char), ns, warnings)
+        _teardown_hik(cmds, mel, characters, ns, warnings)
 
     clip.register_clip(cmds, root_long, name, bake_fps, target_start_frame,
                        bake_end_frame, loop=False)
@@ -662,8 +695,7 @@ def _retarget_fbx(path: str, root_param: str, name: str,
             "minutes (#721)")
 
     ns = "mocap_src_%s" % name
-    target_char: Optional[str] = None
-    source_char: Optional[str] = None
+    characters: List[str] = []
     imported_joints: List[str] = []
     try:
         before = set(cmds.ls(long=True))
@@ -678,15 +710,25 @@ def _retarget_fbx(path: str, root_param: str, name: str,
                 "%r imported no joints" % path,
                 hint="retarget_clip needs a skeletal FBX - this file's "
                      "import produced none")
-        imported_short = [clip._short(j) for j in imported_joints]
-        by_short_imported = {clip._short(j): j for j in imported_joints}
+        # #774 review IMPORTANT 2: an FBX import under `namespace=ns` names
+        # every joint "ns:Hips", not "Hips" - `clip._short()` only strips
+        # the DAG PIPE ("|a|b|c" -> "c"), never a namespace colon, so
+        # matching those names against CMU_HIK_MAP/SKELETON_HIK_MAP (which
+        # carry bare names) could never succeed and this route always fell
+        # into the "not a known mocap convention" refusal below, regardless
+        # of the file. Strip the namespace here (last ":"-segment) for the
+        # MAP LOOKUP only; `by_bare_imported` keeps the mapping back to the
+        # real, still-namespaced node name characterization needs.
+        by_bare_imported = {clip._short(j).rsplit(":", 1)[-1]: j
+                            for j in imported_joints}
+        imported_bare = list(by_bare_imported.keys())
 
         source_slot_map = None
         source_slot_error: Optional[HandlerError] = None
         for table in (mocapmath.CMU_HIK_MAP, mocapmath.SKELETON_HIK_MAP):
             try:
                 source_slot_map = mocapmath.resolve_hik_map(
-                    imported_short, table)
+                    imported_bare, table)
                 break
             except HandlerError as exc:
                 source_slot_error = exc
@@ -697,8 +739,8 @@ def _retarget_fbx(path: str, root_param: str, name: str,
                 "names): %s" % (path, source_slot_error),
                 hint="rename the FBX's joints to a recognized convention, "
                      "or use a BVH source instead")
-        source_slot_joints = {slot: by_short_imported[short]
-                              for slot, short in source_slot_map.items()}
+        source_slot_joints = {slot: by_bare_imported[bare]
+                              for slot, bare in source_slot_map.items()}
 
         times = cmds.keyframe(imported_joints, query=True) or []
         if not times:
@@ -734,8 +776,20 @@ def _retarget_fbx(path: str, root_param: str, name: str,
         # call still leaves nothing behind.
         records = _apply_shared_guards(cmds, root_long, target_joints,
                                        bake_fps, warnings)
+        # #774 review IMPORTANT 3: same replace-cut author_clip does on a
+        # re-authored name (clip.cut_replaced_range) - see the BVH route's
+        # identical block for the full rationale. `kept` (not `records`)
+        # is what the new bake's start frame is computed from below.
+        replaced, kept = clipmath.drop_record(records, name)
+
         session.auto_checkpoint("retarget_clip")
         _set_bake_unit(cmds, bake_fps, warnings)
+        if replaced is not None:
+            clip.cut_replaced_range(cmds, target_joints, replaced)
+            warnings.append(
+                "re-retargeted clip %r: cleared its old frames %d-%d before "
+                "baking the new range - no other clip's motion changed"
+                % (name, replaced["start_frame"], replaced["end_frame"]))
 
         target_hips_height = float(cmds.xform(
             target_slot_joints["Hips"], query=True, worldSpace=True,
@@ -766,7 +820,7 @@ def _retarget_fbx(path: str, root_param: str, name: str,
             cmds.setAttr(scale_node + ".scale", scale_factor, scale_factor,
                         scale_factor)
 
-        target_start_frame = clipmath.next_start_frame(records)
+        target_start_frame = clipmath.next_start_frame(kept)
         num_bake_frames = row_end - row_start + 1
         bake_end_frame = target_start_frame + num_bake_frames - 1
         shift = target_start_frame - row_start
@@ -777,16 +831,16 @@ def _retarget_fbx(path: str, root_param: str, name: str,
         cmds.loadPlugin(_HIK_PLUGIN, quiet=True)
         cmds.loadPlugin(_HIK_CHARACTERIZATION_PLUGIN, quiet=True)
         target_char = _characterize(cmds, mel, "retarget_target",
-                                    target_slot_joints)
+                                    target_slot_joints, characters)
         source_char = _characterize(cmds, mel, "retarget_source",
-                                    source_slot_joints)
+                                    source_slot_joints, characters)
         mel.eval('hikSetCharacterInput("%s", "%s")' % (target_char, source_char))
 
         cmds.bakeResults(list(target_slot_joints.values()),
                          time=(target_start_frame, bake_end_frame),
                          sampleBy=1, simulation=True)
     finally:
-        _teardown_hik(cmds, mel, (target_char, source_char), ns, warnings)
+        _teardown_hik(cmds, mel, characters, ns, warnings)
 
     clip.register_clip(cmds, root_long, name, bake_fps, target_start_frame,
                        bake_end_frame, loop=False)

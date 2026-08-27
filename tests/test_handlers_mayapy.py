@@ -5103,3 +5103,147 @@ class TestCurveFormInMaya:
             "far-end rotation magnitude %.2f degrees is not near 90 for a "
             "twist=90 request - twist does not read as degrees" % magnitude
         )
+
+
+class TestRetargetFbxNamespaceInMaya:
+    """#774 Task 3 review IMPORTANT 2: an FBX imported under `namespace=ns`
+    (retarget.py's `_retarget_fbx`) names every joint "ns:Hips", not "Hips" -
+    `clip._short()` only strips a DAG PIPE ("|a|b|c" -> "c"), never a
+    namespace colon, so matching those names against
+    CMU_HIK_MAP/SKELETON_HIK_MAP (bare names) could never succeed before the
+    fix: EVERY namespaced FBX import fell into the "not a known mocap
+    convention" refusal, regardless of the file's actual joint names.
+
+    No FBX mocap fixture ships with this repo (only the CMU .bvh fixtures,
+    Task 2), so this builds a real, tiny, CMU-named source skeleton by hand,
+    exports it to a real FBX via Maya's own exporter, and re-imports it
+    through the full public `retarget_clip` FBX route - proving the
+    namespace-strip fix end to end rather than unit-testing a private
+    helper in isolation.
+    """
+
+    SOURCE_JOINTS = [
+        ("Hips", None, (0.0, 1.0, 0.0)),
+        ("Spine", "Hips", (0.0, 1.2, 0.0)),
+        ("LeftArm", "Spine", (0.2, 1.4, 0.0)),
+        ("LeftForeArm", "LeftArm", (0.5, 1.4, 0.0)),
+        ("LeftHand", "LeftForeArm", (0.8, 1.4, 0.0)),
+        ("RightArm", "Spine", (-0.2, 1.4, 0.0)),
+        ("RightForeArm", "RightArm", (-0.5, 1.4, 0.0)),
+        ("RightHand", "RightForeArm", (-0.8, 1.4, 0.0)),
+        ("Head", "Spine", (0.0, 1.6, 0.0)),
+        ("LeftUpLeg", "Hips", (0.15, 0.9, 0.0)),
+        ("LeftLeg", "LeftUpLeg", (0.15, 0.5, 0.0)),
+        ("LeftFoot", "LeftLeg", (0.15, 0.1, 0.0)),
+        ("RightUpLeg", "Hips", (-0.15, 0.9, 0.0)),
+        ("RightLeg", "RightUpLeg", (-0.15, 0.5, 0.0)),
+        ("RightFoot", "RightLeg", (-0.15, 0.1, 0.0)),
+    ]
+    # A minimal target biped naming exactly SKELETON_HIK_MAP's 15 required
+    # slots (create_skeleton's own naming convention, #668).
+    TARGET_JOINTS = [
+        {"name": "pelvis", "position": [0.0, 1.0, 0.0]},
+        {"name": "spine_01", "position": [0.0, 1.2, 0.0], "parent": "pelvis"},
+        {"name": "L_shoulder", "position": [0.2, 1.4, 0.0], "parent": "spine_01"},
+        {"name": "L_elbow", "position": [0.5, 1.4, 0.0], "parent": "L_shoulder"},
+        {"name": "L_wrist", "position": [0.8, 1.4, 0.0], "parent": "L_elbow"},
+        {"name": "R_shoulder", "position": [-0.2, 1.4, 0.0], "parent": "spine_01"},
+        {"name": "R_elbow", "position": [-0.5, 1.4, 0.0], "parent": "R_shoulder"},
+        {"name": "R_wrist", "position": [-0.8, 1.4, 0.0], "parent": "R_elbow"},
+        {"name": "head", "position": [0.0, 1.6, 0.0], "parent": "spine_01"},
+        {"name": "L_hip", "position": [0.15, 0.9, 0.0], "parent": "pelvis"},
+        {"name": "L_knee", "position": [0.15, 0.5, 0.0], "parent": "L_hip"},
+        {"name": "L_ankle", "position": [0.15, 0.1, 0.0], "parent": "L_knee"},
+        {"name": "R_hip", "position": [-0.15, 0.9, 0.0], "parent": "pelvis"},
+        {"name": "R_knee", "position": [-0.15, 0.5, 0.0], "parent": "R_hip"},
+        {"name": "R_ankle", "position": [-0.15, 0.1, 0.0], "parent": "R_knee"},
+    ]
+
+    def _export_cmu_like_fbx(self, tmp_path):
+        import maya.cmds as cmds
+        import maya.mel as mel
+
+        from maya_plugin.handlers import export as export_mod
+
+        created = {}
+        for jname, parent, pos in self.SOURCE_JOINTS:
+            if parent is None:
+                cmds.select(clear=True)
+            else:
+                cmds.select(created[parent], replace=True)
+            created[jname] = cmds.joint(name=jname, position=pos)
+        # Two keys on two different channels so the exported FBX carries
+        # real, non-degenerate animation curves.
+        cmds.setKeyframe(created["Hips"], attribute="translateX", time=1, value=0)
+        cmds.setKeyframe(created["Hips"], attribute="translateX", time=10, value=1)
+        cmds.setKeyframe(created["LeftUpLeg"], attribute="rotateX", time=1, value=0)
+        cmds.setKeyframe(created["LeftUpLeg"], attribute="rotateX", time=10, value=20)
+
+        cmds.loadPlugin("fbxmaya", quiet=True)
+        # fbxmaya's export options are PROCESS-GLOBAL, not reset by
+        # cmds.file(new=True) - an earlier test elsewhere in this shared
+        # mayapy session (export.py's own FBX_ANIM_MEL[False] path, a
+        # static/no-animation export) can leave animation baking turned
+        # OFF, which silently drops every keyframe from THIS export with
+        # no error at all - measured directly: a bare `cmds.file(...,
+        # type="FBX export")` call after such a test produced a valid FBX
+        # with zero keyframes, and only this explicit reset fixed it.
+        # `FBX_PREAMBLE_MEL` starts with `FBXResetExport`; `FBX_ANIM_MEL[True]`
+        # is export.py's own animation-on incantation (and the specific
+        # `FBXExportBakeResampleAnimation` requirement export.py's own
+        # comment documents measuring) - reused rather than re-derived.
+        for statement in export_mod.FBX_PREAMBLE_MEL + export_mod.FBX_ANIM_MEL[True]:
+            mel.eval(statement)
+        cmds.select(list(created.values()), replace=True)
+        path = str(tmp_path / "cmu_like_source.fbx").replace("\\", "/")
+        cmds.file(path, force=True, options="v=0", type="FBX export",
+                 pr=True, es=True)
+        return path
+
+    def test_namespaced_import_resolves_past_the_convention_refusal(
+            self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import retarget, rigging
+
+        fbx_path = self._export_cmu_like_fbx(tmp_path)
+        assert (tmp_path / "cmu_like_source.fbx").exists()
+
+        # A fresh scene for the actual retarget - the skeleton above only
+        # existed to produce the FBX file.
+        cmds.file(new=True, force=True)
+        skel = rigging.create_skeleton({"joints": self.TARGET_JOINTS})
+
+        try:
+            result = retarget.retarget_clip(
+                {"file": fbx_path, "root": skel["root"], "clip": "fbxtest"})
+        except HandlerError as exc:
+            # The bug this test targets made EVERY namespaced FBX import
+            # fail with exactly this refusal, regardless of the file's
+            # actual joint names - so this is the one failure the fix must
+            # rule out. A later failure for some OTHER stated reason would
+            # still be a regression in the fix, so nothing further is
+            # asserted here (see the "full success" branch below - this
+            # skeleton is well-formed, so no such later failure exists).
+            assert "not a known mocap convention" not in str(exc), (
+                "the namespace-stripping fix regressed: FBX import is "
+                "still being refused as an unrecognized convention: %s"
+                % exc)
+            raise
+        # This skeleton is a complete, valid 15-slot CMU-named biped with
+        # real keyframes, so the fix should carry it all the way through:
+        # full success, not just "got past the first refusal".
+        assert result["clip"] == "fbxtest"
+        assert result["source_joints"] == len(self.SOURCE_JOINTS)
+        assert result["frames"] > 0
+
+        # Teardown discipline applies here too - nothing HIK-typed, no
+        # mocap_src_* leftovers, same as the BVH route.
+        leftover_hik = sorted({
+            n for t in ("HIKCharacterNode", "HIKProperty2State",
+                       "HIKSolverNode", "HIKState2SK", "HIKRetargeterNode",
+                       "HIKState2FK", "HIKCharacterStateClient")
+            for n in (cmds.ls(type=t) or [])})
+        assert not leftover_hik, leftover_hik
+        assert not [n for n in (cmds.ls(long=True) or []) if "mocap_src_" in n]
