@@ -645,6 +645,21 @@ def _retarget_bvh(path: str, root_param: str, name: str,
         cmds.bakeResults(list(target_slot_joints.values()),
                          time=(target_start_frame, bake_end_frame),
                          sampleBy=1, simulation=True)
+    except HandlerError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - see module docstring / #774
+        # review CRITICAL 1 follow-up (Task 4): a mid-characterize HIK/mel
+        # failure (e.g. an unresolvable slot id) used to escape as a raw
+        # RuntimeError from `mel.eval` - every OTHER refusal in this module
+        # is a HandlerError, and a caller catching HandlerError (the
+        # documented contract) would not catch this. The `finally` below
+        # still tears down exactly as it does for any other exception.
+        raise HandlerError(
+            "retargeting failed while characterizing/baking against "
+            "HumanIK: %s" % exc,
+            hint="this usually means one of the two skeletons' 15 required "
+                 "HIK slots could not be assigned - check both joint sets "
+                 "for duplicate or missing slot targets") from exc
     finally:
         _teardown_hik(cmds, mel, characters, ns, warnings)
 
@@ -839,6 +854,19 @@ def _retarget_fbx(path: str, root_param: str, name: str,
         cmds.bakeResults(list(target_slot_joints.values()),
                          time=(target_start_frame, bake_end_frame),
                          sampleBy=1, simulation=True)
+    except HandlerError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - see the BVH route's identical
+        # handler (#774 Task 4 fix) for the full rationale: a mid-
+        # characterize HIK/mel failure must surface as a HandlerError like
+        # every other refusal in this module, not escape as a raw
+        # RuntimeError. The `finally` below still tears down regardless.
+        raise HandlerError(
+            "retargeting failed while characterizing/baking against "
+            "HumanIK: %s" % exc,
+            hint="this usually means one of the two skeletons' 15 required "
+                 "HIK slots could not be assigned - check both joint sets "
+                 "for duplicate or missing slot targets") from exc
     finally:
         _teardown_hik(cmds, mel, characters, ns, warnings)
 

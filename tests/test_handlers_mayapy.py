@@ -6,6 +6,7 @@ real pixels are covered by the manual M0 loop test inside Maya.
 """
 
 import math
+import os
 
 import pytest
 
@@ -5247,3 +5248,144 @@ class TestRetargetFbxNamespaceInMaya:
             for n in (cmds.ls(type=t) or [])})
         assert not leftover_hik, leftover_hik
         assert not [n for n in (cmds.ls(long=True) or []) if "mocap_src_" in n]
+
+
+_MOCAP_FIXTURES = os.path.join(
+    os.path.dirname(__file__), "..", "evals", "mocap_fixtures")
+
+
+@pytest.mark.skipif(
+    not os.path.exists(os.path.join(_MOCAP_FIXTURES, "cmu_walk.bvh")),
+    reason="CMU fixtures not stocked yet")
+class TestRetargetInMaya:
+    """#774 Task 4: retarget_clip against REAL Maya, a real biped, and the
+    real CMU BVH fixtures (#774 Task 2) - the proof Task 7 builds on.
+
+    Same skip guard as `TestCmuFixtures` in test_mocapmath.py: these fixtures
+    ship with the repo (evals/mocap_fixtures/), so the guard is defensive,
+    not expected to actually skip in this checkout.
+    """
+
+    # create_skeleton's biped params, copied VERBATIM from evals/
+    # humanoid_live.py's JOINTS (#668) - the same 20-joint naming
+    # mocapmath.SKELETON_HIK_MAP's targets are drawn from.
+    JOINTS = [
+        {"name": "pelvis",     "position": [0.0,  1.00, 0.0]},
+        {"name": "spine_01",   "position": [0.0,  1.15, 0.0], "parent": "pelvis"},
+        {"name": "spine_02",   "position": [0.0,  1.30, 0.0], "parent": "spine_01"},
+        {"name": "chest",      "position": [0.0,  1.45, 0.0], "parent": "spine_02"},
+        {"name": "neck",       "position": [0.0,  1.60, 0.0], "parent": "chest"},
+        {"name": "head",       "position": [0.0,  1.72, 0.0], "parent": "neck"},
+        {"name": "L_shoulder", "position": [0.22, 1.50, 0.0], "parent": "chest"},
+        {"name": "L_elbow",    "position": [0.45, 1.50, 0.0], "parent": "L_shoulder"},
+        {"name": "L_wrist",    "position": [0.68, 1.50, 0.0], "parent": "L_elbow"},
+        {"name": "R_shoulder", "position": [-0.22, 1.50, 0.0], "parent": "chest"},
+        {"name": "R_elbow",    "position": [-0.45, 1.50, 0.0], "parent": "R_shoulder"},
+        {"name": "R_wrist",    "position": [-0.68, 1.50, 0.0], "parent": "R_elbow"},
+        {"name": "L_hip",      "position": [0.10, 0.95, 0.0], "parent": "pelvis"},
+        {"name": "L_knee",     "position": [0.10, 0.50, 0.0], "parent": "L_hip"},
+        {"name": "L_ankle",    "position": [0.10, 0.08, 0.0], "parent": "L_knee"},
+        {"name": "L_toe",      "position": [0.10, 0.02, 0.14], "parent": "L_ankle"},
+        {"name": "R_hip",      "position": [-0.10, 0.95, 0.0], "parent": "pelvis"},
+        {"name": "R_knee",     "position": [-0.10, 0.50, 0.0], "parent": "R_hip"},
+        {"name": "R_ankle",    "position": [-0.10, 0.08, 0.0], "parent": "R_knee"},
+        {"name": "R_toe",      "position": [-0.10, 0.02, 0.14], "parent": "R_ankle"},
+    ]
+
+    def _biped(self):
+        from maya_plugin.handlers import rigging
+
+        return rigging.create_skeleton({"joints": self.JOINTS})["root"]
+
+    def test_walk_retargets_and_registers_as_clip(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import clip, retarget
+
+        root = self._biped()
+        result = retarget.retarget_clip({
+            "file": "evals/mocap_fixtures/cmu_walk.bvh",
+            "root": root, "clip": "cmuwalk"})
+        assert result["frames"] > 30
+        assert result["measures"]  # self-measured
+
+        # the clip is a REAL phase-6 clip: metadata visible to clip tools
+        records = clip.clip_meta(cmds, result["root"])
+        assert any(r.get("name") == "cmuwalk" for r in records)
+
+    def test_motion_actually_transferred(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import retarget
+
+        root = self._biped()
+        result = retarget.retarget_clip({
+            "file": "evals/mocap_fixtures/cmu_walk.bvh",
+            "root": root, "clip": "cmuwalk2"})
+        hips = result["root"]
+        p0 = cmds.getAttr(hips + ".translateX", time=1)
+        pN = cmds.getAttr(hips + ".translateX", time=40)
+        assert abs(pN - p0) > 0.01  # a walk MOVES
+
+    def test_nothing_survives_but_keys(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import retarget
+
+        root = self._biped()
+        retarget.retarget_clip({
+            "file": "evals/mocap_fixtures/cmu_idle.bvh",
+            "root": root, "clip": "cmuidle"})
+        assert not cmds.ls("mocap_src_*", long=True)
+        assert not [n for n in (cmds.ls(long=True) or [])
+                    if cmds.nodeType(n) in retarget._HIK_NODE_TYPES]
+
+    def test_non_biped_target_refused_naming_slots(self):
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import retarget, rigging
+
+        chain = rigging.create_skeleton({
+            "joints": [
+                {"name": "a", "position": [0, 0, 0]},
+                {"name": "b", "position": [0, 1, 0], "parent": "a"}]})
+        with pytest.raises(HandlerError, match="LeftFoot"):
+            retarget.retarget_clip({
+                "file": "evals/mocap_fixtures/cmu_walk.bvh",
+                "root": chain["root"], "clip": "nope"})
+
+    def test_characterize_failure_leaves_nothing_behind(self, monkeypatch):
+        """The fix round's throwaway smoke-script proof
+        (task-3-report.md's "Review-fix pass", CRITICAL 1), committed as a
+        real regression test: force a mid-characterize failure through the
+        PUBLIC `retarget_clip()` entry point by monkeypatching an invalid
+        HumanIK slot id into `retarget._HIK_SLOT_IDS` for one slot -
+        `setCharacterObject` fails on that slot, strictly AFTER
+        `hikCreateCharacter` already built real nodes, exactly the window
+        #774 review CRITICAL 1 found leaking. A refusal here must still
+        leave the scene exactly as clean as a successful call's teardown
+        does - no source namespace, no HIK-typed node of any kind, and (the
+        `_HIK_NODE_TYPES` sweep alone cannot see this) no stray keys landed
+        on the target rig's own joints either.
+        """
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import retarget
+
+        root = self._biped()
+        monkeypatch.setitem(retarget._HIK_SLOT_IDS, "Head", 9999)
+
+        target_joints = cmds.ls(
+            cmds.listRelatives(root, allDescendents=True, type="joint",
+                              fullPath=True) or [], long=True) + [root]
+        before_keys = {j: cmds.keyframe(j, query=True) for j in target_joints}
+
+        with pytest.raises(retarget.HandlerError):
+            retarget.retarget_clip({
+                "file": "evals/mocap_fixtures/cmu_walk.bvh",
+                "root": root, "clip": "cmufail"})
+
+        assert not cmds.ls("mocap_src_*", long=True)
+        assert not [n for n in (cmds.ls(long=True) or [])
+                    if cmds.nodeType(n) in retarget._HIK_NODE_TYPES]
+        after_keys = {j: cmds.keyframe(j, query=True) for j in target_joints}
+        assert after_keys == before_keys
