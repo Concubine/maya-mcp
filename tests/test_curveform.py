@@ -4,10 +4,39 @@ Whole-call validation runs before any cmds import (assemble-style): a bad
 call must leave nothing behind, and these tests prove the refusal path is
 Maya-free by running where maya is not importable at all.
 """
+import importlib.util
+import os
+
 import pytest
 
 from maya_plugin.dispatcher import HandlerError
 from maya_plugin.handlers import curveform
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _load_live_gate():
+    """Load evals/curve_form_live.py by path (house convention - see
+    tests/test_assemble_pivots_live.py). Its network calls all sit behind
+    `if __name__ == "__main__"`, so importing it as a module only runs the
+    sys.path setup and defines its functions/constants - no socket, no Maya.
+    """
+    path = os.path.join(REPO_ROOT, "evals", "curve_form_live.py")
+    spec = importlib.util.spec_from_file_location("evals_curve_form_live", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_deviation_warn_matches_live_gate_tolerance():
+    # #768 review RIDER: curveform.DEVIATION_WARN (the self-report threshold
+    # returned in every create_curve_form result's `warnings`) and
+    # evals/curve_form_live.py's TOLERANCE (the live gate's pass/fail bar)
+    # are two independently-written 0.02 literals that share ONE measurement
+    # provenance (both cite the same 2026-08-27 vase/horn/torso run in their
+    # own comments) - nothing enforces they stay equal if either is edited.
+    live_gate = _load_live_gate()
+    assert curveform.DEVIATION_WARN == live_gate.TOLERANCE
 
 
 class TestParamGate:

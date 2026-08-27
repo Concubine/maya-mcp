@@ -22,6 +22,7 @@ either succeeds or cleans up every construction node it made along the way.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..dispatcher import HandlerError, require_known_keys
@@ -91,11 +92,27 @@ def _ensure_sweep_plugin(cmds) -> None:
     `loadPlugin` on an already-loaded plugin is normally a no-op, but this
     wraps it anyway so a Maya version that raises on a redundant load does
     not turn a healthy second call into a refusal.
+
+    #768 review MINOR 6: swallowing every `RuntimeError` here used to also
+    swallow a GENUINE load failure (plugin missing from this Maya install,
+    a bad plugin path, a version mismatch) - the call would return
+    normally, and the actual failure would only surface many lines later as
+    a confusing `AttributeError` on `cmds.sweepMeshFromCurve`, naming
+    nothing about the plugin. Checking `pluginInfo(loaded=True)` after the
+    try/except tells a real failure (still not loaded) apart from the
+    expected redundant-load no-op (already loaded, `loadPlugin` raised or
+    not) and names the actual cause.
     """
     try:
         cmds.loadPlugin(_SWEEP_PLUGIN, quiet=True)
     except RuntimeError:
         pass  # already loaded
+    if not cmds.pluginInfo(_SWEEP_PLUGIN, query=True, loaded=True):
+        raise HandlerError(
+            "the '%s' plugin failed to load" % _SWEEP_PLUGIN,
+            hint="this Maya install may be missing the sweep plugin - "
+            "sweepMeshFromCurve is unavailable without it",
+        )
 
 
 def _curve_degree(point_count: int) -> int:
@@ -203,8 +220,8 @@ def _build_sweep(cmds, spec: Dict[str, Any], requested: str, temp_nodes: List[st
         cmds.setAttr(prefix + ".taperCurve_FloatValue", w / max_width)
         cmds.setAttr(prefix + ".taperCurve_Interp", _TAPER_INTERP_LINEAR)
 
-    if spec["twist"] is not None:
-        cmds.setAttr(creator + ".twist", spec["twist"])
+    # Twist is NOT applied via the creator node's own `.twist` attribute -
+    # see `_apply_twist`'s docstring for the measurement that ruled it out.
 
     sides = spec["profile_sides"]
     if sides is None:
@@ -219,7 +236,74 @@ def _build_sweep(cmds, spec: Dict[str, Any], requested: str, temp_nodes: List[st
     # Bake: the creator node's history is what makes the attrs above take
     # effect on real geometry rather than staying a deferred recipe.
     cmds.delete(mesh, constructionHistory=True)
-    return _long(cmds, cmds.rename(mesh, requested))
+    renamed = _long(cmds, cmds.rename(mesh, requested))
+
+    if spec["twist"]:
+        _apply_twist(cmds, renamed, path_curve, spec["twist"])
+    return renamed
+
+
+def _apply_twist(cmds, mesh: str, path_curve: str, twist_degrees: float) -> None:
+    """Rotate `mesh`'s vertices about the path curve's own tangent, ramping
+    linearly from 0 degrees at the path start to `twist_degrees` at the end.
+
+    Measured live (mayapy A/B, fix for #768 review IMPORTANT 2 - the
+    inert-param failure class this repo has hit twice, #764 being the
+    first): the sweepMeshCreator node's own `.twist` attribute LOOKS wired
+    up (it is settable, holds the value you give it, raises nothing) but is
+    functionally dead for any value a caller would plausibly send. On a
+    straight 2-point path its measured total effect was ~0.0036 degrees of
+    real rotation per unit of input twist, and that already-tiny ratio
+    scaled DOWN further as the path got longer - there is no sane
+    compensating scale factor, so the attribute is not used at all.
+
+    Twist is applied here instead, directly on the baked mesh: for every
+    vertex, find the closest point on the path curve and that point's
+    arc-length fraction `t` along the WHOLE curve (0 at the start, 1 at the
+    end - via `MFnNurbsCurve.length`/`findLengthFromParam`, not the raw
+    curve parameter, so the fitted curve's own parametrization doesn't skew
+    the ramp), then rotate the vertex's offset from that closest point by
+    `twist_degrees * t` around the curve's own tangent direction there.
+    Verified (mayapy): on a straight vertical path a twist of 90 rotates
+    the far-end ring by exactly 90 degrees relative to the near end, and 0
+    degrees at the near end - the linear ramp promised by the design doc's
+    2026-08-27 amendment.
+
+    Both `mesh` and `path_curve` are still in the identity-transform object
+    space they were built in - `create_curve_form` applies translate/
+    rotate/scale AFTER this runs - so object space is used throughout with
+    no space conversion needed.
+    """
+    import maya.api.OpenMaya as om  # noqa: PLC0415 - only importable inside Maya
+
+    sel = om.MSelectionList()
+    sel.add(path_curve)
+    curve_fn = om.MFnNurbsCurve(sel.getDagPath(0))
+    total_length = curve_fn.length()
+    if total_length <= 1e-9:
+        return  # a degenerate curve has no arc length to ramp twist along
+
+    sel = om.MSelectionList()
+    sel.add(mesh)
+    dag = sel.getDagPath(0)
+    try:
+        dag.extendToShape()
+    except RuntimeError:
+        pass  # already a shape
+    mesh_fn = om.MFnMesh(dag)
+    points = mesh_fn.getPoints(om.MSpace.kObject)
+
+    rotated_points = om.MPointArray()
+    for point in points:
+        closest, param = curve_fn.closestPoint(point, space=om.MSpace.kObject)
+        t = curve_fn.findLengthFromParam(param) / total_length
+        angle = math.radians(twist_degrees * t)
+        tangent = curve_fn.tangent(param, space=om.MSpace.kObject)
+        tangent.normalize()
+        offset = om.MVector(point) - om.MVector(closest)
+        rotated = offset.rotateBy(om.MQuaternion(angle, tangent))
+        rotated_points.append(om.MPoint(om.MVector(closest) + rotated))
+    mesh_fn.setPoints(rotated_points, om.MSpace.kObject)
 
 
 def _build_revolve(cmds, spec: Dict[str, Any], requested: str, temp_nodes: List[str]) -> str:

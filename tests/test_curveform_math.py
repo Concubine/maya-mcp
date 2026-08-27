@@ -76,6 +76,18 @@ class TestValidateSpec:
             cm.validate_spec({"kind": "loft", "name": "torso", "sections": [
                 [[1, 0, 0], [0, 0, 1], [-1, 0, 0]]]})
 
+    def test_profile_sides_over_max_refused(self):
+        # #768 review IMPORTANT 3: the MCP surface caps profile_sides at 64
+        # (le=64) but the handler must own this limit too (#764's lesson) -
+        # exceed it here, below the surface, to prove the handler refuses on
+        # its own.
+        with pytest.raises(HandlerError, match="profile_sides"):
+            cm.validate_spec(sweep_params(profile_sides=cm.MAX_PROFILE_SIDES + 1))
+
+    def test_profile_sides_at_max_accepted(self):
+        spec = cm.validate_spec(sweep_params(profile_sides=cm.MAX_PROFILE_SIDES))
+        assert spec["profile_sides"] == cm.MAX_PROFILE_SIDES
+
 
 class TestWireShapedParams:
     """The MCP server (src/maya_mcp/server.py) sends EVERY declared param on
@@ -171,6 +183,22 @@ class TestFaceBudget:
         spec = cm.validate_spec(sweep_params(
             resolution={"along": 10, "around": 8}))
         assert cm.predicted_faces(spec) == 10 * 8 + 2  # + 2 cap n-gons
+
+    def test_predicted_faces_sweep_bills_profile_sides_not_around(self):
+        # #768 review IMPORTANT 3: a sweep's actual cross-section ring width
+        # is `profile_sides` when given, not `resolution.around` -
+        # `_build_sweep` only falls back to `around` when profile_sides is
+        # omitted. Billing by `around` alone (16) here would under-count a
+        # 32-sided profile's real face total.
+        spec = cm.validate_spec(sweep_params(
+            resolution={"along": 10, "around": 16}, profile_sides=32))
+        assert cm.predicted_faces(spec) == 10 * 32 + 2
+
+    def test_predicted_faces_sweep_without_profile_sides_uses_around(self):
+        spec = cm.validate_spec(sweep_params(
+            resolution={"along": 10, "around": 16}))
+        assert spec["profile_sides"] is None
+        assert cm.predicted_faces(spec) == 10 * 16 + 2
 
 
 class TestStations:

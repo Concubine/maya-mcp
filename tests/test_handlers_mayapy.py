@@ -5019,3 +5019,87 @@ class TestCurveFormInMaya:
             "profile": [[0.4, 0.0], [0.3, 0.8]],
             "translate": [5.0, 0.0, 2.0]})
         assert result["worst_station_deviation"] < 0.05
+
+    def test_twist_has_geometric_effect_and_is_degrees(self):
+        # #768 review IMPORTANT 2: `twist` had zero geometric evidence - the
+        # inert-param failure class this repo has hit twice (#764 was the
+        # first). Build the same square-profile sweep twice on a straight
+        # 3-point path up Y, twist=0 vs twist=90, and prove: (1) it is not
+        # inert - vertices genuinely move; (2) the ramp is 0 at the path's
+        # start and (3) the far end rotates by an amount consistent with
+        # DEGREES (~90), not radians, turns, or some other unit.
+        #
+        # Vertices are compared BY INDEX, not by searching for "whichever
+        # vertex is nearest angle X" - a 4-sided profile is symmetric under
+        # a 90-degree rotation, so an angle-search marker would find some
+        # vertex near the target angle regardless of whether twist did
+        # anything at all (measured while designing this test - a
+        # nearest-angle search is a false-negative trap here). Index
+        # correspondence is guaranteed because twist never changes mesh
+        # topology, only vertex positions (see `_apply_twist`).
+        import math
+
+        import maya.cmds as cmds
+
+        path = [[0, 0, 0], [0, 1, 0], [0, 2, 0]]
+        untwisted = self._build({
+            "kind": "sweep", "name": "twist_probe_0",
+            "path": path, "width": 1.0, "profile_sides": 4, "twist": 0})
+        twisted = self._build({
+            "kind": "sweep", "name": "twist_probe_90",
+            "path": path, "width": 1.0, "profile_sides": 4, "twist": 90})
+
+        def verts(name):
+            flat = cmds.xform(
+                name + ".vtx[*]", query=True, translation=True,
+                worldSpace=True)
+            return [flat[i:i + 3] for i in range(0, len(flat), 3)]
+
+        verts0 = verts(untwisted["name"])
+        verts90 = verts(twisted["name"])
+        assert len(verts0) == len(verts90)
+
+        # (1) Not inert: some vertex must have moved by more than a tiny
+        # epsilon between the twist=0 and twist=90 builds.
+        max_displacement = max(
+            math.dist(a, b) for a, b in zip(verts0, verts90)
+        )
+        assert max_displacement > 0.05, (
+            "twist=90 produced no meaningful geometric change "
+            "(max displacement %.6f) - twist is inert" % max_displacement
+        )
+
+        # (2) The ramp starts at 0 degrees: vertices near the path's start
+        # (y~=0) must nearly coincide between the two builds.
+        near_start = [i for i, v in enumerate(verts0) if v[1] < 0.1]
+        assert near_start
+        start_disp = max(math.dist(verts0[i], verts90[i]) for i in near_start)
+        assert start_disp < 0.05, (
+            "twist ramp should be ~0 degrees at the path's start, but a "
+            "near-start vertex moved %.6f" % start_disp
+        )
+
+        # (3) The far end (y~=2, the top of the path) rotated rigidly by an
+        # amount consistent with 90 degrees - not 0 (inert), not some wild
+        # multiple (wrong unit, e.g. radians-as-degrees or turns).
+        far_end = [i for i, v in enumerate(verts0) if v[1] > 1.9]
+        assert far_end
+
+        def angle_about_y(p):
+            return math.degrees(math.atan2(p[2], p[0]))
+
+        rotations = []
+        for i in far_end:
+            a0 = angle_about_y(verts0[i])
+            a1 = angle_about_y(verts90[i])
+            rotations.append((a1 - a0 + 180.0) % 360.0 - 180.0)  # shortest signed diff
+        # Every far-end vertex is part of one rigid ring, so they should all
+        # report the same rotation.
+        assert max(rotations) - min(rotations) < 5.0, (
+            "far-end ring did not rotate rigidly: %r" % rotations
+        )
+        magnitude = abs(rotations[0])
+        assert 60.0 < magnitude < 120.0, (
+            "far-end rotation magnitude %.2f degrees is not near 90 for a "
+            "twist=90 request - twist does not read as degrees" % magnitude
+        )

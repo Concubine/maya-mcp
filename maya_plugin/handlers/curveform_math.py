@@ -53,6 +53,12 @@ MIN_RING_POINTS = 3
 MAX_ALONG = 512
 MAX_AROUND = 256
 
+# Matches the MCP surface's declared `profile_sides` ceiling (le=64 in
+# src/maya_mcp/server.py) - the handler owns this limit too (#764's lesson:
+# a param validated only at the wire's edge is not validated), so the two
+# numbers must be kept in agreement by hand if either one ever changes.
+MAX_PROFILE_SIDES = 64
+
 _SWEEP_DEFAULT_RESOLUTION = {"along": 32, "around": 16}
 _REVOLVE_LOFT_DEFAULT_RESOLUTION = {"along": 24, "around": 24}
 
@@ -402,6 +408,18 @@ def _validate_sweep(params: Dict[str, Any]) -> Dict[str, Any]:
                 "profile_sides must be a whole number of at least 3, got %r" % (profile_sides,),
                 hint="omit profile_sides for a circular cross-section, or use e.g. 4 for a square tube",
             )
+        # #768 review IMPORTANT 3: the MCP surface caps this at 64 (le=64 in
+        # the tool schema), but a handler must not depend on the surface for
+        # its own limits (#764's lesson - a param validated only at the
+        # edge is not validated). MAX_PROFILE_SIDES matches that surface
+        # limit exactly - the two are meant to agree, not merely coincide.
+        if profile_sides > MAX_PROFILE_SIDES:
+            raise HandlerError(
+                "profile_sides %d exceeds the maximum of %d"
+                % (profile_sides, MAX_PROFILE_SIDES),
+                hint="MAX_PROFILE_SIDES=%d bounds a sweep's cross-section - lower profile_sides"
+                % MAX_PROFILE_SIDES,
+            )
 
     spec: Dict[str, Any] = {
         "kind": "sweep",
@@ -496,18 +514,31 @@ def predicted_faces(spec: Dict[str, Any]) -> int:
     """Face count the tessellation in `spec["resolution"]` will produce.
 
     `along * around` quad faces plus 2 n-gon caps when `cap_ends` is set,
-    for all three kinds alike. Refused over MAX_PRIMITIVE_FACES for the same
+    for revolve and loft. Refused over MAX_PRIMITIVE_FACES for the same
     reason modeling.py bounds `divisions`: a wedged Maya main thread has no
     exit but killing the process.
 
+    A sweep bills differently (#768 review IMPORTANT 3): its cross-section
+    is `profile_sides` when given (an explicit n-gon profile), not
+    `resolution["around"]` - `_build_sweep` only falls back to `around` when
+    `profile_sides` is omitted (see its docstring). Billing a sweep by
+    `around` alone would silently under-count whenever a caller asks for a
+    fine profile (`profile_sides` up to MAX_PROFILE_SIDES=64) on a coarse
+    `around` resolution, so the ring width used here is
+    `max(around, profile_sides or 0)`.
+
     For a spec that came from `validate_spec`, this branch is unreachable:
-    `MAX_ALONG * MAX_AROUND + 2 = 131,074`, far under MAX_PRIMITIVE_FACES
-    (1,000,000), because `_validate_resolution` already caps `along`/`around`.
-    It stays as a guard for any spec built by a future caller that skips
-    `validate_spec` and hands a resolution straight in.
+    `MAX_ALONG * max(MAX_AROUND, MAX_PROFILE_SIDES) + 2 = 131,074`, far under
+    MAX_PRIMITIVE_FACES (1,000,000), because `_validate_resolution` and the
+    profile_sides cap already bound every factor here. It stays as a guard
+    for any spec built by a future caller that skips `validate_spec` and
+    hands a resolution straight in.
     """
     resolution = spec["resolution"]
-    along, around = resolution["along"], resolution["around"]
+    along = resolution["along"]
+    around = resolution["around"]
+    if spec.get("kind") == "sweep":
+        around = max(around, spec.get("profile_sides") or 0)
     faces = along * around + (2 if spec.get("cap_ends") else 0)
     if faces > MAX_PRIMITIVE_FACES:
         raise HandlerError(

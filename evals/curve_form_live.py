@@ -14,6 +14,16 @@ state the threshold that discriminates). The coarse-horn check at the
 bottom of gate_horn is the negative control: a resolution too coarse to
 actually pass must land ABOVE TOLERANCE, or the number is not a gate.
 
+`check_quad_dominant` asserts the spec's "quad-dominant" promise (tris <=
+2*faces) using `get_object_info`'s mesh_stats section - both numbers are
+already cheap to read there, no extra triangulation step needed.
+
+Every check() call accumulates into FAILURES rather than stopping the run;
+only ok() aborts early, and only on a hard call failure (a refused or
+crashed command) - so a run always exercises every check before deciding
+pass/fail, and exits non-zero at the end if any check failed (the
+array_deform_live convention).
+
 Run:  set MAYA_MCP_PORT=9878 && .venv/Scripts/python.exe evals/curve_form_live.py
 Artifacts: evals/curve_form_live/*.png
 """
@@ -46,6 +56,37 @@ FAILURES = []
 # control: the same horn at resolution={"along":4,"around":4} measured
 # 0.0406, well above this tolerance - it discriminates.
 TOLERANCE = 0.02
+
+
+def check_quad_dominant(name, around):
+    """Assert `name`'s mesh is quad-dominant: close to 2 triangles per quad
+    face, with slack only for the 2 n-gon end caps.
+
+    A pure-quad body triangulates to exactly 2 tris per face. Each end cap
+    is a SINGLE n-gon face with `around` sides, which triangulates to
+    `around - 2` triangles while counting as only 1 face - a shortfall the
+    "2 tris per face" baseline does not budget for. `2 * around` covers
+    both caps' worth of that shortfall with room to spare (measured: the
+    actual excess for the vase/horn/torso builds below is 38/24/38 tris
+    against a `2 * around` slack of 40/32/40 - a real gate, not a rubber
+    stamp: a mesh that was actually triangulated or n-gon-heavy throughout
+    would blow well past this).
+
+    `around` is the resolution/profile side count THIS gate itself passed
+    to `create_curve_form` for `name` - not an assumption about the
+    handler's internal defaults - so the slack is honestly derived from
+    numbers this script controls. tris/faces come cheaply off
+    `get_object_info`'s `mesh_stats` section - no separate triangulation
+    step needed to observe them.
+    """
+    info = ok(call("get_object_info", {"name": name, "include": ["mesh_stats"]}, 60.0),
+              "get_object_info %s" % name)
+    stats = info["mesh_stats"]
+    tris, faces = stats["tris"], stats["faces"]
+    slack = 2 * around
+    check(tris <= 2 * faces + slack,
+          "%s is quad-dominant (tris=%d <= 2*faces + cap slack=%d)"
+          % (name, tris, 2 * faces + slack))
 
 
 def ok(resp, what):
@@ -83,17 +124,27 @@ def ring(y, a, b, n=8):
     return pts
 
 
+VASE_RESOLUTION = {"along": 24, "around": 24}  # matches the revolve/loft default
+
+
 def gate_vase():
     print("\n[1] vase: revolve")
     result = ok(call("create_curve_form", {
         "kind": "revolve", "name": "vase",
         "profile": [[0.30, 0.0], [0.50, 0.35], [0.22, 0.80],
                     [0.28, 1.10], [0.20, 1.25]],
+        "resolution": VASE_RESOLUTION,
     }, 180.0), "create_curve_form vase")
     check(result["watertight"], "vase is watertight")
     check(result["faces"] > 0, "vase has faces (%d)" % result["faces"])
     report_deviation("vase", result)
+    check_quad_dominant(result["name"], VASE_RESOLUTION["around"])
     return result
+
+
+HORN_RESOLUTION = {"along": 32, "around": 16}  # matches the sweep default; no
+# explicit profile_sides, so the tube's own cross-section side count IS
+# resolution.around (see curveform._build_sweep's fallback).
 
 
 def gate_horn():
@@ -102,9 +153,11 @@ def gate_horn():
         "kind": "sweep", "name": "horn",
         "path": [[0, 0, 0], [0.1, 0.5, 0], [0.35, 0.9, 0], [0.7, 1.1, 0.2]],
         "width": [[0, 0.30], [1, 0.06]],
+        "resolution": HORN_RESOLUTION,
     }, 180.0), "create_curve_form horn")
     check(result["watertight"], "horn is watertight")
     report_deviation("horn", result)
+    check_quad_dominant(result["name"], HORN_RESOLUTION["around"])
 
     # Negative control (Step 3): a deliberately coarse tessellation must NOT
     # pass. Built and measured, never placed in the scene under the "horn"
@@ -127,6 +180,13 @@ def gate_horn():
     return result
 
 
+TORSO_RESOLUTION = {"along": 24, "around": 24}  # matches the revolve/loft
+# default; the loft's tessellation "around" count (nurbsToPoly's vNumber,
+# which is what sizes the two end-cap n-gons) is this, NOT the 8 points
+# per `ring()` section below - those only shape the NURBS surface lofted
+# through them.
+
+
 def gate_torso():
     print("\n[3] torso: loft, 4 rings x 8 points, elliptical, chest wider than waist")
     sections = [
@@ -137,9 +197,11 @@ def gate_torso():
     ]
     result = ok(call("create_curve_form", {
         "kind": "loft", "name": "torso", "sections": sections,
+        "resolution": TORSO_RESOLUTION,
     }, 180.0), "create_curve_form torso")
     check(result["watertight"], "torso is watertight")
     report_deviation("torso", result)
+    check_quad_dominant(result["name"], TORSO_RESOLUTION["around"])
     return result
 
 
