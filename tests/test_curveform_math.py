@@ -77,6 +77,57 @@ class TestValidateSpec:
                 [[1, 0, 0], [0, 0, 1], [-1, 0, 0]]]})
 
 
+class TestWireShapedParams:
+    """The MCP server (src/maya_mcp/server.py) sends EVERY declared param on
+    EVERY call, `None` for whichever ones the caller left unset - it never
+    conditionally omits a key. A prior regression (#768 review) gave
+    `degrees`/`axis` concrete literal defaults (360.0/"y") in the server
+    function signature instead of `None`, so a real sweep or loft call sent
+    `axis: "y"` on the wire - a key `_refuse_foreign_keys` sees as PRESENT
+    regardless of value, and refuses because it belongs to revolve. `FakeConn`
+    in test_server_tools.py can't catch this: it never calls the real
+    `validate_spec`. These build the dict EXACTLY as the server does - every
+    key from server.py's request dict, present, unset ones `None` - and
+    confirm `validate_spec` accepts it for every kind."""
+
+    # The full key set server.py's create_curve_form request dict sends,
+    # every call, regardless of kind.
+    _WIRE_KEYS = (
+        "kind", "name", "path", "width", "twist", "profile_sides",
+        "profile", "degrees", "axis", "sections", "resolution", "cap_ends",
+        "translate", "rotate", "scale",
+    )
+
+    def _wire_dict(self, **over):
+        params = {k: None for k in self._WIRE_KEYS}
+        params["cap_ends"] = True  # server's literal, non-Optional default
+        params.update(over)
+        return params
+
+    def test_sweep_wire_shape_accepted(self):
+        spec = cm.validate_spec(self._wire_dict(
+            kind="sweep", name="horn",
+            path=[[0, 0, 0], [0, 1, 0], [0, 2, 0.5]], width=0.4,
+        ))
+        assert spec["kind"] == "sweep"
+
+    def test_revolve_wire_shape_accepted(self):
+        spec = cm.validate_spec(self._wire_dict(
+            kind="revolve", name="vase",
+            profile=[[0.5, 0], [0.3, 1]],
+        ))
+        assert spec["kind"] == "revolve"
+
+    def test_loft_wire_shape_accepted(self):
+        spec = cm.validate_spec(self._wire_dict(
+            kind="loft", name="torso", sections=[
+                [[1, 0, 0], [0, 0, 1], [-1, 0, 0]],
+                [[1, 1, 0], [0, 1, 1], [-1, 1, 0]],
+            ],
+        ))
+        assert spec["kind"] == "loft"
+
+
 class TestRamps:
     def test_constant_becomes_flat_ramp(self):
         assert cm.parse_ramp(0.4, "width") == [(0.0, 0.4), (1.0, 0.4)]

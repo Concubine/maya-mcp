@@ -2480,6 +2480,7 @@ class TestCurveFormTools:
         # Unset optionals arrive as None, never invented defaults (#669 lesson)
         assert sent["profile"] is None and sent["sections"] is None
         assert sent["twist"] is None
+        assert sent["degrees"] is None and sent["axis"] is None
         assert result.structured_content["worst_station_deviation"] == 0.004
 
     def test_maya_create_curve_form_revolve_defaults(self):
@@ -2495,5 +2496,8 @@ class TestCurveFormTools:
             "profile": [[0.3, 0.0], [0.5, 0.4], [0.2, 1.25]],
         }))
         assert result.is_error is False
-        assert conn.calls[0]["params"]["degrees"] == 360
+        # Handler-side validate_spec applies the 360/"y" defaults; the wire
+        # carries None when the caller left them unset (#669 lesson).
+        assert conn.calls[0]["params"]["degrees"] is None
+        assert conn.calls[0]["params"]["axis"] is None
         assert conn.calls[0]["params"]["cap_ends"] is True

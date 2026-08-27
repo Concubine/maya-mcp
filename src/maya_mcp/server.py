@@ -1142,12 +1142,12 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "revolve only. [radius, height] pairs of the silhouette in the "
             "half-plane, interpolated - [[0.3,0],[0.5,0.4],[0.2,1.2]] is a "
             "vase. Radius 0 at an end closes that end onto the axis."))] = None,
-        degrees: Annotated[float, Field(gt=0, le=360, description=(
+        degrees: Annotated[Optional[float], Field(gt=0, le=360, description=(
             "revolve only. Sweep angle; default 360. Less leaves an open "
-            "shell (capped when cap_ends)."))] = 360.0,
-        axis: Annotated[Literal["x", "y", "z"], Field(description=(
+            "shell (capped when cap_ends)."))] = None,
+        axis: Annotated[Optional[Literal["x", "y", "z"]], Field(description=(
             "revolve only. Revolution axis; default y (height in `profile` "
-            "runs along it)."))] = "y",
+            "runs along it)."))] = None,
         sections: Annotated[Optional[List[List[List[float]]]], Field(description=(
             "loft only. 2-16 cross-section rings, outermost list ordered "
             "along the form; each ring is a closed loop of 3D points, SAME "
