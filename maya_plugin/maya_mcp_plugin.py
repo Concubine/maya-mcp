@@ -41,6 +41,7 @@ from .handlers import (
     pbr,
     physics,
     render,
+    retarget,
     rigging,
     scene,
     sculpt,
@@ -221,6 +222,7 @@ def _build_handlers() -> Dict[str, Any]:
         "delete_clip": clip.delete_clip,
         "preview_clip": clip.preview_clip,
         "measure_clip": clip.measure_clip,
+        "retarget_clip": retarget.retarget_clip,
     }
 
 
