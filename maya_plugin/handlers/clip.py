@@ -293,6 +293,61 @@ def _rest_value(cmds, plug: str, rest: Dict[str, float],
     return value
 
 
+def register_clip(cmds, root_long: str, name: str, fps: int, start: int,
+                  end: int, loop: bool = False, interpolation: str = "linear",
+                  joints: Optional[List[str]] = None,
+                  weight_channels: Optional[List[str]] = None,
+                  root_position_used: bool = False) -> None:
+    """Append (or replace-and-re-append, #718 decision 4) one clip's metadata
+    record on `root_long`, then widen the rig's playback range to the new
+    span so scrubbing the open scene shows every clip, not just the one just
+    written.
+
+    Extracted from author_clip (#774 Task 3) so a second producer of clips
+    (retarget_clip, which bakes motion rather than keying named channels)
+    writes the exact same record shape instead of a hand-rolled
+    approximation - this is the ONE place `mcp_clip` gets written. Every
+    caller does its OWN drop_record/next_start_frame bookkeeping before
+    calling this (start/end/loop are already decided by the time this
+    runs); this function only re-derives `kept` from the rig's current
+    metadata to build the new full record list - cheap, and always
+    consistent with whatever the caller already used to pick `start`,
+    because nothing mutates `root_long`'s CLIP_ATTR between that decision
+    and this call.
+
+    `joints`/`weight_channels`/`root_position_used`/`interpolation` default
+    to what a baked clip actually has: no per-key channel declarations of
+    its own (the whole rig is baked, not authored key by key via `keys=`)
+    and linear tangents (one key per frame from a bake makes tangent TYPE
+    invisible). author_clip passes its own computed values for all four, so
+    adding these defaults changes nothing about its existing behavior.
+
+    Curve-cutting a REPLACED clip's old range is the CALLER's job, not
+    this function's - that has to happen before the new keys are set,
+    which is earlier than this call ever runs.
+    """
+    records = clip_meta(cmds, root_long)
+    _replaced, kept = clipmath.drop_record(records, name)
+    new_record = {
+        "name": name, "fps": fps, "start_frame": start, "end_frame": end,
+        "duration_s": (end - start) / float(fps), "loop": loop,
+        "interpolation": interpolation,
+        "joints": sorted(joints) if joints else [],
+        "weight_channels": list(weight_channels) if weight_channels else [],
+        "root_position_used": bool(root_position_used),
+    }
+    all_records = kept + [new_record]
+    span_end = max(r["end_frame"] for r in all_records)
+    # The playback range is the FULL span, so opening the .ma and scrubbing
+    # shows every clip - not just the one authored last.
+    cmds.playbackOptions(edit=True, minTime=0, maxTime=span_end,
+                         animationStartTime=0, animationEndTime=span_end)
+    if not cmds.attributeQuery(CLIP_ATTR, node=root_long, exists=True):
+        cmds.addAttr(root_long, longName=CLIP_ATTR, dataType="string")
+    cmds.setAttr("%s.%s" % (root_long, CLIP_ATTR), json.dumps(all_records),
+                 type="string")
+
+
 def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     cmds = _cmds()
     from . import rigging  # noqa: PLC0415 - rigging imports clip for guards
@@ -801,22 +856,14 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
                ", ".join(back_filled["clips"])))
     _write_rest(cmds, root_long, rest)
 
-    new_record = {
-        "name": name, "fps": fps, "start_frame": start_frame,
-        "end_frame": end_frame, "duration_s": duration_s, "loop": loop,
-        "interpolation": interpolation,
-        "joints": sorted({_short(j) for key in resolved_keys
-                          for j in key["rotations"]}),
-        "weight_channels": weight_channels,
-        "root_position_used": any(k["root_position"] is not None
-                                  for k in resolved_keys),
-    }
-    all_records = kept + [new_record]
-    span_end = max(r["end_frame"] for r in all_records)
-    # The playback range is the FULL span, so opening the .ma and scrubbing
-    # shows every clip - not just the one authored last.
-    cmds.playbackOptions(edit=True, minTime=0, maxTime=span_end,
-                         animationStartTime=0, animationEndTime=span_end)
+    register_clip(
+        cmds, root_long, name, fps, start_frame, end_frame, loop=loop,
+        interpolation=interpolation,
+        joints=sorted({_short(j) for key in resolved_keys
+                       for j in key["rotations"]}),
+        weight_channels=weight_channels,
+        root_position_used=any(k["root_position"] is not None
+                               for k in resolved_keys))
 
     # MEASURED per key: drive the time to each key's frame and read the
     # bound meshes against the evaluated FIRST key. Key 0 is 0 by
@@ -845,11 +892,6 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
                 "keys landed on joints that own no vertices"
                 % (worst, extent))
 
-    if not cmds.attributeQuery(CLIP_ATTR, node=root_long, exists=True):
-        cmds.addAttr(root_long, longName=CLIP_ATTR, dataType="string")
-    cmds.setAttr("%s.%s" % (root_long, CLIP_ATTR), json.dumps(all_records),
-                 type="string")
-
     # De-duplicate warnings while preserving order and distinctness.
     seen = set()
     deduplicated = []
@@ -874,7 +916,7 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
         "loop": loop,
         "start_frame": start_frame,
         "end_frame": end_frame,
-        "clips": [r["name"] for r in all_records],
+        "clips": [r["name"] for r in clip_meta(cmds, root_long)],
         "padded_channels": padded_channels,
         "held_channels": held_channels,
         "back_filled": back_filled,
