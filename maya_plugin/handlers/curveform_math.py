@@ -84,6 +84,31 @@ def _validate_point3(point: Any, what: str) -> List[float]:
     return [float(v) for v in point]
 
 
+def _refuse_consecutive_duplicates(
+    points: Sequence[Sequence[float]], what: str, wrap: bool = False
+) -> None:
+    """Refuse two consecutive points that are the same point.
+
+    Applies uniformly to every point list a spec carries - `path`, `profile`,
+    and each loft `sections` ring - because a zero-length segment has no
+    direction anywhere it appears, not just on a sweep's path. `wrap=True`
+    additionally refuses a ring whose last point repeats its first: a ring
+    closes itself implicitly, so an explicit closing point is the same
+    "repeated point" mistake, not a legitimately different one.
+    """
+    for i in range(1, len(points)):
+        if math.dist(points[i - 1], points[i]) < _DUP_POINT_EPS:
+            raise HandlerError(
+                "%s has consecutive duplicate points at index %d" % (what, i),
+                hint="remove the repeated point - a zero-length segment has no direction",
+            )
+    if wrap and len(points) >= 2 and math.dist(points[-1], points[0]) < _DUP_POINT_EPS:
+        raise HandlerError(
+            "%s closes itself - its last point repeats its first" % what,
+            hint="a ring closes itself automatically - don't repeat the first point as the last",
+        )
+
+
 def _validate_cap_ends(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -270,12 +295,7 @@ def _validate_path(path: Any) -> List[List[float]]:
             hint="thin the path, or build the form in multiple sweeps",
         )
     points = [_validate_point3(p, "path point") for p in path]
-    for i in range(1, len(points)):
-        if math.dist(points[i - 1], points[i]) < _DUP_POINT_EPS:
-            raise HandlerError(
-                "path has consecutive duplicate points at index %d" % i,
-                hint="remove the repeated point - a zero-length segment has no direction",
-            )
+    _refuse_consecutive_duplicates(points, "path")
     return points
 
 
@@ -309,6 +329,7 @@ def _validate_profile(profile: Any) -> List[List[float]]:
                 hint="radius is a distance from the axis - use 0 for a point ON the axis",
             )
         points.append([r, h])
+    _refuse_consecutive_duplicates(points, "profile")
     return points
 
 
@@ -337,6 +358,7 @@ def _validate_sections(sections: Any) -> List[List[List[float]]]:
                 hint="each section is a closed ring of points, e.g. a triangle needs 3",
             )
         points = [_validate_point3(p, "section %d point" % si) for p in ring]
+        _refuse_consecutive_duplicates(points, "section %d" % si, wrap=True)
         if first_len is None:
             first_len = len(points)
         elif len(points) != first_len:
@@ -477,6 +499,12 @@ def predicted_faces(spec: Dict[str, Any]) -> int:
     for all three kinds alike. Refused over MAX_PRIMITIVE_FACES for the same
     reason modeling.py bounds `divisions`: a wedged Maya main thread has no
     exit but killing the process.
+
+    For a spec that came from `validate_spec`, this branch is unreachable:
+    `MAX_ALONG * MAX_AROUND + 2 = 131,074`, far under MAX_PRIMITIVE_FACES
+    (1,000,000), because `_validate_resolution` already caps `along`/`around`.
+    It stays as a guard for any spec built by a future caller that skips
+    `validate_spec` and hands a resolution straight in.
     """
     resolution = spec["resolution"]
     along, around = resolution["along"], resolution["around"]

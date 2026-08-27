@@ -48,6 +48,23 @@ class TestValidateSpec:
             cm.validate_spec({"kind": "revolve", "name": "vase",
                               "profile": [[0.5, 0], [-0.1, 1]]})
 
+    def test_revolve_duplicate_consecutive_profile_point_refused(self):
+        with pytest.raises(HandlerError, match="consecutive"):
+            cm.validate_spec({"kind": "revolve", "name": "vase",
+                              "profile": [[0.5, 0], [0.5, 0], [0.3, 1]]})
+
+    def test_loft_ring_duplicate_consecutive_point_refused(self):
+        with pytest.raises(HandlerError, match="consecutive"):
+            cm.validate_spec({"kind": "loft", "name": "torso", "sections": [
+                [[1, 0, 0], [1, 0, 0], [-1, 0, 0]],
+                [[1, 1, 0], [0, 1, 1], [-1, 1, 0]]]})
+
+    def test_loft_ring_closing_itself_refused(self):
+        with pytest.raises(HandlerError, match="closes itself"):
+            cm.validate_spec({"kind": "loft", "name": "torso", "sections": [
+                [[1, 0, 0], [0, 0, 1], [-1, 0, 0], [1, 0, 0]],
+                [[1, 1, 0], [0, 1, 1], [-1, 1, 0], [1, 1, 0]]]})
+
     def test_loft_mismatched_ring_counts_refused(self):
         with pytest.raises(HandlerError, match="ring"):
             cm.validate_spec({"kind": "loft", "name": "torso", "sections": [
