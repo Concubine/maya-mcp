@@ -179,16 +179,20 @@ def _build_sweep(cmds, spec: Dict[str, Any], requested: str, temp_nodes: List[st
     creator = new_creators[0]
     mesh = (cmds.listRelatives(mesh_shape, parent=True, fullPath=True) or [mesh_shape])[0]
 
-    # Width mapping (verified empirically in mayapy, see Task 3's report):
-    # the default poly profile is a diameter-1 shape at scaleProfile*=1.0
-    # (profilePolyInnerRadius defaults to 0.5), so scaling the profile by the
-    # ramp's PEAK width gives the widest point its correct diameter, and the
+    # Width mapping (re-verified in mayapy for Task 4 - the earlier claim
+    # here was wrong and Task 4's `test_sweep_horn_tapers` caught it): the
+    # default poly profile is a DIAMETER-2 shape at scaleProfile*=1.0
+    # (profilePolyInnerRadius=0.5, profilePolySides=8 default, but the
+    # measured x-extent of an unscaled sweep is 2.0, not 1.0 - probed with
+    # scaleProfileX left at its default and reading exactWorldBoundingBox).
+    # scaleProfile is therefore set to HALF the ramp's peak width so the
+    # widest point gets its correct diameter (2 * half = width), and the
     # taper ramp then carries every stop's width as a FRACTION of that peak.
     width = spec["width"]
     max_width = max(v for _, v in width)
     cmds.setAttr(creator + ".scaleProfileUniform", True)
-    cmds.setAttr(creator + ".scaleProfileX", max_width)
-    cmds.setAttr(creator + ".scaleProfileY", max_width)
+    cmds.setAttr(creator + ".scaleProfileX", max_width / 2.0)
+    cmds.setAttr(creator + ".scaleProfileY", max_width / 2.0)
     for i, (t, w) in enumerate(width):
         prefix = "%s.taperCurve[%d]" % (creator, i)
         cmds.setAttr(prefix + ".taperCurve_Position", t)

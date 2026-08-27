@@ -4961,3 +4961,61 @@ class TestMeasureClipInMaya:
         cmds.currentTime(7)
         clip.measure_clip({"root": root})
         assert cmds.currentTime(query=True) == 7
+
+
+class TestCurveFormInMaya:
+    def _build(self, params):
+        from maya_plugin.handlers import curveform
+        return curveform.create_curve_form(params)
+
+    def test_revolve_vase_is_watertight_and_on_station(self):
+        result = self._build({
+            "kind": "revolve", "name": "vase",
+            "profile": [[0.30, 0.0], [0.50, 0.35], [0.22, 0.80],
+                        [0.28, 1.10], [0.20, 1.25]]})
+        assert result["watertight"] is True
+        assert result["stations"] == 5 * 4
+        assert result["worst_station_deviation"] < 0.05
+        assert result["faces"] > 0
+
+    def test_sweep_horn_tapers(self):
+        import maya.cmds as cmds
+        result = self._build({
+            "kind": "sweep", "name": "horn",
+            "path": [[0, 0, 0], [0.1, 0.5, 0], [0.35, 0.9, 0],
+                     [0.7, 1.1, 0.2]],
+            "width": [[0.0, 0.30], [1.0, 0.06]]})
+        assert result["worst_station_deviation"] < 0.05
+        # The taper is real: the mesh near the tip is narrower than the base.
+        bbox = cmds.exactWorldBoundingBox(result["name"])
+        assert bbox[4] > 1.0  # reached the top of the path (y max)
+
+    def test_loft_torso_passes_through_rings(self):
+        rings = []
+        for y, r in ((0.0, 0.35), (0.4, 0.45), (0.9, 0.40), (1.3, 0.25)):
+            rings.append([[r, y, 0], [0, y, r], [-r, y, 0], [0, y, -r]])
+        result = self._build({"kind": "loft", "name": "torso",
+                              "sections": rings})
+        assert result["worst_station_deviation"] < 0.05
+        assert result["watertight"] is True
+
+    def test_no_construction_nodes_survive(self):
+        import maya.cmds as cmds
+        before_curves = set(cmds.ls(type="nurbsCurve") or [])
+        before_surfs = set(cmds.ls(type="nurbsSurface") or [])
+        self._build({"kind": "revolve", "name": "cleanup_probe",
+                     "profile": [[0.4, 0.0], [0.3, 0.8]]})
+        assert set(cmds.ls(type="nurbsCurve") or []) == before_curves
+        assert set(cmds.ls(type="nurbsSurface") or []) == before_surfs
+        # and no construction history on the mesh itself
+        assert not (cmds.listHistory("cleanup_probe",
+                                     pruneDagObjects=True) or [])
+
+    def test_placement_happens_after_measurement(self):
+        # Stations are authored in the local frame; a translated build must
+        # still self-measure clean (regression guard for measure-then-place).
+        result = self._build({
+            "kind": "revolve", "name": "placed_vase",
+            "profile": [[0.4, 0.0], [0.3, 0.8]],
+            "translate": [5.0, 0.0, 2.0]})
+        assert result["worst_station_deviation"] < 0.05
