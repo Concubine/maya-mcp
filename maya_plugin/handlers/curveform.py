@@ -37,9 +37,13 @@ CREATE_CURVE_FORM_SYNONYMS = {
     "points": "path", "taper": "width", "curve": "path",
     "rings": "sections", "sides": "profile_sides", "cross_sections": "sections",
 }
-# Soft self-report threshold; the live gate (Task 6) MEASURES the real
-# number and this constant is updated there - see the gate's Step 5.
-DEVIATION_WARN = 0.05
+# Soft self-report threshold. Measured live (evals/curve_form_live.py,
+# 2026-08-27): a real vase/horn/torso build lands at 0.0054/0.0022/0.0086
+# worst_station_deviation; a deliberately coarse tessellation (horn at
+# resolution={"along":4,"around":4}) measured 0.0406. Set to 2x the worst
+# real measurement (0.0172), rounded up to 1 significant figure - the #773
+# method (measure first, then state the threshold that discriminates).
+DEVIATION_WARN = 0.02
 
 # Measured by evals/curveform_probe_768.py - if the probe printed different
 # names, THESE ARE WRONG: fix them here, in one place.
