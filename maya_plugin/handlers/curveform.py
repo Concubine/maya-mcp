@@ -51,6 +51,20 @@ _SWEEP_PLUGIN = "sweep"
 # never asked for.
 _TAPER_INTERP_LINEAR = 1
 
+# interpolationMode's enum, measured live (mayapy A/B, fix for #768 review
+# CRITICAL 2): ['Precision', 'Start to End', 'EP to EP', 'Distance'], indices
+# 0-3. The default (0, "Precision") and 3 ("Distance") both IGNORE
+# interpolationSteps entirely - interpolationSteps=2 and =64 produced
+# IDENTICAL face counts under either, which is why `resolution.along` was
+# silently inert. Mode 1 ("Start to End") divides the WHOLE path into
+# exactly `interpolationSteps` segments, independent of how many edit points
+# the path has - verified A/B on an 8-sided profile: steps=2 -> 16 faces
+# (8*2), steps=64 -> 512 faces (8*64). Mode 2 ("EP to EP") also responds to
+# steps but multiplies by the path's OWN segment count, silently rescaling
+# `along` by however many points the caller's path happens to have - not
+# the promised meaning, so mode 1 is the one that matches `resolution.along`.
+_INTERP_MODE_STEPS = 1
+
 _AXIS_VECTORS = {
     "x": (1.0, 0.0, 0.0),
     "y": (0.0, 1.0, 0.0),
@@ -89,16 +103,24 @@ def _ep_curve(cmds, points: Sequence[Sequence[float]]) -> str:
     return cmds.curve(ep=pts, degree=_curve_degree(len(pts)))
 
 
-def _ring_curve(cmds, points: Sequence[Sequence[float]]) -> str:
+def _ring_curve(
+    cmds, points: Sequence[Sequence[float]], temp_nodes: List[str]
+) -> str:
     """A closed periodic curve through `points` - probe-verified flags.
 
     EP curve through the ring plus its own first point (closing the loop),
     then `closeCurve` with `replaceOriginal=True` folds it into a periodic
     (form=2) curve in place - the exact sequence Task 1's probe measured to
     produce a periodic curve loft/revolve can consume.
+
+    The raw curve is registered into `temp_nodes` BEFORE `closeCurve` runs,
+    not after this function returns: if `closeCurve` itself raises, the EP
+    curve it was about to close would otherwise never make it into the
+    caller's cleanup list and would leak.
     """
     closed_pts = list(points) + [points[0]]
     curve = _ep_curve(cmds, closed_pts)
+    temp_nodes.append(curve)
     result = cmds.closeCurve(
         curve, constructionHistory=False, preserveShape=0, replaceOriginal=True
     )
@@ -136,11 +158,16 @@ def _build_sweep(cmds, spec: Dict[str, Any], requested: str, temp_nodes: List[st
     after_nodes = set(cmds.ls(long=True))
     after_creators = set(cmds.ls(type=_SWEEP_CREATOR_TYPE, long=True) or [])
 
-    new_meshes = [
-        n for n in (after_nodes - before_nodes) if cmds.nodeType(n) == "mesh"
-    ]
+    new_nodes = after_nodes - before_nodes
+    new_meshes = [n for n in new_nodes if cmds.nodeType(n) == "mesh"]
     new_creators = list(after_creators - before_creators)
     if len(new_meshes) != 1 or len(new_creators) != 1:
+        # Measured: cmds.ls(long=True) with no other filter enumerates every
+        # scene node (DAG and DG alike), so `new_nodes` already covers the
+        # creator too - track ALL of it (not just path_curve, already
+        # appended above) so the whole-call try/finally reaps it even on
+        # this refusal path, not just the ones taken after this point.
+        temp_nodes.extend(sorted(new_nodes))
         raise HandlerError(
             "sweepMeshFromCurve produced %d mesh shape(s) and %d creator "
             "node(s), expected exactly one of each"
@@ -177,6 +204,7 @@ def _build_sweep(cmds, spec: Dict[str, Any], requested: str, temp_nodes: List[st
         # many sides as the "around" tessellation asks for.
         sides = spec["resolution"]["around"]
     cmds.setAttr(creator + ".profilePolySides", sides)
+    cmds.setAttr(creator + ".interpolationMode", _INTERP_MODE_STEPS)
     cmds.setAttr(creator + ".interpolationSteps", spec["resolution"]["along"])
     cmds.setAttr(creator + ".capsEnable", spec["cap_ends"])
 
@@ -214,7 +242,12 @@ def _build_revolve(cmds, spec: Dict[str, Any], requested: str, temp_nodes: List[
 def _build_loft(cmds, spec: Dict[str, Any], requested: str, temp_nodes: List[str]) -> str:
     curves = []
     for ring in spec["sections"]:
-        curve = _ring_curve(cmds, ring)
+        # _ring_curve already registers its raw (pre-close) curve into
+        # temp_nodes; append the returned (post-close) name too so the
+        # rare case where closeCurve renames the node is still covered -
+        # a duplicate entry here is harmless (the cleanup loop skips
+        # whatever no longer exists).
+        curve = _ring_curve(cmds, ring, temp_nodes)
         temp_nodes.append(curve)
         curves.append(curve)
 
@@ -292,10 +325,21 @@ def create_curve_form(params: Dict[str, Any]) -> Dict[str, Any]:
             hint="pass the object name to create, e.g. name='horn'",
         )
 
-    # Pure validation - no Maya touched yet. A bad spec or an impossible
-    # tessellation bill is refused here, before anything is built.
+    # Pure validation - no Maya touched yet. A bad spec, an impossible
+    # tessellation bill, OR a malformed placement vector is refused here,
+    # before anything is built. Fix for #768 review CRITICAL 1: translate/
+    # rotate/scale used to be validated only at the _apply_xform call below,
+    # which is AFTER the mesh is built, capped, and measured - a malformed
+    # translate raised there and left an unrecorded orphan mesh in the
+    # scene, violating "a refused call leaves nothing behind". `_vec3` is
+    # pure (no Maya call), so validating it up front costs nothing and the
+    # validated vectors are reused at the placement step instead of
+    # re-parsing `params` there.
     spec = curveform_math.validate_spec(params)
     curveform_math.predicted_faces(spec)
+    translate = _vec3(params, "translate")
+    rotate = _vec3(params, "rotate")
+    scale = _vec3(params, "scale")
 
     cmds = _cmds()
     requested = naming.unique_name(cmds, requested_name.strip())
@@ -325,12 +369,17 @@ def create_curve_form(params: Dict[str, Any]) -> Dict[str, Any]:
     worst_deviation, worst_station = _measure_stations(cmds, mesh, stations, size)
 
     long_name = _long(cmds, mesh)
-    _apply_xform(
-        cmds, long_name,
-        _vec3(params, "translate"), _vec3(params, "rotate"), _vec3(params, "scale"),
-        relative=False,
-    )
-    ledger.record(cmds, long_name)
+    try:
+        _apply_xform(cmds, long_name, translate, rotate, scale, relative=False)
+        ledger.record(cmds, long_name)
+    except Exception:
+        # translate/rotate/scale are already validated above (pure, before
+        # any build), so this should never fire on a well-formed call - but
+        # if Maya's own xform call fails unexpectedly, the mesh that was
+        # just built must not survive as an unrecorded orphan.
+        if cmds.objExists(long_name):
+            cmds.delete(long_name)
+        raise
 
     stats = meshcheck.mesh_stats(long_name)
     warnings: List[str] = []
