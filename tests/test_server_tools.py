@@ -109,6 +109,7 @@ class TestRegistration:
             "maya_delete_clip",
             "maya_measure_clip",
             "maya_preview_clip",
+            "maya_create_curve_form",
         }
 
     def test_annotations_declare_read_only_vs_destructive(self):
@@ -2456,3 +2457,43 @@ class TestMultiTakeSurface:
         assert attributed["take"] == "idle"
         assert orphan["target"] == "orphan"
         assert orphan["take"] is None
+
+
+class TestCurveFormTools:
+    def test_maya_create_curve_form_forwards_params(self):
+        conn = FakeConn(responses={"create_curve_form": {
+            "name": "|horn", "faces": 512, "verts": 514, "watertight": True,
+            "stations": 2, "worst_station_deviation": 0.004,
+            "worst_station": "path[1]", "form_size": 1.1, "warnings": [],
+        }})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_create_curve_form", {
+            "kind": "sweep", "name": "horn",
+            "path": [[0, 0, 0], [0, 1, 0], [0.4, 1.6, 0]],
+            "width": [[0.0, 0.3], [1.0, 0.05]],
+        }))
+        assert result.is_error is False
+        assert conn.calls[0]["cmd"] == "create_curve_form"
+        sent = conn.calls[0]["params"]
+        assert sent["kind"] == "sweep"
+        assert sent["width"] == [[0.0, 0.3], [1.0, 0.05]]
+        # Unset optionals arrive as None, never invented defaults (#669 lesson)
+        assert sent["profile"] is None and sent["sections"] is None
+        assert sent["twist"] is None
+        assert result.structured_content["worst_station_deviation"] == 0.004
+
+    def test_maya_create_curve_form_revolve_defaults(self):
+        conn = FakeConn(responses={"create_curve_form": {
+            "name": "|vase", "faces": 576, "verts": 578, "watertight": True,
+            "stations": 8, "worst_station_deviation": 0.002,
+            "worst_station": "profile[2]@90", "form_size": 1.25,
+            "warnings": [],
+        }})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_create_curve_form", {
+            "kind": "revolve", "name": "vase",
+            "profile": [[0.3, 0.0], [0.5, 0.4], [0.2, 1.25]],
+        }))
+        assert result.is_error is False
+        assert conn.calls[0]["params"]["degrees"] == 360
+        assert conn.calls[0]["params"]["cap_ends"] is True

@@ -241,6 +241,35 @@ class PrimitiveResult(NameResult):
     )
 
 
+class CurveFormResult(NameResult):
+    """What the curve build measured about itself, not just that it ran.
+
+    The whole point of curve-driven authoring (#768) is that the numbers the
+    caller wrote are assertable: worst_station_deviation is the worst
+    distance from the produced surface to those numbers, as a fraction of
+    form_size, so a caller (and the gate) reads conformance straight off the
+    result instead of re-deriving it.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    faces: int = Field(description="Face count of the mesh just built.")
+    verts: int = Field(description="Vertex count of the mesh just built.")
+    watertight: bool = Field(description=(
+        "True when the mesh has no boundary and no non-manifold edges."))
+    stations: int = Field(description=(
+        "How many authored stations were measured against the mesh."))
+    worst_station_deviation: float = Field(description=(
+        "Worst distance from the mesh surface to an authored station, as a "
+        "fraction of form_size. Near 0 = the surface passes through your "
+        "numbers; large = raise `resolution` or simplify the curve."))
+    worst_station: Optional[str] = Field(
+        default=None,
+        description="Label of the worst station, e.g. 'path[3]' or 'profile[2]@90'.")
+    form_size: float = Field(description=(
+        "Max authored extent in scene units - the deviation normalizer."))
+
+
 class TransformedObject(BaseModel):
     model_config = ConfigDict(extra="ignore")
 

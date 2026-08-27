@@ -37,6 +37,7 @@ from .schemas import (
     ClipKeySpec,
     CombineResult,
     CreateBlendshapeResult,
+    CurveFormResult,
     DeleteClipResult,
     UvAtlasResult,
     BindSkinResult,
@@ -1104,6 +1105,86 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                  "rotate": rotate, "scale": scale, "divisions": divisions,
                  "subdivisions": subdivisions},
                 timeout_s=SCENE_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Create curve-driven form",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=False
+        ),
+    )
+    def maya_create_curve_form(
+        kind: Annotated[Literal["sweep", "revolve", "loft"], Field(description=(
+            "sweep: a tube along `path`, sized by `width` - horns, limbs, "
+            "vines, straps. revolve: `profile` spun about an axis - heads, "
+            "vases, domes. loft: a skin through `sections` rings - torsos, "
+            "tails, hulls."))],
+        name: Annotated[str, Field(min_length=1, description=(
+            "Requested name; collisions get a deterministic suffix and the "
+            "canonical long name is returned."))],
+        path: Annotated[Optional[List[List[float]]], Field(description=(
+            "sweep only. 3D points the spine passes THROUGH (interpolated, "
+            "not a control hull), 2-64 of them. e.g. "
+            "[[0,0,0],[0,1,0.2],[0.4,1.6,0.3]]"))] = None,
+        width: Annotated[Optional[Union[float, List[List[float]]]],
+                         Field(description=(
+            "sweep only. Tube DIAMETER: a number for constant width, or "
+            "[t, width] pairs (t 0-1 along the path, strictly increasing) for "
+            "a taper - [[0,0.3],[1,0.05]] is a horn. Default 1.0."))] = None,
+        twist: Annotated[Optional[float], Field(description=(
+            "sweep only. Total twist in degrees applied along the path."
+        ))] = None,
+        profile_sides: Annotated[Optional[int], Field(ge=3, le=64, description=(
+            "sweep only. Cross-section as an n-gon instead of a circle: 4 = "
+            "square strap, 6 = hex bolt shaft."))] = None,
+        profile: Annotated[Optional[List[List[float]]], Field(description=(
+            "revolve only. [radius, height] pairs of the silhouette in the "
+            "half-plane, interpolated - [[0.3,0],[0.5,0.4],[0.2,1.2]] is a "
+            "vase. Radius 0 at an end closes that end onto the axis."))] = None,
+        degrees: Annotated[float, Field(gt=0, le=360, description=(
+            "revolve only. Sweep angle; default 360. Less leaves an open "
+            "shell (capped when cap_ends)."))] = 360.0,
+        axis: Annotated[Literal["x", "y", "z"], Field(description=(
+            "revolve only. Revolution axis; default y (height in `profile` "
+            "runs along it)."))] = "y",
+        sections: Annotated[Optional[List[List[List[float]]]], Field(description=(
+            "loft only. 2-16 cross-section rings, outermost list ordered "
+            "along the form; each ring is a closed loop of 3D points, SAME "
+            "count per ring (3-64), matched index-to-index."))] = None,
+        resolution: Annotated[Optional[dict], Field(description=(
+            "{along, around} tessellation. Defaults: sweep {32,16}, "
+            "revolve/loft {24,24}. along*around is the face bill (1M cap). "
+            "Raise it when worst_station_deviation comes back high."))] = None,
+        cap_ends: Annotated[bool, Field(description=(
+            "Close open borders (tube ends, loft ends, partial revolves) so "
+            "the result is watertight. Default true."))] = True,
+        translate: Vec3 = None,
+        rotate: Vec3 = None,
+        scale: Vec3 = None,
+    ) -> CurveFormResult:
+        """Build a flowing poly surface THROUGH the numbers you write.
+
+        This is the parametric half of modelling: describe a silhouette as a
+        short list of points and Maya constructs the surface deterministically
+        - where primitives + deformers can only push a box around. The curve
+        INTERPOLATES your points, so the surface passes through them, and the
+        result reports worst_station_deviation - how far the built mesh strays
+        from your numbers - so you know it worked without rendering.
+
+        Construction curves are internal: nothing but the mesh survives the
+        call. The result composes with everything else - boolean_op, deform,
+        uv_atlas, bind_skin."""
+        return CurveFormResult.model_validate(
+            maya.request(
+                "create_curve_form",
+                {"kind": kind, "name": name, "path": path, "width": width,
+                 "twist": twist, "profile_sides": profile_sides,
+                 "profile": profile, "degrees": degrees, "axis": axis,
+                 "sections": sections, "resolution": resolution,
+                 "cap_ends": cap_ends, "translate": translate,
+                 "rotate": rotate, "scale": scale},
+                timeout_s=BOOL_TIMEOUT_S,
             )
         )
 
