@@ -57,9 +57,16 @@ Per kind:
 * **`sweep`** — `path`: list of ≥2 3D points the spine passes through.
   `width`: a single number (constant) or a ramp — list of `[t, width]` pairs
   with `t` ∈ [0,1] along the path; this taper ramp is what turns one path into
-  horns, limbs, vines, straps. Optional `twist` ramp, same shape. Optional
+  horns, limbs, vines, straps. ~~Optional `twist` ramp, same shape.~~ Optional
   `profile_sides`: default circle; small ints give square straps / n-gon
   pipes. Implemented with `sweepMeshFromCurve`.
+  *(Amended 2026-08-27 during implementation: `twist` is a single scalar,
+  not a ramp — this Maya's `sweepMeshCreator` node has no twist ramp
+  attribute, measured by `evals/curveform_probe_768.py`. The surface takes
+  `twist` as total degrees along the path, ramping linearly from 0 at the
+  start to the given value at the end — see `curveform._apply_twist`'s
+  docstring for why this is computed directly rather than through the
+  node's own `.twist` attribute, which measured as functionally inert.)*
 * **`revolve`** — `profile`: list of `[radius, height]` pairs in the
   half-plane (radius ≥ 0), revolved about Y by default (`axis` overridable),
   optional `degrees` < 360 for partial shells. Heads, vases, domes, tapering
