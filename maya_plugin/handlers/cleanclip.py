@@ -232,8 +232,9 @@ def _sample_track(cmds, joint: str, start_frame: int,
     return track
 
 
-def _run_contact_lock_pass(cmds, root_long: str, joints: List[str],
-                           contact_joints: List[str], start_frame: int,
+def _run_contact_lock_pass(cmds, joints: List[str],
+                           contact_joints: List[str],
+                           chains: Dict[str, List[str]], start_frame: int,
                            end_frame: int, fps: float,
                            warnings: List[str]) -> None:
     """Per contact joint: find its own plant runs with the SAME function
@@ -241,6 +242,12 @@ def _run_contact_lock_pass(cmds, root_long: str, joints: List[str],
     run's own median world position, and re-solve the 2-bone leg chain
     (rigging.solve_ik_chain) at every frame so the whole limb honours the
     pin, not just the ankle in isolation.
+
+    `chains` is pre-resolved and pre-validated by the caller, BEFORE the
+    checkpoint and the filter pass (#774 Task 5 review: a chain too shallow
+    for `_leg_chain` to accept must refuse before anything mutates, not
+    from inside this already-mutating pass) - this function only consumes
+    it, never calls `_leg_chain` itself.
 
     The `blend_weights` ease is applied OUTSIDE the detected run, not at
     its own boundary samples: `blend_weights(n, edge)` is 0 exactly at
@@ -257,7 +264,7 @@ def _run_contact_lock_pass(cmds, root_long: str, joints: List[str],
     rig_height = _rig_height(cmds, joints, start_frame)
     n_track = end_frame - start_frame + 1
     for ankle in contact_joints:
-        chain = _leg_chain(cmds, joints, root_long, ankle)
+        chain = chains[ankle]
         track = _sample_track(cmds, ankle, start_frame, end_frame)
         runs = motionmath.contact_runs(track, fps, rig_height)
         if not runs:
@@ -377,6 +384,16 @@ def clean_clip(params: Dict[str, Any]) -> Dict[str, Any]:
                 "lock_contacts requested but no contact joint could be "
                 "resolved on this rig - the pass did not run")
 
+    # #774 Task 5 review IMPORTANT: resolved and VALIDATED here, before the
+    # checkpoint and before the filter pass mutates anything - a contact
+    # joint too shallow for a 2-bone chain must refuse a clean call, not an
+    # already-half-mutated one. `_run_contact_lock_pass` only consumes
+    # `chains`; it never calls `_leg_chain` itself.
+    chains: Dict[str, List[str]] = {}
+    if lock_enabled and contact_joints:
+        for ankle in contact_joints:
+            chains[ankle] = _leg_chain(cmds, joints, root_long, ankle)
+
     before = clip.measure_clip({"root": root_long, "name": name,
                                 "contact_joints": contact_joints or None})
 
@@ -396,7 +413,7 @@ def clean_clip(params: Dict[str, Any]) -> Dict[str, Any]:
             warnings.append("filter: no keyed channel found on this rig")
 
     if lock_enabled and contact_joints:
-        _run_contact_lock_pass(cmds, root_long, joints, contact_joints,
+        _run_contact_lock_pass(cmds, joints, contact_joints, chains,
                                start_frame, end_frame, fps, warnings)
         passes.append("lock_contacts")
 

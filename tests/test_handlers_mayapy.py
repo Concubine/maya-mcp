@@ -5595,3 +5595,43 @@ class TestCleanClipInMaya:
         assert after["contacts"]["R_ankle"]["max_slide"] > 0.05
         assert (after["joints"]["L_wrist"]["max_accel"]
                 < before["joints"]["L_wrist"]["max_accel"])
+
+    def test_shallow_contact_joint_refuses_before_any_mutation(
+            self, tmp_path):
+        # #774 Task 5 review IMPORTANT: a contact joint too shallow for a
+        # 2-bone chain must be caught BEFORE the checkpoint and BEFORE the
+        # filter pass mutates anything - not from inside the already-
+        # mutating contact-lock pass, which would leave a refused call with
+        # no checkpoint_id to recover through AND a half-filtered scene.
+        # L_hip hangs directly under this rig's root (pelvis) - only one
+        # joint up, not the two a 2-bone hip/knee/ankle chain needs (the
+        # same shape pose_ik itself refuses on a 2-joint chain).
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import cleanclip, clip, session
+
+        root = self._dirty_rig(tmp_path)
+        ankles = self._ankle_names(cmds, root)
+        all_joints = cmds.ls(type="joint", long=True)
+        before_measure = clip.measure_clip(
+            {"root": root, "name": "walk", "contact_joints": ankles})
+        before_keys = {j: cmds.keyframe(j, query=True) for j in all_joints}
+        cp_dir = session._checkpoint_dir(cmds)
+        before_checkpoints = session._existing(cp_dir)
+
+        with pytest.raises(HandlerError, match="hangs directly under the root"):
+            cleanclip.clean_clip({
+                "root": root, "clip": "walk",
+                "lock_contacts": {"joints": ["L_hip"]}})
+
+        # no checkpoint was created ...
+        assert session._existing(cp_dir) == before_checkpoints
+        # ... no key on any joint changed ...
+        after_keys = {j: cmds.keyframe(j, query=True) for j in all_joints}
+        assert after_keys == before_keys
+        # ... and re-measuring the clip matches the pre-call measurement
+        # exactly (nothing moved, so nothing should even be a float away).
+        after_measure = clip.measure_clip(
+            {"root": root, "name": "walk", "contact_joints": ankles})
+        assert after_measure == before_measure
