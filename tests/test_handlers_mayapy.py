@@ -5389,3 +5389,209 @@ class TestRetargetInMaya:
                     if cmds.nodeType(n) in retarget._HIK_NODE_TYPES]
         after_keys = {j: cmds.keyframe(j, query=True) for j in target_joints}
         assert after_keys == before_keys
+
+
+class TestCleanClipInMaya:
+    """clean_clip (#774 Task 5): filter + contact-lock, proven against a
+    REAL biped carrying a DELIBERATELY dirty clip - one foot that drifts
+    during its own plant (a measurable SLIDE, #773's own metric) and one
+    elbow channel jittering on alternating frames (a popped-key stand-in,
+    the #773 probe's own defect shape). Both defects are numbers before
+    this call and smaller numbers after it - the whole point of #774's
+    "motion has numbers now" arc (see MEMORY.md).
+    """
+
+    # create_skeleton's biped params, copied VERBATIM from evals/
+    # humanoid_live.py's JOINTS (#668) - the same 20-joint naming
+    # mocapmath.SKELETON_HIK_MAP's targets are drawn from, and the exact
+    # shape TestRetargetInMaya already proved against a real HumanIK bake.
+    JOINTS = [
+        {"name": "pelvis",     "position": [0.0,  1.00, 0.0]},
+        {"name": "spine_01",   "position": [0.0,  1.15, 0.0], "parent": "pelvis"},
+        {"name": "spine_02",   "position": [0.0,  1.30, 0.0], "parent": "spine_01"},
+        {"name": "chest",      "position": [0.0,  1.45, 0.0], "parent": "spine_02"},
+        {"name": "neck",       "position": [0.0,  1.60, 0.0], "parent": "chest"},
+        {"name": "head",       "position": [0.0,  1.72, 0.0], "parent": "neck"},
+        {"name": "L_shoulder", "position": [0.22, 1.50, 0.0], "parent": "chest"},
+        {"name": "L_elbow",    "position": [0.45, 1.50, 0.0], "parent": "L_shoulder"},
+        {"name": "L_wrist",    "position": [0.68, 1.50, 0.0], "parent": "L_elbow"},
+        {"name": "R_shoulder", "position": [-0.22, 1.50, 0.0], "parent": "chest"},
+        {"name": "R_elbow",    "position": [-0.45, 1.50, 0.0], "parent": "R_shoulder"},
+        {"name": "R_wrist",    "position": [-0.68, 1.50, 0.0], "parent": "R_elbow"},
+        {"name": "L_hip",      "position": [0.10, 0.95, 0.0], "parent": "pelvis"},
+        {"name": "L_knee",     "position": [0.10, 0.50, 0.0], "parent": "L_hip"},
+        {"name": "L_ankle",    "position": [0.10, 0.08, 0.0], "parent": "L_knee"},
+        {"name": "L_toe",      "position": [0.10, 0.02, 0.14], "parent": "L_ankle"},
+        {"name": "R_hip",      "position": [-0.10, 0.95, 0.0], "parent": "pelvis"},
+        {"name": "R_knee",     "position": [-0.10, 0.50, 0.0], "parent": "R_hip"},
+        {"name": "R_ankle",    "position": [-0.10, 0.08, 0.0], "parent": "R_knee"},
+        {"name": "R_toe",      "position": [-0.10, 0.02, 0.14], "parent": "R_ankle"},
+    ]
+
+    @staticmethod
+    def _keys():
+        # Same walk-in-place shape TestMeasureClipInMaya's fixture proved
+        # (#773): each leg swings hip+knee on rotateY (create_skeleton
+        # auto-orients local X down the bone, so [rx,0,0] would silently
+        # twist instead - the probe's own first-fixture mistake), half a
+        # cycle out of phase, planted the other half. R's plant is
+        # deliberately broken: instead of holding rt=0, it ramps 0->8
+        # degrees - a straight ~0.87m hip-to-ankle chain swept 8 degrees
+        # moves the ankle ~12cm sideways, at a speed still well under the
+        # contact-speed threshold (0.35 * rig_height), so it still reads
+        # as "planted" - just planted somewhere that keeps moving.
+        import math as m
+        out = []
+        for i in range(11):
+            t = i / 10.0
+
+            def leg(sw_start):
+                ph = (t - sw_start) % 1.0
+                if ph < 0.5:
+                    s = m.sin(ph / 0.5 * m.pi)
+                    return (-25.0 * s, 35.0 * s)
+                return (0.0, 0.0)
+
+            lt, ls = leg(0.0)
+            rt, rs = leg(0.5)
+            if t < 0.5:
+                rt = 8.0 * (t / 0.5)  # the plant drifts instead of holding
+            # A genuine, smooth arm swing for L_elbow - the jitter added on
+            # top of THIS in _dirty_rig (not onto a flat zero) is what makes
+            # "acceleration improved" a meaningful check: a real signal's
+            # own frame-to-frame speed already varies, so measuring "did
+            # noise get removed" needs noise riding on real motion, not a
+            # bare square wave (whose own discrete accel is exactly 0 - a
+            # perfectly periodic same-magnitude alternation has CONSTANT
+            # frame-to-frame speed by construction, found while designing
+            # this fixture: max_accel measured 0.0 on a bare +12/-12
+            # alternation with no base signal underneath it).
+            elbow = 15.0 * m.sin(2.0 * m.pi * t)
+            out.append({"time_s": t, "rotations": {
+                "L_hip": [0, lt, 0], "L_knee": [0, ls, 0],
+                "R_hip": [0, rt, 0], "R_knee": [0, rs, 0],
+                "L_elbow": [0, elbow, 0]}})
+        return out
+
+    def _ankle_names(self, cmds, root):
+        joints = cmds.ls(cmds.listRelatives(
+            root, allDescendents=True, type="joint", fullPath=True) or [],
+            long=True) + [root]
+        by_short = {j.rsplit("|", 1)[-1]: j for j in joints}
+        return [by_short["L_ankle"], by_short["R_ankle"]]
+
+    def _dirty_rig(self, tmp_path, name="walk"):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import clip, rigging
+
+        cmds.file(new=True, force=True)
+        # A real path (unsaved is fine - session.auto_checkpoint only
+        # needs a directory to resolve against, matching the existing
+        # checkpoint-round-trip precedent at
+        # TestSessionInMaya.test_checkpoint_id_restores_and_error_hint_names_it).
+        cmds.file(rename=str(tmp_path / "cleanclipcp.ma"))
+        root = rigging.create_skeleton({"joints": self.JOINTS})["root"]
+        authored = clip.author_clip({
+            "root": root, "name": name, "fps": 30,
+            "interpolation": "smooth", "keys": self._keys()})
+        start, end = authored["start_frame"], authored["end_frame"]
+        elbow = [j for j in cmds.ls(type="joint", long=True)
+                 if j.endswith("|L_elbow")][0]
+        # Alternating-frame jitter ON TOP of the smooth swing author_clip
+        # just keyed - a popped key on every other frame, the #773 probe's
+        # own defect shape - never authored via author_clip itself (which
+        # would try to pin/back-fill it), directly via setKeyframe the way
+        # a bad mocap import or a hand-editing mistake would leave it.
+        # Left off the outermost 2 frames each side: mocapmath.smooth_track
+        # shrinks its window at the very ends of the track down to a
+        # 1-point (then a 3-point, exactly-determined) fit, which cannot
+        # reduce noise AT those exact samples - jitter placed there would
+        # measure "improved" against a boundary artifact instead of the
+        # filter's real effect on the interior.
+        base_values = {f: cmds.getAttr(elbow + ".rotateY", time=f)
+                      for f in range(start, end + 1)}
+        for frame in range(start + 2, end - 1):
+            jitter = 12.0 if frame % 2 == 0 else -12.0
+            cmds.setKeyframe(elbow, attribute="rotateY", time=frame,
+                             value=base_values[frame] + jitter)
+        return root
+
+    def test_filter_and_lock_contacts_both_improve_measured_numbers(
+            self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import cleanclip
+
+        root = self._dirty_rig(tmp_path)
+        ankles = self._ankle_names(cmds, root)
+        result = cleanclip.clean_clip({"root": root, "clip": "walk"})
+
+        assert result["clip"] == "walk"
+        assert result["root"] == root
+        assert set(result["passes"]) == {"filter", "lock_contacts"}
+        assert result["checkpoint_id"]
+
+        before, after = result["before"], result["after"]
+        # the deliberately-drifted plant slides less after locking - #773's
+        # own metric, on the exact joint the fixture broke.
+        assert before["contacts"]["R_ankle"]["max_slide"] > 0.02
+        assert (after["contacts"]["R_ankle"]["max_slide"]
+                < before["contacts"]["R_ankle"]["max_slide"])
+        # the jittered elbow channel's effect shows up in its CHILD's
+        # world kinematics (a joint's own rotation never moves its own
+        # pivot, only what hangs below it) - measured on L_wrist. A
+        # Savitzky-Golay smooth cannot remove a real signal's own
+        # acceleration, only alternating-frame noise on top of it.
+        assert before["joints"]["L_wrist"]["max_accel"] > 0
+        assert (after["joints"]["L_wrist"]["max_accel"]
+                < before["joints"]["L_wrist"]["max_accel"])
+        # the OTHER foot was never broken - locking must not make it worse.
+        assert (after["contacts"]["L_ankle"]["max_slide"]
+                <= before["contacts"]["L_ankle"]["max_slide"] + 1e-6)
+        assert ankles == sorted(ankles)  # sanity: both feet were resolved
+
+    def test_checkpoint_id_restores_to_the_measured_before_state(
+            self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import cleanclip, clip, session
+
+        root = self._dirty_rig(tmp_path)
+        ankles = self._ankle_names(cmds, root)
+        result = cleanclip.clean_clip({"root": root, "clip": "walk"})
+        before = result["before"]
+
+        session.restore_checkpoint({"checkpoint_id": result["checkpoint_id"]})
+        restored = clip.measure_clip({"root": root, "name": "walk",
+                                      "contact_joints": ankles})
+
+        assert abs(restored["contacts"]["R_ankle"]["max_slide"]
+                  - before["contacts"]["R_ankle"]["max_slide"]) < 1e-4
+        assert abs(restored["joints"]["L_wrist"]["max_accel"]
+                  - before["joints"]["L_wrist"]["max_accel"]) < 1e-3
+
+    def test_filter_only_leaves_contacts_untouched_by_the_lock_pass(
+            self, tmp_path):
+        # passes reports only what actually ran - lock_contacts=false means
+        # no IK solve touches the legs at all, so the (still broken) slide
+        # is unchanged, not improved.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import cleanclip
+
+        root = self._dirty_rig(tmp_path)
+        ankles = self._ankle_names(cmds, root)
+        result = cleanclip.clean_clip(
+            {"root": root, "clip": "walk", "lock_contacts": False})
+
+        assert result["passes"] == ["filter"]
+        before, after = result["before"], result["after"]
+        # the drift is NOT locked - it may shift a little from the filter
+        # pass smoothing R_hip/R_knee's own curves, but it stays broken,
+        # nowhere near the ~10x reduction the full (filter + lock) call
+        # measures in the sibling test above.
+        assert before["contacts"]["R_ankle"]["max_slide"] > 0.05
+        assert after["contacts"]["R_ankle"]["max_slide"] > 0.05
+        assert (after["joints"]["L_wrist"]["max_accel"]
+                < before["joints"]["L_wrist"]["max_accel"])

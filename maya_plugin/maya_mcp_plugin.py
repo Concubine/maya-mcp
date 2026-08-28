@@ -28,6 +28,7 @@ from .handlers import (
     assemble,
     blendshape,
     capture,
+    cleanclip,
     clip,
     code_exec,
     combine,
@@ -223,6 +224,7 @@ def _build_handlers() -> Dict[str, Any]:
         "preview_clip": clip.preview_clip,
         "measure_clip": clip.measure_clip,
         "retarget_clip": retarget.retarget_clip,
+        "clean_clip": cleanclip.clean_clip,
     }
 
 
