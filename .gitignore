@@ -63,3 +63,6 @@ evals/bake_probe_714_out/
 # #714 phase 2 Task 6 live gate: before/after renders and FBXs, rebuilt on
 # every run of evals/texbake_live.py --build
 evals/texbake_live/
+
+# user-stocked local mocap clips (#774) - repo ships only evals/mocap_fixtures/
+mocap/
