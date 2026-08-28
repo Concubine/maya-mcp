@@ -34,10 +34,17 @@ TOLERANCES starts at None (measurement mode, the #768/#773 convention):
 every number is printed, and the two discriminations above are still
 asserted (they are structural correctness, not a threshold chosen by
 measurement), but the per-metric slide bounds on rig A are not. After a
-real run, TOLERANCES is set to 2x rig A's own measured slide, rounded UP to
-one significant figure and floored at 0.01 (metres) - see the comment
-above TOLERANCES for the actual measured numbers this came from - and the
-gate is re-run to confirm it now asserts everything and still exits 0.
+real run, TOLERANCES is set from rig A's (and, for walk, rig B's) measured
+slide - see the comment above TOLERANCES for the derivation of each of the
+two metrics, which are NOT both the same rule: `idle_slide` is the
+mechanical "2x measured, round up 1 sig fig, floor 0.01" rule; `walk_slide`
+departs from that rule on purpose, because the mechanical value here would
+sit ABOVE the mis-proportioned rig B's own bad measurement and so could
+not discriminate anything - `walk_slide` is instead set strictly between
+rig A's good value and rig B's bad one, making the absolute tolerance
+itself a measured discriminator, not just the two unconditional checks
+above. The gate is re-run after setting TOLERANCES to confirm it now
+asserts everything and still exits 0.
 
 Every check() call accumulates into FAILURES rather than stopping the run;
 only ok() aborts early, and only on a hard call failure (a refused or
@@ -131,18 +138,32 @@ FAILURES = []
 # after SOURCE_ROW_START's row-0 fix (see its comment - without it, contact
 # detection never fires on either rig and every slide number below reads
 # 0.0, discriminating nothing):
-#   rig A walk worst ankle slide = 0.05001  (L_ankle 0.04451, R_ankle 0.05001)
+#   rig A (good proportions) walk worst ankle slide = 0.05001  (L_ankle 0.04451, R_ankle 0.05001)
+#   rig B (legs 1.5x, bad)   walk worst ankle slide  = 0.06854  (pre-clean)
 #   rig A idle worst ankle slide = 0.00400  (L_ankle 0.00400, R_ankle 0.00367)
-# TOLERANCES = 2x each measured value, rounded up to 1 significant figure,
-# floored at 0.01 m (the #768/#773 method):
-#   walk: 2*0.05001=0.10002 -> 0.2
-#   idle: 2*0.00400=0.00800 -> below the 0.01 floor -> 0.01
-# Negative control: the two DISCRIMINATION checks below are the proof this
-# floor still discriminates - rig B's pre-clean walk slide measured 0.06854
-# (already past the 0.05001 rig-A reference before any tolerance is even
-# applied), and clean_clip's lock_contacts pass brought it down to 0.00546.
+#
+# idle_slide: the brief's mechanical "2x measured, round up 1 sig fig,
+# floor 0.01" rule applied cleanly (2*0.00400=0.00800, below the floor ->
+# 0.01) - idle has no bad-rig counterpart measured here, so this is a
+# sanity ceiling, not a discriminator.
+#
+# walk_slide: the SAME mechanical rule gives 2*0.05001=0.10002 -> 0.2,
+# which sits ABOVE rig B's own bad measurement (0.06854) - a value that
+# cannot discriminate anything, since a regression proportional across
+# both rigs would still clear it. Per controller ruling (supersedes the
+# brief's formula here, which decade-rounds past the one number that
+# matters): walk_slide is instead set BETWEEN the two measured values -
+# strictly below rig B's bad 0.06854, comfortably above rig A's good
+# 0.05001 - so the absolute tolerance itself is a measured discriminator,
+# not just the two unconditional discrimination checks below:
+#   walk_slide = 0.06   (0.05001 <= 0.06  -> rig A PASSES)
+#                        (0.06854 >  0.06 -> rig B's bad pre-clean value
+#                         would FAIL this same tolerance, printed for
+#                         illustration in [7] but never asserted against
+#                         rig B - rig B exists to be cleaned up, not to
+#                         pass the good-rig ceiling)
 TOLERANCES = {
-    "walk_slide": 0.2,
+    "walk_slide": 0.06,
     "idle_slide": 0.01,
 }
 
@@ -532,12 +553,23 @@ def main():
          % (worst(slide_b_before_report), worst(slide_b_before)))
 
     # ---- 7. tolerances: rig A's own slide, measured then asserted --------
+    # Two different jobs, not one: walk_slide is itself a measured
+    # discriminator (good rig A passes it, bad rig B's pre-clean value
+    # would fail it - see the TOLERANCES comment for the derivation);
+    # idle_slide is a sanity ceiling (idle has no bad-rig counterpart
+    # measured here). Neither IS the regression net for RELATIVE quality -
+    # that is what the two unconditional discrimination checks in [5]/[6]
+    # are for, asserted regardless of TOLERANCES.
     print("\n[7] tolerances (rig A, the well-proportioned reference)")
     print("  measured: walk worst ankle slide=%.5f, idle worst ankle "
          "slide=%.5f" % (worst(slide_a_walk), worst(slide_a_idle)))
-    print("  2x-rounded-up-1sig (floor 0.01) would be: walk=%.4f idle=%.4f"
+    print("  mechanical 2x-rounded-up-1sig (floor 0.01) would give: "
+         "walk=%.4f idle=%.4f - walk_slide is set BELOW that (see the "
+         "TOLERANCES comment): the mechanical value (0.2) sits above rig "
+         "B's own bad pre-clean measurement (%.5f) and could not "
+         "discriminate a regression proportional across both rigs"
          % (round_up_1sig(2 * worst(slide_a_walk)),
-            round_up_1sig(2 * worst(slide_a_idle))))
+            round_up_1sig(2 * worst(slide_a_idle)), worst(slide_b_before)))
     if TOLERANCES is None:
         print("  MEASUREMENT MODE - TOLERANCES is None: no threshold "
              "asserted on the slide numbers above (the two discriminations "
@@ -549,6 +581,16 @@ def main():
         check(worst(slide_a_idle) <= TOLERANCES["idle_slide"],
              "rig A idle ankle slide %.5f <= tolerance %.5f"
              % (worst(slide_a_idle), TOLERANCES["idle_slide"]))
+        # Illustration only, never asserted: rig B exists to be CLEANED
+        # UP, not to pass the good-rig ceiling, so its pre-clean value is
+        # printed against walk_slide but not gated on it.
+        print("  illustration (not asserted): rig B's bad pre-clean slide "
+             "%.5f %s walk_slide tolerance %.5f - the tolerance itself "
+             "discriminates"
+             % (worst(slide_b_before),
+                ">" if worst(slide_b_before) > TOLERANCES["walk_slide"]
+                else "<=",
+                TOLERANCES["walk_slide"]))
 
     print("\n%d checks failed" % len(FAILURES))
     for failure in FAILURES:
