@@ -642,9 +642,18 @@ def _retarget_bvh(path: str, root_param: str, name: str,
                                     source_slot_joints, characters)
         mel.eval('hikSetCharacterInput("%s", "%s")' % (target_char, source_char))
 
+        # preserveOutsideKeys, or this bake DESTROYS every other take on the
+        # rig: bakeResults' default replaces the whole curve with keys for
+        # only the baked range, so baking take 2 (frames 159-308) left take
+        # 1's frames 0-157 evaluating to a pre-infinity constant - a frozen
+        # figure in every preview cell, and an export whose first take
+        # resamples that constant with a perfectly correct key COUNT (#780,
+        # measured: pelvis_translateZ1 held 150 keys spanning 159-308 and
+        # nothing else after the second retarget).
         cmds.bakeResults(list(target_slot_joints.values()),
                          time=(target_start_frame, bake_end_frame),
-                         sampleBy=1, simulation=True)
+                         sampleBy=1, simulation=True,
+                         preserveOutsideKeys=True)
     except HandlerError:
         raise
     except Exception as exc:  # noqa: BLE001 - see module docstring / #774
@@ -851,9 +860,12 @@ def _retarget_fbx(path: str, root_param: str, name: str,
                                     source_slot_joints, characters)
         mel.eval('hikSetCharacterInput("%s", "%s")' % (target_char, source_char))
 
+        # preserveOutsideKeys for the same reason as the BVH route above:
+        # without it this bake erases every OTHER take's keys (#780).
         cmds.bakeResults(list(target_slot_joints.values()),
                          time=(target_start_frame, bake_end_frame),
-                         sampleBy=1, simulation=True)
+                         sampleBy=1, simulation=True,
+                         preserveOutsideKeys=True)
     except HandlerError:
         raise
     except Exception as exc:  # noqa: BLE001 - see the BVH route's identical

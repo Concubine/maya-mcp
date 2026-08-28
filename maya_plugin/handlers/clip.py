@@ -1214,6 +1214,25 @@ def preview_clip(params: Dict[str, Any]) -> Dict[str, Any]:
         "samples": params.get("samples", 1),
         "zoom": params.get("zoom", 1.0),
     }
+    # The held camera's framing box is the UNION of the meshes' bounds
+    # across every sampled frame, measured frame by frame - NOT frame 0's
+    # box. A held camera is the right call (motion must read against a
+    # fixed frame), but holding a frame the subject leaves is not: the
+    # #774 CMU walk covers ~4.8 m of root motion, walked out of its
+    # frame-0 framing at frame 105, and every later cell was the same
+    # byte-identical subject-less render while nothing said so (#780).
+    # Framing the whole journey keeps the promise a contact sheet makes.
+    previous_time = cmds.currentTime(query=True)
+    union_min = [float("inf")] * 3
+    union_max = [float("-inf")] * 3
+    try:
+        for offset in frames:
+            cmds.currentTime(start_frame + offset)
+            bbox_min, bbox_max = capture._scene_bbox(cmds, meshes)
+            union_min = [min(a, b) for a, b in zip(union_min, bbox_min)]
+            union_max = [max(a, b) for a, b in zip(union_max, bbox_max)]
+    finally:
+        cmds.currentTime(previous_time)
     shots = []
     for i, offset in enumerate(frames):
         shots.append({
@@ -1221,6 +1240,7 @@ def preview_clip(params: Dict[str, Any]) -> Dict[str, Any]:
             "angle": angle,
             "isolate": None,
             "frame_on": meshes,
+            "bbox": (union_min, union_max),
             "time": start_frame + offset,
             "reuse_camera": i > 0,
         })

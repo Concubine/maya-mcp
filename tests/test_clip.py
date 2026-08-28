@@ -65,7 +65,8 @@ class FakeCmds:
         return matches
 
     def objExists(self, name):
-        return bool(self.ls(name)) or name in ("body_shapes", "body_skin")
+        return (bool(self.ls(name)) or name in ("body_shapes", "body_skin")
+                or name in self.rigid_chunks.values())
 
     def nodeType(self, node):
         if node in self.joints:
@@ -234,6 +235,13 @@ class FakeCmds:
         if query:
             return self.time
         self.time = float(value)
+
+    def exactWorldBoundingBox(self, *targets, **kw):
+        # A unit-deep box that RIDES the current time along X - the minimal
+        # model of a clip with root motion. A caller that claims to frame
+        # the whole clip must union this box across frames; framing frame
+        # 0's box alone loses the subject (#780).
+        return [self.time, 0.0, 0.0, self.time + 1.0, 2.0, 1.0]
 
     def playbackOptions(self, edit=False, **kw):
         self.playback.update(kw)
@@ -1208,6 +1216,21 @@ class TestPreviewClip:
         fake.time = 7.0
         clip.preview_clip({"root": "root", "name": "idle"})
         assert fake.time == 7.0
+
+    def test_held_camera_frames_the_whole_journey(self, fake, monkeypatch):
+        """#780: the held camera's framing box must be the UNION of the
+        subject's bounds across every sampled frame, not frame 0's box -
+        the fake's bbox rides the current time along X, so the union's X
+        extent must span first sampled frame .. last sampled frame + 1."""
+        calls = self._wire(fake, monkeypatch, duration_s=2.0, fps=30)
+        out = clip.preview_clip({"root": "root", "name": "idle"})
+        frames = [f["frame"] for f in out["frames"]]
+        want = ([float(frames[0]), 0.0, 0.0],
+                [float(frames[-1]) + 1.0, 2.0, 1.0])
+        assert calls["shots"][0]["bbox"] == want
+        # every shot carries the same held box - only shot 0 places the
+        # camera today, but the framing promise is per-sheet, not per-shot
+        assert all(s["bbox"] == want for s in calls["shots"])
 
     def test_unbound_skeleton_refuses(self, fake, monkeypatch):
         self._wire(fake, monkeypatch)

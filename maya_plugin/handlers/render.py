@@ -22,7 +22,7 @@ import uuid
 from typing import Any, Dict, List, Optional, Sequence
 
 from ..dispatcher import HandlerError
-from . import capture, lighting, naming, session
+from . import capture, lighting, naming, pngprobe, session
 
 VALID_RENDERERS = ("arnold", "hw2")
 RENDERER_TO_MAYA = {"arnold": "arnold", "hw2": "mayaHardware2"}
@@ -867,10 +867,20 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
                 current_isolate = visible_key
 
             if not (shot.get("reuse_camera") and temp_camera is not None):
-                bbox_min, bbox_max = capture._scene_bbox(
-                    cmds, shot["frame_on"],
-                    visible_only=bool(shot.get("frame_visible_only"))
-                )
+                # A shot may carry its own framing box: a HELD camera is only
+                # honest if its frame contains the subject at every time it
+                # will be shot at, and only the caller knows those times -
+                # preview_clip passes the union of the subject's bounds
+                # across all its sampled frames (#780: a walking clip left
+                # its frame-0 framing at frame 105 and every later cell was
+                # the same subject-less render).
+                if shot.get("bbox") is not None:
+                    bbox_min, bbox_max = shot["bbox"]
+                else:
+                    bbox_min, bbox_max = capture._scene_bbox(
+                        cmds, shot["frame_on"],
+                        visible_only=bool(shot.get("frame_visible_only"))
+                    )
                 # "current" has no meaning without a panel to read a camera
                 # from; it degrades to the default judging angle rather than
                 # failing a render the caller could not have known was
@@ -919,6 +929,17 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
                     hint="check Maya's script editor output; for arnold, "
                     "confirm the mtoa plugin is loaded",
                 )
+            # The #765 lesson applied to the render path: a valid PNG of
+            # nothing is a success code wearing a failure. Probed while the
+            # file still exists (opacity reads from disk), reported as a
+            # warning rather than a refusal because "nothing here" is a
+            # legitimate render of an empty view - the caller just must be
+            # TOLD, not left to eyeball 16 identical background cells (#780).
+            probe = pngprobe.opacity(path)
+            if probe.get("blank"):
+                framing_warnings.append(
+                    "%s drew nothing - zero opaque pixels; the subject is "
+                    "outside this frame (or nothing is lit)" % shot["label"])
             try:
                 with open(path, "rb") as fh:
                     png = fh.read()

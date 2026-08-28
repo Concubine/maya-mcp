@@ -83,6 +83,7 @@ Exit: 0 pass, 1 fail or preflight refused, 2 no connection.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import math
 import os
@@ -400,6 +401,24 @@ def main():
          % ({k: round(v, 5) for k, v in slide_a_idle.items()},
             worst(slide_a_idle), json.dumps(idle_a_ankles.get("contacts"))))
 
+    # #780's data-level check: baking take 2 must not TOUCH take 1. Before
+    # preserveOutsideKeys, bakeResults' default replaced each plug's whole
+    # curve with keys for only the idle range - the walk still LOOKED
+    # registered (mcp_clip metadata survived) while its frames evaluated to
+    # a pre-infinity constant, the export resampled that constant with a
+    # correct key COUNT, and only the pixels could have told anyone. The
+    # walk's own kinematics re-measured after the idle bake must equal the
+    # measurement taken before it.
+    walk_after_idle = independent_measure(root_a, "walk",
+                                          what="walk re-measure after idle")
+    pelvis_before = (walk_agree.get("joints") or {}).get("pelvis") or {}
+    pelvis_after = (walk_after_idle.get("joints") or {}).get("pelvis") or {}
+    check(pelvis_before.get("path_length") == pelvis_after.get("path_length")
+          and pelvis_before.get("path_length", 0) > 1.0,
+         "walk motion unchanged by the idle bake (#780): pelvis path_length "
+         "%s before, %s after"
+         % (pelvis_before.get("path_length"), pelvis_after.get("path_length")))
+
     # ---- 3. composition: multi-take export_fbx, both clips, from rig A ---
     print("\n[3] composition: export_fbx multi-take (walk + idle) from rig A")
     records = declared_clips(root_a)
@@ -481,13 +500,17 @@ def main():
 
     # ---- 4. preview_clip contact sheet: walk, rig A (still in-scene) -----
     print("\n[4] preview_clip contact sheet: walk, rig A")
-    # zoom=1.0 (fits the framed subject) measured UNJUDGEABLE - the figure
-    # renders as a speck a few percent of the cell (this walk's own
-    # translation sets the framing box); 2.5 is what made the stride/arm
-    # swing actually readable (see the report).
+    # DEFAULT zoom, on purpose (#780). The first run of this gate zoomed to
+    # 2.5 because zoom=1.0 rendered a speck - but the framing box that made
+    # the speck was frame 0's alone (inflated by the hidden bind-pose Orig
+    # shape), and 2.5 cropped a frame the walk then LEFT at frame 105:
+    # every later cell was the same byte-identical, subject-less render.
+    # preview_clip now frames its held camera on the union of the subject's
+    # bounds across all sampled frames, so the default framing both fits
+    # the whole journey and keeps the figure readable.
     preview = ok("preview_clip", {"root": root_a, "name": "walk",
-                                  "angle": "side", "resolution": 512,
-                                  "zoom": 2.5}, 120.0, "preview_clip walk")
+                                  "angle": "side", "resolution": 512},
+                 120.0, "preview_clip walk")
     frame_imgs = preview.get("images", [])
     check(len(frame_imgs) > 0,
          "preview_clip returned at least one frame (%d)" % len(frame_imgs))
@@ -495,6 +518,19 @@ def main():
     for im, png in zip(frame_imgs, pngs):
         stats = images.pixel_stats(png)
         check(not stats.get("blank"), "%s cell is not blank" % im.get("label"))
+    # #780's structural check: a moving clip's cells must ALL be distinct
+    # images - a byte-identical run is a frozen or subject-less tail, and
+    # measure_clip already proved this walk moves at every sampled frame.
+    frame_hashes = [hashlib.md5(p).hexdigest() for p in pngs]
+    dupe_labels = sorted({im.get("label")
+                          for im, h in zip(frame_imgs, frame_hashes)
+                          if frame_hashes.count(h) > 1})
+    check(not dupe_labels,
+         "all %d preview cells are distinct images (#780)%s"
+         % (len(frame_hashes),
+            "" if not dupe_labels else " - duplicates: %s" % dupe_labels))
+    check(not [w for w in preview.get("warnings", []) if "drew nothing" in w],
+         "no cell warned 'drew nothing' (#780 defense-in-depth warning)")
     if pngs:
         sheet_png = images.contact_sheet(pngs, cols=min(len(pngs), 4))
         sheet_path = os.path.join(OUT_DIR, "walk_sheet.png")
