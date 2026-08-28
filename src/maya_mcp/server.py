@@ -69,6 +69,8 @@ from .schemas import (
     ResetNamespaceResult,
     ResetPoseResult,
     RestoreResult,
+    RetargetClipResult,
+    CleanClipResult,
     SaveSceneResult,
     SceneGraphResult,
     SculptResult,
@@ -2648,6 +2650,101 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         for warning in result.get("warnings", []):
             content.append("note: " + warning)
         return content
+
+    @mcp.tool(
+        title="Retarget mocap clip",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_retarget_clip(
+        file: Annotated[str, Field(description=(
+            "A local .bvh or .fbx mocap file. BVH is parsed internally; "
+            "FBX imports via Maya's native FBX path."
+        ))],
+        root: Annotated[str, Field(description=(
+            "The target rig's root joint, e.g. what create_skeleton "
+            "returned as `root` - must be a biped this tool can "
+            "characterize (HumanIK's 15 classic slots)."
+        ))],
+        clip: Annotated[str, Field(min_length=1, description=(
+            "Clip name - becomes the exported take name, same as "
+            "author_clip's `name`. Re-using an existing name re-appends "
+            "the new bake at the tail, same as author_clip's re-author rule."
+        ))],
+        start: Annotated[Optional[float], Field(ge=0, description=(
+            "Trim the SOURCE file's frame range (row index), before any "
+            "bake-rate resampling. Omit for the file's first frame."
+        ))] = None,
+        end: Annotated[Optional[float], Field(ge=0, description=(
+            "End of the source trim range (row index). Omit for the "
+            "file's last frame."
+        ))] = None,
+        fps: Annotated[Optional[int], Field(description=(
+            "One of 24, 25, 30, 48, 50, 60 to bake at. Omit to bake at "
+            "whichever of those is nearest the source capture's own rate."
+        ))] = None,
+    ) -> RetargetClipResult:
+        """Get a mocap file's motion onto this rig via HumanIK retargeting.
+
+        Motion QUALITY comes from the capture, not from anything authored
+        here - this tool's only job is the mechanical, checkable part: bake
+        the source skeleton's motion onto the target through HumanIK, self-
+        measure the result (measure_clip, #773), and leave no HumanIK state
+        behind. Once baked, the clip is indistinguishable from one
+        author_clip produced - preview_clip/measure_clip/delete_clip/
+        multi-take export_fbx all read it unchanged."""
+        return RetargetClipResult.model_validate(
+            maya.request(
+                "retarget_clip",
+                {"file": file, "root": root, "clip": clip,
+                 "start": start, "end": end, "fps": fps},
+                timeout_s=EXPORT_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Clean up mocap clip",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_clean_clip(
+        root: Annotated[str, Field(description="Skeleton root joint.")],
+        clip: Annotated[Optional[str], Field(description=(
+            "Which clip to clean. May be omitted when the rig carries "
+            "exactly one; otherwise refused with the names present."
+        ))] = None,
+        filter: Annotated[Union[bool, dict], Field(description=(
+            "Savitzky-Golay smooth every currently-keyed joint channel. "
+            "true (default) smooths with the gentlest legal window (5); "
+            "{'window': <odd int, at least 5>} raises it; false skips this "
+            "pass. filter and lock_contacts cannot both be false."
+        ))] = True,
+        lock_contacts: Annotated[Union[bool, dict], Field(description=(
+            "Pin each inferred ground-contact run to its own median plant "
+            "position and re-solve the 2-bone leg chain through it. true "
+            "(default) uses this rig's two HIK Foot slots; "
+            "{'joints': [...]} names explicit contact joints instead; "
+            "false skips this pass."
+        ))] = True,
+    ) -> CleanClipResult:
+        """Deterministic clip improvement, always measured before and after.
+
+        #773 gave motion NUMBERS (measure_clip); this is the first tool
+        that ACTS on them. Both passes are independent and optional; any
+        metric that got WORSE after cleanup is named in `warnings`, never
+        turned into a failure - you (or the eval gate) judge whether a
+        regression matters. checkpoint_id is restorable via
+        maya_restore_checkpoint if the result is not an improvement."""
+        return CleanClipResult.model_validate(
+            maya.request(
+                "clean_clip",
+                {"root": root, "clip": clip, "filter": filter,
+                 "lock_contacts": lock_contacts},
+                timeout_s=BOOL_TIMEOUT_S,
+            )
+        )
 
     @mcp.tool(
         title="Report skin weights",

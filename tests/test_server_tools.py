@@ -110,6 +110,8 @@ class TestRegistration:
             "maya_measure_clip",
             "maya_preview_clip",
             "maya_create_curve_form",
+            "maya_retarget_clip",
+            "maya_clean_clip",
         }
 
     def test_annotations_declare_read_only_vs_destructive(self):
@@ -2501,3 +2503,84 @@ class TestCurveFormTools:
         assert conn.calls[0]["params"]["degrees"] is None
         assert conn.calls[0]["params"]["axis"] is None
         assert conn.calls[0]["params"]["cap_ends"] is True
+
+
+class TestRetargetTools:
+    def test_maya_retarget_clip_forwards_params(self):
+        conn = FakeConn(responses={"retarget_clip": {
+            "clip": "walk01", "root": "|rig|Hips", "frames": 121, "fps": 30,
+            "source_joints": 31,
+            "measures": {"name": "walk01", "fps": 30, "frames_sampled": 121,
+                         "loop": False, "rig_height": 1.7,
+                         "thresholds": {}, "joints": {}, "contacts": {},
+                         "symmetry": [], "warnings": []},
+            "warnings": [],
+        }})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_retarget_clip", {
+            "file": "evals/mocap_fixtures/cmu_walk.bvh",
+            "root": "|rig|Hips", "clip": "walk01",
+        }))
+        assert result.is_error is False
+        assert conn.calls[0]["cmd"] == "retarget_clip"
+        sent = conn.calls[0]["params"]
+        assert sent == {
+            "file": "evals/mocap_fixtures/cmu_walk.bvh",
+            "root": "|rig|Hips", "clip": "walk01",
+            "start": None, "end": None, "fps": None,
+        }
+        assert conn.calls[0]["timeout_s"] == server_mod.EXPORT_TIMEOUT_S
+        assert result.structured_content["frames"] == 121
+        assert result.structured_content["measures"]["rig_height"] == 1.7
+
+    def test_maya_retarget_clip_forwards_start_end_fps_when_set(self):
+        conn = FakeConn(responses={"retarget_clip": {
+            "clip": "walk01", "root": "|rig|Hips", "frames": 61, "fps": 24,
+            "source_joints": 31, "measures": {}, "warnings": [],
+        }})
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_retarget_clip", {
+            "file": "evals/mocap_fixtures/cmu_walk.bvh",
+            "root": "|rig|Hips", "clip": "walk01",
+            "start": 10, "end": 70, "fps": 24,
+        }))
+        sent = conn.calls[0]["params"]
+        assert sent["start"] == 10 and sent["end"] == 70 and sent["fps"] == 24
+
+    def test_maya_clean_clip_forwards_params(self):
+        conn = FakeConn(responses={"clean_clip": {
+            "clip": "walk01", "root": "|rig|Hips",
+            "passes": ["filter", "lock_contacts"],
+            "before": {"rig_height": 1.7}, "after": {"rig_height": 1.7},
+            "checkpoint_id": "007_clean_clip", "warnings": [],
+        }})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_clean_clip", {
+            "root": "|rig|Hips", "clip": "walk01",
+        }))
+        assert result.is_error is False
+        assert conn.calls[0]["cmd"] == "clean_clip"
+        sent = conn.calls[0]["params"]
+        # filter/lock_contacts are the cap_ends-style literal-default
+        # exceptions (#768 ruling) - wire-defaulted True, never None.
+        assert sent == {
+            "root": "|rig|Hips", "clip": "walk01",
+            "filter": True, "lock_contacts": True,
+        }
+        assert conn.calls[0]["timeout_s"] == server_mod.BOOL_TIMEOUT_S
+        assert result.structured_content["checkpoint_id"] == "007_clean_clip"
+
+    def test_maya_clean_clip_forwards_explicit_filter_and_lock_contacts(self):
+        conn = FakeConn(responses={"clean_clip": {
+            "clip": "walk01", "root": "|rig|Hips", "passes": ["filter"],
+            "before": {}, "after": {}, "checkpoint_id": "008_clean_clip",
+            "warnings": [],
+        }})
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_clean_clip", {
+            "root": "|rig|Hips", "clip": "walk01",
+            "filter": {"window": 7}, "lock_contacts": False,
+        }))
+        sent = conn.calls[0]["params"]
+        assert sent["filter"] == {"window": 7}
+        assert sent["lock_contacts"] is False

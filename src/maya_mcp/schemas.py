@@ -869,6 +869,66 @@ class DeleteClipResult(BaseModel):
     warnings: List[str] = Field(default_factory=list)
 
 
+class RetargetClipResult(BaseModel):
+    """A mocap file's motion baked onto a `create_skeleton` biped (#774).
+
+    Once this returns, the clip is indistinguishable from one `author_clip`
+    produced - `preview_clip`/`measure_clip`/`delete_clip`/multi-take
+    `export_fbx` all read it unchanged.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    clip: str = Field(description="The clip name, as authored.")
+    root: str = Field(description="Skeleton root joint the clip was baked onto.")
+    frames: int = Field(description="Baked frame count.")
+    fps: int = Field(description=(
+        "The bake rate actually used - the nearest Maya time unit to the "
+        "source capture's own rate when `fps` was left unset."))
+    source_joints: int = Field(description=(
+        "Joint count in the source mocap file (parsed BVH hierarchy, or "
+        "imported FBX skeleton) - not the target rig's own joint count."))
+    measures: dict = Field(description=(
+        "measure_clip's (#773) full summary for the freshly-baked clip: "
+        "per-joint kinematics, inferred contact runs and slide, L/R "
+        "symmetry, loop closure. Every relative threshold in it is a "
+        "fraction of RIG HEIGHT, the #773 convention - read `thresholds` "
+        "inside this dict for the derived absolute numbers."))
+    warnings: List[str] = Field(default_factory=list)
+
+
+class CleanClipResult(BaseModel):
+    """Deterministic clip improvement with before/after numbers (#774).
+
+    Two independent passes - `filter` (Savitzky-Golay smoothing) and
+    `lock_contacts` (pin inferred ground-contact runs, re-solve the leg) -
+    each optional, each measured. Any metric that got WORSE after cleanup is
+    named in `warnings`, never turned into a failure: this call reports, the
+    caller (or the eval gate) judges.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    clip: str = Field(description="The clip that was cleaned.")
+    root: str = Field(description="Skeleton root joint carrying the clip.")
+    passes: List[str] = Field(description=(
+        "Which of 'filter'/'lock_contacts' actually ran (a pass with "
+        "nothing to do, e.g. no contact run detected, is still listed if "
+        "it was enabled)."))
+    before: dict = Field(description=(
+        "measure_clip's (#773) full summary taken BEFORE either pass ran. "
+        "Every relative threshold in it is a fraction of RIG HEIGHT, the "
+        "#773 convention."))
+    after: dict = Field(description=(
+        "The same measure_clip summary taken AFTER both passes ran - "
+        "compare against `before` to see what changed. Thresholds are "
+        "fractions of rig height, same convention as `before`."))
+    checkpoint_id: str = Field(description=(
+        "Auto-checkpoint saved just before either pass mutated the scene; "
+        "pass to maya_restore_checkpoint to undo this cleanup."))
+    warnings: List[str] = Field(default_factory=list)
+
+
 class TakeRecord(BaseModel):
     model_config = ConfigDict(extra="ignore")
 

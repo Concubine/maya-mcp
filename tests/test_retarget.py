@@ -8,7 +8,7 @@ params alone, never getting as far as `_cmds()`.
 
 import pytest
 
-from maya_plugin.dispatcher import HandlerError
+from maya_plugin.dispatcher import HandlerError, require_known_keys
 from maya_plugin.handlers import cleanclip, retarget
 
 
@@ -113,3 +113,65 @@ class TestCleanClipParamGate:
         del p["root"]
         with pytest.raises(HandlerError, match="root"):
             cleanclip.clean_clip(p)
+
+
+class TestWireShapedParams:
+    """The MCP server (src/maya_mcp/server.py) sends EVERY declared param on
+    EVERY call, `None` for whichever ones the caller left unset - it never
+    conditionally omits a key (the #768 lesson, TestWireShapedParams in
+    test_curveform_math.py is the sibling of this class). These build the
+    request dict EXACTLY as server.py's maya_retarget_clip/maya_clean_clip
+    send it and drive it through the real handler far enough to prove no
+    foreign-key or None-handling refusal fires."""
+
+    # server.py's maya_retarget_clip request dict: file/root/clip always a
+    # caller-given string, start/end/fps None when left unset.
+    _RETARGET_WIRE_KEYS = ("file", "root", "clip", "start", "end", "fps")
+    # server.py's maya_clean_clip request dict: filter/lock_contacts are the
+    # cap_ends-style literal-default exception (#768 ruling) - wire-defaulted
+    # True, never None, even when the caller left them unset.
+    _CLEAN_WIRE_KEYS = ("root", "clip", "filter", "lock_contacts")
+
+    def _retarget_wire_dict(self, **over):
+        params = {k: None for k in self._RETARGET_WIRE_KEYS}
+        params.update({"file": "evals/mocap_fixtures/nope.bvh",
+                       "root": "|rig|Hips", "clip": "walk01"})
+        params.update(over)
+        return params
+
+    def _clean_wire_dict(self, **over):
+        params = {k: None for k in self._CLEAN_WIRE_KEYS}
+        params["filter"] = True
+        params["lock_contacts"] = True
+        params.update({"root": "|rig|Hips", "clip": "walk01"})
+        params.update(over)
+        return params
+
+    def test_retarget_wire_shape_reaches_file_existence_refusal(self):
+        # Every key server.py sends is present, start/end/fps None (the
+        # unset case). A key-gate or None-handling regression would refuse
+        # on 'start'/'end'/'fps' before ever touching the filesystem; the
+        # file-existence refusal proves all of them passed clean and
+        # validation got past the key gate.
+        with pytest.raises(HandlerError, match="no such file"):
+            retarget.retarget_clip(self._retarget_wire_dict())
+
+    def test_clean_clip_wire_key_set_accepted_by_key_gate(self):
+        # clean_clip's own validation reaches a real `import maya.cmds`
+        # partway through any call whose root/clip are otherwise valid, so
+        # driving a fully-valid wire dict all the way through is not
+        # possible in this headless process. The minimal honest check: the
+        # exact wire key set, with filter/lock_contacts's literal True
+        # default, is not refused by the key gate itself.
+        require_known_keys(self._clean_wire_dict(),
+                            cleanclip.CLEAN_CLIP_KEYS, "clean_clip",
+                            cleanclip.CLEAN_CLIP_SYNONYMS)
+
+    def test_clean_clip_wire_shape_reaches_root_refusal(self):
+        # Every key server.py sends is present, filter/lock_contacts at
+        # their wire-default True. A key-gate or None-handling regression
+        # on either of those would refuse before root is ever inspected;
+        # an empty root instead reaches root's OWN pure refusal, proving
+        # filter/lock_contacts (and the both-false check) passed clean.
+        with pytest.raises(HandlerError, match="root"):
+            cleanclip.clean_clip(self._clean_wire_dict(root=""))
