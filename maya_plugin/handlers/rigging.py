@@ -879,6 +879,165 @@ def _chain_between(cmds, joints: List[str], start: str, end: str) -> List[str]:
     return chain
 
 
+def solve_ik_plan(cmds, chain: List[str], target: List[float],
+                  pole: Optional[List[float]] = None) -> Dict[str, Any]:
+    """Read-only analytic prep for `solve_ik_and_bake`: the chain's current
+    positions, how far `target` sits against the chain's reach, and the pole
+    the solve will use (given, or #671's own-bend-plane default). Nothing
+    here mutates Maya, so a caller can snapshot state (pose_ik's own
+    mesh/rotate "before", for its `keep=false` restore) between this call
+    and the bake with nothing lost.
+
+    Extracted from pose_ik (#774 Task 5, review: extraction with zero
+    behavior change) so `solve_ik_chain` - and through it, clean_clip's
+    contact-lock pass - reuses the SAME solve pose_ik does, rather than a
+    second, slightly different implementation.
+    """
+    positions = [[float(v) for v in cmds.xform(
+        j, query=True, worldSpace=True, translation=True)] for j in chain]
+    reach = rigmath.chain_reach(positions)
+    distance = rigmath.dist(positions[0], target)
+    warnings: List[str] = []
+    if distance > reach:
+        warnings.append(
+            "the target sits %.4g from %s but the chain reaches only %.4g - "
+            "the solve will fall short and residual reports the miss"
+            % (distance, _short(chain[0]), reach))
+
+    pole_used = pole if pole is not None else rigmath.default_pole(
+        positions, COLLINEAR_RATIO)
+    straight = rigmath.chain_deviation(positions) < COLLINEAR_RATIO * reach
+    if straight and pole_used is None:
+        warnings.append(
+            "the chain is STRAIGHT and no pole was given - the solver has no "
+            "bend plane, so which way the limb folds is Maya's guess; pass "
+            "pole=[x,y,z], the world position the knee/elbow should face")
+    return {
+        "positions": positions,
+        "reach": reach,
+        "distance": distance,
+        "pole_used": pole_used,
+        "straight": straight,
+        "warnings": warnings,
+    }
+
+
+def solve_ik_and_bake(cmds, chain: List[str], target: List[float],
+                      plan: Dict[str, Any]) -> Dict[str, Any]:
+    """The mutating half of the #671 solve: pre-bend a straight chain toward
+    `plan`'s pole, solve a transient ikHandle (the RP-solver window never
+    persists past this call - handle/effector/pole locator all die in the
+    `finally`, on the error path too), and bake the result as plain FK onto
+    `chain`. `plan` is `solve_ik_plan`'s return for the SAME chain/target/
+    pole; callers normally reach this only through `solve_ik_chain`.
+    """
+    positions = plan["positions"]
+    pole_used = plan["pole_used"]
+    straight = plan["straight"]
+    distance = plan["distance"]
+    reach = plan["reach"]
+    start, end = chain[0], chain[-1]
+
+    prior_preferred = {}
+    if straight and pole_used is not None:
+        # A straight chain gives the solver no fold to amplify: nudge the
+        # interior joints a few degrees toward the pole. The solve
+        # overwrites the .rotate nudge; .preferredAngle is restored below
+        # regardless of what the caller does with the baked pose.
+        matrices = {i: [float(v) for v in cmds.xform(
+            chain[i], query=True, worldSpace=True, matrix=True)]
+            for i in range(1, len(chain) - 1)}
+        for i, triple in rigmath.prebend_rotations(
+                positions, matrices, target, pole_used, PREBEND_DEG).items():
+            prior_preferred[chain[i]] = tuple(
+                cmds.getAttr(chain[i] + ".preferredAngle")[0])
+            current = cmds.getAttr(chain[i] + ".rotate")[0]
+            cmds.setAttr(chain[i] + ".rotate",
+                         current[0] + units.degrees_to_ui(cmds, triple[0]),
+                         current[1] + units.degrees_to_ui(cmds, triple[1]),
+                         current[2] + units.degrees_to_ui(cmds, triple[2]))
+            cmds.setAttr(chain[i] + ".preferredAngle",
+                         units.degrees_to_ui(cmds, triple[0]),
+                         units.degrees_to_ui(cmds, triple[1]),
+                         units.degrees_to_ui(cmds, triple[2]))
+
+    # No persistent IK state may ever exist (#671 final review): an
+    # exception anywhere between the ikHandle's creation and the doomed-node
+    # delete must still restore the seeded .preferredAngle and remove
+    # whatever transient nodes got as far as being created.
+    handle = effector = locator = None
+    baked: Dict[str, List[float]] = {}
+    try:
+        handle, effector = cmds.ikHandle(
+            startJoint=start, endEffector=end, solver=IK_SOLVER,
+            name=naming.unique_name(cmds, _short(end) + "_ikh"))
+        if pole_used is not None:
+            locator = cmds.spaceLocator(
+                name=naming.unique_name(cmds, _short(end) + "_pole"))[0]
+            cmds.xform(locator, worldSpace=True, translation=pole_used)
+            cmds.poleVectorConstraint(locator, handle)
+        cmds.xform(handle, worldSpace=True, translation=target)
+
+        # Reading the effector's world position pulls the IK evaluation;
+        # the solved joint rotations are then plain attribute reads, in
+        # degrees (#636's unit rule).
+        cmds.xform(end, query=True, worldSpace=True, translation=True)
+        for j in chain:
+            raw = cmds.getAttr(j + ".rotate")[0]
+            baked[j] = [round(units.ui_to_degrees(cmds, v), 6) for v in raw]
+    finally:
+        for j, angle in prior_preferred.items():
+            cmds.setAttr(j + ".preferredAngle", angle[0], angle[1], angle[2])
+        doomed = [n for n in (handle, effector, locator)
+                  if n and cmds.objExists(n)]
+        if doomed:
+            cmds.delete(*doomed)
+    # The bake: deleting a handle can snap joints back, so the solved values
+    # are re-applied as plain FK - the same currency pose_skeleton speaks.
+    for j in chain:
+        cmds.setAttr(j + ".rotate",
+                     units.degrees_to_ui(cmds, baked[j][0]),
+                     units.degrees_to_ui(cmds, baked[j][1]),
+                     units.degrees_to_ui(cmds, baked[j][2]))
+
+    achieved = [float(v) for v in cmds.xform(
+        end, query=True, worldSpace=True, translation=True)]
+    residual = rigmath.dist(achieved, target)
+    warnings: List[str] = []
+    if residual > RESIDUAL_WARN and distance <= reach:
+        warnings.append(
+            "the solve missed a REACHABLE target by %.4g - joint limits, a "
+            "degenerate pole, or a bend the pre-bend could not break can do "
+            "this; try a pole on the intended bend side" % residual)
+
+    return {
+        "achieved_position": achieved,
+        "residual": residual,
+        "rotations": baked,
+        "warnings": warnings,
+    }
+
+
+def solve_ik_chain(cmds, chain: List[str], target: List[float],
+                   pole: Optional[List[float]] = None) -> Dict[str, Any]:
+    """`solve_ik_plan` then `solve_ik_and_bake` in one call - the entry
+    point for a caller that wants #671's 2(+)-bone analytic solve without
+    pose_ik's own checkpoint/mesh-measurement/keep=false bookkeeping wrapped
+    around it (clean_clip's contact-lock pass, #774 Task 5)."""
+    plan = solve_ik_plan(cmds, chain, target, pole)
+    solved = solve_ik_and_bake(cmds, chain, target, plan)
+    return {
+        "achieved_position": solved["achieved_position"],
+        "residual": solved["residual"],
+        "rotations": solved["rotations"],
+        "chain": chain,
+        "pole_used": plan["pole_used"],
+        "reach": plan["reach"],
+        "distance": plan["distance"],
+        "warnings": plan["warnings"] + solved["warnings"],
+    }
+
+
 def pose_ik(params: Dict[str, Any]) -> Dict[str, Any]:
     cmds = _cmds()
     root_long = _require_joint(cmds, params.get("root"))
@@ -923,25 +1082,9 @@ def pose_ik(params: Dict[str, Any]) -> Dict[str, Any]:
             hint="a single bone is an aim, not a solve: rotate it with "
                  "pose_skeleton, or pass a higher start")
 
-    positions = [[float(v) for v in cmds.xform(
-        j, query=True, worldSpace=True, translation=True)] for j in chain]
-    reach = rigmath.chain_reach(positions)
-    distance = rigmath.dist(positions[0], target)
-    warnings: List[str] = []
-    if distance > reach:
-        warnings.append(
-            "the target sits %.4g from %s but the chain reaches only %.4g - "
-            "the solve will fall short and residual reports the miss"
-            % (distance, _short(start), reach))
-
-    pole_used = pole if pole is not None else rigmath.default_pole(
-        positions, COLLINEAR_RATIO)
-    straight = rigmath.chain_deviation(positions) < COLLINEAR_RATIO * reach
-    if straight and pole_used is None:
-        warnings.append(
-            "the chain is STRAIGHT and no pole was given - the solver has no "
-            "bend plane, so which way the limb folds is Maya's guess; pass "
-            "pole=[x,y,z], the world position the knee/elbow should face")
+    plan = solve_ik_plan(cmds, chain, target, pole)
+    warnings: List[str] = list(plan["warnings"])
+    pole_used = plan["pole_used"]
 
     session.auto_checkpoint("pose_ik")
     meshes = _bound_meshes(cmds, set(joints))
@@ -956,83 +1099,16 @@ def pose_ik(params: Dict[str, Any]) -> Dict[str, Any]:
     # instead; setting that (in addition to the visible .rotate nudge, so a
     # mid-solve inspection still shows a bent chain) is what actually folds
     # the knee. preferredAngle is a solver-seeding implementation detail,
-    # not part of the pose, so it is restored to whatever it held before
-    # this call once the solve is read, regardless of `keep`.
-    prior_preferred = {}
-    if straight and pole_used is not None:
-        # A straight chain gives the solver no fold to amplify: nudge the
-        # interior joints a few degrees toward the pole. The solve
-        # overwrites the .rotate nudge; keep=false or the checkpoint undoes
-        # it. .preferredAngle is restored explicitly below.
-        matrices = {i: [float(v) for v in cmds.xform(
-            chain[i], query=True, worldSpace=True, matrix=True)]
-            for i in range(1, len(chain) - 1)}
-        for i, triple in rigmath.prebend_rotations(
-                positions, matrices, target, pole_used, PREBEND_DEG).items():
-            prior_preferred[chain[i]] = tuple(
-                cmds.getAttr(chain[i] + ".preferredAngle")[0])
-            current = cmds.getAttr(chain[i] + ".rotate")[0]
-            cmds.setAttr(chain[i] + ".rotate",
-                         current[0] + units.degrees_to_ui(cmds, triple[0]),
-                         current[1] + units.degrees_to_ui(cmds, triple[1]),
-                         current[2] + units.degrees_to_ui(cmds, triple[2]))
-            cmds.setAttr(chain[i] + ".preferredAngle",
-                         units.degrees_to_ui(cmds, triple[0]),
-                         units.degrees_to_ui(cmds, triple[1]),
-                         units.degrees_to_ui(cmds, triple[2]))
-
-    # #671 final review: the transient IK window (handle, effector, pole
-    # locator, plus the seeded .preferredAngle) must never survive an
-    # exception, or the "no persistent IK state ever exists" promise breaks
-    # on the error path. try/finally guarantees the restore and the delete
-    # run even if a Maya call in between raises; the finally re-checks
-    # objExists per node exactly like the success path always has, so a
-    # partially-built window (e.g. the handle failed before the locator was
-    # made) cleans up only what actually exists and never raises itself,
-    # which would mask the original exception.
-    handle = effector = locator = None
-    baked: Dict[str, List[float]] = {}
-    try:
-        handle, effector = cmds.ikHandle(
-            startJoint=start, endEffector=end, solver=IK_SOLVER,
-            name=naming.unique_name(cmds, _short(end) + "_ikh"))
-        if pole_used is not None:
-            locator = cmds.spaceLocator(
-                name=naming.unique_name(cmds, _short(end) + "_pole"))[0]
-            cmds.xform(locator, worldSpace=True, translation=pole_used)
-            cmds.poleVectorConstraint(locator, handle)
-        cmds.xform(handle, worldSpace=True, translation=target)
-
-        # Reading the effector's world position pulls the IK evaluation;
-        # the solved joint rotations are then plain attribute reads, in
-        # degrees (#636's unit rule).
-        cmds.xform(end, query=True, worldSpace=True, translation=True)
-        for j in chain:
-            raw = cmds.getAttr(j + ".rotate")[0]
-            baked[j] = [round(units.ui_to_degrees(cmds, v), 6) for v in raw]
-    finally:
-        for j, angle in prior_preferred.items():
-            cmds.setAttr(j + ".preferredAngle", angle[0], angle[1], angle[2])
-        doomed = [n for n in (handle, effector, locator)
-                  if n and cmds.objExists(n)]
-        if doomed:
-            cmds.delete(*doomed)
-    # The bake: deleting a handle can snap joints back, so the solved values
-    # are re-applied as plain FK - the same currency pose_skeleton speaks.
-    for j in chain:
-        cmds.setAttr(j + ".rotate",
-                     units.degrees_to_ui(cmds, baked[j][0]),
-                     units.degrees_to_ui(cmds, baked[j][1]),
-                     units.degrees_to_ui(cmds, baked[j][2]))
-
-    achieved = [float(v) for v in cmds.xform(
-        end, query=True, worldSpace=True, translation=True)]
-    residual = rigmath.dist(achieved, target)
-    if residual > RESIDUAL_WARN and distance <= reach:
-        warnings.append(
-            "the solve missed a REACHABLE target by %.4g - joint limits, a "
-            "degenerate pole, or a bend the pre-bend could not break can do "
-            "this; try a pole on the intended bend side" % residual)
+    # not part of the pose, so `solve_ik_and_bake` restores it to whatever
+    # it held before this call once the solve is read, regardless of
+    # `keep` - and the whole transient IK window (handle, effector, pole
+    # locator) never survives an exception either (#671 final review): its
+    # try/finally cleans up whatever got as far as being created.
+    solved = solve_ik_and_bake(cmds, chain, target, plan)
+    warnings.extend(solved["warnings"])
+    baked = solved["rotations"]
+    achieved = solved["achieved_position"]
+    residual = solved["residual"]
 
     max_disp = 0.0
     displaced = 0
