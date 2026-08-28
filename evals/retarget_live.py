@@ -77,7 +77,7 @@ MAYA_MCP_EXPECT_PID is REQUIRED: a port is not an identity (#648), and this
 gate discards the open scene more than once.
 
 Artifacts: evals/retarget_live/walk_sheet.png, retarget_multi_take.fbx
-Exit: 0 pass, 1 fail, 2 no connection / preflight refused.
+Exit: 0 pass, 1 fail or preflight refused, 2 no connection.
 """
 
 from __future__ import annotations

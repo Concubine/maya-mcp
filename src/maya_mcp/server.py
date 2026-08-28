@@ -2693,7 +2693,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         measure the result (measure_clip, #773), and leave no HumanIK state
         behind. Once baked, the clip is indistinguishable from one
         author_clip produced - preview_clip/measure_clip/delete_clip/
-        multi-take export_fbx all read it unchanged."""
+        multi-take export_fbx all read it unchanged. Stock a local directory
+        with BVH or FBX clips (e.g. from CMU Motion Capture Database; the
+        repo ships fixtures at evals/mocap_fixtures/, see ATTRIBUTION.md)."""
         return RetargetClipResult.model_validate(
             maya.request(
                 "retarget_clip",
@@ -2742,7 +2744,7 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 "clean_clip",
                 {"root": root, "clip": clip, "filter": filter,
                  "lock_contacts": lock_contacts},
-                timeout_s=BOOL_TIMEOUT_S,
+                timeout_s=EXPORT_TIMEOUT_S,
             )
         )
 

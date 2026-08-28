@@ -2567,7 +2567,7 @@ class TestRetargetTools:
             "root": "|rig|Hips", "clip": "walk01",
             "filter": True, "lock_contacts": True,
         }
-        assert conn.calls[0]["timeout_s"] == server_mod.BOOL_TIMEOUT_S
+        assert conn.calls[0]["timeout_s"] == server_mod.EXPORT_TIMEOUT_S
         assert result.structured_content["checkpoint_id"] == "007_clean_clip"
 
     def test_maya_clean_clip_forwards_explicit_filter_and_lock_contacts(self):
