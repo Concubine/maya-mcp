@@ -1,0 +1,77 @@
+# Subdivision-cage vocabulary — design (#769)
+
+Date: 2026-08-29. Short brainstorm (the ticket pre-answered most of it);
+design approved in chat. Sibling of #768: that ticket added what can be
+authored, this one raises the quality of what is authored. Analysis:
+`docs/superpowers/plans/2026-08-26-modelling-vocabulary-gap.md` §2.
+
+## Decision: four ops INSIDE `maya_sculpt_ops`
+
+No new tool. `sculpt.py`'s `_OPS` registry gains four entries, batched per
+call like the existing eight, same mesh/result conventions:
+
+1. **`insert_loop`** — wraps `polySplitRing`. Params: `edge` (ONE component
+   in the `"e[12]"` syntax `bevel_edges`/`crease_edges` already take — reuse
+   that resolver, never invent a second), `count` (int ≥1, default 1),
+   `position` (0–1 across the ring, default 0.5; `count`>1 distributes
+   evenly across (0,1)). Result reports edges/faces before → after.
+2. **`extrude_edges`** — wraps `polyExtrudeEdge`. Params: `edges` (list,
+   same syntax), `translate` ([x,y,z] world offset, required — an extrude
+   that moves nothing is a no-op nobody wants silently), `divisions`
+   (default 1). Result verifies the measured new-face count matches
+   `len(edges) * divisions` and reports it.
+3. **`mirror_topology`** — wraps `polyMirrorFace`. Params: `axis`
+   ("x"|"y"|"z"), `direction` ("+"|"-", default "+" meaning the geometry is
+   duplicated toward positive axis — stated, probe-verified), and
+   `merge_threshold` (scene units, default stated in the tool docs — the
+   value is chosen during implementation by probing what merges a
+   coincident seam without eating nearby detail; NOT silently Maya's).
+   **The care-point rule:** after the op, shell count is MEASURED; if the
+   result is not one shell, the op FAILS with the measured minimum seam gap
+   in the message (hint: raise `merge_threshold` or move the open border to
+   the mirror plane) — unless `allow_unmerged=true` was passed. Result
+   reports `merged_vertices` and `shells`.
+4. **`split`** — wraps `polySplit`. Params: `points` — a list of
+   `[edge, t]` pairs (`"e[12]"` syntax + parameter 0–1 along that edge),
+   ≥2 entries. Result reports edges/faces before → after.
+
+All four validate through the existing per-op param validation pattern in
+`sculpt.py` (unknown op-level keys refused the way existing ops refuse).
+
+## Probe-first (the two risky commands)
+
+`polySplitRing`'s ring addressing/flags and `polyMirrorFace`'s
+axis/direction/merge semantics get a mayapy probe before implementation —
+both are flag-rich commands of the kind that has repeatedly diverged from
+documentation on this Maya (#764/#768/#774 precedents). `polyExtrudeEdge`
+and `polySplit` are probed in the same script since it costs one section
+each.
+
+## Testing
+
+- **Headless**: param validation refusals per op (bad component syntax,
+  count/position/threshold shapes, empty lists) — the existing sculpt
+  validation test pattern.
+- **mayapy** (real geometry, counted): insert_loop on a cylinder adds
+  exactly one ring of edges/faces at the stated position; extrude_edges on
+  a plane border adds the predicted faces; mirror_topology on a half-cube
+  yields ONE shell with the predicted vertex merge count, and the
+  refuse-on-unmerged path fires with a measured gap when the mesh sits off
+  the plane; split adds the predicted topology.
+- **Live gate** (`evals/cage_ops_live.py`, disposable 9878 Maya): build a
+  deliberately asymmetric HALF form (primitives + existing sculpt verbs) →
+  insert loops → extrude an edge border → `mirror_topology` → measure the
+  ticket's promise directly: **every vertex maps onto a counterpart under
+  reflection about the mirror plane within an epsilon chosen by
+  measurement**; shells == 1; then `smooth` (the workflow's last step)
+  survives with the loops holding the silhouette (bbox comparison
+  smoothed-with-loops vs smoothed-without — the loop's whole purpose,
+  measured); composition: `uv_atlas` + `bind_skin` work on the result; one
+  render sheet for eyes.
+
+## Out of scope
+
+- No new tool surface; no changes to existing eight ops beyond registry
+  adjacency.
+- `polyChamferVertex`/`birail`/`curveWarp` — measured absent on this Maya.
+- Cage *presets* (e.g. "loop-cut a limb") — YAGNI until a consumer asks.
