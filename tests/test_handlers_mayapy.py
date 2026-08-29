@@ -1276,10 +1276,15 @@ class TestCageOpsInMaya:
             sculpt.sculpt_ops(
                 {"mesh": mesh, "ops": [{"op": "mirror_topology", "axis": "x"}]}
             )
-        numbers = [
-            float(n) for n in re.findall(r"[-+]?\d*\.\d+|\d+", str(exc.value))
-        ]
-        assert any(n >= 0.09 for n in numbers), str(exc.value)
+        # Pin the specific measured-gap number in _op_mirror_topology's own
+        # message ("...gap before the op: %.6g, merge_threshold was..."),
+        # not just any number in the (wrapped) exception text - a bare
+        # any(n >= 0.09 for n in numbers) over every number in the string
+        # would also pass on the unrelated shell count (2 >= 0.09) even if a
+        # future edit dropped pre_gap from the message entirely.
+        m = re.search(r"gap before the op: ([\d.eE+-]+)", str(exc.value))
+        assert m is not None, str(exc.value)
+        assert float(m.group(1)) == pytest.approx(0.1, abs=0.01)
         # the mesh must be untouched by the refused op path's own claim - Maya
         # actually already applied polyMirrorFace before the shell check, so
         # this asserts the refusal fires on the same live result, not a stale
