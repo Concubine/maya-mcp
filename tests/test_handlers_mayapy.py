@@ -1120,6 +1120,213 @@ class TestSculptInMaya:
         assert checkpoint_id in exc.value.hint
 
 
+def _build_half_cube_on_plane(cmds, name, border_offset=0.0):
+    """Cube of width/height/depth 2 with its +X cap face deleted, leaving an
+    open border loop sitting on the mirror plane (x=0) - mirrors
+    evals/cage_probe_769.py's build_half_cube exactly (seam_x=0.0 case).
+    border_offset shifts the open border's OWN vertices (component-space,
+    not the transform) further along +X, simulating a half-shell authored
+    slightly off the intended mirror plane."""
+    c = cmds.polyCube(name=name, width=2, height=2, depth=2, constructionHistory=False)
+    mesh = (cmds.ls(c[0], long=True) or [c[0]])[0]
+    cmds.xform(mesh, translation=(-1, 0, 0), worldSpace=True)
+    cmds.makeIdentity(mesh, apply=True, translate=True, rotate=True, scale=True)
+    nfaces = cmds.polyEvaluate(mesh, face=True)
+    target = None
+    for i in range(nfaces):
+        vs = cmds.ls(
+            cmds.polyListComponentConversion(mesh + ".f[%d]" % i, toVertex=True),
+            flatten=True,
+        )
+        if all(abs(cmds.pointPosition(v, world=True)[0]) < 1e-6 for v in vs):
+            target = i
+            break
+    cmds.delete(mesh + ".f[%d]" % target)
+    if border_offset:
+        for v in cmds.ls(mesh + ".vtx[*]", flatten=True):
+            if abs(cmds.pointPosition(v, world=True)[0]) < 1e-6:
+                cmds.xform(
+                    v, translation=(border_offset, 0, 0), worldSpace=True,
+                    relative=True,
+                )
+    return mesh
+
+
+class TestCageOpsInMaya:
+    """The four ops built for #769's subdivision-cage authoring: real-Maya
+    topology counted against evals/cage_probe_769.py's measured arithmetic
+    (task-1-report.md), never only the handler's own self-report - every
+    test re-queries cmds independently of op_results."""
+
+    def test_insert_loop_adds_one_ring_at_position(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import sculpt
+
+        # Matches the probe's fresh_cyl(): radius=1, height=4,
+        # subdivisionsAxis=20, subdivisionsHeight=1 - edge 40 is a lateral
+        # edge spanning the full Y range [-2, 2].
+        cmds.polyCylinder(
+            name="loop_cyl", radius=1, height=4, subdivisionsAxis=20,
+            subdivisionsHeight=1, constructionHistory=False,
+        )
+        mesh = "|loop_cyl"
+        edges_before = cmds.polyEvaluate(mesh, edge=True)
+        faces_before = cmds.polyEvaluate(mesh, face=True)
+        verts_before = set(cmds.ls(mesh + ".vtx[*]", flatten=True))
+
+        result = sculpt.sculpt_ops(
+            {"mesh": mesh,
+             "ops": [{"op": "insert_loop", "edge": "e[40]", "position": 0.25}]}
+        )
+        op_result = result["op_results"][0]
+        assert op_result["op"] == "insert_loop"
+        assert op_result["loops_inserted"] == 1
+        # probe: N_AROUND=20 -> +N verts (not itself in op_results), +2N
+        # edges, +N faces per loop.
+        assert op_result["edges_after"] - op_result["edges_before"] == 40
+        assert op_result["faces_after"] - op_result["faces_before"] == 20
+
+        # independent cmds re-query, not just the self-report
+        assert cmds.polyEvaluate(mesh, edge=True) - edges_before == 40
+        assert cmds.polyEvaluate(mesh, face=True) - faces_before == 20
+        new_verts = set(cmds.ls(mesh + ".vtx[*]", flatten=True)) - verts_before
+        assert len(new_verts) == 20
+        # position=0.25 along the edge's own Y span [-2, 2] -> Y = -1.0
+        # (probe: splitring_weight_0.25_measured_fraction_of_edge: 0.25)
+        ys = {round(cmds.pointPosition(v, world=True)[1], 4) for v in new_verts}
+        assert ys == {-1.0}
+
+    def test_extrude_edges_yields_predicted_faces(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import sculpt
+
+        # Matches the probe's fresh_plane(): width=4, height=1,
+        # subdivisionsWidth=4, subdivisionsHeight=1 - edges 0,1,2 are
+        # boundary edges (probe: plane_boundary_edge_indices includes 0,1,2).
+        cmds.polyPlane(
+            name="extrude_plane", width=4, height=1, subdivisionsWidth=4,
+            subdivisionsHeight=1, constructionHistory=False,
+        )
+        mesh = "|extrude_plane"
+        faces_before = cmds.polyEvaluate(mesh, face=True)
+        verts_before = set(cmds.ls(mesh + ".vtx[*]", flatten=True))
+
+        result = sculpt.sculpt_ops(
+            {"mesh": mesh,
+             "ops": [{"op": "extrude_edges", "edges": ["e[0]", "e[1]", "e[2]"],
+                      "translate": [0, 2, 0], "divisions": 2}]}
+        )
+        op_result = result["op_results"][0]
+        # probe: extrude_edges3_div2_face_delta == 6 (== 3 edges * 2 divisions)
+        assert op_result["new_faces"] == 6
+        assert op_result["faces_after"] - op_result["faces_before"] == 6
+
+        # independent cmds re-query
+        assert cmds.polyEvaluate(mesh, face=True) - faces_before == 6
+        new_verts = set(cmds.ls(mesh + ".vtx[*]", flatten=True)) - verts_before
+        ys = [cmds.pointPosition(v, world=True)[1] for v in new_verts]
+        # translate is a literal world-space offset (probe:
+        # extrude_translate_is_world_offset_new_vertex_Ys == [2.0, 2.0]) - the
+        # farthest new border reaches the full requested offset.
+        assert max(ys) == pytest.approx(2.0)
+
+    def test_mirror_topology_merges_to_one_shell(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import sculpt
+
+        mesh = _build_half_cube_on_plane(cmds, "mc_merge")
+        verts_before = cmds.polyEvaluate(mesh, vertex=True)
+        assert verts_before == 8  # probe: half_cube_pre_shells_verts_faces
+
+        result = sculpt.sculpt_ops(
+            {"mesh": mesh, "ops": [{"op": "mirror_topology", "axis": "x"}]}
+        )
+        op_result = result["op_results"][0]
+        assert op_result["shells"] == 1
+        # probe: mergeMode_1_on_plane_shells_verts == (1, 12) from 8 verts ->
+        # 4 border verts merge (2*8-12=4).
+        assert op_result["merged_vertices"] == 4
+
+        # independent cmds re-query
+        assert cmds.polyEvaluate(mesh, shell=True) == 1
+        verts_after = cmds.polyEvaluate(mesh, vertex=True)
+        assert verts_after == 12
+        assert verts_after == 2 * verts_before - 4
+        bbox = cmds.exactWorldBoundingBox(mesh)
+        # probe: mirror_axis0_shells_verts_bbox closes the box to [-2,2] on X
+        assert bbox[0] == pytest.approx(-2.0)
+        assert bbox[3] == pytest.approx(2.0)
+
+    def test_mirror_off_plane_refuses_with_measured_gap(self):
+        import re
+
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import sculpt
+
+        # Default merge_threshold (0.001) can never bridge a deliberate
+        # 0.1-unit gap (probe's mtt1_offset0.1_threshold0.001 cell: 2 shells,
+        # unmerged) - refuses instead of silently leaving two shells.
+        mesh = _build_half_cube_on_plane(cmds, "mc_refuse", border_offset=0.1)
+        with pytest.raises(HandlerError) as exc:
+            sculpt.sculpt_ops(
+                {"mesh": mesh, "ops": [{"op": "mirror_topology", "axis": "x"}]}
+            )
+        numbers = [
+            float(n) for n in re.findall(r"[-+]?\d*\.\d+|\d+", str(exc.value))
+        ]
+        assert any(n >= 0.09 for n in numbers), str(exc.value)
+        # the mesh must be untouched by the refused op path's own claim - Maya
+        # actually already applied polyMirrorFace before the shell check, so
+        # this asserts the refusal fires on the same live result, not a stale
+        # pre-op state.
+        assert cmds.polyEvaluate(mesh, shell=True) == 2
+
+        # allow_unmerged=True keeps the unmerged result instead of refusing.
+        mesh2 = _build_half_cube_on_plane(cmds, "mc_allow", border_offset=0.1)
+        result = sculpt.sculpt_ops(
+            {"mesh": mesh2,
+             "ops": [{"op": "mirror_topology", "axis": "x",
+                      "allow_unmerged": True}]}
+        )
+        op_result = result["op_results"][0]
+        assert op_result["shells"] == 2
+        assert cmds.polyEvaluate(mesh2, shell=True) == 2
+
+    def test_split_cuts_predicted_topology(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import sculpt
+
+        # Matches the probe's quad plane: width=2, height=2,
+        # subdivisionsWidth=1, subdivisionsHeight=1.
+        cmds.polyPlane(
+            name="split_quad", width=2, height=2, subdivisionsWidth=1,
+            subdivisionsHeight=1, constructionHistory=False,
+        )
+        mesh = "|split_quad"
+        faces_before = cmds.polyEvaluate(mesh, face=True)
+        edges_before = cmds.polyEvaluate(mesh, edge=True)
+
+        result = sculpt.sculpt_ops(
+            {"mesh": mesh,
+             "ops": [{"op": "split",
+                      "points": [["e[0]", 0.5], ["e[2]", 0.5]]}]}
+        )
+        op_result = result["op_results"][0]
+        # probe: polysplit_two_midpoints_delta_verts_edges_faces == (2, 3, 1)
+        assert op_result["faces_after"] - op_result["faces_before"] == 1
+        assert op_result["edges_after"] - op_result["edges_before"] == 3
+
+        # independent cmds re-query
+        assert cmds.polyEvaluate(mesh, face=True) - faces_before == 1
+        assert cmds.polyEvaluate(mesh, edge=True) - edges_before == 3
+
+
 class TestViewportInMaya:
     def test_set_camera_creates_and_positions_named_camera(self):
         import maya.cmds as cmds
