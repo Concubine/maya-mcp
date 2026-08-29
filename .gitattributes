@@ -1,0 +1,5 @@
+# .ma is Maya ASCII scene data, not Mathematica - GitHub's linguist maps the
+# extension to Wolfram Language and labeled the whole repo with it.
+*.ma -linguist-detectable
+*.mb -linguist-detectable
+*.bvh -linguist-detectable
