@@ -857,6 +857,211 @@ def test_deform_raises_for_whitelisted_type_missing_from_nonlinear_types(monkeyp
     assert not any(c[0] == "nonLinear" for c in fake.calls)
 
 
+# --- #769 cage ops: insert_loop / extrude_edges / mirror_topology / split --
+# Validation-only, matching the file's existing idiom: whole-op validation
+# runs before any cmds mutation, so every refusal here leaves fake.calls
+# empty, just like test_remesh_retopo_rejects_too_low_target_polycount.
+
+def test_insert_loop_rejects_unknown_param(monkeypatch):
+    fake = _mesh_fake("|col")
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        sculpt.sculpt_ops({
+            "mesh": "|col",
+            "ops": [{"op": "insert_loop", "edge": "e[12]", "bogus": 1}],
+        })
+    assert "bogus" in str(exc.value) or "bogus" in (exc.value.hint or "")
+    assert fake.calls == []
+
+
+def test_insert_loop_rejects_count_zero(monkeypatch):
+    fake = _mesh_fake("|col")
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        sculpt.sculpt_ops({
+            "mesh": "|col",
+            "ops": [{"op": "insert_loop", "edge": "e[12]", "count": 0}],
+        })
+    assert "count" in str(exc.value)
+    assert fake.calls == []
+
+
+def test_insert_loop_rejects_position_out_of_range(monkeypatch):
+    fake = _mesh_fake("|col")
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        sculpt.sculpt_ops({
+            "mesh": "|col",
+            "ops": [{"op": "insert_loop", "edge": "e[12]", "position": 1.5}],
+        })
+    assert "position" in str(exc.value)
+    assert fake.calls == []
+
+
+def test_insert_loop_rejects_a_face_component(monkeypatch):
+    # The edge param must be an 'e[N]' single index - a face component is a
+    # kind mismatch, and a range/list ('e[0:3]') is refused too (see
+    # test_insert_loop_rejects_edge_range below): both would silently break
+    # the len()-based counting extrude_edges/split rely on downstream.
+    fake = _mesh_fake("|col")
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        sculpt.sculpt_ops({
+            "mesh": "|col",
+            "ops": [{"op": "insert_loop", "edge": "f[3]"}],
+        })
+    assert "edge" in str(exc.value)
+    assert fake.calls == []
+
+
+def test_insert_loop_rejects_edge_range():
+    with pytest.raises(HandlerError) as exc:
+        sculpt._single_component_index("e[0:3]", "e", "edge")
+    assert "single" in str(exc.value)
+
+
+def test_extrude_edges_rejects_unknown_param(monkeypatch):
+    fake = _mesh_fake("|col")
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        sculpt.sculpt_ops({
+            "mesh": "|col",
+            "ops": [{"op": "extrude_edges", "edges": ["e[1]"],
+                      "translate": [0, 1, 0], "bogus": 1}],
+        })
+    assert "bogus" in str(exc.value) or "bogus" in (exc.value.hint or "")
+    assert fake.calls == []
+
+
+def test_extrude_edges_rejects_missing_translate(monkeypatch):
+    fake = _mesh_fake("|col")
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        sculpt.sculpt_ops({
+            "mesh": "|col",
+            "ops": [{"op": "extrude_edges", "edges": ["e[1]"]}],
+        })
+    assert "translate" in str(exc.value)
+    assert fake.calls == []
+
+
+def test_extrude_edges_rejects_zero_translate(monkeypatch):
+    # design.md: "an extrude that moves nothing is a no-op nobody wants
+    # silently" - a literal [0,0,0] is refused, not just a missing key.
+    fake = _mesh_fake("|col")
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        sculpt.sculpt_ops({
+            "mesh": "|col",
+            "ops": [{"op": "extrude_edges", "edges": ["e[1]"],
+                      "translate": [0, 0, 0]}],
+        })
+    assert "translate" in str(exc.value)
+    assert fake.calls == []
+
+
+def test_extrude_edges_rejects_empty_edges(monkeypatch):
+    fake = _mesh_fake("|col")
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        sculpt.sculpt_ops({
+            "mesh": "|col",
+            "ops": [{"op": "extrude_edges", "edges": [], "translate": [0, 1, 0]}],
+        })
+    assert "edges" in str(exc.value)
+    assert fake.calls == []
+
+
+def test_mirror_topology_rejects_unknown_param(monkeypatch):
+    fake = _mesh_fake("|col")
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        sculpt.sculpt_ops({
+            "mesh": "|col",
+            "ops": [{"op": "mirror_topology", "axis": "x", "bogus": 1}],
+        })
+    assert "bogus" in str(exc.value) or "bogus" in (exc.value.hint or "")
+    assert fake.calls == []
+
+
+def test_mirror_topology_rejects_bad_axis(monkeypatch):
+    fake = _mesh_fake("|col")
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        sculpt.sculpt_ops({
+            "mesh": "|col",
+            "ops": [{"op": "mirror_topology", "axis": "w"}],
+        })
+    assert "axis" in str(exc.value)
+    assert fake.calls == []
+
+
+def test_mirror_topology_rejects_bad_direction(monkeypatch):
+    fake = _mesh_fake("|col")
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        sculpt.sculpt_ops({
+            "mesh": "|col",
+            "ops": [{"op": "mirror_topology", "axis": "x", "direction": "up"}],
+        })
+    assert "direction" in str(exc.value)
+    assert fake.calls == []
+
+
+def test_mirror_topology_rejects_negative_merge_threshold(monkeypatch):
+    fake = _mesh_fake("|col")
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        sculpt.sculpt_ops({
+            "mesh": "|col",
+            "ops": [{"op": "mirror_topology", "axis": "x", "merge_threshold": -1}],
+        })
+    assert "merge_threshold" in str(exc.value)
+    assert fake.calls == []
+
+
+def test_split_rejects_unknown_param(monkeypatch):
+    fake = _mesh_fake("|col")
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        sculpt.sculpt_ops({
+            "mesh": "|col",
+            "ops": [{"op": "split", "points": [["e[0]", 0.5], ["e[2]", 0.5]],
+                      "bogus": 1}],
+        })
+    assert "bogus" in str(exc.value) or "bogus" in (exc.value.hint or "")
+    assert fake.calls == []
+
+
+def test_split_rejects_fewer_than_two_points(monkeypatch):
+    fake = _mesh_fake("|col")
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        sculpt.sculpt_ops({
+            "mesh": "|col",
+            "ops": [{"op": "split", "points": [["e[0]", 0.5]]}],
+        })
+    assert "points" in str(exc.value)
+    assert fake.calls == []
+
+
+def test_split_rejects_t_out_of_range(monkeypatch):
+    fake = _mesh_fake("|col")
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        sculpt.sculpt_ops({
+            "mesh": "|col",
+            "ops": [{"op": "split", "points": [["e[0]", 0.5], ["e[2]", 1.5]]}],
+        })
+    assert "points" in str(exc.value) or "t" in str(exc.value)
+    assert fake.calls == []
+
+
+def test_cage_ops_are_registered():
+    for kind in ("insert_loop", "extrude_edges", "mirror_topology", "split"):
+        assert kind in sculpt._OPS
+
+
 def _patch_auto_checkpoint(monkeypatch):
     monkeypatch.setattr(
         session, "auto_checkpoint",

@@ -1734,18 +1734,36 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             'extrude_faces {faces:"f[120:135]", distance, keep_together:true}; '
             'bevel_edges {edges:"e[3:7]", width, segments:1..10}; '
             'crease_edges {edges, amount:0..10} — stone-plate joints; '
-            'bridge {edges_a, edges_b}. '
+            'bridge {edges_a, edges_b}; '
+            'insert_loop {edge:"e[12]", count:1, position:0..1} — how a cage '
+            'keeps its silhouette under smooth: an unsupported flat span '
+            'collapses toward its neighbours\' average, a loop nearby gives '
+            'smooth something to hold onto; '
+            'extrude_edges {edges:["e[3]","e[5]"], translate:[x,y,z], divisions:1} '
+            '— translate is a world-space offset and is required, a zero '
+            'offset is refused as a no-op nobody wants silently; '
+            'mirror_topology {axis:"x"|"y"|"z", direction:"+"|"-", '
+            'merge_threshold:0.001, allow_unmerged:false} — mirrors about the '
+            'WORLD-ORIGIN plane on that axis (not the object\'s own pivot) and '
+            'REFUSES an unmerged result: if the open border does not weld to '
+            'one shell it fails with the measured seam gap, unless '
+            'allow_unmerged=true; '
+            'split {points:[["e[12]",0.5], ["e[9]",0.3]]} — cuts a face through '
+            '>=2 edge points, needs at least 2 (a single point silently does '
+            'nothing in Maya). '
             'soft_move/inflate_region/displace_noise are fast vertex ops that write '
             'via the Maya API and bypass the undo queue entirely — maya_undo will NOT '
             'revert them. If any of the three appear in this list, the call '
             'auto-checkpoints before applying anything; pass the returned '
-            'checkpoint_id to maya_restore_checkpoint to revert. The other five '
-            'ops (smooth, extrude_faces, bevel_edges, '
-            'crease_edges, bridge) are cmds-based and undo normally.'
+            'checkpoint_id to maya_restore_checkpoint to revert. The other nine '
+            'ops (smooth, extrude_faces, bevel_edges, crease_edges, bridge, '
+            'insert_loop, extrude_edges, mirror_topology, split) are cmds-based '
+            'and undo normally.'
         ))],
     ) -> SculptResult:
         """Apply sculpt ops in order to one mesh. cmds-based ops (smooth,
-        extrude_faces, bevel_edges, crease_edges, bridge) undo normally via
+        extrude_faces, bevel_edges, crease_edges, bridge, insert_loop,
+        extrude_edges, mirror_topology, split) undo normally via
         maya_undo(1). soft_move, inflate_region, and displace_noise write
         vertices via the Maya API and bypass the undo queue - when any of
         those three are requested, the call auto-checkpoints first, and

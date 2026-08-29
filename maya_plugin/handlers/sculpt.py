@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List
 
-from ..dispatcher import HandlerError
+from ..dispatcher import HandlerError, require_known_keys
 from . import naming, sculpt_math, units
 
 MAX_OPS = 20
@@ -26,12 +26,17 @@ def _cmds():
     return cmds
 
 
-def _om_mesh(mesh_long: str):
+def _om_mesh_dag(mesh_long: str):
     import maya.api.OpenMaya as om  # noqa: PLC0415
 
     sel = om.MSelectionList()
     sel.add(mesh_long)
     dag = sel.getDagPath(0)
+    return om, dag
+
+
+def _om_mesh(mesh_long: str):
+    om, dag = _om_mesh_dag(mesh_long)
     return om, om.MFnMesh(dag)
 
 
@@ -159,6 +164,39 @@ def _components(mesh_long: str, spec: Any, kind: str, key: str) -> str:
     return "%s.%s" % (mesh_long, spec)
 
 
+def _single_component_index(spec: Any, kind: str, key: str) -> int:
+    """Parse a single-index component string ('e[12]') to its raw int index.
+
+    insert_loop/extrude_edges/split all need a raw index, not a component
+    string: polySplitRing and polySplit take rootEdge=/insertpoint=(idx, t)
+    directly (Measured by evals/cage_probe_769.py - passing a component
+    string straight to polySplitRing prints "Can't perform polySplitRing1 on
+    selection" and silently changes nothing, no exception). Refusing a range
+    or list here (rather than silently taking its first index) is what makes
+    `len(edges)` in extrude_edges/split actually count edges - a range like
+    'e[0:3]' would otherwise pass and undercount by a factor of the range
+    size.
+    """
+    if not isinstance(spec, str) or not spec.startswith(kind + "["):
+        raise HandlerError(
+            "%s must be a single component like '%s[12]'" % (key, kind),
+            hint="got %r" % (spec,),
+        )
+    inner = spec[len(kind) + 1:]
+    if not inner.endswith("]"):
+        raise HandlerError(
+            "%s must look like '%s[12]'" % (key, kind), hint="got %r" % (spec,)
+        )
+    inner = inner[:-1]
+    if not inner.isdigit():
+        raise HandlerError(
+            "%s must address exactly one %s (a single index), not a range "
+            "or list" % (key, kind),
+            hint="got %r; use e.g. '%s[12]', not '%s[0:3]'" % (spec, kind, kind),
+        )
+    return int(inner)
+
+
 def _op_smooth(cmds, mesh_long: str, op: Dict[str, Any]) -> None:
     divisions = op.get("divisions", 1)
     if not isinstance(divisions, int) or not (1 <= divisions <= 3):
@@ -215,6 +253,295 @@ def _op_bridge(cmds, mesh_long: str, op: Dict[str, Any]) -> None:
             cmds.select(clear=True)
 
 
+INSERT_LOOP_KEYS = {"op", "edge", "count", "position"}
+
+
+def _op_insert_loop(cmds, mesh_long: str, op: Dict[str, Any]) -> Dict[str, Any]:
+    """Wraps polySplitRing - how a subdivision cage keeps its silhouette under
+    `smooth`: an unsupported flat span collapses toward its neighbours'
+    average when smoothed, and a loop near the edge gives smooth something to
+    hold onto.
+
+    Measured by evals/cage_probe_769.py:
+    - the edge must be selected via polySelect(edgeRing=idx) BEFORE
+      polySplitRing runs; passing a component string straight to
+      polySplitRing prints a Maya warning and silently changes nothing (no
+      exception - this is why `edge` is resolved to a raw index here, never
+      forwarded as a string).
+    - `count`==1 uses splitType=1 with weight=`position`, landing the loop at
+      exactly that fraction of the edge's own span (weight 0.25/0.5/0.75 all
+      measured exact).
+    - `count`>1 uses splitType=2 with divisions=`count`, which distributes N
+      loops evenly across (0,1) and IGNORES weight/`position` entirely - this
+      is the only reliable multi-loop path measured: repeated single calls at
+      the same edge do NOT distribute evenly (the index renumbers to the
+      lower remaining sub-segment after each split, nesting toward one end).
+    - per-loop yield on an N-around ring is +N vertices, +2N edges, +N faces.
+    """
+    require_known_keys(op, INSERT_LOOP_KEYS, "insert_loop")
+    idx = _single_component_index(op.get("edge"), "e", "edge")
+    count = op.get("count", 1)
+    if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+        raise HandlerError(
+            "insert_loop needs count >= 1", hint="got %r" % (count,)
+        )
+    position = op.get("position", 0.5)
+    if (
+        not isinstance(position, (int, float)) or isinstance(position, bool)
+        or not (0.0 <= position <= 1.0)
+    ):
+        raise HandlerError(
+            "insert_loop needs position in 0..1", hint="got %r" % (position,)
+        )
+    edges_before = cmds.polyEvaluate(mesh_long, edge=True)
+    faces_before = cmds.polyEvaluate(mesh_long, face=True)
+    cmds.polySelect(mesh_long, edgeRing=idx)
+    if count == 1:
+        cmds.polySplitRing(
+            rootEdge=idx, splitType=1, weight=float(position),
+            constructionHistory=False,
+        )
+    else:
+        cmds.polySplitRing(
+            rootEdge=idx, splitType=2, divisions=count,
+            constructionHistory=False,
+        )
+    edges_after = cmds.polyEvaluate(mesh_long, edge=True)
+    faces_after = cmds.polyEvaluate(mesh_long, face=True)
+    return {
+        "loops_inserted": count,
+        "edges_before": edges_before, "edges_after": edges_after,
+        "faces_before": faces_before, "faces_after": faces_after,
+    }
+
+
+EXTRUDE_EDGES_KEYS = {"op", "edges", "translate", "divisions"}
+
+
+def _op_extrude_edges(cmds, mesh_long: str, op: Dict[str, Any]) -> Dict[str, Any]:
+    """Wraps polyExtrudeEdge. Measured by evals/cage_probe_769.py:
+    `translate` is a literal WORLD-SPACE offset (an edge at y=0 with
+    translate=(0,2,0) lands its new vertices at exactly y=2, not a
+    normal-relative offset), and new-face yield is EXACTLY
+    `len(edges) * divisions` for every combination tested (1/3 edges x
+    1/2 divisions, border and interior edges alike) - checked below and
+    raised on any mismatch, because a silent short count on a cage op is
+    exactly the kind of "reported success, changed less than asked"
+    failure this codebase has been burned by before (#636).
+    """
+    require_known_keys(op, EXTRUDE_EDGES_KEYS, "extrude_edges")
+    spec = op.get("edges")
+    if not isinstance(spec, list) or not spec:
+        raise HandlerError(
+            "extrude_edges needs a non-empty edges list",
+            hint="e.g. edges=['e[3]', 'e[5]']",
+        )
+    indices = [
+        _single_component_index(item, "e", "edges[%d]" % i)
+        for i, item in enumerate(spec)
+    ]
+    edge_strs = ["%s.e[%d]" % (mesh_long, idx) for idx in indices]
+    translate = op.get("translate")
+    if (
+        not isinstance(translate, (list, tuple)) or len(translate) != 3
+        or not all(
+            isinstance(v, (int, float)) and not isinstance(v, bool)
+            for v in translate
+        )
+    ):
+        raise HandlerError(
+            "extrude_edges needs translate=[dx,dy,dz]",
+            hint="a world-space offset; required because an extrude that "
+                 "moves nothing is a no-op nobody wants silently",
+        )
+    translate = [float(v) for v in translate]
+    if all(v == 0.0 for v in translate):
+        raise HandlerError(
+            "translate must not be [0,0,0]",
+            hint="an extrude that moves nothing is a no-op nobody wants silently",
+        )
+    divisions = op.get("divisions", 1)
+    if not isinstance(divisions, int) or isinstance(divisions, bool) or divisions < 1:
+        raise HandlerError(
+            "extrude_edges needs divisions >= 1", hint="got %r" % (divisions,)
+        )
+    faces_before = cmds.polyEvaluate(mesh_long, face=True)
+    cmds.polyExtrudeEdge(
+        edge_strs, translate=translate, divisions=divisions,
+        constructionHistory=False,
+    )
+    faces_after = cmds.polyEvaluate(mesh_long, face=True)
+    new_faces = faces_after - faces_before
+    expected = len(edge_strs) * divisions
+    if new_faces != expected:
+        raise HandlerError(
+            "extrude_edges expected %d new faces (%d edges x %d divisions) "
+            "but Maya reported %d" % (expected, len(edge_strs), divisions, new_faces),
+            hint="the mesh already applied - inspect it before retrying; "
+                 "this invariant held in every configuration probed "
+                 "(evals/cage_probe_769.py), so a mismatch means something "
+                 "about this mesh's topology diverges from what was measured",
+        )
+    return {
+        "faces_before": faces_before, "faces_after": faces_after,
+        "new_faces": new_faces,
+    }
+
+
+# axis: polyMirrorFace's `axis` is the plane's NORMAL, fixed at world origin -
+# Measured by evals/cage_probe_769.py: moving the mesh's own pivot/transform,
+# or passing `worldSpace`, has zero effect on where the plane sits; only the
+# unexposed `mirrorPlaneCenter` flag overrides world origin (YAGNI here - a
+# mesh living away from the origin gets the measured-gap refusal below,
+# which is an honest answer: move it to the plane, or pass allow_unmerged).
+_MIRROR_AXIS = {"x": 0, "y": 1, "z": 2}
+# `direction` is part of the surface for parity with polyMirrorFace's own
+# flag, but Measured by evals/cage_probe_769.py: direction in {0, 1, -1, 2}
+# produced byte-identical results in every whole-object invocation tested -
+# it is passed through, documented as inert on this Maya, never relied on.
+_MIRROR_DIRECTION = {"+": 1, "-": -1}
+# mergeThresholdType 1 (2 was byte-identical in the probed 40-cell grid, so
+# either works - 1 is picked arbitrarily). Under mergeMode=1 + this type,
+# Measured: merge succeeds iff `2 * offset < mergeThreshold` (strict), where
+# `offset` is a border vertex's own one-sided distance from the plane (the
+# actual cross-plane gap to its mirrored counterpart is `2 * offset`). Every
+# successful merge in the grid snapped the border exactly onto the plane -
+# there is no partial/averaged case.
+_MIRROR_THRESHOLD_TYPE = 1
+# merge_threshold default: 0.001 scene units (mm-scale in a metre-native
+# scene). Derivation from the probed grid: our `merge_threshold` is the
+# one-sided offset the caller tolerates, so Maya's mergeThreshold is set to
+# 2x it; a seam within floating-point noise of the plane (offset ~1e-6, the
+# case a boolean-delete-cap-face construction actually produces) merges
+# under any positive value, while a deliberate 0.02-unit gap - the smallest
+# "off" case in the probed grid - refuses: 2*0.02=0.04 is not < 2*0.001=0.002.
+DEFAULT_MERGE_THRESHOLD = 0.001
+
+MIRROR_TOPOLOGY_KEYS = {"op", "axis", "direction", "merge_threshold", "allow_unmerged"}
+
+
+def _min_border_plane_gap(mesh_long: str, axis_idx: int) -> float:
+    """Minimum distance from an open-border vertex to the mirror plane
+    (world origin along `axis_idx` - see _MIRROR_AXIS above). +inf if the
+    mesh has no open border (already closed)."""
+    om, dag = _om_mesh_dag(mesh_long)
+    fn = om.MFnMesh(dag)
+    border_vert_ids = set()
+    edge_it = om.MItMeshEdge(dag)
+    while not edge_it.isDone():
+        if edge_it.numConnectedFaces() == 1:
+            border_vert_ids.add(edge_it.vertexId(0))
+            border_vert_ids.add(edge_it.vertexId(1))
+        edge_it.next()
+    if not border_vert_ids:
+        return float("inf")
+    best = float("inf")
+    for vid in border_vert_ids:
+        p = fn.getPoint(vid, om.MSpace.kWorld)
+        best = min(best, abs((p.x, p.y, p.z)[axis_idx]))
+    return best
+
+
+def _op_mirror_topology(cmds, mesh_long: str, op: Dict[str, Any]) -> Dict[str, Any]:
+    """Wraps polyMirrorFace. REFUSES an unmerged result: after the op, shell
+    count is measured, and anything other than exactly one shell fails with
+    the pre-op minimum border-to-plane gap in the message, unless
+    `allow_unmerged=true` was passed. See _MIRROR_AXIS/_MIRROR_THRESHOLD_TYPE/
+    DEFAULT_MERGE_THRESHOLD above for what was measured and why.
+    """
+    require_known_keys(op, MIRROR_TOPOLOGY_KEYS, "mirror_topology")
+    axis = op.get("axis")
+    if axis not in _MIRROR_AXIS:
+        raise HandlerError(
+            "mirror_topology needs axis in 'x'/'y'/'z'", hint="got %r" % (axis,)
+        )
+    direction = op.get("direction", "+")
+    if direction not in _MIRROR_DIRECTION:
+        raise HandlerError(
+            "mirror_topology needs direction '+' or '-'", hint="got %r" % (direction,)
+        )
+    merge_threshold = op.get("merge_threshold", DEFAULT_MERGE_THRESHOLD)
+    if (
+        not isinstance(merge_threshold, (int, float))
+        or isinstance(merge_threshold, bool) or merge_threshold < 0
+    ):
+        raise HandlerError(
+            "mirror_topology needs merge_threshold >= 0",
+            hint="got %r; it is the max distance a border vertex may sit "
+                 "from the mirror plane and still merge (default %.6g)"
+                 % (merge_threshold, DEFAULT_MERGE_THRESHOLD),
+        )
+    allow_unmerged = bool(op.get("allow_unmerged", False))
+    axis_idx = _MIRROR_AXIS[axis]
+
+    pre_gap = _min_border_plane_gap(mesh_long, axis_idx)
+    vertices_before = cmds.polyEvaluate(mesh_long, vertex=True)
+    cmds.polyMirrorFace(
+        mesh_long, axis=axis_idx, direction=_MIRROR_DIRECTION[direction],
+        mergeMode=1, mergeThreshold=2.0 * float(merge_threshold),
+        mergeThresholdType=_MIRROR_THRESHOLD_TYPE, constructionHistory=False,
+    )
+    vertices_after = cmds.polyEvaluate(mesh_long, vertex=True)
+    shells = cmds.polyEvaluate(mesh_long, shell=True)
+    merged_vertices = max(0, 2 * vertices_before - vertices_after)
+
+    if shells != 1 and not allow_unmerged:
+        raise HandlerError(
+            "mirror_topology produced %d shells, not 1: the open border did "
+            "not merge (measured minimum border-to-plane gap before the op: "
+            "%.6g, merge_threshold was %.6g)" % (shells, pre_gap, merge_threshold),
+            hint="raise merge_threshold above %.6g, move the open border "
+                 "onto the mirror plane, or pass allow_unmerged=true to keep "
+                 "the unmerged result" % pre_gap,
+        )
+    return {
+        "shells": shells, "merged_vertices": merged_vertices,
+        "vertices_before": vertices_before, "vertices_after": vertices_after,
+    }
+
+
+SPLIT_KEYS = {"op", "points"}
+
+
+def _op_split(cmds, mesh_long: str, op: Dict[str, Any]) -> Dict[str, Any]:
+    """Wraps polySplit. Measured by evals/cage_probe_769.py: insertpoint takes
+    plain (edgeIndex, t) tuples - raw indices, no component-string prefix,
+    unlike every other op here - and a SINGLE insertpoint is a silent no-op
+    (returns success, changes nothing); the >=2-entry requirement below is
+    load-bearing, not just tidiness.
+    """
+    require_known_keys(op, SPLIT_KEYS, "split")
+    points = op.get("points")
+    if not isinstance(points, list) or len(points) < 2:
+        raise HandlerError(
+            "split needs points=[[edge, t], ...] with at least 2 entries",
+            hint="a single insertpoint is a silent no-op in Maya (measured); "
+                 "e.g. points=[['e[0]', 0.5], ['e[2]', 0.5]]",
+        )
+    insertpoints = []
+    for i, pair in enumerate(points):
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            raise HandlerError(
+                "split needs points[%d] to be [edge, t]" % i, hint="got %r" % (pair,)
+            )
+        edge_spec, t = pair
+        idx = _single_component_index(edge_spec, "e", "points[%d][0]" % i)
+        if not isinstance(t, (int, float)) or isinstance(t, bool) or not (0.0 <= t <= 1.0):
+            raise HandlerError(
+                "split needs points[%d][1] (t) in 0..1" % i, hint="got %r" % (t,)
+            )
+        insertpoints.append((idx, float(t)))
+    edges_before = cmds.polyEvaluate(mesh_long, edge=True)
+    faces_before = cmds.polyEvaluate(mesh_long, face=True)
+    cmds.polySplit(mesh_long, insertpoint=insertpoints, constructionHistory=False)
+    edges_after = cmds.polyEvaluate(mesh_long, edge=True)
+    faces_after = cmds.polyEvaluate(mesh_long, face=True)
+    return {
+        "edges_before": edges_before, "edges_after": edges_after,
+        "faces_before": faces_before, "faces_after": faces_after,
+    }
+
+
 _OPS: Dict[str, Callable] = {
     "soft_move": _op_soft_move,
     "inflate_region": _op_inflate_region,
@@ -224,6 +551,10 @@ _OPS: Dict[str, Callable] = {
     "bevel_edges": _op_bevel_edges,
     "crease_edges": _op_crease_edges,
     "bridge": _op_bridge,
+    "insert_loop": _op_insert_loop,
+    "extrude_edges": _op_extrude_edges,
+    "mirror_topology": _op_mirror_topology,
+    "split": _op_split,
 }
 
 
@@ -257,10 +588,11 @@ def sculpt_ops(params: Dict[str, Any]) -> Dict[str, Any]:
         checkpoint_info = session.auto_checkpoint("sculpt")
 
     applied: List[str] = []
+    op_results: List[Dict[str, Any]] = []
     for index, op in enumerate(ops):
         kind = kinds[index]
         try:
-            _OPS[kind](cmds, mesh_long, op)
+            result = _OPS[kind](cmds, mesh_long, op)
         except HandlerError as exc:
             involves_vertex_op = kind in VERTEX_OPS or any(
                 k in VERTEX_OPS for k in applied
@@ -279,6 +611,8 @@ def sculpt_ops(params: Dict[str, Any]) -> Dict[str, Any]:
                 hint=(exc.hint or "") + " — applied ops stay; " + revert,
             ) from None
         applied.append(kind)
+        if result:
+            op_results.append(dict(result, op=kind))
 
     warnings: List[str] = []
     if checkpoint_info is not None:
@@ -297,6 +631,13 @@ def sculpt_ops(params: Dict[str, Any]) -> Dict[str, Any]:
         "tris": tris,
         "warnings": warnings,
         "checkpoint_id": checkpoint_info["checkpoint_id"] if checkpoint_info else None,
+        # Per-op measured results (before/after counts, mirror's
+        # shells/merged_vertices, ...) for the four cage ops; the eight
+        # original ops return None and contribute nothing here. Not part of
+        # SculptResult's schema (extra="ignore") - available to callers that
+        # invoke sculpt_ops() directly (mayapy tests, evals), dropped
+        # silently for MCP clients until a schema change adds it.
+        "op_results": op_results,
     }
 
 
