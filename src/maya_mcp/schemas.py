@@ -342,6 +342,21 @@ class SculptResult(BaseModel):
         default=None,
         description="Auto-checkpoint id; pass to maya_restore_checkpoint to revert vertex ops.",
     )
+    op_results: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description=(
+            "One entry per cage op (insert_loop, extrude_edges, "
+            "mirror_topology, split), each carrying that op's measured "
+            "outcome: insert_loop/split report edges_before/edges_after/"
+            "faces_before/faces_after; extrude_edges reports the verified "
+            "new_faces count (checked against len(edges)*divisions); "
+            "mirror_topology reports shells (must be 1 unless "
+            "allow_unmerged was set) and merged_vertices. The other eight "
+            "ops (soft_move, inflate_region, displace_noise, smooth, "
+            "extrude_faces, bevel_edges, crease_edges, bridge) contribute "
+            "nothing here."
+        ),
+    )
 
 
 class ArrayResult(BaseModel):

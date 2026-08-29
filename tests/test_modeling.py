@@ -996,15 +996,22 @@ def test_mirror_topology_rejects_bad_axis(monkeypatch):
     assert fake.calls == []
 
 
-def test_mirror_topology_rejects_bad_direction(monkeypatch):
+def test_mirror_topology_rejects_direction_as_an_unknown_key(monkeypatch):
+    # #764 doctrine: a measured-inert param is refused, not kept on
+    # speculation. Measured by evals/cage_probe_769.py: polyMirrorFace's own
+    # `direction` flag produced byte-identical results for every value tried
+    # (0/1/-1/2) in the tested whole-object invocation, so mirror_topology
+    # does not expose it at all - require_known_keys refuses it like any
+    # other param the op does not read.
     fake = _mesh_fake("|col")
     monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
     with pytest.raises(HandlerError) as exc:
         sculpt.sculpt_ops({
             "mesh": "|col",
-            "ops": [{"op": "mirror_topology", "axis": "x", "direction": "up"}],
+            "ops": [{"op": "mirror_topology", "axis": "x", "direction": "+"}],
         })
     assert "direction" in str(exc.value)
+    assert "axis" in exc.value.hint  # hint lists the valid params
     assert fake.calls == []
 
 

@@ -31,12 +31,43 @@ call like the existing eight, same mesh/result conventions:
    in the message (hint: raise `merge_threshold` or move the open border to
    the mirror plane) — unless `allow_unmerged=true` was passed. Result
    reports `merged_vertices` and `shells`.
+
+   > **2026-08-29 fix-review amendment:** `direction` is NOT exposed on the
+   > op after all. `evals/cage_probe_769.py` measured `direction` in
+   > `{0, 1, -1, 2}` to produce byte-identical results in every
+   > whole-object invocation tested — genuinely inert on this Maya, not
+   > merely undocumented. Per #764 doctrine (a measured-inert param is
+   > refused, not kept on speculation), Task 2 dropped it from
+   > `MIRROR_TOPOLOGY_KEYS` entirely; passing it is refused by
+   > `require_known_keys` like any other unread key. The op's surface is
+   > **axis-only** about the world-origin plane. The side that actually
+   > gets duplicated is whatever the probe recorded: for `axis="x"` on a
+   > half-cube spanning x in `[-2, 0]` with an open border at x=0, the
+   > duplicate lands on the **positive** side, producing a closed box
+   > spanning `[-2, 2]` — there is no caller-facing control over this, only
+   > the fact of it.
 4. **`split`** — wraps `polySplit`. Params: `points` — a list of
    `[edge, t]` pairs (`"e[12]"` syntax + parameter 0–1 along that edge),
    ≥2 entries. Result reports edges/faces before → after.
 
 All four validate through the existing per-op param validation pattern in
 `sculpt.py` (unknown op-level keys refused the way existing ops refuse).
+
+> **2026-08-29 fix-review amendment:** the `"e[12]"` resolver
+> `bevel_edges`/`crease_edges` use (`_components` in `sculpt.py`) could NOT
+> be literally reused for `insert_loop`/`extrude_edges`/`split` as this
+> spec originally implied. `_components` returns a component STRING
+> (`"mesh.e[3:7]"`) and accepts ranges — exactly what `bevel_edges`/
+> `crease_edges` want, since `polyBevel3`/`polyCrease` take component
+> strings directly. But `evals/cage_probe_769.py` measured that
+> `polySplitRing` (rootEdge=), `polyExtrudeEdge`'s per-edge counting, and
+> `polySplit` (insertpoint=(idx, t)) all need a **raw single integer
+> index**, not a string, and must REFUSE a range/list rather than silently
+> taking one element from it (a range like `"e[0:3]"` would otherwise pass
+> and undercount `len(edges)` by a factor of the range size in
+> `extrude_edges`/`split`'s new-face verification). Task 2 therefore added
+> a second, distinct helper, `_single_component_index`, rather than
+> stretching `_components` to cover both shapes.
 
 ## Probe-first (the two risky commands)
 

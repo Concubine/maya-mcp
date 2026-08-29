@@ -1,5 +1,5 @@
 """sculpt_ops: the golem-maker (§5.3). Ops apply in order; the first failure
-aborts with a report of what landed (one undo chunk for the five cmds-based
+aborts with a report of what landed (one undo chunk for the nine cmds-based
 ops - maya_undo reverts all of those).
 
 Three ops (soft_move, inflate_region, displace_noise) write vertices via
@@ -395,11 +395,17 @@ def _op_extrude_edges(cmds, mesh_long: str, op: Dict[str, Any]) -> Dict[str, Any
 # mesh living away from the origin gets the measured-gap refusal below,
 # which is an honest answer: move it to the plane, or pass allow_unmerged).
 _MIRROR_AXIS = {"x": 0, "y": 1, "z": 2}
-# `direction` is part of the surface for parity with polyMirrorFace's own
-# flag, but Measured by evals/cage_probe_769.py: direction in {0, 1, -1, 2}
-# produced byte-identical results in every whole-object invocation tested -
-# it is passed through, documented as inert on this Maya, never relied on.
-_MIRROR_DIRECTION = {"+": 1, "-": -1}
+# polyMirrorFace's own `direction` flag is NOT exposed here (2026-08-29
+# review, #764 doctrine: a measured-inert param is refused, not kept on
+# speculation). Measured by evals/cage_probe_769.py: direction in
+# {0, 1, -1, 2} produced byte-identical results in every whole-object
+# invocation tested - the op's surface is axis-only about the world-origin
+# plane, and the side that gets duplicated is whatever the probe recorded
+# for that axis (for axis="x" on a half-cube spanning x in [-2,0], the
+# duplicate always lands on the positive side, giving a closed box spanning
+# [-2,2] - see docs/superpowers/specs/2026-08-29-cage-ops-design.md's
+# mirror_topology bullet for the dated note). `direction` is refused by
+# require_known_keys like any other unread key, listing the valid params.
 # mergeThresholdType 1 (2 was byte-identical in the probed 40-cell grid, so
 # either works - 1 is picked arbitrarily). Under mergeMode=1 + this type,
 # Measured: merge succeeds iff `2 * offset < mergeThreshold` (strict), where
@@ -417,7 +423,7 @@ _MIRROR_THRESHOLD_TYPE = 1
 # "off" case in the probed grid - refuses: 2*0.02=0.04 is not < 2*0.001=0.002.
 DEFAULT_MERGE_THRESHOLD = 0.001
 
-MIRROR_TOPOLOGY_KEYS = {"op", "axis", "direction", "merge_threshold", "allow_unmerged"}
+MIRROR_TOPOLOGY_KEYS = {"op", "axis", "merge_threshold", "allow_unmerged"}
 
 
 def _min_border_plane_gap(mesh_long: str, axis_idx: int) -> float:
@@ -455,11 +461,6 @@ def _op_mirror_topology(cmds, mesh_long: str, op: Dict[str, Any]) -> Dict[str, A
         raise HandlerError(
             "mirror_topology needs axis in 'x'/'y'/'z'", hint="got %r" % (axis,)
         )
-    direction = op.get("direction", "+")
-    if direction not in _MIRROR_DIRECTION:
-        raise HandlerError(
-            "mirror_topology needs direction '+' or '-'", hint="got %r" % (direction,)
-        )
     merge_threshold = op.get("merge_threshold", DEFAULT_MERGE_THRESHOLD)
     if (
         not isinstance(merge_threshold, (int, float))
@@ -477,7 +478,7 @@ def _op_mirror_topology(cmds, mesh_long: str, op: Dict[str, Any]) -> Dict[str, A
     pre_gap = _min_border_plane_gap(mesh_long, axis_idx)
     vertices_before = cmds.polyEvaluate(mesh_long, vertex=True)
     cmds.polyMirrorFace(
-        mesh_long, axis=axis_idx, direction=_MIRROR_DIRECTION[direction],
+        mesh_long, axis=axis_idx,
         mergeMode=1, mergeThreshold=2.0 * float(merge_threshold),
         mergeThresholdType=_MIRROR_THRESHOLD_TYPE, constructionHistory=False,
     )
@@ -633,10 +634,9 @@ def sculpt_ops(params: Dict[str, Any]) -> Dict[str, Any]:
         "checkpoint_id": checkpoint_info["checkpoint_id"] if checkpoint_info else None,
         # Per-op measured results (before/after counts, mirror's
         # shells/merged_vertices, ...) for the four cage ops; the eight
-        # original ops return None and contribute nothing here. Not part of
-        # SculptResult's schema (extra="ignore") - available to callers that
-        # invoke sculpt_ops() directly (mayapy tests, evals), dropped
-        # silently for MCP clients until a schema change adds it.
+        # original ops return None and contribute nothing here. Declared on
+        # SculptResult (schemas.py) as Optional[List[Dict]], so it reaches
+        # real MCP callers too, not just direct sculpt_ops() callers.
         "op_results": op_results,
     }
 

@@ -789,6 +789,59 @@ class TestModelingTools:
         assert result.is_error is False
         assert result.structured_content["checkpoint_id"] is None
 
+    def test_maya_sculpt_ops_op_results_round_trips(self):
+        # #769 fix review: op_results (the cage ops' measured per-op
+        # outcomes) must reach real MCP callers, not just direct
+        # sculpt.sculpt_ops() callers - SculptResult declares it explicitly
+        # so it survives the schema's extra="ignore" for undeclared keys.
+        conn = FakeConn(
+            responses={
+                "sculpt_ops": {
+                    "applied": 1, "ops": ["mirror_topology"], "tris": 24,
+                    "warnings": [], "checkpoint_id": None,
+                    "op_results": [
+                        {"op": "mirror_topology", "shells": 1,
+                         "merged_vertices": 4, "vertices_before": 8,
+                         "vertices_after": 12},
+                    ],
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        ops = [{"op": "mirror_topology", "axis": "x"}]
+        result = run(
+            mcp.call_tool(
+                "maya_sculpt_ops",
+                {"mesh": "|half_cube", "ops": ops},
+            )
+        )
+        assert result.is_error is False
+        assert result.structured_content["op_results"] == [
+            {"op": "mirror_topology", "shells": 1, "merged_vertices": 4,
+             "vertices_before": 8, "vertices_after": 12},
+        ]
+
+    def test_maya_sculpt_ops_op_results_defaults_to_none(self):
+        # The eight original ops (soft_move, smooth, bridge, ...) never
+        # populate op_results - the plugin response omits the key entirely
+        # for those calls, and the schema must not invent one.
+        conn = FakeConn(
+            responses={
+                "sculpt_ops": {
+                    "applied": 1, "ops": ["smooth"], "tris": 12, "warnings": [],
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        result = run(
+            mcp.call_tool(
+                "maya_sculpt_ops",
+                {"mesh": "|cube", "ops": [{"op": "smooth", "divisions": 1}]},
+            )
+        )
+        assert result.is_error is False
+        assert result.structured_content["op_results"] is None
+
     def test_maya_deform_forwards_params(self):
         conn = FakeConn(
             responses={

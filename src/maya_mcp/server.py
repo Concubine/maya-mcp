@@ -1742,11 +1742,12 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             'extrude_edges {edges:["e[3]","e[5]"], translate:[x,y,z], divisions:1} '
             '— translate is a world-space offset and is required, a zero '
             'offset is refused as a no-op nobody wants silently; '
-            'mirror_topology {axis:"x"|"y"|"z", direction:"+"|"-", '
-            'merge_threshold:0.001, allow_unmerged:false} — mirrors about the '
-            'WORLD-ORIGIN plane on that axis (not the object\'s own pivot) and '
-            'REFUSES an unmerged result: if the open border does not weld to '
-            'one shell it fails with the measured seam gap, unless '
+            'mirror_topology {axis:"x"|"y"|"z", merge_threshold:0.001, '
+            'allow_unmerged:false} — mirrors about the WORLD-ORIGIN plane on '
+            'that axis (not the object\'s own pivot; no direction param - '
+            'measured inert on this Maya, so it is not exposed) and REFUSES '
+            'an unmerged result: if the open border does not weld to one '
+            'shell it fails with the measured seam gap, unless '
             'allow_unmerged=true; '
             'split {points:[["e[12]",0.5], ["e[9]",0.3]]} — cuts a face through '
             '>=2 edge points, needs at least 2 (a single point silently does '
@@ -1758,7 +1759,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             'checkpoint_id to maya_restore_checkpoint to revert. The other nine '
             'ops (smooth, extrude_faces, bevel_edges, crease_edges, bridge, '
             'insert_loop, extrude_edges, mirror_topology, split) are cmds-based '
-            'and undo normally.'
+            'and undo normally. The four cage ops (insert_loop, extrude_edges, '
+            'mirror_topology, split) each add one entry to the response\'s '
+            'op_results, carrying that op\'s measured outcome.'
         ))],
     ) -> SculptResult:
         """Apply sculpt ops in order to one mesh. cmds-based ops (smooth,
@@ -1769,7 +1772,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         those three are requested, the call auto-checkpoints first, and
         restoring the returned checkpoint_id via maya_restore_checkpoint
         (not maya_undo) is how you revert this call. On partial failure,
-        applied ops stay and the response says which recovery path applies."""
+        applied ops stay and the response says which recovery path applies.
+        op_results carries one entry per cage op (insert_loop, extrude_edges,
+        mirror_topology, split) with its measured before/after counts."""
         return SculptResult.model_validate(
             maya.request(
                 "sculpt_ops", {"mesh": mesh, "ops": ops}, timeout_s=BOOL_TIMEOUT_S
