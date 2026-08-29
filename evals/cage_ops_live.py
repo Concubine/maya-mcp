@@ -11,8 +11,14 @@ it:
      counterpart under reflection within an EPSILON chosen by measurement.
   2. the epsilon actually discriminates: nudging one off-plane vertex by
      10x epsilon (via soft_move) makes the same check FAIL.
-  3. insert_loop's whole reason to exist, measured: `smooth` shrinks a
-     looped cage LESS than an otherwise-identical loopless control.
+  3. insert_loop's whole reason to exist, measured LOCALLY: `smooth` moves
+     the surface AT THE LOOP'S OWN LOCATION less than it moves the same
+     absolute location on an otherwise-identical loopless control (2026-
+     08-29 fix-review: a global bbox metric was tried first and rejected -
+     Catmull-Clark's effect is local by construction, so a global metric
+     dilutes it into a margin small enough that an unrelated change could
+     flip its sign with no real regression; see
+     code_nearest_vertex_distance's docstring).
   4. the result survives composition (uv_atlas, create_skeleton + bind_skin)
      and renders.
 
@@ -89,6 +95,20 @@ FAILURES = []
 # measured worst=0.00099999 afterward - comfortably above EPSILON, so the
 # tolerance actually discriminates.
 EPSILON = 0.0001
+
+# Measured on the same real Maya (2026-08-29, pid 131852, port 9878): local
+# post-smooth displacement at the loop's own fixed pre-smooth location,
+# looped=0.176777 vs loopless=0.242956 - ratio 1.374x. The GAP (0.066179) is
+# what matters for "orders of magnitude above float noise": the sanity
+# check right above this measurement (build_half_form's "unchanged by every
+# step since insert_loop") measures the SAME kind of residual at ~0 (<1e-9)
+# when nothing moved the point on purpose, so a 0.066-unit gap is ~7-8
+# orders of magnitude bigger than the float noise floor - not a coin-flip
+# margin. RATIO_THRESHOLD=1.2 sits comfortably below the measured 1.374x
+# (real margin against a future small drift in the exact numbers) and
+# comfortably above 1.0 (so it tests more than the bare ordering assert
+# next to it, which would pass at ratio=1.0001).
+RATIO_THRESHOLD = 1.2
 
 
 def round_up_1sig(x, floor=1e-4):
@@ -284,18 +304,66 @@ def code_vertex_bbox(mesh):
     """(dx, dy, dz) from actual vertex positions - not exactWorldBoundingBox,
     which transforms the object-space box and over-reports
     (maya-exact-bbox-is-not-vertex-bounds); moot here since nothing is
-    rotated, but vertices are the ground truth regardless.
-
-    Reported per-axis, not as one volume/diagonal number: insert_loop's root
-    edge runs along X (a ring of loops added at intermediate X stations), so
-    the op should specifically resist shrinkage IN X - a Y/Z-dominated
-    volume metric dilutes exactly the signal this gate exists to measure."""
+    rotated, but vertices are the ground truth regardless. PRINTED CONTEXT
+    ONLY (not asserted) - see code_nearest_vertex_distance's docstring for
+    why a global bbox metric is the wrong thing to assert on here."""
     return """
 import maya.cmds as cmds
 pts = cmds.xform({mesh!r} + '.vtx[*]', query=True, worldSpace=True, translation=True)
 xs = pts[0::3]; ys = pts[1::3]; zs = pts[2::3]
 (max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs))
 """.format(mesh=mesh)
+
+
+def code_vertex_positions(mesh):
+    """Every vertex's world position, as a list of (x, y, z) tuples - used to
+    diff before/after an op (e.g. finding insert_loop's newly-created
+    vertices by set difference) and as the raw data for a nearest-neighbour
+    search."""
+    return """
+import maya.cmds as cmds
+pts = cmds.xform({mesh!r} + '.vtx[*]', query=True, worldSpace=True, translation=True)
+n = len(pts) // 3
+[(pts[3 * i], pts[3 * i + 1], pts[3 * i + 2]) for i in range(n)]
+""".format(mesh=mesh)
+
+
+def code_nearest_vertex_distance(mesh, point):
+    """Distance from a fixed world-space `point` to the NEAREST vertex
+    currently on `mesh`.
+
+    This is the LOCAL displacement metric (2026-08-29 fix-review): `point`
+    is captured once, right after insert_loop, at a specific loop-ring
+    vertex's pre-smooth position (or, for the loopless control, the exact
+    same absolute coordinate - a point that sits on a bare, unsupported
+    face there instead of on a real vertex). After `smooth` runs, the
+    nearest surviving/new vertex to that fixed point tells you how far
+    Catmull-Clark moved the surface AT THAT SPECIFIC LOCAL SPOT - which is
+    exactly what a support loop is supposed to constrain.
+
+    Why not the global bbox (the first version of this gate): Catmull-Clark's
+    vertex rule reads only a vertex's own 1-ring neighbourhood, so a loop's
+    effect is LOCAL by construction - measured directly by this gate's own
+    dead end, where a loop placed physically close to the flange border
+    (but not topologically adjacent to the flange's own corner vertices)
+    moved the flange corner's post-smooth position by exactly ZERO relative
+    to a loopless control. A global metric (bbox extent, volume, dx/dy/dz)
+    is dominated by whichever few vertices happen to be the extremes (here,
+    the far-corner inflate_region bump, present identically in both builds)
+    and can only pick up the loop's real, local effect as a diluted,
+    small-margin difference that a functionally-irrelevant, unrelated change
+    elsewhere (a merge_threshold default, a divisions default, a different
+    Maya version's polySmooth rounding) could plausibly flip the sign of
+    without any real insert_loop regression. Measuring at the loop's own
+    location removes that dilution."""
+    return """
+import maya.cmds as cmds
+pts = cmds.xform({mesh!r} + '.vtx[*]', query=True, worldSpace=True, translation=True)
+px, py_, pz = {point!r}
+n = len(pts) // 3
+min(((pts[3 * i] - px) ** 2 + (pts[3 * i + 1] - py_) ** 2
+     + (pts[3 * i + 2] - pz) ** 2) ** 0.5 for i in range(n))
+""".format(mesh=mesh, point=tuple(float(c) for c in point))
 
 
 # ---------------------------------------------------------------------------
@@ -315,7 +383,10 @@ def build_half_form(tag, z_offset, with_loop):
     extrude of that border (Y/Z only - the x component of translate is 0,
     so the new border stays exactly on the mirror plane), an asymmetric
     inflate_region bump on the untouched far corner, and finally
-    mirror_topology(axis="x"). Returns the final mesh's long name.
+    mirror_topology(axis="x"). Returns (mesh_long_name, loop_ref_point):
+    `loop_ref_point` is the pre-smooth world position of one of
+    insert_loop's own newly-created vertices (None when with_loop=False) -
+    the anchor for phase 2's local displacement-under-smooth measurement.
     """
     print("\n  building %s (with_loop=%s, z_offset=%.2f)"
           % (tag, with_loop, z_offset))
@@ -325,6 +396,7 @@ def build_half_form(tag, z_offset, with_loop):
     }, 60.0, "create_primitive %s" % tag)
     mesh = body["name"]
 
+    loop_ref_point = None
     if with_loop:
         edges = py(code_find_axis_edges(mesh, 0, 1.0),
                   "find X-parallel edges (%s)" % tag)
@@ -332,17 +404,17 @@ def build_half_form(tag, z_offset, with_loop):
              "%s: found 4 X-parallel edges before insert_loop (got %d)"
              % (tag, len(edges)))
         # Two loops (splitType=2, position ignored per the handler's own
-        # doc) splitting the box into thirds along X - measured below to
-        # hold the flange's Y-extent measurably tighter than an unsupported
-        # span does, even though the loops sit mid-span rather than
-        # touching the flange directly (a single loop placed right next to
-        # the border was tried and measured to make ZERO difference here:
+        # doc) splitting the box into thirds along X. A single loop placed
+        # right next to the border was tried first and measured to make
+        # ZERO difference to the flange corner's post-smooth position:
         # Catmull-Clark's vertex rule only reads 1-ring neighbours, and the
         # flange's own corner vertices are not in that ring regardless of a
-        # nearby loop - the mid-span pair changes the corner's neighbours'
-        # neighbours enough to move the measured result, and does so with
-        # zero risk of an accidental topology change to the border itself).
+        # nearby loop. The mid-span pair is kept anyway - phase 2 measures
+        # displacement AT the loop's own location (not the flange), which
+        # is exactly where this placement's local effect actually lands.
         root_idx, _x0, _x1 = edges[0]
+        verts_before_loop = py(code_vertex_positions(mesh),
+                              "vertices before insert_loop (%s)" % tag)
         loop_res = ok("sculpt_ops", {
             "mesh": mesh,
             "ops": [{"op": "insert_loop", "edge": "e[%d]" % root_idx,
@@ -353,6 +425,28 @@ def build_half_form(tag, z_offset, with_loop):
                 loop_res["faces_before"], loop_res["faces_after"]))
         check(loop_res["edges_after"] > loop_res["edges_before"],
              "%s: insert_loop added edges" % tag)
+
+        verts_after_loop = py(code_vertex_positions(mesh),
+                             "vertices after insert_loop (%s)" % tag)
+        before_set = {tuple(round(c, 6) for c in v) for v in verts_before_loop}
+        new_verts = [v for v in verts_after_loop
+                    if tuple(round(c, 6) for c in v) not in before_set]
+        check(len(new_verts) == 8,
+             "%s: insert_loop created exactly 8 new vertices (2 rings x 4)"
+             " (got %d)" % (tag, len(new_verts)))
+        # Pick a new vertex clear of the inflate_region bump's radius below
+        # (centred at [-1, -0.5, z_offset-0.5], radius 0.35) so its position
+        # is untouched by every later step in this builder (cap deletion and
+        # extrude only touch the x=0 border; mirror only touches the border
+        # too) and stays valid as a pre-smooth reference all the way to
+        # phase 2's smooth call: the opposite Y/Z corner, y>0 and
+        # z>z_offset, sits >1.4 units from the bump centre.
+        candidates = [v for v in new_verts
+                     if v[1] > 0.0 and (v[2] - z_offset) > 0.0]
+        check(len(candidates) >= 1,
+             "%s: found a loop vertex clear of the inflate_region bump"
+             % tag)
+        loop_ref_point = sorted(candidates or new_verts)[0]
 
     cap_faces = py(code_find_cap_faces(mesh, 0, 0.0),
                   "find x=0 cap face(s) (%s)" % tag)
@@ -423,7 +517,20 @@ def build_half_form(tag, z_offset, with_loop):
          "self-report (%d vs %d)"
          % (tag, merged_independent, mirror_res["merged_vertices"]))
 
-    return mesh
+    if loop_ref_point is not None:
+        # Sanity check the assumption phase 2 relies on: the captured
+        # position must still be an EXACT vertex on the finished mesh (not
+        # nudged by anything since it was captured) - if this ever fails,
+        # the local-displacement measurement below would be silently wrong
+        # rather than loudly wrong.
+        still_there = py(code_nearest_vertex_distance(mesh, loop_ref_point),
+                        "loop_ref_point still exact on the finished mesh (%s)"
+                        % tag)
+        check(still_there < 1e-9,
+             "%s: the captured loop vertex position is unchanged by every "
+             "step since insert_loop (residual=%.3g)" % (tag, still_there))
+
+    return mesh, loop_ref_point
 
 
 # ---------------------------------------------------------------------------
@@ -433,7 +540,7 @@ def build_half_form(tag, z_offset, with_loop):
 def phase1_symmetry_and_discrimination():
     print("\n[1] symmetry-by-measurement + discrimination proof")
     ok("new_scene", {"confirm": True}, 180.0, "new_scene (phase 1)")
-    mesh = build_half_form("sym_check", 0.0, with_loop=True)
+    mesh, _loop_ref = build_half_form("sym_check", 0.0, with_loop=True)
 
     worst = py(code_symmetry_worst(mesh), "symmetry worst deviation (pre-nudge)")
     print("  measured worst vertex-to-mirror-counterpart distance: %.8f" % worst)
@@ -481,9 +588,22 @@ def phase2_loops_hold_and_composition():
     print("\n[2] loops hold the silhouette under smooth (measured)")
     ok("new_scene", {"confirm": True}, 180.0, "new_scene (phase 2)")
 
-    looped = build_half_form("cage_looped", 0.0, with_loop=True)
-    loopless = build_half_form("cage_loopless", 3.0, with_loop=False)
+    looped, loop_ref = build_half_form("cage_looped", 0.0, with_loop=True)
+    loopless, _no_ref = build_half_form("cage_loopless", 3.0, with_loop=False)
+    check(loop_ref is not None, "captured a loop-vertex reference point (looped)")
+    # The loopless control has no loop, so there is no real vertex to
+    # capture there - the exact same absolute station (X, Y, Z - only Z
+    # shifted by the same z_offset delta between the two builds) is used
+    # instead, landing on a bare, unsupported patch of its otherwise
+    # identical geometry.
+    loopless_ref = (loop_ref[0], loop_ref[1], loop_ref[2] + 3.0)
 
+    # Global bbox is PRINTED CONTEXT ONLY (2026-08-29 fix-review) - see
+    # code_nearest_vertex_distance's docstring for why it is not asserted
+    # on: it is dominated by the far-corner inflate_region bump (identical
+    # in both builds) and dilutes the loop's local, small-margin effect
+    # into a gap that a functionally-irrelevant change elsewhere could flip
+    # without any real insert_loop regression.
     bbox_before_looped = py(code_vertex_bbox(looped), "bbox before smooth (looped)")
     bbox_before_loopless = py(code_vertex_bbox(loopless), "bbox before smooth (loopless)")
 
@@ -494,38 +614,49 @@ def phase2_loops_hold_and_composition():
 
     bbox_after_looped = py(code_vertex_bbox(looped), "bbox after smooth (looped)")
     bbox_after_loopless = py(code_vertex_bbox(loopless), "bbox after smooth (loopless)")
-
-    def shrink(before, after, axis):
-        return (before[axis] - after[axis]) / before[axis]
-
-    # Y is the axis the extruded flange shifted furthest along (translate
-    # [0, 0.15, -0.1] - the flange corner is the actual Y bbox extreme), and
-    # the support loop was placed right next to that border specifically to
-    # brace it against rounding - so Y-extent is the asserted metric. X is
-    # dominated by the far-corner inflate_region bump (identical in both
-    # builds, unrelated to the loop) and Z is a smaller flange shift; both
-    # are printed for context only.
-    shrink_y_looped = shrink(bbox_before_looped, bbox_after_looped, 1)
-    shrink_y_loopless = shrink(bbox_before_loopless, bbox_after_loopless, 1)
-    print("  bbox before smooth (x,y,z): looped=%s loopless=%s"
+    print("  bbox before smooth (x,y,z), CONTEXT ONLY: looped=%s loopless=%s"
          % (tuple(round(v, 5) for v in bbox_before_looped),
             tuple(round(v, 5) for v in bbox_before_loopless)))
-    print("  bbox after  smooth (x,y,z): looped=%s loopless=%s"
+    print("  bbox after  smooth (x,y,z), CONTEXT ONLY: looped=%s loopless=%s"
          % (tuple(round(v, 5) for v in bbox_after_looped),
             tuple(round(v, 5) for v in bbox_after_loopless)))
-    print("  Y-extent shrinkage under smooth(divisions=1): "
-         "looped=%.4f%% loopless=%.4f%%"
-         % (shrink_y_looped * 100, shrink_y_loopless * 100))
-    for axis, label in ((0, "X"), (2, "Z")):
-        print("  %s-extent shrinkage (not asserted, context only): "
-             "looped=%.4f%% loopless=%.4f%%"
-             % (label, shrink(bbox_before_looped, bbox_after_looped, axis) * 100,
-                shrink(bbox_before_loopless, bbox_after_loopless, axis) * 100))
-    check(shrink_y_looped < shrink_y_loopless,
-         "insert_loop's whole purpose, measured: the looped cage's Y-extent "
-         "(the flange's own axis, and where the support loop was placed) "
-         "shrinks LESS under smooth than an otherwise-identical loopless "
-         "control (%.4f%% < %.4f%%)" % (shrink_y_looped * 100, shrink_y_loopless * 100))
+    for axis, label in ((0, "X"), (1, "Y"), (2, "Z")):
+        shrink = lambda before, after: (before[axis] - after[axis]) / before[axis]
+        print("  %s-extent shrinkage (not asserted, global/diluted - context "
+             "only): looped=%.4f%% loopless=%.4f%%"
+             % (label, shrink(bbox_before_looped, bbox_after_looped) * 100,
+                shrink(bbox_before_loopless, bbox_after_loopless) * 100))
+
+    # THE ASSERTED METRIC: local post-smooth displacement AT the loop's own
+    # (fixed, pre-smooth) location, looped vs loopless. See
+    # code_nearest_vertex_distance's docstring for the mechanism and why
+    # this replaces the global bbox metric.
+    disp_looped = py(code_nearest_vertex_distance(looped, loop_ref),
+                    "local displacement after smooth (looped)")
+    disp_loopless = py(code_nearest_vertex_distance(loopless, loopless_ref),
+                      "local displacement after smooth (loopless)")
+    ratio = (disp_loopless / disp_looped) if disp_looped > 0 else float("inf")
+    print("  LOCAL post-smooth displacement at the loop's own station: "
+         "looped=%.6f loopless=%.6f (loopless/looped ratio=%.3fx)"
+         % (disp_looped, disp_loopless, ratio))
+    check(disp_looped < disp_loopless,
+         "insert_loop's whole purpose, measured LOCALLY: the surface at the "
+         "loop's own location moves LESS under smooth than the same "
+         "location does in an otherwise-identical loopless control "
+         "(%.6f < %.6f)" % (disp_looped, disp_loopless))
+    if RATIO_THRESHOLD is None:
+        print("  MEASUREMENT MODE - RATIO_THRESHOLD is None: the ratio "
+             "above is printed and not asserted yet")
+    else:
+        # RATIO_THRESHOLD is set well below the measured value (real
+        # margin) and well above 1.0 (so it tests more than the bare
+        # ordering assert above) - orders of magnitude above anything float
+        # noise or an unrelated default (merge_threshold, divisions) could
+        # produce by accident.
+        check(ratio > RATIO_THRESHOLD,
+             "the local displacement gap is orders of magnitude above float "
+             "noise, not a coin-flip global margin (ratio %.3fx > "
+             "threshold %sx)" % (ratio, RATIO_THRESHOLD))
 
     print("\n[3] composition: uv_atlas + create_skeleton + bind_skin (looped mesh)")
     uv = ok("uv_atlas", {"names": [looped], "cols": 1, "rows": 1, "patch": 0,
