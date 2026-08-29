@@ -77,11 +77,13 @@ try:
 
     mesh = fresh_cyl()
     before = vef(mesh)
+    N_AROUND = 20  # matches subdivisionsAxis in fresh_cyl()
     split_ring(mesh, EDGE_IDX, splitType=1, weight=0.5)
     after = vef(mesh)
-    probe("splitring_working_recipe_delta_verts_edges_faces",
-          tuple(a - b for a, b in zip(after, before)))
-    probe("splitring_working_recipe_on_20around_matches_formula(N,2N,N)", (20, 40, 20))
+    delta = tuple(a - b for a, b in zip(after, before))
+    probe("splitring_working_recipe_delta_verts_edges_faces", delta)
+    probe("splitring_working_recipe_matches_formula_N_2N_N",
+          delta == (N_AROUND, 2 * N_AROUND, N_AROUND))
 
     # weight positions the loop LINEARLY and EXACTLY (measured fraction along
     # the root edge's own Y span, splitType=1 or 0; splitType=2 below ignores
@@ -140,6 +142,33 @@ try:
         new_v = set(cmds.ls(mesh + ".vtx[*]", flatten=True)) - before_v
         ys = sorted(set(round(cmds.pointPosition(v, world=True)[1], 4) for v in new_v))
         probe("splitring_splitType2_weight_%s_IGNORED_still_evenly_spaced_Y" % w, ys)
+
+    # --- Coordinator review, IMPORTANT 1: every splitType=2/divisions
+    # measurement above passed useEqualMultiplier=True. No control run existed
+    # WITHOUT it, so the "evenly spaced" claim handed to Task 2 was measured
+    # under an untested extra flag. A/B it directly: splitType=2, divisions=3,
+    # on fresh cylinders, with vs without useEqualMultiplier.
+    mesh = fresh_cyl()
+    before_v = set(cmds.ls(mesh + ".vtx[*]", flatten=True))
+    split_ring(mesh, EDGE_IDX, splitType=2, divisions=3, useEqualMultiplier=True)
+    new_v = set(cmds.ls(mesh + ".vtx[*]", flatten=True)) - before_v
+    ys_with = sorted(set(round(cmds.pointPosition(v, world=True)[1], 4) for v in new_v))
+    probe("splitring_divisions3_WITH_useEqualMultiplier_Y", ys_with)
+
+    mesh = fresh_cyl()
+    before_v = set(cmds.ls(mesh + ".vtx[*]", flatten=True))
+    split_ring(mesh, EDGE_IDX, splitType=2, divisions=3)  # useEqualMultiplier omitted
+    new_v = set(cmds.ls(mesh + ".vtx[*]", flatten=True)) - before_v
+    ys_without = sorted(set(round(cmds.pointPosition(v, world=True)[1], 4) for v in new_v))
+    probe("splitring_divisions3_WITHOUT_useEqualMultiplier_Y", ys_without)
+    probe("splitring_useEqualMultiplier_changes_spacing", ys_with != ys_without)
+
+    mesh = fresh_cyl()
+    before_v = set(cmds.ls(mesh + ".vtx[*]", flatten=True))
+    split_ring(mesh, EDGE_IDX, splitType=2, divisions=3, useEqualMultiplier=False)
+    new_v = set(cmds.ls(mesh + ".vtx[*]", flatten=True)) - before_v
+    ys_false = sorted(set(round(cmds.pointPosition(v, world=True)[1], 4) for v in new_v))
+    probe("splitring_divisions3_EXPLICIT_useEqualMultiplier_False_Y", ys_false)
 
     # repeated single-weight calls on the SAME nominal rootEdge index do NOT
     # distribute evenly - after a split, index 40 remaps to the LOWER half of
@@ -351,27 +380,69 @@ try:
             probe("care_case_offset%s_threshold%s_shells_verts_distinctX" % (offset, threshold),
                   (shells, verts, xs))
 
-    probe("care_case_CONCLUSION",
-          "mergeThreshold is a no-op under mergeMode=1 for the whole-object "
-          "invocation - border vertices are unconditionally snapped onto the "
-          "mirror plane. shell-count alone cannot implement the spec's "
-          "refuse-on-unmerged rule; Task 2 needs a pre-op distance-from-plane "
-          "measurement instead (or must find a different mergeMode/selection "
-          "shape where mergeThreshold actually gates the weld).")
+    probe("care_case_default_mergeThresholdType_note",
+          "the sweep above used mergeThresholdType's DEFAULT (type 0), under "
+          "which mergeThreshold is measured to have no gating effect at all - "
+          "see mergeThresholdType characterization below for types 1 and 2, "
+          "which behave differently.")
 
-    # mergeThresholdType: DOES change behavior (unlike mergeThreshold itself) -
-    # measured at threshold=0.15, offset=0.1: type 0 merges (1 shell), types
-    # 1 and 2 do NOT (2 shells) - so the type flag selects what the number
-    # means, and only type 0's interpretation of 0.15 is generous enough
-    # here. (This was NOT re-tested against the force-snap finding above,
-    # which used the type-0 default throughout - the two findings are not
-    # contradictory: they were measured under different threshold TYPES.)
-    for mtt in (0, 1, 2):
-        mesh = build_half_cube(border_offset=0.1)
-        cmds.polyMirrorFace(mesh, axis=0, mergeMode=1, mergeThreshold=0.15,
-                             mergeThresholdType=mtt, constructionHistory=False)
-        probe("mergeThresholdType_%d_offset0.1_threshold0.15_shells" % mtt,
-              cmds.polyEvaluate(mesh, shell=True))
+    # mergeThresholdType: an initial spot-check (threshold=0.15, offset=0.1)
+    # showed type 0 merges (1 shell) but types 1 and 2 do NOT (2 shells) - a
+    # single data point suggesting types 1/2 might be a REAL distance gate
+    # that could replace the pre-op check below. Characterize it properly:
+    # sweep offset x threshold for both types, and for each merged result
+    # check where the border vertices actually land (exactly on the plane
+    # x=0, i.e. "snapped", vs some non-zero value, i.e. "preserved/partial").
+    #
+    # --- Coordinator review, IMPORTANT 2 -----------------------------------
+    for mtt in (1, 2):
+        for offset in (0.02, 0.1, 0.5, 1.0):
+            for threshold in (0.001, 0.05, 0.2, 0.6, 2.5):
+                mesh = build_half_cube(border_offset=offset)
+                cmds.polyMirrorFace(mesh, axis=0, mergeMode=1, mergeThreshold=threshold,
+                                     mergeThresholdType=mtt, constructionHistory=False)
+                shells = cmds.polyEvaluate(mesh, shell=True)
+                verts = cmds.polyEvaluate(mesh, vertex=True)
+                xs = sorted(set(round(cmds.pointPosition(v, world=True)[0], 4)
+                                for v in cmds.ls(mesh + ".vtx[*]", flatten=True)))
+                merged = shells == 1
+                # When merged, is x==0.0 present with NO residual non-zero
+                # value near +-offset (i.e. fully snapped onto the plane), or
+                # does a non-zero value remain (partial/preserved position)?
+                snapped_exactly = merged and (0.0 in xs) and not any(
+                    0.0 < abs(x) <= offset + 1e-6 for x in xs)
+                probe("mtt%d_offset%s_threshold%s_shells_verts_distinctX" % (mtt, offset, threshold),
+                      (shells, verts, xs))
+                probe("mtt%d_offset%s_threshold%s_merged_snapped_exactly_to_plane"
+                      % (mtt, offset, threshold), (merged, snapped_exactly))
+                # Gate hypotheses to discriminate with this same data:
+                #  - per-vertex distance from plane == offset
+                #  - doubled/pair distance across the plane == 2*offset
+                probe("mtt%d_offset%s_threshold%s_gate_predicts_merge(by_offset,by_2xoffset)"
+                      % (mtt, offset, threshold),
+                      (offset <= threshold, 2 * offset <= threshold))
+
+    probe("care_case_CONCLUSION",
+          "TWO regimes measured, not one. (1) mergeThresholdType's DEFAULT "
+          "(type 0, used throughout the on/off-plane sweep above): "
+          "mergeThreshold is a total no-op under mergeMode=1 - border "
+          "vertices are unconditionally force-snapped onto the mirror plane "
+          "regardless of gap size (tested 0.1 to 1.9 units off, threshold "
+          "0.0 to 0.25 inclusive of 0 and negative - always 1 shell, always "
+          "snapped exactly to x=0). shell-count can never detect a bad seam "
+          "under type 0. (2) mergeThresholdType 1 and 2: see the "
+          "mtt*_offset*_threshold* PROBE lines directly above for the full "
+          "measured grid (offset in 0.02/0.1/0.5/1.0 x threshold in "
+          "0.001/0.05/0.2/0.6/2.5) - read those lines to determine whether "
+          "gap<threshold reliably predicts 1-shell-merged and gap>threshold "
+          "reliably predicts 2-shells-unmerged for THIS Maya, which distance "
+          "(single-sided offset vs the doubled cross-plane gap) the gate "
+          "actually keys on, and whether a successful merge under types 1/2 "
+          "still force-snaps to the plane (x=0) or leaves geometry at a "
+          "partial/averaged position. Task 2 must read the measured grid "
+          "above, not this sentence, to choose between (a) mapping "
+          "merge_threshold onto mergeThresholdType 1 or 2 natively, or (b) "
+          "keeping the pre-op distance-from-plane check.")
 except Exception as exc:  # noqa: BLE001
     probe("SECTION_3_FAILED", str(exc))
 
