@@ -27,6 +27,11 @@ class FakeCmds:
         self.deformed_verts = None
         self.angle_unit = "deg"
         self.angle_attrs = {"curvature", "startAngle", "endAngle"}
+        # polySplitRing/polySplit's measured silent-failure mode (#769
+        # fix-review): both commands can warn-and-do-nothing on un-probed
+        # topology, so the fake stays a no-op by default - edge_count never
+        # moves - to exercise sculpt.py's changed-anything guard.
+        self.edge_count = 12
 
     def objExists(self, name):
         return any(o == name or o.split("|")[-1] == name for o in self.objects)
@@ -162,15 +167,33 @@ class FakeCmds:
         self.objects.add("|sculpt1StretchOrigin")
         return ["sculpt1", "sculptor1", "sculpt1StretchOrigin"]
 
-    def polyEvaluate(self, name, face=False, triangle=False, vertex=False):
-        self.calls.append(("polyEvaluate", name, face, triangle, vertex))
+    def polyEvaluate(self, name, face=False, triangle=False, vertex=False, edge=False):
+        self.calls.append(("polyEvaluate", name, face, triangle, vertex, edge))
         if face:
             return self.face_count
         if triangle:
             return self.face_count
         if vertex:
             return self.face_count
+        if edge:
+            return self.edge_count
         raise AssertionError("unexpected polyEvaluate call")
+
+    def polySelect(self, name, edgeRing=None):
+        self.calls.append(("polySelect", name, edgeRing))
+
+    def polySplitRing(self, rootEdge=None, splitType=None, weight=None,
+                       divisions=None, constructionHistory=False):
+        self.calls.append(
+            ("polySplitRing", rootEdge, splitType, weight, divisions)
+        )
+        # No-op by default: edge_count never moves, matching Maya's measured
+        # warn-and-do-nothing behavior on un-probed topology (#769
+        # fix-review) - this is what exercises the changed-anything guard.
+
+    def polySplit(self, name, insertpoint=None, constructionHistory=False):
+        self.calls.append(("polySplit", name, insertpoint))
+        # No-op by default, for the same reason as polySplitRing above.
 
     def polyReduce(self, name, percentage=None, constructionHistory=False):
         self.calls.append(("polyReduce", name, percentage))
@@ -920,6 +943,40 @@ def test_insert_loop_rejects_edge_range():
     assert "single" in str(exc.value)
 
 
+def test_insert_loop_rejects_position_with_count_greater_than_one(monkeypatch):
+    # Measured (evals/cage_probe_769.py): count>1 uses splitType=2, which
+    # IGNORES weight/position entirely - #764 doctrine refuses the
+    # combination rather than silently dropping the caller's position.
+    fake = _mesh_fake("|col")
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        sculpt.sculpt_ops({
+            "mesh": "|col",
+            "ops": [{"op": "insert_loop", "edge": "e[12]", "count": 2,
+                      "position": 0.5}],
+        })
+    assert "position" in str(exc.value)
+    assert "count" in str(exc.value) or "count" in (exc.value.hint or "")
+    assert fake.calls == []
+
+
+def test_insert_loop_refuses_when_edge_count_unchanged(monkeypatch):
+    # polySplitRing's measured silent-failure mode: warn-and-do-nothing on
+    # un-probed topology (a ring interrupted by a triangle/boundary), no
+    # exception. The fake's polySplitRing is a no-op, so edges_after ==
+    # edges_before and the changed-anything guard must fire.
+    fake = _mesh_fake("|col")
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        sculpt.sculpt_ops({
+            "mesh": "|col",
+            "ops": [{"op": "insert_loop", "edge": "e[12]"}],
+        })
+    assert "changed nothing" in str(exc.value)
+    assert str(fake.edge_count) in str(exc.value)
+    assert any(c[0] == "polySplitRing" for c in fake.calls)
+
+
 def test_extrude_edges_rejects_unknown_param(monkeypatch):
     fake = _mesh_fake("|col")
     monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
@@ -1062,6 +1119,24 @@ def test_split_rejects_t_out_of_range(monkeypatch):
         })
     assert "points" in str(exc.value) or "t" in str(exc.value)
     assert fake.calls == []
+
+
+def test_split_refuses_when_edge_count_unchanged(monkeypatch):
+    # polySplit's measured silent-failure mode: a single insertpoint is a
+    # known no-op (already refused above with a >=2-entry requirement), but
+    # an invalid path with >=2 entries can ALSO silently no-op (e.g. a
+    # degenerate path Maya can't triangulate). The fake's polySplit is a
+    # no-op, so edges_after == edges_before and the guard must fire.
+    fake = _mesh_fake("|col")
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        sculpt.sculpt_ops({
+            "mesh": "|col",
+            "ops": [{"op": "split", "points": [["e[0]", 0.5], ["e[2]", 0.5]]}],
+        })
+    assert "changed nothing" in str(exc.value)
+    assert str(fake.edge_count) in str(exc.value)
+    assert any(c[0] == "polySplit" for c in fake.calls)
 
 
 def test_cage_ops_are_registered():

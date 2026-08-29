@@ -1316,6 +1316,7 @@ class TestCageOpsInMaya:
         mesh = "|split_quad"
         faces_before = cmds.polyEvaluate(mesh, face=True)
         edges_before = cmds.polyEvaluate(mesh, edge=True)
+        verts_before = cmds.polyEvaluate(mesh, vertex=True)
 
         result = sculpt.sculpt_ops(
             {"mesh": mesh,
@@ -1330,6 +1331,7 @@ class TestCageOpsInMaya:
         # independent cmds re-query
         assert cmds.polyEvaluate(mesh, face=True) - faces_before == 1
         assert cmds.polyEvaluate(mesh, edge=True) - edges_before == 3
+        assert cmds.polyEvaluate(mesh, vertex=True) - verts_before == 2
 
 
 class TestViewportInMaya:

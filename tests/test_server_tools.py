@@ -822,9 +822,10 @@ class TestModelingTools:
         ]
 
     def test_maya_sculpt_ops_op_results_defaults_to_none(self):
-        # The eight original ops (soft_move, smooth, bridge, ...) never
-        # populate op_results - the plugin response omits the key entirely
-        # for those calls, and the schema must not invent one.
+        # The plugin now always sends op_results ([] for the eight original
+        # ops - soft_move, smooth, bridge, ...). This test exercises
+        # back-compat with an old-plugin response that omits the key
+        # entirely - the schema must not invent one when that happens.
         conn = FakeConn(
             responses={
                 "sculpt_ops": {

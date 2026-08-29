@@ -276,7 +276,14 @@ def _op_insert_loop(cmds, mesh_long: str, op: Dict[str, Any]) -> Dict[str, Any]:
       is the only reliable multi-loop path measured: repeated single calls at
       the same edge do NOT distribute evenly (the index renumbers to the
       lower remaining sub-segment after each split, nesting toward one end).
+      `count`>1 with `position` given is refused outright (2026-08-29
+      fix-review): silently ignoring a param the caller set is the #764
+      failure mode.
     - per-loop yield on an N-around ring is +N vertices, +2N edges, +N faces.
+    - a changed-nothing result (edge count unchanged after the call) is
+      refused (2026-08-29 fix-review): polySplitRing on un-probed topology
+      (a ring interrupted by a triangle, or a boundary edge with no ring to
+      walk) prints a warning and silently changes nothing - no exception.
     """
     require_known_keys(op, INSERT_LOOP_KEYS, "insert_loop")
     idx = _single_component_index(op.get("edge"), "e", "edge")
@@ -284,6 +291,19 @@ def _op_insert_loop(cmds, mesh_long: str, op: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(count, int) or isinstance(count, bool) or count < 1:
         raise HandlerError(
             "insert_loop needs count >= 1", hint="got %r" % (count,)
+        )
+    if count > 1 and "position" in op:
+        # Measured (evals/cage_probe_769.py): count>1 uses splitType=2,
+        # which distributes loops evenly across (0,1) and IGNORES
+        # weight/position entirely - so a caller passing both is asking for
+        # something Maya silently will not do. #764 doctrine: refuse the
+        # combination rather than accept it and do something else.
+        raise HandlerError(
+            "insert_loop needs position to be omitted when count > 1",
+            hint="splitType=2 (count>1) distributes loops evenly across "
+                 "(0,1) and measured to ignore weight/position entirely; "
+                 "position only applies when count=1 - drop 'position' or "
+                 "set count=1",
         )
     position = op.get("position", 0.5)
     if (
@@ -308,6 +328,22 @@ def _op_insert_loop(cmds, mesh_long: str, op: Dict[str, Any]) -> Dict[str, Any]:
         )
     edges_after = cmds.polyEvaluate(mesh_long, edge=True)
     faces_after = cmds.polyEvaluate(mesh_long, face=True)
+    if edges_after == edges_before:
+        # Measured (evals/cage_probe_769.py): polySplitRing on un-probed
+        # topology (a ring interrupted by a triangle, or a boundary edge
+        # that has no ring to walk) prints a Maya warning and silently
+        # changes nothing - no exception. Reporting "success" with an
+        # unchanged mesh is exactly the "reported success, changed less
+        # than asked" failure this codebase has been burned by before
+        # (#636) - refuse it here instead.
+        raise HandlerError(
+            "insert_loop reported success but changed nothing: edge count "
+            "stayed at %d (faces stayed at %d) - Maya declined the "
+            "polySplitRing silently" % (edges_before, faces_before),
+            hint="the ring may be interrupted by a triangle or a mesh "
+                 "boundary, or edge %d may not support this split; try a "
+                 "different edge" % idx,
+        )
     return {
         "loops_inserted": count,
         "edges_before": edges_before, "edges_after": edges_after,
@@ -510,6 +546,12 @@ def _op_split(cmds, mesh_long: str, op: Dict[str, Any]) -> Dict[str, Any]:
     unlike every other op here - and a SINGLE insertpoint is a silent no-op
     (returns success, changes nothing); the >=2-entry requirement below is
     load-bearing, not just tidiness.
+
+    A changed-nothing result (edge count unchanged after the call) is
+    refused too (2026-08-29 fix-review): polySplit can silently no-op on an
+    invalid path (points on the same edge with an equal or degenerate `t`,
+    or a path Maya cannot triangulate) even with >=2 entries, printing a
+    warning rather than raising.
     """
     require_known_keys(op, SPLIT_KEYS, "split")
     points = op.get("points")
@@ -537,6 +579,15 @@ def _op_split(cmds, mesh_long: str, op: Dict[str, Any]) -> Dict[str, Any]:
     cmds.polySplit(mesh_long, insertpoint=insertpoints, constructionHistory=False)
     edges_after = cmds.polyEvaluate(mesh_long, edge=True)
     faces_after = cmds.polyEvaluate(mesh_long, face=True)
+    if edges_after == edges_before:
+        raise HandlerError(
+            "split reported success but changed nothing: edge count stayed "
+            "at %d (faces stayed at %d) - Maya declined the polySplit "
+            "silently" % (edges_before, faces_before),
+            hint="the split path may be invalid for this topology (e.g. "
+                 "points landing on the same spot, or a path Maya cannot "
+                 "triangulate); try different points",
+        )
     return {
         "edges_before": edges_before, "edges_after": edges_after,
         "faces_before": faces_before, "faces_after": faces_after,

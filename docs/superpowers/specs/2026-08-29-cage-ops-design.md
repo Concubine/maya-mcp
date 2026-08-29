@@ -100,6 +100,23 @@ each.
   measured); composition: `uv_atlas` + `bind_skin` work on the result; one
   render sheet for eyes.
 
+  > **2026-08-29 fix-review amendment:** the gate does NOT assert a global
+  > bbox comparison as this spec said above — it measures LOCAL
+  > displacement instead. A global bbox (whole-mesh extent) dilutes a
+  > strictly local Catmull-Clark effect: `polySmooth` only pulls a vertex
+  > toward the average of its own 1-ring neighbourhood, so a support loop's
+  > whole job — holding one specific span of silhouette still — can move
+  > the mesh's overall bounding box by nothing at all when that span sits
+  > away from whichever axis extreme the bbox tracks (measured: a
+  > border-adjacent loop produced ZERO global bbox effect in the probed
+  > half-form). The shipped gate instead captures the post-`insert_loop`
+  > world position of one of the loop's own new vertices, then compares
+  > post-smooth displacement AT THAT SAME LOCATION between a looped build
+  > and an otherwise-identical loopless control: looped displacement
+  > 0.176777 vs loopless 0.242956 — ratio 1.374x. `RATIO_THRESHOLD = 1.2`
+  > sits comfortably below the measured 1.374x while still failing a loop
+  > that did nothing (ratio ~1.0).
+
 ## Out of scope
 
 - No new tool surface; no changes to existing eight ops beyond registry
