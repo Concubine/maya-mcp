@@ -5849,3 +5849,168 @@ class TestCleanClipInMaya:
         after_measure = clip.measure_clip(
             {"root": root, "name": "walk", "contact_joints": ankles})
         assert after_measure == before_measure
+
+
+class TestBakeMeshMapsInMaya:
+    """#770 against real Arnold. The claim under test is the ticket's own:
+    the bake captures what only GEOMETRY knows - a box resting on a plane
+    darkens the plane's AO exactly under itself (probe S3 measured 3.9
+    under vs 251.1 away), and the composite carries that into the colour
+    map the export ships."""
+
+    def _plane_under_box(self):
+        import maya.cmds as cmds
+
+        plane = cmds.ls(cmds.polyPlane(name="ground", width=10, height=10,
+                                       constructionHistory=False)[0],
+                        long=True)[0]
+        box = cmds.polyCube(name="crate", width=2, height=2, depth=2,
+                            constructionHistory=False)[0]
+        cmds.setAttr(box + ".translateY", 1.0)
+        return plane
+
+    def _region_mean(self, path, u0, u1, v0, v1):
+        from maya_plugin.handlers import pngprobe
+
+        png = pngprobe.read_png(path)
+        w, h, px = png["width"], png["height"], png["pixels"]
+        vals = [px[y * w + x][0]
+                for y in range(h) for x in range(w)
+                if u0 <= (x + 0.5) / w <= u1
+                and v0 <= 1.0 - (y + 0.5) / h <= v1]
+        return sum(vals) / max(len(vals), 1)
+
+    def test_ao_darkens_under_a_resting_box(self, tmp_path):
+        from maya_plugin.handlers import meshmaps
+
+        plane = self._plane_under_box()
+        out = meshmaps.bake_mesh_maps({
+            "meshes": [plane], "out_dir": str(tmp_path), "maps": ["ao"],
+            "resolution": 256})
+        entry = out["baked"][0]
+        assert entry["stats"]["non_uniform"] is True
+        assert entry["stats"]["blank"] is False
+        under = self._region_mean(entry["file"], 0.4, 0.6, 0.4, 0.6)
+        away = self._region_mean(entry["file"], 0.0, 0.15, 0.0, 0.15)
+        assert under < away - 100, (under, away)
+
+    def test_curvature_and_normal_are_non_flat_on_shaped_geometry(
+            self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import meshmaps, uvatlas
+
+        cube = cmds.ls(cmds.polyCube(name="edgy", width=2, height=2,
+                                     depth=2,
+                                     constructionHistory=False)[0],
+                       long=True)[0]
+        cmds.polyBevel3(cube, offset=0.15, segments=2,
+                        constructionHistory=False)
+        uvatlas.uv_atlas({"names": [cube], "project": "box"})
+        out = meshmaps.bake_mesh_maps({
+            "meshes": [cube], "out_dir": str(tmp_path),
+            "maps": ["curvature", "world_normal"], "resolution": 256})
+        by_map = {b["map"]: b for b in out["baked"]}
+        assert by_map["curvature"]["stats"]["non_uniform"] is True
+        assert by_map["world_normal"]["stats"]["non_uniform"] is True
+
+    def test_no_temp_shader_survives_a_bake(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import meshmaps
+
+        plane = self._plane_under_box()
+        before = set(cmds.ls(type=("aiAmbientOcclusion", "aiCurvature",
+                                   "aiUtility")) or [])
+        meshmaps.bake_mesh_maps({
+            "meshes": [plane], "out_dir": str(tmp_path),
+            "resolution": 256})
+        after = set(cmds.ls(type=("aiAmbientOcclusion", "aiCurvature",
+                                  "aiUtility")) or [])
+        assert after == before
+
+    def test_a_uv_less_mesh_refuses_upfront(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import meshmaps
+
+        cube = cmds.ls(cmds.polyCube(name="naked",
+                                     constructionHistory=False)[0],
+                       long=True)[0]
+        shape = cmds.listRelatives(cube, shapes=True, fullPath=True)[0]
+        cmds.polyMapDel(shape + ".map[*]")
+        with pytest.raises(HandlerError, match="no UVs"):
+            meshmaps.bake_mesh_maps({"meshes": [cube],
+                                     "out_dir": str(tmp_path),
+                                     "maps": ["ao"]})
+        assert not [f for f in os.listdir(str(tmp_path))]
+
+    def test_apply_ao_rewires_a_plain_colour_to_a_darkened_file(
+            self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import material, meshmaps, texclaim
+
+        plane = self._plane_under_box()
+        material.assign_material({"mesh": plane, "name": "ground_mat",
+                                  "shader": "standardSurface"})
+        cmds.setAttr("ground_mat.baseColor", 0.8, 0.8, 0.8,
+                     type="double3")
+        out = meshmaps.bake_mesh_maps({
+            "meshes": [plane], "out_dir": str(tmp_path), "maps": ["ao"],
+            "resolution": 256, "apply_ao": True})
+        assert out["checkpoint_id"]
+        applied = out["applied"][0]
+        assert applied["material"] == "ground_mat"
+        assert os.path.isfile(applied["file"])
+
+        # the slot really reads the composite now
+        shape = cmds.listRelatives(plane, shapes=True, fullPath=True)[0]
+        claims = texclaim.material_claims(cmds, [shape])
+        claim = next(c for c in claims
+                     if c["material"] == "ground_mat"
+                     and c["attr"] == "baseColor")
+        assert claim["classification"] == "file"
+        assert claim["terminals"][0]["file_path"].replace("\\", "/") \
+            == applied["file"].replace("\\", "/")
+
+        # and the composite is DARKER under the box than away from it -
+        # the contact shadow is in the colour map itself
+        under = self._region_mean(applied["file"], 0.4, 0.6, 0.4, 0.6)
+        away = self._region_mean(applied["file"], 0.0, 0.15, 0.0, 0.15)
+        assert under < away - 100, (under, away)
+
+    def test_apply_ao_composites_onto_a_file_base_without_touching_it(
+            self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import material, meshmaps, pngwrite
+
+        plane = self._plane_under_box()
+        material.assign_material({"mesh": plane, "name": "kit_mat",
+                                  "shader": "standardSurface"})
+        base_path = str(tmp_path / "kit_albedo.png")
+        pngwrite.write_png(base_path, 4, 4, [(200, 100, 50)] * 16)
+        base_bytes = open(base_path, "rb").read()
+        file_node = cmds.shadingNode("file", asTexture=True,
+                                     name="kit_albedo_file")
+        cmds.setAttr(file_node + ".fileTextureName", base_path,
+                     type="string")
+        cmds.connectAttr(file_node + ".outColor", "kit_mat.baseColor",
+                         force=True)
+
+        out = meshmaps.bake_mesh_maps({
+            "meshes": [plane], "out_dir": str(tmp_path), "maps": ["ao"],
+            "resolution": 256, "apply_ao": True})
+        applied = out["applied"][0]
+        assert applied["replaced_file"].replace("\\", "/") \
+            == base_path.replace("\\", "/")
+        # the input atlas is byte-identical - never overwritten
+        assert open(base_path, "rb").read() == base_bytes
+        # the old file node was orphaned by the rewire and swept
+        assert not cmds.objExists(file_node)
+        # away from the box, the composite keeps the base hue (scaled by
+        # open-sky AO ~1.0): red channel stays dominant
+        away = self._region_mean(applied["file"], 0.0, 0.1, 0.0, 0.1)
+        assert away > 150
