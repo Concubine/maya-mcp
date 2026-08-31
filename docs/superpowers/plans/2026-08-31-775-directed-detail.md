@@ -109,8 +109,8 @@ Expected: export `ok`, `dropped_maps` empty, `P2 basename in FBX bytes: True`. I
 - [ ] **Step 4: Record results below, commit**
 
 **Results (filled by Task 1):**
-- P1 256²: ___ s; 1024²: ___ s → strategy: ___
-- P2: export status ___, dropped_maps ___, bytes carry PNG name: ___
+- P1 256²: 0.4 s; 1024²: 6.8 s → strategy: full-res generation (1024² well under the ~15s threshold, no upsample needed)
+- P2: export status `ok`, dropped_maps `[]` (empty), bytes carry PNG name: `True`. `file_maps` records one entry (`p2_heightfile` → `normalCamera`, `on_disk: True`, `found_in_file: True`) noting `semantics_lost: ["channel swizzle outAlpha"]` — the outAlpha→bumpValue swizzle isn't representable in FBX, informational only, not a refusal.
 
 ```bash
 git add evals/surfdetail_probe_775.py docs/superpowers/plans/2026-08-31-775-directed-detail.md
