@@ -759,6 +759,54 @@ class SetBlendshapeWeightsResult(BaseModel):
     warnings: List[str] = Field(default_factory=list)
 
 
+class ApplyDeltaMushResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    mesh: str
+    delta_mush: str = Field(description=(
+        "The deformer node, at the END of the chain (blendShape -> "
+        "skinCluster -> deltaMush). One per mesh; delete_objects it to "
+        "remove the relaxation."))
+    worst_edge_ratio_before: Optional[float] = Field(default=None, description=(
+        "MEASURED at the current pose before the mush: worst current-world "
+        "/ bind edge-length ratio (the humanoid gate's tear currency). "
+        "~1.0 when the rig is at rest."))
+    worst_edge_ratio_after: Optional[float] = Field(default=None, description=(
+        "The same ratio re-measured through the mush - the relaxation, "
+        "as a number."))
+    max_displacement: float = Field(description=(
+        "Furthest any vertex moved when the mush landed, measured at the "
+        "current pose. ~0 at rest (deltaMush is identity at the bind pose)."))
+    warnings: List[str] = Field(default_factory=list)
+
+
+class AddCorrectiveResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    mesh: str
+    blend_shape: str
+    target: str
+    joint: str
+    interpolator: str = Field(description=(
+        "The poseInterpolator shape driving the weight. One per driver "
+        "joint - a second corrective on the same joint adds a pose to it. "
+        "delete_objects the interpolator's transform to free every weight "
+        "it drives."))
+    pose_name: str
+    pose_index: int
+    weight_at_pose: float = Field(description=(
+        "MEASURED: the weight re-read through the real graph with the "
+        "joint AT the trigger rotation - ~1.0, or the call would have "
+        "refused (an inert wire must not return ok)."))
+    weight_at_rest: float = Field(description=(
+        "The weight with the joint zeroed - ~0.0; larger warns that "
+        "neighbouring poses overlap the neutral."))
+    corrective_displacement: float = Field(description=(
+        "Furthest any vertex moved when the corrective connected, at the "
+        "trigger pose, through the full deformer chain."))
+    warnings: List[str] = Field(default_factory=list)
+
+
 class ShapeRecord(BaseModel):
     model_config = ConfigDict(extra="ignore")
 

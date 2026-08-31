@@ -106,6 +106,8 @@ class TestRegistration:
             "maya_author_physics",
             "maya_create_blendshape",
             "maya_set_blendshape_weights",
+            "maya_apply_delta_mush",
+            "maya_add_corrective",
             "maya_author_clip",
             "maya_delete_clip",
             "maya_measure_clip",
@@ -2131,6 +2133,59 @@ class TestBlendshapeTools:
         weigh = by_name["maya_set_blendshape_weights"].annotations
         assert (weigh.read_only_hint, weigh.destructive_hint,
                 weigh.idempotent_hint) == (False, True, True)
+
+
+class TestCorrectiveTools:
+    def test_delta_mush_marshals_and_returns_measured(self):
+        conn = FakeConn(responses={"apply_delta_mush": {
+            "mesh": "|humanoid", "delta_mush": "deltaMush1",
+            "worst_edge_ratio_before": 1.94,
+            "worst_edge_ratio_after": 1.41,
+            "max_displacement": 0.012, "warnings": []}})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_apply_delta_mush", {
+            "mesh": "|humanoid", "smoothing_iterations": 12}))
+        call = conn.calls[0]
+        assert call["cmd"] == "apply_delta_mush"
+        assert call["params"] == {"mesh": "|humanoid",
+                                  "smoothing_iterations": 12,
+                                  "smoothing_step": 0.5,
+                                  "pin_border_vertices": True}
+        payload = result.structured_content
+        assert payload["worst_edge_ratio_after"] == 1.41
+        assert payload["delta_mush"] == "deltaMush1"
+
+    def test_add_corrective_marshals_and_returns_measured(self):
+        conn = FakeConn(responses={"add_corrective": {
+            "mesh": "|humanoid", "blend_shape": "humanoid_shapes",
+            "target": "L_elbow_bulge", "joint": "|pelvis|...|L_elbow",
+            "interpolator": "L_elbow_poseInterpShape",
+            "pose_name": "L_elbow_bulge", "pose_index": 3,
+            "weight_at_pose": 1.0, "weight_at_rest": 0.0,
+            "corrective_displacement": 0.041, "warnings": []}})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_add_corrective", {
+            "mesh": "|humanoid", "target": "L_elbow_bulge",
+            "joint": "L_elbow", "rotation": [0.0, 0.0, -90.0]}))
+        call = conn.calls[0]
+        assert call["cmd"] == "add_corrective"
+        assert call["params"] == {"mesh": "|humanoid",
+                                  "target": "L_elbow_bulge",
+                                  "joint": "L_elbow",
+                                  "rotation": [0.0, 0.0, -90.0]}
+        payload = result.structured_content
+        assert payload["weight_at_pose"] == 1.0
+        assert payload["pose_index"] == 3
+
+    def test_annotations(self):
+        mcp = server_mod.create_server(FakeConn())
+        by_name = {t.name: t for t in run(mcp.list_tools())}
+        mush = by_name["maya_apply_delta_mush"].annotations
+        assert (mush.read_only_hint, mush.destructive_hint,
+                mush.idempotent_hint) == (False, True, False)
+        corr = by_name["maya_add_corrective"].annotations
+        assert (corr.read_only_hint, corr.destructive_hint,
+                corr.idempotent_hint) == (False, True, False)
 
 
 def _export_result_stub():

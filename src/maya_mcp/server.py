@@ -28,6 +28,8 @@ from maya_plugin import logsetup
 from . import images, refstore
 from .connection import MayaConnection
 from .schemas import (
+    AddCorrectiveResult,
+    ApplyDeltaMushResult,
     ApplySurfaceDetailResult,
     ArrayResult,
     AssembleResult,
@@ -2646,6 +2648,91 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             maya.request(
                 "set_blendshape_weights",
                 {"mesh": mesh, "weights": weights},
+                timeout_s=BOOL_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Relax skinning with deltaMush",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_apply_delta_mush(
+        mesh: Annotated[str, Field(description="The skinned mesh (long name).")],
+        smoothing_iterations: Annotated[int, Field(ge=1, le=50, description=(
+            "Smoothing passes. 10 is Maya's default and measurably relaxes "
+            "a harsh bend; more is smoother and slower."
+        ))] = 10,
+        smoothing_step: Annotated[float, Field(ge=0.01, le=1.0, description=(
+            "Per-pass step size 0.01..1.0."
+        ))] = 0.5,
+        pin_border_vertices: Annotated[bool, Field(description=(
+            "Hold open-edge borders in place (Maya's default)."
+        ))] = True,
+    ) -> ApplyDeltaMushResult:
+        """Relax skinning artifacts with one deltaMush and MEASURE it.
+
+        The deformer lands at the END of the chain (blendShape ->
+        skinCluster -> deltaMush), is exactly identity at the bind pose,
+        and reports the worst edge-stretch ratio at the CURRENT pose
+        before and after - pose the rig first or the numbers read ~1.0
+        and the result warns. Refuses an unskinned mesh (nothing to
+        relax) and a second mush (unexplainable stacking). KNOW: the
+        relaxation exists only in Maya - FBX export drops a deltaMush
+        with byte-identical output, and export_fbx warns when one is
+        live."""
+        return ApplyDeltaMushResult.model_validate(
+            maya.request(
+                "apply_delta_mush",
+                {"mesh": mesh,
+                 "smoothing_iterations": smoothing_iterations,
+                 "smoothing_step": smoothing_step,
+                 "pin_border_vertices": pin_border_vertices},
+                timeout_s=BOOL_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Fire a corrective at a joint angle",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_add_corrective(
+        mesh: Annotated[str, Field(description=(
+            "The mesh carrying the blendShape (long name)."))],
+        target: Annotated[str, Field(description=(
+            "An EXISTING blend-shape target alias on that mesh - "
+            "maya_create_blendshape authors it first."
+        ))],
+        joint: Annotated[str, Field(description=(
+            "Driver joint. Its LOCAL rotation fires the corrective."
+        ))],
+        rotation: Annotated[List[float], Field(min_length=3, max_length=3,
+                                               description=(
+            "[rx, ry, rz] local degrees - the trigger pose the corrective "
+            "peaks at; the exact currency maya_pose_skeleton speaks. "
+            "(0,0,0) is refused: that IS the neutral pose."
+        ))],
+    ) -> AddCorrectiveResult:
+        """Drive an existing blend-shape target from a joint angle.
+
+        Wires a poseInterpolator (one per driver joint; reused) so the
+        weight ramps 0 at rest to 1 at the trigger rotation - the phase-5
+        corrective now fires ON THE BEND instead of at a hand-set weight.
+        The call verifies its own wire: weight re-read AT the trigger
+        through the real graph, refusing (with rollback) if it did not
+        take. Driven weights refuse hand-setting (set_blendshape_weights)
+        and clip keys (author_clip) with pointers back here; animated
+        exports bake them into per-frame DeformPercent take curves
+        automatically (measured). delete_objects the interpolator to
+        free every weight it drives."""
+        return AddCorrectiveResult.model_validate(
+            maya.request(
+                "add_corrective",
+                {"mesh": mesh, "target": target, "joint": joint,
+                 "rotation": rotation},
                 timeout_s=BOOL_TIMEOUT_S,
             )
         )
