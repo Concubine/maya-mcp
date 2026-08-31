@@ -6014,3 +6014,305 @@ class TestBakeMeshMapsInMaya:
         # open-sky AO ~1.0): red channel stays dominant
         away = self._region_mean(applied["file"], 0.0, 0.1, 0.0, 0.1)
         assert away > 150
+
+
+class TestApplySurfaceDetailInMaya:
+    """#775 task 5 against real Arnold bakes. wear/grime ride the SAME
+    curvature/ao masks meshmaps.bake_mesh_maps produces from real geometry
+    (#770); grain wires a real bump2d height network. The claim under
+    test is directional: colour change concentrates where the geometry
+    signal says it should, not merely "some pixels changed"."""
+
+    def _beveled_cube(self, name):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import uvatlas
+
+        cube = cmds.ls(cmds.polyCube(name=name, width=2, height=2, depth=2,
+                                     constructionHistory=False)[0],
+                       long=True)[0]
+        cmds.polyBevel3(cube, offset=0.15, segments=2,
+                        constructionHistory=False)
+        # cols=1, rows=1: the mesh fills the WHOLE UV tile rather than the
+        # default's one-of-16 patch - a bake's unmapped canvas gets a
+        # dilated background fill (meshmaps extend_edges) that dilutes a
+        # per-texel mask correlation if most of the canvas is background,
+        # not geometry (measured while tuning this test's ratio bar).
+        uvatlas.uv_atlas({"names": [cube], "project": "box", "cols": 1,
+                          "rows": 1})
+        return cube
+
+    def _plane_under_box(self, plane_name="ground", box_name="crate"):
+        import maya.cmds as cmds
+
+        plane = cmds.ls(cmds.polyPlane(name=plane_name, width=10, height=10,
+                                       constructionHistory=False)[0],
+                        long=True)[0]
+        box = cmds.polyCube(name=box_name, width=2, height=2, depth=2,
+                            constructionHistory=False)[0]
+        cmds.setAttr(box + ".translateY", 1.0)
+        return plane
+
+    def _beveled_box_on_plane(self, plane_name="ground", box_name="crate"):
+        """A beveled box resting on a plane: the box carries both a real
+        curvature signal (the bevel) and a real AO signal (occluded near
+        its base, from the plane it touches) - the one scene both wear
+        and grime/grain masks can be baked from."""
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import uvatlas
+
+        plane = cmds.ls(cmds.polyPlane(name=plane_name, width=10, height=10,
+                                       constructionHistory=False)[0],
+                        long=True)[0]
+        box = cmds.ls(cmds.polyCube(name=box_name, width=2, height=2,
+                                    depth=2,
+                                    constructionHistory=False)[0],
+                      long=True)[0]
+        cmds.setAttr(box + ".translateY", 1.0)
+        cmds.polyBevel3(box, offset=0.15, segments=2,
+                        constructionHistory=False)
+        uvatlas.uv_atlas({"names": [box], "project": "box", "cols": 1,
+                          "rows": 1})
+        return plane, box
+
+    def _flat_material(self, mesh, name, rgb=(0.6, 0.6, 0.6)):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import material
+
+        material.assign_material({"mesh": mesh, "name": name,
+                                  "shader": "standardSurface"})
+        cmds.setAttr(name + ".baseColor", *rgb, type="double3")
+        return name
+
+    def _delta_quartiles(self, mask_path, after_path, before_srgb,
+                         channel=0):
+        """Sort texel indices by the RAW mask pixel value (ascending);
+        mean |after-before| colour delta over the bottom and the top
+        quartile. The caller decides which end is the "high driving
+        signal" one for its effect kind (curvature un-inverted for wear,
+        AO inverted for grime - so grime's high signal is the mask's LOW
+        raw quartile)."""
+        from maya_plugin.handlers import pngprobe
+
+        mask = pngprobe.read_png(mask_path)
+        after = pngprobe.read_png(after_path)
+        n = len(mask["pixels"])
+        assert len(after["pixels"]) == n, (n, len(after["pixels"]))
+        order = sorted(range(n), key=lambda i: mask["pixels"][i][0])
+        q = max(1, n // 4)
+
+        def mean_delta(idx):
+            return sum(abs(after["pixels"][i][channel] - before_srgb)
+                      for i in idx) / float(len(idx))
+
+        return mean_delta(order[:q]), mean_delta(order[-q:])
+
+    def test_wear_correlates_with_baked_curvature(self, tmp_path):
+        import os
+
+        from maya_plugin.handlers import meshmaps, surfdetail
+
+        cube = self._beveled_cube("worn")
+        base_rgb = (0.6, 0.6, 0.6)
+        self._flat_material(cube, "worn_mat", base_rgb)
+        before_srgb = meshmaps._srgb_encode(base_rgb[0])
+
+        meshmaps.bake_mesh_maps({"meshes": [cube], "out_dir": str(tmp_path),
+                                 "maps": ["curvature"], "resolution": 256})
+
+        result = surfdetail.apply_surface_detail({
+            "mesh": cube, "maps_dir": str(tmp_path), "out_dir": str(tmp_path),
+            "resolution": 256,
+            "effects": [{"kind": "wear", "strength": 2.0, "scale": 1.0}],
+        })
+        wear = next(e for e in result["effects"] if e["kind"] == "wear")
+        assert wear["changed_fraction"] > 0
+        assert os.path.isfile(result["color_file"])
+
+        curv_path = os.path.join(str(tmp_path), "worn_curvature.png")
+        bottom_mean, top_mean = self._delta_quartiles(
+            curv_path, result["color_file"], before_srgb)
+        # high curvature (top quartile) is wear's driving mask - it must
+        # be worn measurably more than the flattest quartile.
+        ratio = top_mean / max(bottom_mean, 1e-6)
+        assert ratio > 2, (bottom_mean, top_mean, ratio)
+
+    def test_grime_correlates_with_inverted_baked_ao(self, tmp_path):
+        import os
+
+        from maya_plugin.handlers import meshmaps, surfdetail
+
+        plane = self._plane_under_box(plane_name="grimyground",
+                                      box_name="grimycrate")
+        base_rgb = (0.6, 0.6, 0.6)
+        self._flat_material(plane, "grime_mat", base_rgb)
+        before_srgb = meshmaps._srgb_encode(base_rgb[0])
+
+        meshmaps.bake_mesh_maps({"meshes": [plane], "out_dir": str(tmp_path),
+                                 "maps": ["ao"], "resolution": 256})
+
+        result = surfdetail.apply_surface_detail({
+            "mesh": plane, "maps_dir": str(tmp_path), "out_dir": str(tmp_path),
+            "resolution": 256,
+            "effects": [{"kind": "grime", "strength": 2.0, "scale": 1.0}],
+        })
+        grime = next(e for e in result["effects"] if e["kind"] == "grime")
+        assert grime["changed_fraction"] > 0
+        assert os.path.isfile(result["color_file"])
+
+        ao_path = os.path.join(str(tmp_path), "grimyground_ao.png")
+        bottom_mean, top_mean = self._delta_quartiles(
+            ao_path, result["color_file"], before_srgb)
+        # grime's mask is AO INVERTED - the driving signal is highest
+        # where the raw AO bake is DARKEST (occluded), i.e. the bottom
+        # quartile of raw AO values.
+        ratio = bottom_mean / max(top_mean, 1e-6)
+        assert ratio > 2, (bottom_mean, top_mean, ratio)
+
+    def test_grain_writes_a_height_map_and_wires_a_bump_network(
+            self, tmp_path):
+        import os
+
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import meshmaps, pngprobe, surfdetail
+
+        plane, box = self._beveled_box_on_plane(plane_name="grainground",
+                                                box_name="graincrate")
+        self._flat_material(box, "grain_mat")
+
+        meshmaps.bake_mesh_maps({"meshes": [box], "out_dir": str(tmp_path),
+                                 "maps": ["curvature", "ao"],
+                                 "resolution": 256})
+
+        result = surfdetail.apply_surface_detail({
+            "mesh": box, "maps_dir": str(tmp_path), "out_dir": str(tmp_path),
+            "resolution": 256,
+            "effects": [{"kind": "grain", "strength": 0.4, "scale": 1.0}],
+        })
+        assert result["height_file"] is not None
+        assert os.path.isfile(result["height_file"])
+        uni = pngprobe.uniformity(result["height_file"])
+        assert uni["non_uniform"] is True
+
+        bumps = [n for n in result["file_nodes"]
+                if cmds.nodeType(n) == "bump2d"]
+        assert len(bumps) == 1, result["file_nodes"]
+        bump = bumps[0]
+        assert cmds.getAttr(bump + ".bumpInterp") == 0
+
+        value_src = cmds.listConnections(bump + ".bumpValue", source=True,
+                                         plugs=True, destination=False)
+        assert value_src, "bumpValue has no incoming connection"
+        assert value_src[0].endswith(".outAlpha")
+        assert cmds.nodeType(value_src[0].split(".")[0]) == "file"
+
+        normal_src = cmds.listConnections("grain_mat.normalCamera",
+                                          source=True, destination=False)
+        assert normal_src and bump in normal_src
+
+    def test_grain_refuses_a_shader_that_already_has_a_bump_network(
+            self, tmp_path):
+        from maya_plugin.handlers import (meshmaps, surfdetail,
+                                          texture_recipes)
+        from maya_plugin.dispatcher import HandlerError
+
+        plane, box = self._beveled_box_on_plane(plane_name="stackedground",
+                                                box_name="stackedcrate")
+        self._flat_material(box, "stacked_mat")
+        texture_recipes.apply_texture_recipe({"mesh": box,
+                                              "recipe": "noise_bump"})
+
+        meshmaps.bake_mesh_maps({"meshes": [box], "out_dir": str(tmp_path),
+                                 "maps": ["curvature", "ao"],
+                                 "resolution": 256})
+
+        with pytest.raises(HandlerError, match="bump/normal network"):
+            surfdetail.apply_surface_detail({
+                "mesh": box, "maps_dir": str(tmp_path),
+                "out_dir": str(tmp_path), "resolution": 256,
+                "effects": [{"kind": "grain", "strength": 0.4,
+                            "scale": 1.0}],
+            })
+
+    def test_a_flat_mask_refuses_naming_distinct_values(self, tmp_path):
+        """MEASURED (this task): a lone flat plane's real Arnold bake is
+        NOT honestly flat. aiAmbientOcclusion/aiCurvature at the
+        aa_samples=3 `_arnold_bake` uses carry Monte-Carlo sampling noise
+        even over unoccluded, uncurved geometry - a diagnostic bake of
+        this exact scene (curvature and ao, 256 res) came back with 125
+        and 665 distinct byte values respectively, ~18%/~38% of texels
+        off the dominant value, not the single-value bake the #775 plan
+        assumed. So this test proves the refusal against a literally
+        flat mask FILE (the real geometry-derived filename convention
+        and the real `_load_mask`/`pngprobe.uniformity` code path
+        `apply_surface_detail` reads through) rather than against a
+        bake, which cannot produce one at this sample count."""
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import pngwrite, surfdetail
+
+        plane = cmds.ls(cmds.polyPlane(name="lonely", width=10, height=10,
+                                       constructionHistory=False)[0],
+                        long=True)[0]
+        self._flat_material(plane, "lonely_mat")
+
+        flat_path = str(tmp_path / "lonely_curvature.png")
+        pngwrite.write_png(flat_path, 256, 256, [(0, 0, 0)] * (256 * 256))
+
+        with pytest.raises(HandlerError, match="distinct_values"):
+            surfdetail.apply_surface_detail({
+                "mesh": plane, "maps_dir": str(tmp_path),
+                "out_dir": str(tmp_path), "resolution": 256,
+                "effects": [{"kind": "wear", "strength": 0.5,
+                            "scale": 1.0}],
+            })
+
+    def test_checkpoint_restore_reverts_the_colour_slot(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import (meshmaps, session, surfdetail,
+                                          texclaim)
+
+        cmds.file(rename=str(tmp_path / "work.ma"))
+        cube = self._beveled_cube("checkpointed")
+        base_rgb = (0.6, 0.6, 0.6)
+        self._flat_material(cube, "cp_mat", base_rgb)
+
+        shape = cmds.listRelatives(cube, shapes=True, fullPath=True)[0]
+        # texclaim.material_claims only reports slots worth an export
+        # warning (file/procedural) - a plain flat value is classified
+        # "value" internally but never appears in the list at all
+        # (texclaim.py: `if classification == "value": continue`), so
+        # "before" is the ABSENCE of a cp_mat/baseColor claim, not a
+        # claim carrying classification "value".
+        before_claims = texclaim.material_claims(cmds, [shape])
+        assert not any(c["material"] == "cp_mat" and c["attr"] == "baseColor"
+                      for c in before_claims)
+
+        meshmaps.bake_mesh_maps({"meshes": [cube], "out_dir": str(tmp_path),
+                                 "maps": ["curvature"], "resolution": 256})
+
+        result = surfdetail.apply_surface_detail({
+            "mesh": cube, "maps_dir": str(tmp_path), "out_dir": str(tmp_path),
+            "resolution": 256,
+            "effects": [{"kind": "wear", "strength": 2.0, "scale": 1.0}],
+        })
+
+        after_claims = texclaim.material_claims(cmds, [shape])
+        after_claim = next(c for c in after_claims
+                           if c["material"] == "cp_mat"
+                           and c["attr"] == "baseColor")
+        assert after_claim["classification"] == "file"
+
+        session.restore_checkpoint({"checkpoint_id": result["checkpoint_id"]})
+
+        restored_claims = texclaim.material_claims(cmds, [shape])
+        assert not any(
+            c["material"] == "cp_mat" and c["attr"] == "baseColor"
+            for c in restored_claims), (
+            "restore_checkpoint left the slot classified as file/"
+            "procedural - the pre-apply flat value did not come back")
