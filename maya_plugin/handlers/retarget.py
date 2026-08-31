@@ -332,6 +332,71 @@ def _characterize(cmds, mel, name_hint: str, slot_joints: Dict[str, str],
     return char
 
 
+def _stance_snapshot(cmds, joints: Sequence[str]):
+    """Temporarily force every joint's ROTATION to zero - the build stance (#788).
+
+    HumanIK records the pose at characterization time as the character's
+    STANCE, and retargeting maps stance-relative rotation. A skeleton whose
+    curves pose it mid-motion at characterization time therefore has its
+    stance recorded as that motion pose, and every CONSTANT limb offset
+    between the true stance and the motion is silently eaten - measured as
+    arms retargeting horizontal (T-pose) while legs, straight in both poses,
+    came through fine. Zero rotation IS the stance for every skeleton this
+    tool builds or characterizes (create_skeleton rigs and BVH-offset
+    sources are both authored that way).
+
+    Returns a snapshot for `_stance_restore`: the disconnected anim-curve
+    plugs AND the raw values, so the rig leaves exactly as it arrived.
+    """
+    saved_conn = []
+    saved_val = []
+    for j in joints:
+        for ax in ("X", "Y", "Z"):
+            attr = "%s.rotate%s" % (j, ax)
+            try:
+                for src in (cmds.listConnections(attr, source=True,
+                                                 destination=False,
+                                                 plugs=True) or []):
+                    cmds.disconnectAttr(src, attr)
+                    saved_conn.append((src, attr))
+                saved_val.append((attr, cmds.getAttr(attr)))
+                cmds.setAttr(attr, 0.0)
+            except Exception:  # noqa: BLE001 - a locked/missing channel holds
+                pass           # no stance error either way; skip, never abort
+    return saved_conn, saved_val
+
+
+def _stance_restore(cmds, snapshot) -> None:
+    """Undo `_stance_snapshot`: values first, then the anim-curve plugs."""
+    saved_conn, saved_val = snapshot
+    for attr, val in saved_val:
+        try:
+            cmds.setAttr(attr, val)
+        except Exception:  # noqa: BLE001 - restore is best-effort per channel
+            pass
+    for src, attr in saved_conn:
+        try:
+            cmds.connectAttr(src, attr)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _characterize_at_stance(cmds, mel, name_hint: str,
+                            slot_joints: Dict[str, str],
+                            created: List[str],
+                            all_joints: Sequence[str]) -> str:
+    """`_characterize`, with the skeleton held at its zero-rotation stance
+    for exactly the duration of the characterization (#788). The lock
+    snapshots the pose into the character definition, so restoring the live
+    pose immediately afterwards changes nothing HIK later solves with.
+    """
+    snapshot = _stance_snapshot(cmds, all_joints)
+    try:
+        return _characterize(cmds, mel, name_hint, slot_joints, created)
+    finally:
+        _stance_restore(cmds, snapshot)
+
+
 def _teardown_hik(cmds, mel, characters: Sequence[Optional[str]], ns: str,
                   warnings: List[str]) -> None:
     """hikDeleteCharacter per character, then the source namespace, then
@@ -627,19 +692,30 @@ def _retarget_bvh(path: str, root_param: str, name: str,
     try:
         joint_nodes = _create_source_joints(cmds, bvh["joints"], ns,
                                             scale_factor)
-        _key_source_motion(cmds, bvh["joints"], joint_nodes, bvh["rows"],
-                           start_row, target_start_frame, num_bake_frames,
-                           source_fps, bake_fps, scale_factor)
         source_slot_joints = {slot: "%s:%s" % (ns, jname)
                               for slot, jname in source_slot_map.items()}
 
         cmds.loadPlugin(_HIK_PLUGIN, quiet=True)
         cmds.loadPlugin(_HIK_CHARACTERIZATION_PLUGIN, quiet=True)
 
-        target_char = _characterize(cmds, mel, "retarget_target",
-                                    target_slot_joints, characters)
+        # #788: characterize BOTH skeletons at their zero-rotation stance,
+        # BEFORE any motion drives them. The source is trivially at stance
+        # here - its joints were just created at the BVH's OFFSET rest pose
+        # and carry no curves yet, which is exactly why it is characterized
+        # before _key_source_motion. The target may already carry other
+        # clips' curves (the multi-take workflow), so it gets the explicit
+        # stance guard. Characterizing after keying was the measured cause
+        # of arms retargeting horizontal: HIK recorded a mid-walk pose as
+        # the stance and ate the constant stance-to-hanging arm rotation.
         source_char = _characterize(cmds, mel, "retarget_source",
                                     source_slot_joints, characters)
+        target_char = _characterize_at_stance(cmds, mel, "retarget_target",
+                                              target_slot_joints, characters,
+                                              target_joints)
+
+        _key_source_motion(cmds, bvh["joints"], joint_nodes, bvh["rows"],
+                           start_row, target_start_frame, num_bake_frames,
+                           source_fps, bake_fps, scale_factor)
         mel.eval('hikSetCharacterInput("%s", "%s")' % (target_char, source_char))
 
         # preserveOutsideKeys, or this bake DESTROYS every other take on the
@@ -854,10 +930,19 @@ def _retarget_fbx(path: str, root_param: str, name: str,
 
         cmds.loadPlugin(_HIK_PLUGIN, quiet=True)
         cmds.loadPlugin(_HIK_CHARACTERIZATION_PLUGIN, quiet=True)
-        target_char = _characterize(cmds, mel, "retarget_target",
-                                    target_slot_joints, characters)
-        source_char = _characterize(cmds, mel, "retarget_source",
-                                    source_slot_joints, characters)
+        # #788: both skeletons characterized at their zero-rotation stance -
+        # see the BVH route's identical block. On this route the SOURCE also
+        # arrives pre-keyed (the FBX import), so it needs the stance guard
+        # too; the assumption that zero rotation IS its stance holds for any
+        # skeleton authored at rest, and a source it does not hold for was
+        # ALREADY mis-characterized by the old code (at an arbitrary motion
+        # frame), so this is strictly no worse there.
+        target_char = _characterize_at_stance(cmds, mel, "retarget_target",
+                                              target_slot_joints, characters,
+                                              target_joints)
+        source_char = _characterize_at_stance(cmds, mel, "retarget_source",
+                                              source_slot_joints, characters,
+                                              imported_joints)
         mel.eval('hikSetCharacterInput("%s", "%s")' % (target_char, source_char))
 
         # preserveOutsideKeys for the same reason as the BVH route above:
