@@ -60,6 +60,11 @@ class FakeCmds:
     def nodeType(self, node):
         if node in self.blend_nodes:
             return "blendShape"
+        override = getattr(self, "node_types", {}).get(node)
+        if override:
+            return override
+        if node.endswith("_crv"):
+            return "animCurveTU"
         return "mesh" if node.endswith("Shape") else "transform"
 
     def listHistory(self, node, pruneDagObjects=False, **kw):
@@ -130,9 +135,15 @@ class FakeCmds:
         return None
 
     def listConnections(self, plug, source=False, destination=True,
-                        type=None):
+                        type=None, plugs=False):
         if plug in getattr(self, "curve_plugs", ()):
-            return [plug.replace("|", "_").replace(".", "_") + "_crv"]
+            crv = plug.replace("|", "_").replace(".", "_") + "_crv"
+            return [crv + ".output"] if plugs else [crv]
+        # #771: a corrective-driven plug - a non-animCurve source.
+        driven = getattr(self, "driven_plugs", {})
+        if plug in driven and type is None:
+            src = driven[plug]
+            return [src] if plugs else [src.split(".")[0]]
         return None
 
 
@@ -398,3 +409,34 @@ class TestClipGuard:
         out = blendshape.set_blendshape_weights(
             {"mesh": "humanoid", "weights": {"blink": 0.5}})
         assert out["weights"]["blink"] == 0.5
+
+
+class TestCorrectiveGuard:
+    """#771: a poseInterpolator-driven weight refuses hand-setting -
+    MEASURED (evals/correctives_probe/): setAttr on a connected plug raises
+    a raw locked-or-connected error, which is not a contract."""
+
+    def test_set_weights_refuses_on_a_driven_channel(self, fake):
+        _scene(fake)
+        fake.deltas = {"elbow_fix": 0.2}
+        node = _create(fake, [{"name": "elbow_fix",
+                               "target_mesh": "brow"}])["blend_shape"]
+        fake.driven_plugs = {
+            "%s.elbow_fix" % node: "elbow_poseInterpShape.output[3]"}
+        fake.node_types = {"elbow_poseInterpShape": "poseInterpolator"}
+        with pytest.raises(HandlerError, match="corrective"):
+            blendshape.set_blendshape_weights(
+                {"mesh": "humanoid", "weights": {"elbow_fix": 0.5}})
+
+    def test_a_corrective_elsewhere_does_not_lock_other_targets(self, fake):
+        _scene(fake)
+        fake.deltas = {"elbow_fix": 0.2, "brow_raise": 0.1}
+        node = _create(fake, [
+            {"name": "elbow_fix", "target_mesh": "brow"},
+            {"name": "brow_raise", "target_mesh": "bulge"}])["blend_shape"]
+        fake.driven_plugs = {
+            "%s.elbow_fix" % node: "elbow_poseInterpShape.output[3]"}
+        fake.node_types = {"elbow_poseInterpShape": "poseInterpolator"}
+        out = blendshape.set_blendshape_weights(
+            {"mesh": "humanoid", "weights": {"brow_raise": 0.7}})
+        assert out["weights"]["brow_raise"] == 0.7

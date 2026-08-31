@@ -426,6 +426,28 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     alias_map = _weight_alias_map(cmds, meshes)
     weight_channels = _resolve_weight_channels(alias_map, resolved_keys)
 
+    # #771: a corrective-driven weight cannot be keyed - MEASURED
+    # (evals/correctives_probe/): setKeyframe on a connection-fed plug
+    # returns 0 and creates NOTHING, so without this refusal the clip
+    # would silently ship without the channel it claims to key.
+    for alias in weight_channels:
+        plug = "%s.%s" % (alias_map[alias], alias)
+        srcs = cmds.listConnections(plug, source=True, destination=False,
+                                    plugs=True) or []
+        driven_by = [s for s in srcs
+                     if not cmds.nodeType(s.split(".")[0]).startswith(
+                         "animCurve")]
+        if driven_by:
+            raise HandlerError(
+                "blend_weights channel %r is a corrective, driven by %s - "
+                "keying it would silently no-op (measured: setKeyframe "
+                "returns 0 and creates no curve on a connected plug)"
+                % (alias, driven_by[0]),
+                hint="the corrective already follows the joints this clip "
+                     "keys, and animated exports bake it into DeformPercent "
+                     "curves; key the JOINT, or delete_objects the "
+                     "interpolator to reclaim the channel")
+
     if loop:
         violations = clipmath.loop_violations(resolved_keys[0],
                                               resolved_keys[-1])

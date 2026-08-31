@@ -1844,3 +1844,32 @@ class TestClaimWalkFailure:
         out = export.export_fbx(_params(tmp_path))
         assert out["textures"] is not None
         assert out["textures"]["unavailable_reason"] == "byte-only-fail"
+
+
+class TestLiveDeltaMushes:
+    """#771: the scene-side walk that names every relaxation the file will
+    silently lose (measured: with/without-mush exports are byte-identical)."""
+
+    class _Cmds:
+        def __init__(self, history):
+            self.history = history
+
+        def ls(self, nodes=None, dagObjects=False, type=None, long=False,
+               noIntermediate=False, **kw):
+            if type == "mesh":
+                return list(self.history)
+            if type == "deltaMush":
+                return [n for n in (nodes or []) if n.startswith("deltaMush")]
+            return list(nodes or [])
+
+        def listHistory(self, node, pruneDagObjects=False, **kw):
+            return list(self.history.get(node, []))
+
+    def test_finds_a_mush_in_exported_history(self):
+        cmds = self._Cmds({"|arm|armShape": ["deltaMush1", "arm_skin"]})
+        assert export._live_delta_mushes(cmds, None) == [
+            ("|arm|armShape", "deltaMush1")]
+
+    def test_clean_history_reports_nothing(self):
+        cmds = self._Cmds({"|arm|armShape": ["arm_skin", "arm_shapes"]})
+        assert export._live_delta_mushes(cmds, None) == []

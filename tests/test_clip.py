@@ -73,6 +73,11 @@ class FakeCmds:
             return "joint"
         if node == "body_shapes":
             return "blendShape"
+        override = getattr(self, "node_types", {}).get(node)
+        if override:
+            return override
+        if node in self.curves.values():
+            return "animCurveTU"
         return "mesh" if node.endswith("Shape") else "transform"
 
     def listRelatives(self, node, children=False, parent=False, shapes=False,
@@ -203,9 +208,19 @@ class FakeCmds:
         return len(doomed)
 
     def listConnections(self, plug, source=False, destination=True,
-                        type=None):
+                        type=None, plugs=False):
+        # #771: a corrective-driven plug - a non-animCurve source that the
+        # driven-channel refusal must classify by nodeType.
+        driven = getattr(self, "driven_plugs", {})
+        if plug in driven:
+            if type is None:
+                src = driven[plug]
+                return [src] if plugs else [src.split(".")[0]]
+            return None
         curve = self.curves.get(plug)
-        return [curve] if curve else None
+        if not curve:
+            return None
+        return [curve + ".output"] if plugs else [curve]
 
     def delete(self, *names):
         for n in names:
@@ -314,6 +329,19 @@ class TestAuthorValidation:
         fake.curves["|root|mid.rotateZ"] = "hand_authored_crv"
         with pytest.raises(HandlerError, match="hand-authored"):
             _author(fake)
+
+    def test_corrective_driven_weight_channel_refuses(self, fake):
+        # #771, MEASURED (evals/correctives_probe/): setKeyframe on a
+        # connection-fed plug silently no-ops - the refusal is what keeps
+        # the clip from shipping without a channel it claims to key.
+        fake.driven_plugs = {
+            "body_shapes.blink": "mid_poseInterpShape.output[3]"}
+        fake.node_types = {"mid_poseInterpShape": "poseInterpolator"}
+        with pytest.raises(HandlerError, match="corrective"):
+            _author(fake, keys=[
+                {"time_s": 0.0, "blend_weights": {"blink": 0.0}},
+                {"time_s": 1.0, "blend_weights": {"blink": 1.0}}])
+        assert fake.checkpoints == []
 
 
 class TestAuthor:

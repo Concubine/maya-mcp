@@ -317,6 +317,22 @@ def _exported_mesh_shapes(cmds, nodes) -> List[str]:
     return cmds.ls(type="mesh", long=True, noIntermediate=True) or []
 
 
+def _live_delta_mushes(cmds, nodes) -> List[Tuple[str, str]]:
+    """(mesh shape, deltaMush node) for every exported mesh carrying one.
+
+    #771, MEASURED (evals/correctives_probe/): exports of the same rig with
+    and without a live deltaMush are byte-identical - the FBX exporter
+    drops the deformer with no trace, so the file deforms without the
+    relaxation the Maya viewport shows. That is the #714 procedural-texture
+    class of silent loss: warn, never refuse."""
+    out: List[Tuple[str, str]] = []
+    for shape in _exported_mesh_shapes(cmds, nodes):
+        for mush in cmds.ls(cmds.listHistory(shape, pruneDagObjects=True)
+                            or [], type="deltaMush") or []:
+            out.append((shape, mush))
+    return out
+
+
 def _scene_shape_aliases(cmds, nodes) -> List[str]:
     """Weight aliases of every blendShape reachable from the exported
     meshes - what the FILE must now carry."""
@@ -898,6 +914,14 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
 
     declared_shapes = _scene_shape_aliases(cmds, nodes)
 
+    # #771: name every relaxation the file will silently lose.
+    mush_warnings = [
+        "deltaMush %r on %s does not travel in FBX - the exported mesh "
+        "deforms WITHOUT it (measured: with/without exports are "
+        "byte-identical); the relaxation exists only in Maya"
+        % (mush, shape)
+        for shape, mush in _live_delta_mushes(cmds, nodes)]
+
     # #714: what the SCENE says its materials carry. Read-only queries; the
     # scene is never modified. Scoped to the exported shapes, like shape
     # aliases and clips above.
@@ -1111,6 +1135,7 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
                                                claims_unavailable)
     if claims_unavailable:
         tex_warnings.append(claims_unavailable)
+    tex_warnings.extend(mush_warnings)
     violations += tex_bad
     texture_hint = (
         " For texture violations: a file texture's image must exist on disk "

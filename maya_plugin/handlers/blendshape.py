@@ -227,6 +227,23 @@ def set_blendshape_weights(params: Dict[str, Any]) -> Dict[str, Any]:
             raise HandlerError(
                 "weights[%r] must be a number in 0..1, got %r"
                 % (name, value))
+        # #771: only the REQUESTED weights are checked - a corrective on
+        # one target must not lock every other target's hand control.
+        # (animCurve sources are the clip guard's job, above, and that one
+        # deliberately covers ALL aliases.)
+        srcs = cmds.listConnections("%s.%s" % (node, name), source=True,
+                                    destination=False, plugs=True) or []
+        driven_by = [s for s in srcs
+                     if not cmds.nodeType(s.split(".")[0]).startswith(
+                         "animCurve")]
+        if driven_by:
+            raise HandlerError(
+                "weight %r is a corrective, driven by %s - a hand-set "
+                "value cannot land on a connected plug"
+                % (name, driven_by[0]),
+                hint="pose the driver joint instead (that IS the "
+                     "corrective's control), or delete_objects the "
+                     "interpolator to return the weight to static control")
 
     session.auto_checkpoint("set_blendshape_weights")
 
