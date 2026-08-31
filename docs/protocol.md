@@ -573,6 +573,61 @@ there is no parameter). The byte gate refuses an export whose scene
 declares a target the file does not carry, and the result's `shapes` block
 reports each channel's name and delta payload as read from the bytes.
 
+## Commands (deformation quality / #771)
+
+| cmd | params | result |
+|---|---|---|
+| `apply_delta_mush` | `{ mesh, smoothing_iterations=10, smoothing_step=0.5, pin_border_vertices=true }` | `{ mesh, delta_mush, worst_edge_ratio_before, worst_edge_ratio_after, max_displacement, warnings }` |
+| `add_corrective` | `{ mesh, target, joint, rotation: [rx,ry,rz] }` | `{ mesh, blend_shape, target, joint, interpolator, pose_name, pose_index, weight_at_pose, weight_at_rest, corrective_displacement, warnings }` |
+
+`apply_delta_mush` relaxes skinning artifacts with one deltaMush at the
+END of the deformation chain (blendShape → skinCluster → deltaMush,
+measured). It is exactly identity at the bind pose, so the report's
+edge-stretch ratios (current world edge length over the orig shape's bind
+length — the humanoid gate's tear currency) are measured **at the current
+pose**: pose the rig first, or both ratios read ~1.0 and the result warns.
+Refusals: unknown params (#764 synonym map), no skinCluster in history
+(nothing to relax — `bind_skin` first), a second deltaMush (stacked
+smoothing is unexplainable — `delete_objects` the first).
+
+`add_corrective` completes the phase-5 story: an EXISTING blendshape
+target (authored with `create_blendshape`) fires **at a joint angle**
+instead of at a hand-set weight. One poseInterpolator per driver joint
+(created on demand with neutral poses recorded at rest, reused by later
+correctives on the same joint) drives the weight through `output[pose]`:
+measured 0.0 at rest, 0.5 at half the trigger angle, 1.0 at the trigger.
+`rotation` is local degrees — the exact `pose_skeleton` currency. The call
+verifies its own wire (`weight_at_pose` re-read through the real graph at
+the trigger; an inert wire refuses and rolls back) and restores the
+joint's rotation. Refusals: unknown params; no blendShape / unknown
+target; joint missing or not a joint; all-zero rotation (that IS the
+neutral); a target already driven (by a clip's curves, another corrective,
+or any connection); animation curves on the driver joint; a pose within
+1 degree of one this tool already recorded on that interpolator (stored in
+the interpolator's `mcp_correctives` string attr).
+
+Removal: `delete_objects` the interpolator's transform — every weight it
+drives returns to static control. There is no per-pose removal (v1).
+
+Guard closures that arrive with this surface:
+- `set_blendshape_weights` refuses a REQUESTED weight that a corrective
+  drives (a hand-set value cannot land on a connected plug — measured);
+  a corrective on one target does not lock the others.
+- `author_clip` refuses a `blend_weights` channel that a corrective drives
+  — measured: `setKeyframe` on a connection-fed plug silently no-ops
+  (returns 0, creates no curve), so without the refusal the clip would
+  ship without a channel it claims to key. Key the JOINT instead; the
+  corrective follows it.
+
+Export facts (measured, `evals/correctives_probe/`): a live deltaMush is
+DROPPED by FBX export with byte-identical output — `export_fbx` warns,
+naming the node, and the relaxation exists only in Maya. A driven
+corrective weight, by contrast, ships automatically: the animated export's
+bake resamples it into real per-frame `DeformPercent` curves in each take
+(reimport tracks the driver), with no in-scene baking and no declaration —
+the animation gate checks declared clip channels only, and corrective
+curves ride as tolerated extras.
+
 ## Commands (rigging phase 6 / clips / #695, multi-take #718)
 
 | cmd | params | result |

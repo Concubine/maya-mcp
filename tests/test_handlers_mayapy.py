@@ -6323,3 +6323,241 @@ class TestApplySurfaceDetailInMaya:
             for c in restored_claims), (
             "restore_checkpoint left the slot classified as file/"
             "procedural - the pre-apply flat value did not come back")
+
+
+class TestCorrectivesInMaya:
+    """#771: apply_delta_mush + add_corrective against real deformers.
+
+    The design probes (evals/correctives_probe/) pinned the mechanics in a
+    GUI Maya; these tests pin the same facts under mayapy so a regression
+    is caught without launching the live gate.
+    """
+
+    def _load_pose_interpolator(self, cmds):
+        # The Type-plugin idiom above: loadPlugin returns falsy both when
+        # the plugin is missing and when it was already loaded.
+        if not cmds.loadPlugin("poseInterpolator", quiet=True) and (
+                not cmds.pluginInfo("poseInterpolator", q=True, loaded=True)):
+            pytest.fail(
+                "poseInterpolator plugin unavailable under mayapy - the "
+                "GUI Maya has it (measured), so this is an environment "
+                "regression, not a skip")
+
+    def _arm_rig(self, cmds):
+        """The probe fixture: 3-joint chain along +X, skinned cylinder."""
+        from maya_plugin.handlers import rigging
+
+        skel = rigging.create_skeleton({
+            "chain": [[0.0, 0.0, 0.0], [0.3, 0.0, 0.0], [0.6, 0.0, 0.0]],
+            "chain_prefix": "carm"})
+        joints = [j["name"] for j in skel["joints"]]
+        mesh = cmds.polyCylinder(name="carmMesh", radius=0.05, height=0.6,
+                                 subdivisionsAxis=8, subdivisionsHeight=24,
+                                 subdivisionsCaps=1)[0]
+        cmds.setAttr(mesh + ".rotateZ", -90)
+        cmds.setAttr(mesh + ".translateX", 0.3)
+        cmds.makeIdentity(mesh, apply=True, translate=True, rotate=True,
+                          scale=True)
+        cmds.delete(mesh, constructionHistory=True)
+        mesh_long = cmds.ls(mesh, long=True)[0]
+        rigging.bind_skin({"mesh": mesh_long, "root": joints[0]})
+        return mesh_long, joints
+
+    def _bulge_target(self, cmds, mesh_long, name="elbow_fix"):
+        from maya_plugin.handlers import blendshape
+
+        dup = cmds.duplicate(mesh_long, name="carmBulge")[0]
+        count = cmds.polyEvaluate(dup, vertex=True)
+        for i in range(count):
+            pos = cmds.pointPosition("%s.vtx[%d]" % (dup, i), world=True)
+            if 0.2 < pos[0] < 0.4:
+                cmds.move(0, pos[1] * 0.5, pos[2] * 0.5,
+                          "%s.vtx[%d]" % (dup, i), relative=True,
+                          worldSpace=True)
+        return blendshape.create_blendshape({
+            "mesh": mesh_long,
+            "targets": [{"name": name, "target_mesh": dup}]})
+
+    def test_delta_mush_at_rest_is_identity_and_warns(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import correctives
+
+        mesh_long, _joints = self._arm_rig(cmds)
+        out = correctives.apply_delta_mush({"mesh": mesh_long})
+        assert out["delta_mush"]
+        assert out["max_displacement"] < 1e-5
+        assert abs(out["worst_edge_ratio_before"] - 1.0) < 1e-3
+        assert abs(out["worst_edge_ratio_after"] - 1.0) < 1e-3
+        assert any("at rest" in w for w in out["warnings"])
+
+    def test_delta_mush_reduces_stretch_at_a_bend(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import correctives
+
+        mesh_long, joints = self._arm_rig(cmds)
+        cmds.setAttr(joints[1] + ".rotate", 0, 0, -110)
+        out = correctives.apply_delta_mush({"mesh": mesh_long})
+        # The GUI probe measured 1.745 -> 1.349 (23% off) on this fixture;
+        # standalone's closestDistance bind lands milder stretch (measured
+        # 1.44 before), so the assertion is relative: real stretch exists
+        # and the mush takes a solid bite out of it.
+        assert out["worst_edge_ratio_before"] > 1.3
+        assert (out["worst_edge_ratio_after"]
+                <= out["worst_edge_ratio_before"] * 0.9)
+        assert out["max_displacement"] > 1e-3
+        assert not any("at rest" in w for w in out["warnings"])
+        # Chain order: the mush deforms the SKINNED result.
+        shape = cmds.listRelatives(mesh_long, shapes=True, fullPath=True,
+                                   noIntermediate=True)[0]
+        history = cmds.listHistory(shape, pruneDagObjects=True)
+        chain = [n for n in history
+                 if cmds.nodeType(n) in ("skinCluster", "deltaMush")]
+        assert chain.index(out["delta_mush"]) < chain.index("carmMesh_skin")
+
+    def test_delta_mush_refusals(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import correctives
+
+        bare = cmds.ls(cmds.polyCube(name="bareCube")[0], long=True)[0]
+        with pytest.raises(HandlerError, match="skinCluster"):
+            correctives.apply_delta_mush({"mesh": bare})
+        mesh_long, _joints = self._arm_rig(cmds)
+        correctives.apply_delta_mush({"mesh": mesh_long})
+        with pytest.raises(HandlerError, match="already has a deltaMush"):
+            correctives.apply_delta_mush({"mesh": mesh_long})
+
+    def test_add_corrective_fires_at_the_angle(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import correctives
+
+        self._load_pose_interpolator(cmds)
+        mesh_long, joints = self._arm_rig(cmds)
+        self._bulge_target(cmds, mesh_long)
+        out = correctives.add_corrective({
+            "mesh": mesh_long, "target": "elbow_fix",
+            "joint": joints[1], "rotation": [0.0, 0.0, -90.0]})
+        assert out["weight_at_pose"] > 0.99
+        assert abs(out["weight_at_rest"]) < 0.01
+        assert out["corrective_displacement"] > 1e-3
+        assert out["pose_name"] == "elbow_fix"
+        # The call restored the joint.
+        assert all(abs(v) < 1e-6
+                   for v in cmds.getAttr(joints[1] + ".rotate")[0])
+        # The ramp is the tool's whole claim: measured 0.5 at half angle.
+        node = out["blend_shape"]
+        cmds.setAttr(joints[1] + ".rotate", 0, 0, -90)
+        assert cmds.getAttr("%s.elbow_fix" % node) > 0.99
+        cmds.setAttr(joints[1] + ".rotate", 0, 0, -45)
+        assert 0.3 < cmds.getAttr("%s.elbow_fix" % node) < 0.7
+        cmds.setAttr(joints[1] + ".rotate", 0, 0, 0)
+        assert abs(cmds.getAttr("%s.elbow_fix" % node)) < 0.01
+
+    def test_second_corrective_reuses_the_interpolator(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import correctives
+
+        self._load_pose_interpolator(cmds)
+        mesh_long, joints = self._arm_rig(cmds)
+        self._bulge_target(cmds, mesh_long, name="elbow_fix")
+        self._bulge_target(cmds, mesh_long, name="elbow_deep")
+        first = correctives.add_corrective({
+            "mesh": mesh_long, "target": "elbow_fix",
+            "joint": joints[1], "rotation": [0.0, 0.0, -90.0]})
+        second = correctives.add_corrective({
+            "mesh": mesh_long, "target": "elbow_deep",
+            "joint": joints[1], "rotation": [0.0, 0.0, -130.0]})
+        assert second["interpolator"] == first["interpolator"]
+        records = correctives.corrective_records(
+            __import__("maya.cmds", fromlist=["cmds"]),
+            first["interpolator"])
+        assert [r["target"] for r in records] == ["elbow_fix", "elbow_deep"]
+        # The duplicate-pose refusal needs an UNDRIVEN target (a driven one
+        # refuses earlier as already-a-corrective, tested elsewhere).
+        self._bulge_target(cmds, mesh_long, name="elbow_third")
+        with pytest.raises(HandlerError, match="already exists"):
+            correctives.add_corrective({
+                "mesh": mesh_long, "target": "elbow_third",
+                "joint": joints[1], "rotation": [0.0, 0.0, -90.5]})
+
+    def test_driven_weight_guards_fire_against_real_connections(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import blendshape, clip, correctives
+
+        self._load_pose_interpolator(cmds)
+        mesh_long, joints = self._arm_rig(cmds)
+        self._bulge_target(cmds, mesh_long)
+        correctives.add_corrective({
+            "mesh": mesh_long, "target": "elbow_fix",
+            "joint": joints[1], "rotation": [0.0, 0.0, -90.0]})
+        with pytest.raises(HandlerError, match="corrective"):
+            blendshape.set_blendshape_weights({
+                "mesh": mesh_long, "weights": {"elbow_fix": 0.5}})
+        with pytest.raises(HandlerError, match="corrective"):
+            clip.author_clip({
+                "root": joints[0], "name": "bendclip", "fps": 24,
+                "keys": [
+                    {"time_s": 0.0, "blend_weights": {"elbow_fix": 0.0}},
+                    {"time_s": 1.0, "blend_weights": {"elbow_fix": 1.0}}]})
+        with pytest.raises(HandlerError, match="already a corrective"):
+            correctives.add_corrective({
+                "mesh": mesh_long, "target": "elbow_fix",
+                "joint": joints[1], "rotation": [0.0, 0.0, -45.0]})
+
+    def test_export_warns_on_mush_and_bakes_the_driven_weight(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import clip, correctives, export, fbxbytes
+
+        self._load_pose_interpolator(cmds)
+        cmds.loadPlugin("fbxmaya", quiet=True)
+        mesh_long, joints = self._arm_rig(cmds)
+        self._bulge_target(cmds, mesh_long)
+        correctives.add_corrective({
+            "mesh": mesh_long, "target": "elbow_fix",
+            "joint": joints[1], "rotation": [0.0, 0.0, -90.0]})
+        correctives.apply_delta_mush({"mesh": mesh_long})
+        clip.author_clip({
+            "root": joints[0], "name": "bendclip", "fps": 24,
+            "keys": [
+                {"time_s": 0.0, "rotations": {"carm_02": [0, 0, 0]}},
+                {"time_s": 0.5, "rotations": {"carm_02": [0, 0, -90]}},
+                {"time_s": 1.0, "rotations": {"carm_02": [0, 0, 0]}}]})
+        path = str(tmp_path / "correctives.fbx")
+        out = export.export_fbx({
+            "path": path, "metres_per_unit": 1.0,
+            "include_skins": True, "include_animation": True,
+            "nodes": [mesh_long, joints[0]]})
+        assert any("deltaMush" in w for w in out["warnings"])
+
+        anim = fbxbytes.anim_facts(fbxbytes.read_fbx(path))
+        deform = [t for t in anim["targets"]
+                  if t["property"] == "DeformPercent"
+                  and t["target"] == "elbow_fix"
+                  and t["take"] == "bendclip"]
+        assert deform, ("no DeformPercent curve for the driven weight in "
+                        "take 'bendclip': %r" % anim["targets"])
+        rot = [t for t in anim["targets"]
+               if t["property"] == "Lcl Rotation" and t["take"] == "bendclip"
+               and t["target"] == "carm_02"]
+        assert rot and deform[0]["key_count"] == rot[0]["key_count"]
+
+        # The baked VALUES track the driver (a constant curve would pass a
+        # presence check): reimport and evaluate.
+        cmds.file(new=True, force=True)
+        cmds.file(path, i=True)
+        node = cmds.ls(type="blendShape")[0]
+        # time_s 0 lands on frame 0 at 24 fps, so the take runs 0..24 and
+        # the elbow peaks at -90 on frame 12.
+        cmds.currentTime(12)
+        assert cmds.getAttr(node + ".elbow_fix") > 0.9
+        cmds.currentTime(0)
+        assert cmds.getAttr(node + ".elbow_fix") < 0.05
