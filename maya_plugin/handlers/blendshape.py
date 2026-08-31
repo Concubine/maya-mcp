@@ -131,6 +131,26 @@ def create_blendshape(params: Dict[str, Any]) -> Dict[str, Any]:
     resolved = _validated_targets(cmds, mesh_long, params.get("targets"),
                                   existing)
 
+    # #771, MEASURED (evals/correctives_probe/probe_bs_hang.py): creating a
+    # NEW blendShape with frontOfChain=True while a deltaMush sits in the
+    # history hangs Maya's deformer-reorder for 20+ minutes on an 8k-vert
+    # mesh. Every neighbouring operation is instant - adding a target to an
+    # EXISTING node under the same mush measured 0.0 s - so only the
+    # node-creation path refuses.
+    if node is None:
+        mushes = cmds.ls(cmds.listHistory(mesh_shape, pruneDagObjects=True)
+                         or [], type="deltaMush") or []
+        if mushes:
+            raise HandlerError(
+                "%s carries a deltaMush (%s) and no blendShape yet - "
+                "creating the blendShape under it would hang Maya's "
+                "deformer reorder (measured: 20+ minutes on an 8k-vertex "
+                "mesh)" % (mesh_long, mushes[0]),
+                hint="author blend shapes BEFORE the mush - or "
+                     "delete_objects the mush, wire the targets, and "
+                     "apply_delta_mush again (re-applying is cheap and "
+                     "measured identical)")
+
     base_count = cmds.polyEvaluate(mesh_long, vertex=True)
     for name, t_long in resolved:
         t_count = cmds.polyEvaluate(t_long, vertex=True)

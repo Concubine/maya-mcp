@@ -577,7 +577,7 @@ reports each channel's name and delta payload as read from the bytes.
 
 | cmd | params | result |
 |---|---|---|
-| `apply_delta_mush` | `{ mesh, smoothing_iterations=10, smoothing_step=0.5, pin_border_vertices=true }` | `{ mesh, delta_mush, worst_edge_ratio_before, worst_edge_ratio_after, max_displacement, warnings }` |
+| `apply_delta_mush` | `{ mesh, smoothing_iterations=10, smoothing_step=0.5, pin_border_vertices=true, distance_weight=1.0 }` | `{ mesh, delta_mush, worst_edge_ratio_before, worst_edge_ratio_after, max_displacement, warnings }` |
 | `add_corrective` | `{ mesh, target, joint, rotation: [rx,ry,rz] }` | `{ mesh, blend_shape, target, joint, interpolator, pose_name, pose_index, weight_at_pose, weight_at_rest, corrective_displacement, warnings }` |
 
 `apply_delta_mush` relaxes skinning artifacts with one deltaMush at the
@@ -589,6 +589,19 @@ pose**: pose the rig first, or both ratios read ~1.0 and the result warns.
 Refusals: unknown params (#764 synonym map), no skinCluster in history
 (nothing to relax — `bind_skin` first), a second deltaMush (stacked
 smoothing is unexplainable — `delete_objects` the first).
+
+`distance_weight` defaults to 1.0, NOT Maya's 0.0: uniform smoothing on
+this toolbox's primitive meshes (2 mm circumference rings beside 70 mm
+length edges, the #669 anisotropy) measurably spikes tiny edges to 8.9x
+their bind length — a visible 17 mm tear — while distance-weighted
+smoothing removes the spike and still relaxes (measured: humanoid crouch
+1.943 → 1.540, extend 2.026 → 1.535).
+
+Order matters, measured: creating a NEW blendShape on a mushed mesh hangs
+Maya's deformer reorder 20+ minutes, so `create_blendshape` REFUSES the
+node-creation path while a deltaMush is in history (adding targets to an
+existing node is instant and stays allowed). Author shapes first, mush
+last; re-applying a deleted mush is instant and identical.
 
 `add_corrective` completes the phase-5 story: an EXISTING blendshape
 target (authored with `create_blendshape`) fires **at a joint angle**

@@ -2150,7 +2150,8 @@ class TestCorrectiveTools:
         assert call["params"] == {"mesh": "|humanoid",
                                   "smoothing_iterations": 12,
                                   "smoothing_step": 0.5,
-                                  "pin_border_vertices": True}
+                                  "pin_border_vertices": True,
+                                  "distance_weight": 1.0}
         payload = result.structured_content
         assert payload["worst_edge_ratio_after"] == 1.41
         assert payload["delta_mush"] == "deltaMush1"

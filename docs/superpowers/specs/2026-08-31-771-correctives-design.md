@@ -64,11 +64,38 @@ that has actually been seen, exactly as the ticket demanded.
    automatically**; nothing needs baking in-scene ("export_fbx never bakes"
    stands).
 
+### Amendments from the live gate (2026-08-31, runs 1–2)
+
+The gate's first run against the humanoid caught two facts the cylinder
+probe could not see — both are now part of the design:
+
+9. **Maya's default (uniform) deltaMush smoothing SPIKES anisotropic
+   meshes.** On the crouched humanoid, default `distanceWeight=0` blew a
+   2.16 mm hip-ring edge to **8.9x its bind length** (17 mm — visible by
+   the #668 tear currency; iterations 20 → 15.5x/31 mm). The cause is the
+   #669 anisotropy: 2 mm circumference rings beside 70 mm length edges, so
+   uniform Laplacian smoothing drags tiny-edge vertices toward huge
+   neighbours. **`distanceWeight=1.0` removes the spike entirely and beats
+   the pre-mush stretch on both currencies** (unfiltered 1.943 → 1.540,
+   visible 1.234 → 1.216) — so `distance_weight` is a param and its
+   default is 1.0, not Maya's 0.0 (`evals/correctives_probe/
+   probe_mush_spike.py`).
+10. **Creating a NEW frontOfChain blendShape under a deltaMush hangs
+   Maya's deformer reorder 20+ minutes** (8k-vert mesh; measured by
+   bisection, `evals/correctives_probe/probe_bs_hang.py`). Every
+   neighbouring operation is instant — adding a target to an EXISTING
+   node under the same mush measured 0.0 s, and applying a mush over an
+   existing blendShape is instant. So `create_blendshape` refuses the
+   node-creation path when a deltaMush is in history (author shapes
+   first, mush last — real rigging order), and the gate re-applies the
+   mush after the corrective section.
+
 ## Tool 1: `maya_apply_delta_mush` (wire: `apply_delta_mush`)
 
 Params: `mesh` (required); `smoothing_iterations` int 1–50 (default 10, Maya's
 default; 50 mirrors rigmath.MAX_SMOOTH_ITERATIONS); `smoothing_step` float
-0.01–1.0 (default 0.5); `pin_border_vertices` bool (default true).
+0.01–1.0 (default 0.5); `pin_border_vertices` bool (default true);
+`distance_weight` float 0–1 (default 1.0 — amendment 9).
 Synonyms: iterations→smoothing_iterations, step→smoothing_step,
 pin_border→pin_border_vertices, object/name→mesh.
 

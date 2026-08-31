@@ -45,7 +45,7 @@ from ..dispatcher import HandlerError, require_known_keys
 from . import blendshape, clip, naming, sculpt, sculpt_math, session, units
 
 APPLY_DELTA_MUSH_KEYS = ("mesh", "smoothing_iterations", "smoothing_step",
-                         "pin_border_vertices")
+                         "pin_border_vertices", "distance_weight")
 DELTA_MUSH_SYNONYMS = {"iterations": "smoothing_iterations",
                        "step": "smoothing_step",
                        "pin_border": "pin_border_vertices",
@@ -53,6 +53,16 @@ DELTA_MUSH_SYNONYMS = {"iterations": "smoothing_iterations",
 MAX_MUSH_ITERATIONS = 50  # mirrors rigmath.MAX_SMOOTH_ITERATIONS
 DEFAULT_MUSH_ITERATIONS = 10  # Maya's own default
 DEFAULT_MUSH_STEP = 0.5
+# NOT Maya's default (0.0). MEASURED (evals/correctives_probe/
+# probe_mush_spike.py, crouched humanoid): uniform smoothing on this
+# toolbox's primitive meshes - 2 mm circumference rings beside 70 mm
+# length edges, the #669 anisotropy - drags tiny-edge vertices toward
+# their huge neighbours and SPIKES them (worst edge 8.9x its bind length
+# at iterations 10, 15.5x at 20, a visible 17-31 mm tear). Distance-
+# weighted smoothing removes the spike entirely AND beats the pre-mush
+# stretch on both currencies (unfiltered 1.943 -> 1.54, visible 1.234 ->
+# 1.216), so it is the default here.
+DEFAULT_DISTANCE_WEIGHT = 1.0
 
 ADD_CORRECTIVE_KEYS = ("mesh", "target", "joint", "rotation")
 ADD_CORRECTIVE_SYNONYMS = {"angle": "rotation", "pose": "rotation",
@@ -137,6 +147,17 @@ def validate_delta_mush(params: Dict[str, Any], cmds) -> Dict[str, Any]:
             "pin_border_vertices must be a boolean",
             hint="got %r; default true (Maya's own)" % (pin_border,))
 
+    distance_weight = params.get("distance_weight", DEFAULT_DISTANCE_WEIGHT)
+    if (isinstance(distance_weight, bool)
+            or not isinstance(distance_weight, (int, float))
+            or not 0.0 <= float(distance_weight) <= 1.0):
+        raise HandlerError(
+            "distance_weight must be a number in 0..1",
+            hint="got %r; default %g - 0 (uniform smoothing) measurably "
+                 "SPIKES the small edges of anisotropic meshes (2 mm rings "
+                 "beside 70 mm length edges) up to 15x their bind length"
+                 % (distance_weight, DEFAULT_DISTANCE_WEIGHT))
+
     history = cmds.listHistory(mesh_shape, pruneDagObjects=True) or []
     skins = [n for n in history if cmds.nodeType(n) == "skinCluster"]
     if not skins:
@@ -154,7 +175,9 @@ def validate_delta_mush(params: Dict[str, Any], cmds) -> Dict[str, Any]:
 
     return {"mesh_long": mesh_long, "mesh_shape": mesh_shape,
             "iterations": int(iterations), "step": float(step),
-            "pin_border": pin_border, "skin_cluster": skins[0]}
+            "pin_border": pin_border,
+            "distance_weight": float(distance_weight),
+            "skin_cluster": skins[0]}
 
 
 def _orig_shape(cmds, mesh_long: str) -> Optional[str]:
@@ -235,6 +258,9 @@ def apply_delta_mush(params: Dict[str, Any]) -> Dict[str, Any]:
         smoothingIterations=plan["iterations"],
         smoothingStep=plan["step"],
         pinBorderVertices=plan["pin_border"])[0]
+    # distanceWeight is set post-create: the deltaMush command has no flag
+    # for it, and the attr write re-evaluates the node either way.
+    cmds.setAttr(node + ".distanceWeight", plan["distance_weight"])
     try:
         history = cmds.listHistory(plan["mesh_shape"],
                                    pruneDagObjects=True) or []

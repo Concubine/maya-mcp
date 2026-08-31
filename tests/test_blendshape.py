@@ -41,6 +41,8 @@ class FakeCmds:
         if isinstance(pattern, list):
             if type == "blendShape":
                 return [n for n in pattern if n in self.blend_nodes]
+            if type is not None:
+                return [n for n in pattern if self.nodeType(n) == type]
             return list(pattern)
         if pattern is None:
             return list(self.objects)
@@ -409,6 +411,28 @@ class TestClipGuard:
         out = blendshape.set_blendshape_weights(
             {"mesh": "humanoid", "weights": {"blink": 0.5}})
         assert out["weights"]["blink"] == 0.5
+
+
+class TestMushOrderGuard:
+    """#771, MEASURED (evals/correctives_probe/probe_bs_hang.py): a NEW
+    frontOfChain blendShape under a deltaMush hangs Maya 20+ minutes;
+    adding a target to an existing node under the same mush is instant."""
+
+    def test_new_node_under_a_mush_refuses(self, fake):
+        _scene(fake)
+        fake.node_types = {"deltaMush1": "deltaMush"}
+        fake.history["|humanoid|humanoidShape"] = ["deltaMush1"]
+        with pytest.raises(HandlerError, match="deltaMush"):
+            _create(fake, [{"name": "blink", "target_mesh": "brow"}])
+
+    def test_adding_to_an_existing_node_under_a_mush_is_allowed(self, fake):
+        _scene(fake)
+        fake.deltas = {"blink": 0.2, "wink": 0.1}
+        _create(fake, [{"name": "blink", "target_mesh": "brow"}])
+        fake.node_types = {"deltaMush1": "deltaMush"}
+        fake.history["|humanoid|humanoidShape"].insert(0, "deltaMush1")
+        out = _create(fake, [{"name": "wink", "target_mesh": "bulge"}])
+        assert [t["name"] for t in out["targets"]] == ["wink"]
 
 
 class TestCorrectiveGuard:

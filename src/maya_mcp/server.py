@@ -2670,6 +2670,13 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         pin_border_vertices: Annotated[bool, Field(description=(
             "Hold open-edge borders in place (Maya's default)."
         ))] = True,
+        distance_weight: Annotated[float, Field(ge=0.0, le=1.0, description=(
+            "Edge-length weighting of the smooth, 0..1. Default 1.0 - NOT "
+            "Maya's 0.0: uniform smoothing measurably spikes the small "
+            "edges of anisotropic meshes (2mm rings beside 70mm length "
+            "edges) up to 15x their bind length; distance-weighting "
+            "removes the spike (measured)."
+        ))] = 1.0,
     ) -> ApplyDeltaMushResult:
         """Relax skinning artifacts with one deltaMush and MEASURE it.
 
@@ -2688,7 +2695,8 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 {"mesh": mesh,
                  "smoothing_iterations": smoothing_iterations,
                  "smoothing_step": smoothing_step,
-                 "pin_border_vertices": pin_border_vertices},
+                 "pin_border_vertices": pin_border_vertices,
+                 "distance_weight": distance_weight},
                 timeout_s=BOOL_TIMEOUT_S,
             )
         )

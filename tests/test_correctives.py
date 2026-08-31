@@ -153,11 +153,20 @@ class TestDeltaMushValidate:
         msg = _err(correctives.validate_delta_mush, {"mesh": "|arm"}, fake)
         assert "deltaMush1" in msg
 
+    @pytest.mark.parametrize("bad", [-0.1, 1.5, True, "1"])
+    def test_distance_weight_out_of_range_or_type(self, bad):
+        msg = _err(correctives.validate_delta_mush,
+                   {"mesh": "|arm", "distance_weight": bad}, FakeCmds())
+        assert "distance_weight" in msg
+
     def test_defaults_resolve(self):
         plan = correctives.validate_delta_mush({"mesh": "|arm"}, FakeCmds())
         assert plan["iterations"] == 10
         assert plan["step"] == 0.5
         assert plan["pin_border"] is True
+        # NOT Maya's 0.0: uniform smoothing measurably spikes anisotropic
+        # edges (see the module constant's provenance comment).
+        assert plan["distance_weight"] == 1.0
         assert plan["skin_cluster"] == "arm_skin"
         assert plan["mesh_long"] == "|arm"
 
