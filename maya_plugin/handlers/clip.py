@@ -87,6 +87,70 @@ def _anim_curves(cmds, plugs: List[str]) -> Dict[str, List[str]]:
     return out
 
 
+# Driven-key curves: input is a DRIVER attribute, not time. They feed a plug
+# through a connection exactly like a poseInterpolator does, and setKeyframe
+# on such a plug silently no-ops the same way (#771 measured the
+# poseInterpolator case; the U-typed curves share the connection shape), so
+# the classifier below must NOT lump them in with time-based clip curves.
+_DRIVEN_KEY_TYPES = ("animCurveUU", "animCurveUL", "animCurveUA",
+                     "animCurveUT")
+
+
+def driven_weight_source(cmds, plug: str):
+    """(source plug, kind) for the connection feeding `plug`, or (None, None).
+
+    kind: "clip" (a time-based animCurve - this module's own currency),
+    "driven_key" (a U-typed curve reading a driver attribute), "corrective"
+    (a poseInterpolator output, #771), or "other" (anim layers' blend
+    nodes, pairBlend, unitConversion, expressions...). One classifier for
+    every guard that must answer "who owns this weight" - three sites
+    classifying independently is how the wrong hint ships (#771 review).
+    """
+    srcs = cmds.listConnections(plug, source=True, destination=False,
+                                plugs=True) or []
+    if not srcs:
+        return None, None
+    src = srcs[0]
+    src_type = cmds.nodeType(src.split(".")[0])
+    if src_type in _DRIVEN_KEY_TYPES:
+        return src, "driven_key"
+    if src_type.startswith("animCurve"):
+        return src, "clip"
+    if src_type == "poseInterpolator":
+        return src, "corrective"
+    return src, "other"
+
+
+def refuse_driven_weight(what: str, alias: str, src: str, kind: str) -> None:
+    """The kind-specific refusal for a weight some connection owns.
+
+    A wrong diagnosis is worse than a refusal: telling a caller to
+    delete_objects an interpolator that does not exist (because the real
+    source was a unitConversion or an anim-layer blend node) sends them
+    to delete the wrong node or loop on a dead-end hint.
+    """
+    if kind == "corrective":
+        raise HandlerError(
+            "weight %r is a corrective, driven by %s - %s cannot write a "
+            "connected plug (measured: setKeyframe on one returns 0 and "
+            "creates no curve; setAttr raises)" % (alias, src, what),
+            hint="pose the driver joint instead (that IS the corrective's "
+                 "control), or delete_objects the interpolator to return "
+                 "the weight to static control")
+    if kind == "driven_key":
+        raise HandlerError(
+            "weight %r is driven by a set-driven key (%s) - %s cannot "
+            "write a connection-fed plug" % (alias, src, what),
+            hint="remove the driven key (delete its curve node) to return "
+                 "the weight to static control")
+    raise HandlerError(
+        "weight %r is driven by %s - %s cannot write a connection-fed "
+        "plug" % (alias, src, what),
+        hint="disconnect that source to return the weight to static "
+             "control; this tool refuses rather than silently writing a "
+             "value the connection would immediately override")
+
+
 def _joint_plugs(joints: List[str]) -> List[str]:
     return ["%s.%s" % (j, a) for j in joints
             for a in ROTATE_ATTRS + TRANSLATE_ATTRS]
@@ -115,8 +179,17 @@ def guard_static_pose(cmds, root_long: str, joints: List[str],
 
 def guard_static_weights(cmds, node: str, aliases: List[str],
                          what: str) -> None:
-    """The same rule for blendshape weight channels."""
+    """The same rule for blendshape weight channels.
+
+    Driven-key (U-typed) curves are deliberately NOT this guard's business:
+    they are connections reading a driver, not clip channels, and "the clip
+    owns these channels; delete_clip" would be a wrong diagnosis with a
+    dead-end hint. They fall through to the per-request
+    driven_weight_source classifier, which names them (#771)."""
     driven = _anim_curves(cmds, ["%s.%s" % (node, a) for a in aliases])
+    driven = {plug: kept for plug, curves in driven.items()
+              if (kept := [c for c in curves
+                          if cmds.nodeType(c) not in _DRIVEN_KEY_TYPES])}
     if driven:
         raise HandlerError(
             "%s refuses while animation curves drive %d weight channel(s) "
@@ -426,27 +499,18 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     alias_map = _weight_alias_map(cmds, meshes)
     weight_channels = _resolve_weight_channels(alias_map, resolved_keys)
 
-    # #771: a corrective-driven weight cannot be keyed - MEASURED
-    # (evals/correctives_probe/): setKeyframe on a connection-fed plug
-    # returns 0 and creates NOTHING, so without this refusal the clip
-    # would silently ship without the channel it claims to key.
+    # #771: a connection-fed weight cannot be keyed - MEASURED
+    # (evals/correctives_probe/): setKeyframe on such a plug returns 0 and
+    # creates NOTHING, so without this refusal the clip would silently ship
+    # without a channel it claims to key. Time-based animCurves ("clip"
+    # kind) pass through - re-authoring over this tool's own curves is the
+    # normal append/replace path, and foreign hand-keyed curves are the
+    # older refusal's job below.
     for alias in weight_channels:
-        plug = "%s.%s" % (alias_map[alias], alias)
-        srcs = cmds.listConnections(plug, source=True, destination=False,
-                                    plugs=True) or []
-        driven_by = [s for s in srcs
-                     if not cmds.nodeType(s.split(".")[0]).startswith(
-                         "animCurve")]
-        if driven_by:
-            raise HandlerError(
-                "blend_weights channel %r is a corrective, driven by %s - "
-                "keying it would silently no-op (measured: setKeyframe "
-                "returns 0 and creates no curve on a connected plug)"
-                % (alias, driven_by[0]),
-                hint="the corrective already follows the joints this clip "
-                     "keys, and animated exports bake it into DeformPercent "
-                     "curves; key the JOINT, or delete_objects the "
-                     "interpolator to reclaim the channel")
+        src, kind = driven_weight_source(
+            cmds, "%s.%s" % (alias_map[alias], alias))
+        if kind is not None and kind != "clip":
+            refuse_driven_weight("author_clip", alias, src, kind)
 
     if loop:
         violations = clipmath.loop_violations(resolved_keys[0],
@@ -820,6 +884,18 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
                 "a clip declares weight channel %r, which no mesh bound to "
                 "this skeleton carries any more - it cannot be pinned at "
                 "rest" % alias)
+            continue
+        # #771: another clip's declared channel can have become driven
+        # out-of-band (its curve deleted, then a corrective wired). _pin's
+        # setKeyframe would silently no-op on it (measured), so claiming
+        # "pinned" below would be false-green - skip and say so instead.
+        src, drive_kind = driven_weight_source(cmds, "%s.%s" % (node, alias))
+        if drive_kind is not None and drive_kind != "clip":
+            warnings.append(
+                "weight channel %r is driven by %s - its boundary pin was "
+                "SKIPPED (a key on a connection-fed plug silently no-ops); "
+                "the clip declaring it can no longer export that channel"
+                % (alias, src))
             continue
         kind = _pad_boundaries("%s.%s" % (node, alias))
         if kind == "held":

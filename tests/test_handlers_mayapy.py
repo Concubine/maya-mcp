@@ -6389,7 +6389,7 @@ class TestCorrectivesInMaya:
         assert out["max_displacement"] < 1e-5
         assert abs(out["worst_edge_ratio_before"] - 1.0) < 1e-3
         assert abs(out["worst_edge_ratio_after"] - 1.0) < 1e-3
-        assert any("at rest" in w for w in out["warnings"])
+        assert any("changed nothing" in w for w in out["warnings"])
 
     def test_delta_mush_reduces_stretch_at_a_bend(self):
         import maya.cmds as cmds
@@ -6407,7 +6407,7 @@ class TestCorrectivesInMaya:
         assert (out["worst_edge_ratio_after"]
                 <= out["worst_edge_ratio_before"] * 0.9)
         assert out["max_displacement"] > 1e-3
-        assert not any("at rest" in w for w in out["warnings"])
+        assert not any("changed nothing" in w for w in out["warnings"])
         # Chain order: the mush deforms the SKINNED result.
         shape = cmds.listRelatives(mesh_long, shapes=True, fullPath=True,
                                    noIntermediate=True)[0]
@@ -6478,13 +6478,19 @@ class TestCorrectivesInMaya:
             __import__("maya.cmds", fromlist=["cmds"]),
             first["interpolator"])
         assert [r["target"] for r in records] == ["elbow_fix", "elbow_deep"]
-        # The duplicate-pose refusal needs an UNDRIVEN target (a driven one
-        # refuses earlier as already-a-corrective, tested elsewhere).
+        # A second target at (nearly) the same rotation REUSES the pose -
+        # no near-duplicate pose is added, and both weights ride it.
         self._bulge_target(cmds, mesh_long, name="elbow_third")
-        with pytest.raises(HandlerError, match="already exists"):
-            correctives.add_corrective({
-                "mesh": mesh_long, "target": "elbow_third",
-                "joint": joints[1], "rotation": [0.0, 0.0, -90.5]})
+        third = correctives.add_corrective({
+            "mesh": mesh_long, "target": "elbow_third",
+            "joint": joints[1], "rotation": [0.0, 0.0, -90.5]})
+        assert third["pose_name"] == first["pose_name"]
+        assert third["pose_index"] == first["pose_index"]
+        assert third["weight_at_pose"] > 0.9
+        assert any("reusing pose" in w for w in third["warnings"])
+        names = cmds.poseInterpolator(first["interpolator"], query=True,
+                                      poseNames=True)
+        assert names.count("elbow_fix") == 1  # no near-duplicate pose added
 
     def test_driven_weight_guards_fire_against_real_connections(self):
         import maya.cmds as cmds
@@ -6511,6 +6517,29 @@ class TestCorrectivesInMaya:
             correctives.add_corrective({
                 "mesh": mesh_long, "target": "elbow_fix",
                 "joint": joints[1], "rotation": [0.0, 0.0, -45.0]})
+        # A set-driven key is a CONNECTION, not a clip curve - the
+        # classifier must name it as such, not call it a corrective
+        # (review catch: the animCurveUU family reads a driver, not time).
+        self._bulge_target(cmds, mesh_long, name="sdk_target")
+        node = cmds.ls(cmds.listHistory(
+            cmds.listRelatives(mesh_long, shapes=True, fullPath=True,
+                               noIntermediate=True)[0],
+            pruneDagObjects=True), type="blendShape")[0]
+        cmds.setDrivenKeyframe(node + ".sdk_target",
+                               currentDriver=joints[1] + ".rotateZ",
+                               driverValue=0.0, value=0.0)
+        cmds.setDrivenKeyframe(node + ".sdk_target",
+                               currentDriver=joints[1] + ".rotateZ",
+                               driverValue=-90.0, value=1.0)
+        with pytest.raises(HandlerError, match="set-driven key"):
+            blendshape.set_blendshape_weights({
+                "mesh": mesh_long, "weights": {"sdk_target": 0.5}})
+        with pytest.raises(HandlerError, match="set-driven key"):
+            clip.author_clip({
+                "root": joints[0], "name": "sdkclip", "fps": 24,
+                "keys": [
+                    {"time_s": 0.0, "blend_weights": {"sdk_target": 0.0}},
+                    {"time_s": 1.0, "blend_weights": {"sdk_target": 1.0}}]})
 
     def test_export_warns_on_mush_and_bakes_the_driven_weight(self, tmp_path):
         import maya.cmds as cmds

@@ -8,8 +8,8 @@ ratios against the orig shape's edge lengths.
 
 add_corrective completes the phase-5 story (#691): an EXISTING blendshape
 target fires AT a joint angle instead of at a hand-set weight, via the
-poseInterpolator plugin (loaded by default on this install). The measured
-mechanics this module is built on (probe, 2026-08-31):
+poseInterpolator plugin (loaded on demand, the curveform sweep precedent).
+The measured mechanics this module is built on (probe, 2026-08-31):
 
 - cmds.poseInterpolator(joint, name=...) creates transform+shape wired
   driver[0].driverMatrix <- joint.matrix; the shipped MEL helper
@@ -19,8 +19,8 @@ mechanics this module is built on (probe, 2026-08-31):
   the trigger rotation, output[pose] ramps 0 -> 1 monotonically (0.5 at
   half angle) and a connected weight follows it exactly.
 - setAttr on a driven weight raises; setKeyframe on one SILENTLY no-ops
-  (returns 0, no curve) - which is why the guard closures in blendshape.py
-  and clip.py exist.
+  (returns 0, no curve) - which is why clip.driven_weight_source and the
+  guard closures in blendshape.py and clip.py exist.
 - FBX export bakes a driven weight into real per-frame DeformPercent curves
   (reimport tracks the driver), so correctives ship in clip exports with no
   in-scene baking; a deltaMush, by contrast, is DROPPED byte-identically -
@@ -28,12 +28,18 @@ mechanics this module is built on (probe, 2026-08-31):
 
 Every refusal fires before any node is created. The one mutation block runs
 under session.auto_checkpoint; failure deletes what this call created and
-restores the driver joint's rotation in a finally.
+restores the driver joint's rotation.
 
-The duplicate-pose refusal reads this module's own `mcp_correctives` string
-attr (JSON list of {pose, target, mesh, blend_shape, rotation}) off the
-interpolator shape - the mcp_clip precedent: the tool's records are the
-tool's memory, because pose[i].poseRotation internals are not a contract.
+A second corrective at the SAME rotation (within DUPLICATE_POSE_TOL_DEG)
+REUSES the existing pose - it connects the same output element to the new
+target instead of stacking a near-duplicate pose that would ill-condition
+the interpolation. The record of what this tool authored lives in the
+interpolator's `mcp_correctives` string attr (JSON list of {pose, target,
+mesh, blend_shape, rotation}) - the mcp_clip precedent: the tool's records
+are the tool's memory, because pose[i].poseRotation internals are not a
+contract. An unreadable record REFUSES rather than being silently replaced
+(overwriting it would erase every prior pose's memory and disarm the
+duplicate guard).
 """
 
 from __future__ import annotations
@@ -42,7 +48,7 @@ import json
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..dispatcher import HandlerError, require_known_keys
-from . import blendshape, clip, naming, sculpt, sculpt_math, session, units
+from . import blendshape, clip, naming, rigmath, sculpt_math, session, units
 
 APPLY_DELTA_MUSH_KEYS = ("mesh", "smoothing_iterations", "smoothing_step",
                          "pin_border_vertices", "distance_weight")
@@ -50,7 +56,7 @@ DELTA_MUSH_SYNONYMS = {"iterations": "smoothing_iterations",
                        "step": "smoothing_step",
                        "pin_border": "pin_border_vertices",
                        "object": "mesh", "name": "mesh"}
-MAX_MUSH_ITERATIONS = 50  # mirrors rigmath.MAX_SMOOTH_ITERATIONS
+MAX_MUSH_ITERATIONS = rigmath.MAX_SMOOTH_ITERATIONS
 DEFAULT_MUSH_ITERATIONS = 10  # Maya's own default
 DEFAULT_MUSH_STEP = 0.5
 # NOT Maya's default (0.0). MEASURED (evals/correctives_probe/
@@ -79,9 +85,14 @@ WEIGHT_AT_POSE_FLOOR = 0.5
 REST_WEIGHT_WARN = 0.01
 
 ROTATE_ATTRS = ("rotateX", "rotateY", "rotateZ")
-# Below this angle on every axis of every influence, the rig counts as
-# unposed and the delta-mush measurement means little.
-REST_ANGLE_TOL_DEG = 1e-3
+# Below this vertex movement the mush changed nothing at the current pose -
+# which is exactly what "measured at rest" means for a deformer that is
+# identity at the bind pose. Keyed on the MEASUREMENT, not on joint
+# rotations: a rig posed by translation, a constraint, or a bind pose that
+# legitimately carries rotation (the #732 class) would fool a rotation test
+# both ways.
+NOOP_MUSH_DISPLACEMENT = 1e-6
+SCALE_TOL = 1e-6
 
 
 def _cmds():
@@ -98,13 +109,6 @@ def _mel():
 
 def _short(name: str) -> str:
     return name.split("|")[-1]
-
-
-def _points(mesh_long: str) -> List[float]:
-    """World-space vertex positions through the real deformer chain.
-    Module-level so mayapy tests can monkeypatch (the blendshape._points
-    precedent)."""
-    return sculpt.vertex_positions(_cmds(), mesh_long)
 
 
 # ---------------------------------------------------------------------------
@@ -159,14 +163,14 @@ def validate_delta_mush(params: Dict[str, Any], cmds) -> Dict[str, Any]:
                  % (distance_weight, DEFAULT_DISTANCE_WEIGHT))
 
     history = cmds.listHistory(mesh_shape, pruneDagObjects=True) or []
-    skins = [n for n in history if cmds.nodeType(n) == "skinCluster"]
+    skins = cmds.ls(history, type="skinCluster") or []
     if not skins:
         raise HandlerError(
             "apply_delta_mush relaxes SKINNING - %s has no skinCluster"
             % mesh_long,
             hint="bind_skin first; a mush without a skin has nothing to "
                  "relax and this tool's report would be meaningless")
-    mushes = [n for n in history if cmds.nodeType(n) == "deltaMush"]
+    mushes = cmds.ls(history, type="deltaMush") or []
     if mushes:
         raise HandlerError(
             "%s already has a deltaMush (%s)" % (mesh_long, mushes[0]),
@@ -192,35 +196,34 @@ def _edge_lengths(mesh_node: str, world: bool) -> List[float]:
 
     sel = om.MSelectionList()
     sel.add(mesh_node)
-    try:
-        dag = sel.getDagPath(0)
-        it = om.MItMeshEdge(dag)
-    except RuntimeError:
-        # An intermediate shape has no DAG path evaluation of its own frame;
-        # object space via MObject still measures its stored points.
-        it = om.MItMeshEdge(sel.getDependNode(0))
+    it = om.MItMeshEdge(sel.getDagPath(0))
     space = om.MSpace.kWorld if world else om.MSpace.kObject
     lengths = []
     while not it.isDone():
-        p0 = it.point(0, space)
-        p1 = it.point(1, space)
-        lengths.append((p0 - p1).length())
+        lengths.append(it.length(space))
         it.next()
     return lengths
 
 
-def worst_edge_ratio(cmds, mesh_long: str) -> Optional[float]:
-    """Worst current-world / orig-shape edge-length ratio, or None.
+def bind_edge_lengths(cmds, mesh_long: str) -> Optional[List[float]]:
+    """Every edge's length on the orig (intermediate) shape, or None.
 
-    The orig shape holds the bind geometry, so no pose mutation is needed to
-    know bind lengths - the same currency humanoid_live's tear detector
-    speaks. Orig points are object-space; the export gate's identity-scale
-    culture makes that equal to world at bind."""
+    The orig shape holds the bind geometry, so no pose mutation is needed
+    to know bind lengths - the same currency humanoid_live's tear detector
+    speaks. Computed once per apply (a deltaMush cannot change the orig
+    shape, so re-reading it after the mutation would be duplicate work)."""
     orig = _orig_shape(cmds, mesh_long)
     if orig is None:
         return None
+    return _edge_lengths(orig, world=False)
+
+
+def worst_edge_ratio(cmds, mesh_long: str,
+                     bind: Optional[List[float]]) -> Optional[float]:
+    """Worst current-world / bind edge-length ratio, or None."""
+    if bind is None:
+        return None
     current = _edge_lengths(mesh_long, world=True)
-    bind = _edge_lengths(orig, world=False)
     if len(current) != len(bind):
         return None
     worst = 0.0
@@ -230,60 +233,65 @@ def worst_edge_ratio(cmds, mesh_long: str) -> Optional[float]:
     return worst
 
 
-def _rig_is_at_rest(cmds, skin_cluster: str) -> bool:
-    influences = cmds.skinCluster(skin_cluster, query=True,
-                                  influence=True) or []
-    for joint in influences:
-        for attr in ROTATE_ATTRS:
-            value = units.ui_to_degrees(
-                cmds, float(cmds.getAttr("%s.%s" % (joint, attr))))
-            if abs(value) > REST_ANGLE_TOL_DEG:
-                return False
-    return True
-
-
 def apply_delta_mush(params: Dict[str, Any]) -> Dict[str, Any]:
     cmds = _cmds()
     plan = validate_delta_mush(params, cmds)
     mesh_long = plan["mesh_long"]
     warnings: List[str] = []
 
+    # Bind lengths come from the orig shape in OBJECT space; the current
+    # lengths are world. A transform carrying scale makes the ratio report
+    # the scale, not the stretch - say so rather than let a healthy rig
+    # read as torn (only export_fbx enforces identity scale, and only at
+    # export time).
+    world_scale = cmds.xform(mesh_long, query=True, worldSpace=True,
+                             scale=True) or [1.0, 1.0, 1.0]
+    if any(abs(s - 1.0) > SCALE_TOL for s in world_scale):
+        warnings.append(
+            "%s's world scale is %s - the edge ratios below compare "
+            "world lengths against object-space bind lengths, so they are "
+            "inflated by that scale; freeze transforms for honest numbers"
+            % (mesh_long, [round(s, 6) for s in world_scale]))
+
     checkpoint = session.auto_checkpoint("apply_delta_mush")
 
-    ratio_before = worst_edge_ratio(cmds, mesh_long)
-    before_pts = _points(mesh_long)
+    bind = bind_edge_lengths(cmds, mesh_long)
+    ratio_before = worst_edge_ratio(cmds, mesh_long, bind)
+    before_pts = blendshape._points(mesh_long)
 
     node = cmds.deltaMush(
         mesh_long,
         smoothingIterations=plan["iterations"],
         smoothingStep=plan["step"],
         pinBorderVertices=plan["pin_border"])[0]
-    # distanceWeight is set post-create: the deltaMush command has no flag
-    # for it, and the attr write re-evaluates the node either way.
-    cmds.setAttr(node + ".distanceWeight", plan["distance_weight"])
     try:
-        history = cmds.listHistory(plan["mesh_shape"],
-                                   pruneDagObjects=True) or []
-        mushes = [n for n in history if cmds.nodeType(n) == "deltaMush"]
-        if len(mushes) != 1:
-            raise HandlerError(
-                "postcondition failed: expected exactly one deltaMush in "
-                "%s's history, found %d" % (mesh_long, len(mushes)),
-                hint="restore checkpoint %r" % checkpoint["checkpoint_id"])
+        # distanceWeight is set post-create (the deltaMush command has no
+        # flag for it) INSIDE the rollback: a mush stranded at Maya's
+        # default 0.0 is the uniform-smoothing spike this module's
+        # constant block measures, and a failed call must not leave it
+        # live (review catch, 4 finders).
+        cmds.setAttr(node + ".distanceWeight", plan["distance_weight"])
     except Exception:
         if cmds.objExists(node):
             cmds.delete(node)
-        raise
+        raise HandlerError(
+            "the deltaMush was created but its distanceWeight could not "
+            "be set - the node was deleted again rather than left at "
+            "Maya's uniform-smoothing default (measured to spike "
+            "anisotropic edges up to 15x)",
+            hint="restore checkpoint %r if the scene looks disturbed"
+                 % checkpoint["checkpoint_id"])
 
-    ratio_after = worst_edge_ratio(cmds, mesh_long)
+    ratio_after = worst_edge_ratio(cmds, mesh_long, bind)
     max_displacement = sculpt_math.max_displacement(
-        before_pts, _points(mesh_long))
+        before_pts, blendshape._points(mesh_long))
 
-    if _rig_is_at_rest(cmds, plan["skin_cluster"]):
+    if max_displacement < NOOP_MUSH_DISPLACEMENT:
         warnings.append(
-            "measured at rest - deltaMush is identity at the bind pose "
-            "(measured), so both ratios read ~1.0 and max_displacement ~0; "
-            "pose the rig to measure the relaxation")
+            "the mush changed nothing at the current pose - deltaMush is "
+            "identity at the bind pose (measured), so an unposed rig "
+            "reads ~1.0 on both ratios; pose the rig to measure the "
+            "relaxation")
 
     return {"mesh": mesh_long, "delta_mush": node,
             "worst_edge_ratio_before": ratio_before,
@@ -297,10 +305,26 @@ def apply_delta_mush(params: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _incoming(cmds, plug: str) -> Optional[str]:
-    srcs = cmds.listConnections(plug, source=True, destination=False,
-                                plugs=True) or []
-    return srcs[0] if srcs else None
+def _ensure_pose_interpolator_plugin(cmds) -> None:
+    """Load the poseInterpolator plugin, or refuse naming it.
+
+    The curveform sweep precedent: without this, the failure surfaces many
+    lines later - after the checkpoint and after the joint was zeroed - as
+    a confusing AttributeError on cmds.poseInterpolator that names nothing
+    about the plugin."""
+    if cmds.pluginInfo("poseInterpolator", query=True, loaded=True):
+        return
+    try:
+        cmds.loadPlugin("poseInterpolator", quiet=True)
+    except Exception:  # noqa: BLE001 - the verdict is the re-query below
+        pass
+    if not cmds.pluginInfo("poseInterpolator", query=True, loaded=True):
+        raise HandlerError(
+            "the poseInterpolator plugin is not available in this Maya",
+            hint="add_corrective drives weights through a poseInterpolator "
+                 "node; load the plugin (Windows > Settings > Plug-in "
+                 "Manager, poseInterpolator) or install a Maya that "
+                 "ships it")
 
 
 def interp_for_joint(cmds, joint_long: str) -> Optional[str]:
@@ -316,20 +340,74 @@ def interp_for_joint(cmds, joint_long: str) -> Optional[str]:
 
 
 def corrective_records(cmds, interp: str) -> List[Dict[str, Any]]:
-    """This module's own record of the poses it added to `interp`."""
+    """This module's own record of the poses it added to `interp`.
+
+    An unreadable record REFUSES: returning [] here and letting the caller
+    append-and-overwrite would silently erase every prior pose's memory
+    and disarm the duplicate guard in one step (review catch)."""
     if not cmds.attributeQuery(CORRECTIVE_ATTR, node=interp, exists=True):
         return []
     raw = cmds.getAttr("%s.%s" % (interp, CORRECTIVE_ATTR))
-    try:
-        parsed = json.loads(raw) if raw else []
-    except (TypeError, ValueError):
+    if not raw:
         return []
-    return parsed if isinstance(parsed, list) else []
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise HandlerError(
+            "the %s record on %s is unreadable (%s) - refusing rather "
+            "than overwrite it, which would erase every prior corrective's "
+            "memory" % (CORRECTIVE_ATTR, interp, exc),
+            hint="delete_objects the interpolator to re-author its "
+                 "correctives from scratch, or repair the attr by hand")
+    if not isinstance(parsed, list):
+        raise HandlerError(
+            "the %s record on %s is not a list - refusing rather than "
+            "overwrite it" % (CORRECTIVE_ATTR, interp),
+            hint="delete_objects the interpolator to re-author its "
+                 "correctives from scratch, or repair the attr by hand")
+    return parsed
+
+
+def _joint_rotation_writable(cmds, joint_long: str) -> None:
+    """Refuse a driver joint this handler cannot pose.
+
+    The handler must write joint.rotate to record the trigger; a locked or
+    connection-fed channel would raise mid-mutation - after the checkpoint,
+    with the restore step then masking the real error (review catch)."""
+    plugs = [joint_long + ".rotate"] + [
+        "%s.%s" % (joint_long, a) for a in ROTATE_ATTRS]
+    for plug in plugs:
+        if cmds.getAttr(plug, lock=True):
+            raise HandlerError(
+                "%s is locked - add_corrective must pose the driver joint "
+                "to record the trigger" % plug,
+                hint="unlock the channel first")
+        srcs = cmds.listConnections(plug, source=True, destination=False,
+                                    plugs=True) or []
+        if not srcs:
+            continue
+        src_type = cmds.nodeType(srcs[0].split(".")[0])
+        if src_type.startswith("animCurve"):
+            raise HandlerError(
+                "add_corrective refuses while animation curves drive %s - "
+                "the handler must pose the joint to record the trigger, "
+                "and a static write here would fight the curves"
+                % joint_long,
+                hint="delete_clip first, add the corrective, then "
+                     "re-author the motion")
+        raise HandlerError(
+            "%s is driven by %s - add_corrective must pose the driver "
+            "joint to record the trigger, and a connection-fed channel "
+            "cannot be posed" % (plug, srcs[0]),
+            hint="a constraint or expression owns this joint; drive the "
+                 "corrective from a joint this handler can pose")
 
 
 def validate_corrective(params: Dict[str, Any], cmds) -> Dict[str, Any]:
     require_known_keys(params, ADD_CORRECTIVE_KEYS, "add_corrective",
                        ADD_CORRECTIVE_SYNONYMS)
+
+    _ensure_pose_interpolator_plugin(cmds)
 
     mesh_name = params.get("mesh")
     if not isinstance(mesh_name, str) or not mesh_name.strip():
@@ -384,52 +462,52 @@ def validate_corrective(params: Dict[str, Any], cmds) -> Dict[str, Any]:
                  "[0, 0, -90] for a 90-degree local-Z bend")
 
     weight_plug = "%s.%s" % (node, target)
-    src = _incoming(cmds, weight_plug)
-    if src is not None:
-        src_node = src.split(".")[0]
-        src_type = cmds.nodeType(src_node)
-        if src_type.startswith("animCurve"):
-            raise HandlerError(
-                "a clip owns weight %r (driven by %s)" % (target, src_node),
-                hint="delete_clip returns the channel to static control "
-                     "before a corrective can take it over")
-        if src_type == "poseInterpolator":
-            raise HandlerError(
-                "%r is already a corrective, driven by %s" % (target, src_node),
-                hint="delete_objects the interpolator to re-author every "
-                     "corrective on that joint")
+    src, kind = clip.driven_weight_source(cmds, weight_plug)
+    if kind == "clip":
+        raise HandlerError(
+            "a clip owns weight %r (driven by %s)"
+            % (target, src.split(".")[0]),
+            hint="delete_clip returns the channel to static control "
+                 "before a corrective can take it over")
+    if kind == "corrective":
+        raise HandlerError(
+            "%r is already a corrective, driven by %s"
+            % (target, src.split(".")[0]),
+            hint="delete_objects the interpolator to re-author every "
+                 "corrective on that joint")
+    if kind is not None:
         raise HandlerError(
             "weight %r is already driven by %s" % (target, src),
             hint="disconnect it before wiring a corrective")
 
-    driven = clip._anim_curves(
-        cmds, ["%s.%s" % (joint_long, a) for a in ROTATE_ATTRS])
-    if driven:
-        raise HandlerError(
-            "add_corrective refuses while animation curves drive %s - the "
-            "handler must pose the joint to record the trigger, and a "
-            "static write here would fight the curves" % joint_long,
-            hint="delete_clip first, add the corrective, then re-author "
-                 "the motion")
+    _joint_rotation_writable(cmds, joint_long)
 
     interp = interp_for_joint(cmds, joint_long)
+    reuse_pose: Optional[str] = None
     if interp is not None:
         for record in corrective_records(cmds, interp):
             recorded = record.get("rotation") or []
             if (len(recorded) == 3
                     and all(abs(float(a) - b) < DUPLICATE_POSE_TOL_DEG
                             for a, b in zip(recorded, rotation))):
-                raise HandlerError(
-                    "a pose at that rotation already exists on %s (pose %r "
-                    "driving %r)" % (interp, record.get("pose"),
-                                     record.get("target")),
-                    hint="two poses within %g degrees make the "
-                         "interpolation ill-conditioned; pick a distinct "
-                         "trigger angle" % DUPLICATE_POSE_TOL_DEG)
+                # Same trigger, different target (a same-target repeat was
+                # already refused above as driven): REUSE the pose. Two
+                # poses within a degree would ill-condition the
+                # interpolation; two targets riding one pose is an
+                # ordinary rig (elbow_bulge + forearm_crease on one bend).
+                reuse_pose = record.get("pose")
+                warnings.append(
+                    "reusing pose %r (recorded at %s) for target %r - a "
+                    "second pose within %g degrees would make the "
+                    "interpolation ill-conditioned, so both targets ride "
+                    "the one pose"
+                    % (reuse_pose, recorded, target,
+                       DUPLICATE_POSE_TOL_DEG))
+                break
 
-    return {"mesh_long": mesh_long, "mesh_shape": mesh_shape,
-            "blend_node": node, "target": target, "joint_long": joint_long,
-            "rotation": rotation, "interpolator": interp,
+    return {"mesh_long": mesh_long, "blend_node": node, "target": target,
+            "joint_long": joint_long, "rotation": rotation,
+            "interpolator": interp, "reuse_pose": reuse_pose,
             "warnings": warnings}
 
 
@@ -443,6 +521,13 @@ def _set_rotate(cmds, joint: str, degrees: Tuple[float, float, float]) -> None:
 def _add_pose(mel, interp: str, name: str) -> int:
     return int(mel.eval('poseInterpolatorAddPose("%s", "%s")'
                         % (interp, name)))
+
+
+def _pose_index_by_name(cmds, interp: str, name: str) -> Optional[int]:
+    for i in cmds.getAttr(interp + ".pose", multiIndices=True) or []:
+        if cmds.getAttr("%s.pose[%d].poseName" % (interp, i)) == name:
+            return i
+    return None
 
 
 def _unique_pose_name(existing: List[str], requested: str) -> str:
@@ -476,6 +561,17 @@ def add_corrective(params: Dict[str, Any]) -> Dict[str, Any]:
     interp = plan["interpolator"]
     weight_plug = "%s.%s" % (node, target)
     try:
+        # A previewed shape may hold a non-zero STATIC weight; the
+        # connection about to own this plug makes that value dead either
+        # way, and measuring corrective_displacement against a baseline
+        # that already contains the shape would report ~0 for a working
+        # corrective (review catch).
+        if abs(float(cmds.getAttr(weight_plug))) > 1e-9:
+            cmds.setAttr(weight_plug, 0.0)
+            warnings.append(
+                "weight %r held a hand-set value - zeroed before wiring; "
+                "the corrective's driver owns it now" % target)
+
         if interp is None:
             # Neutral poses must record the driver at REST: zero, create,
             # add the three neutrals the Pose Editor itself records.
@@ -495,20 +591,28 @@ def add_corrective(params: Dict[str, Any]) -> Dict[str, Any]:
             for neutral in NEUTRAL_POSES:
                 _add_pose(mel, interp, neutral)
 
-        existing_names = list(
-            cmds.poseInterpolator(interp, query=True, poseNames=True) or [])
-        pose_name = _unique_pose_name(existing_names, target)
-
         _set_rotate(cmds, joint, tuple(rotation))
-        pose_index = _add_pose(mel, interp, pose_name)
-        pose_added = pose_name
+
+        pose_index: Optional[int] = None
+        pose_name = plan["reuse_pose"]
+        if pose_name is not None:
+            pose_index = _pose_index_by_name(cmds, interp, pose_name)
+        if pose_index is None:
+            # No reusable pose (or a stale record naming a pose deleted
+            # outside this tool - then a fresh pose is the right answer).
+            existing_names = list(
+                cmds.poseInterpolator(interp, query=True,
+                                      poseNames=True) or [])
+            pose_name = _unique_pose_name(existing_names, target)
+            pose_index = _add_pose(mel, interp, pose_name)
+            pose_added = pose_name
 
         # The corrective's own contribution, measured through the real
         # chain at the trigger pose: skin-only before, skin+shape after.
-        pre = _points(mesh_long)
+        pre = blendshape._points(mesh_long)
         cmds.connectAttr("%s.output[%d]" % (interp, pose_index), weight_plug)
         connected = True
-        post = _points(mesh_long)
+        post = blendshape._points(mesh_long)
         corrective_displacement = sculpt_math.max_displacement(pre, post)
 
         weight_at_pose = float(cmds.getAttr(weight_plug))
@@ -562,7 +666,10 @@ def add_corrective(params: Dict[str, Any]) -> Dict[str, Any]:
             pass
         raise
     finally:
-        _set_rotate(cmds, joint, snapshot)
+        try:
+            _set_rotate(cmds, joint, snapshot)
+        except Exception:  # noqa: BLE001 - never mask the primary error
+            pass
 
     return {"mesh": mesh_long, "blend_shape": node, "target": target,
             "joint": joint, "interpolator": interp,

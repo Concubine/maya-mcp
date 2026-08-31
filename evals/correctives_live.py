@@ -143,107 +143,24 @@ def preflight():
                                                process.get("scene")))
 
 
-# --- the humanoid fixture, copied from evals/humanoid_live.py (#668) -------
-# (the constants ARE the fixture; importing them would couple two gates'
-# lifecycles, the same call surfdetail_live made about the #770 proxy)
+# --- the humanoid fixture: DATA and probe code imported from the #668 gate
+# (the humanoid_ik_live precedent - that module runs nothing on import).
+# The first cut of this gate COPIED these and the copy immediately
+# diverged: it dropped the visible-tear fields the design doc quotes as
+# evidence, and a future fix to the pose mapping would have forked the rig
+# away from the baseline it compares against (review catch).
 
-JOINTS = [
-    {"name": "pelvis",     "position": [0.0,  1.00, 0.0]},
-    {"name": "spine_01",   "position": [0.0,  1.15, 0.0], "parent": "pelvis"},
-    {"name": "spine_02",   "position": [0.0,  1.30, 0.0], "parent": "spine_01"},
-    {"name": "chest",      "position": [0.0,  1.45, 0.0], "parent": "spine_02"},
-    {"name": "neck",       "position": [0.0,  1.60, 0.0], "parent": "chest"},
-    {"name": "head",       "position": [0.0,  1.72, 0.0], "parent": "neck"},
-    {"name": "L_shoulder", "position": [0.22, 1.50, 0.0], "parent": "chest"},
-    {"name": "L_elbow",    "position": [0.45, 1.50, 0.0], "parent": "L_shoulder"},
-    {"name": "L_wrist",    "position": [0.68, 1.50, 0.0], "parent": "L_elbow"},
-    {"name": "R_shoulder", "position": [-0.22, 1.50, 0.0], "parent": "chest"},
-    {"name": "R_elbow",    "position": [-0.45, 1.50, 0.0], "parent": "R_shoulder"},
-    {"name": "R_wrist",    "position": [-0.68, 1.50, 0.0], "parent": "R_elbow"},
-    {"name": "L_hip",      "position": [0.10, 0.95, 0.0], "parent": "pelvis"},
-    {"name": "L_knee",     "position": [0.10, 0.50, 0.0], "parent": "L_hip"},
-    {"name": "L_ankle",    "position": [0.10, 0.08, 0.0], "parent": "L_knee"},
-    {"name": "L_toe",      "position": [0.10, 0.02, 0.14], "parent": "L_ankle"},
-    {"name": "R_hip",      "position": [-0.10, 0.95, 0.0], "parent": "pelvis"},
-    {"name": "R_knee",     "position": [-0.10, 0.50, 0.0], "parent": "R_hip"},
-    {"name": "R_ankle",    "position": [-0.10, 0.08, 0.0], "parent": "R_knee"},
-    {"name": "R_toe",      "position": [-0.10, 0.02, 0.14], "parent": "R_ankle"},
-]
-
-DIVISIONS = 8
-BALL_DIVISIONS = 2
-PARTS = [
-    ("cylinder", "torso", DIVISIONS, [0.34, 0.62, 0.22], [0.0, 1.31, 0.0], None),
-    ("sphere",   "head_p", BALL_DIVISIONS, [0.20, 0.26, 0.20], [0.0, 1.74, 0.0], None),
-    ("sphere",   "ball_shoulder_L", BALL_DIVISIONS, [0.17, 0.17, 0.17], [0.22, 1.50, 0.0], None),
-    ("sphere",   "ball_shoulder_R", BALL_DIVISIONS, [0.17, 0.17, 0.17], [-0.22, 1.50, 0.0], None),
-    ("cylinder", "arm_L", DIVISIONS, [0.10, 0.56, 0.10], [0.42, 1.50, 0.0], [0, 0, 90]),
-    ("cylinder", "arm_R", DIVISIONS, [0.10, 0.56, 0.10], [-0.42, 1.50, 0.0], [0, 0, 90]),
-    ("sphere",   "ball_hip_L", BALL_DIVISIONS, [0.19, 0.19, 0.19], [0.10, 0.95, 0.0], None),
-    ("sphere",   "ball_hip_R", BALL_DIVISIONS, [0.19, 0.19, 0.19], [-0.10, 0.95, 0.0], None),
-    ("cylinder", "leg_L", DIVISIONS, [0.11, 1.00, 0.11], [0.10, 0.56, 0.0], None),
-    ("cylinder", "leg_R", DIVISIONS, [0.11, 1.00, 0.11], [-0.10, 0.56, 0.0], None),
-    ("cube",     "foot_L", DIVISIONS, [0.10, 0.08, 0.26], [0.10, 0.05, 0.06], None),
-    ("cube",     "foot_R", DIVISIONS, [0.10, 0.08, 0.26], [-0.10, 0.05, 0.06], None),
-]
-
-EDGE_PROBE = """
-import maya.cmds as cmds
-import maya.api.OpenMaya as om
-_mesh = %(mesh)r
-_shape = cmds.listRelatives(_mesh, shapes=True, fullPath=True)[0]
-_flat = cmds.xform(_mesh + '.vtx[*]', query=True, worldSpace=True,
-                   translation=True)
-_sel = om.MSelectionList()
-_sel.add(_shape)
-_it = om.MItMeshEdge(_sel.getDagPath(0))
-_lengths = []
-while not _it.isDone():
-    _a = _it.vertexId(0) * 3
-    _b = _it.vertexId(1) * 3
-    _dx = _flat[_a] - _flat[_b]
-    _dy = _flat[_a + 1] - _flat[_b + 1]
-    _dz = _flat[_a + 2] - _flat[_b + 2]
-    _lengths.append((_dx * _dx + _dy * _dy + _dz * _dz) ** 0.5)
-    _it.next()
-if %(store)s:
-    CORRECTIVES_BIND_EDGES = list(_lengths)
-_worst = 0.0
-for _i in range(len(_lengths)):
-    _b0 = CORRECTIVES_BIND_EDGES[_i]
-    if _b0 > 1e-9:
-        _r = _lengths[_i] / _b0
-        if _r > _worst:
-            _worst = _r
-{'edges': len(_lengths), 'max_edge_ratio': round(_worst, 6)}
-"""
+from humanoid_live import (EDGE_PROBE, JOINTS, PARTS,  # noqa: E402
+                           TEAR_GROWTH_MIN, biped_pose)
 
 
 def edge_probe(store, what):
-    return py(EDGE_PROBE % {"mesh": "|" + MESH, "store": repr(bool(store))},
+    """Both currencies: `max_edge_ratio` (unfiltered - the gate's pinned
+    numbers) and `max_visible_ratio` (edges that grew >= TEAR_GROWTH_MIN,
+    the #668 judged-tear currency)."""
+    return py(EDGE_PROBE % {"mesh": "|" + MESH, "store": repr(bool(store)),
+                            "grow": TEAR_GROWTH_MIN},
               what)
-
-
-def biped_pose(joints_deg):
-    """The #668 pose mapping - see humanoid_live.biped_pose for the measured
-    frame derivation (local X is the twist axis on vertical chains)."""
-    hip = joints_deg["hip"]
-    knee = joints_deg["knee"]
-    ankle = joints_deg["ankle"]
-    shoulder = joints_deg["shoulder"]
-    elbow = joints_deg["elbow"]
-    spine = -hip / 6.0
-    return {
-        "L_hip": [0, -hip, 0], "R_hip": [0, -hip, 0],
-        "L_knee": [0, -knee, 0], "R_knee": [0, -knee, 0],
-        "L_ankle": [0, 0, -ankle], "R_ankle": [0, 0, -ankle],
-        "L_shoulder": [0, 0, abs(shoulder)],
-        "R_shoulder": [0, 0, abs(shoulder)],
-        "L_elbow": [0, 0, abs(elbow)],
-        "R_elbow": [0, 0, abs(elbow)],
-        "spine_01": [0, -spine, 0], "spine_02": [0, -spine, 0],
-        "chest": [0, -spine, 0],
-    }
 
 
 def render(tag):
@@ -267,7 +184,7 @@ def render(tag):
           "renderer=%s" % response["result"].get("renderer"))
 
 
-def build_fixture(golem_poses):
+def build_fixture():
     """Steps 1-2 of humanoid_live: mesh + skeleton + bind + craft pass."""
     ok("new_scene", {"confirm": True})
     for kind, name, divisions, scale, translate, rotate in PARTS:
@@ -345,19 +262,22 @@ def main():
     preflight()
 
     # ---- 1. fixture + baseline reproduction (the "before" side) ----------
-    root = build_fixture(golem_poses)
+    root = build_fixture()
     edge_probe(store=True, what="bind edge baseline")
     ok("setup_lighting", {"preset": "three_point"})
 
     before = {}
+    visible_before = {}
     for pname in ("crouch", "extend"):
         pose(root, golem_poses, pname)
         probe = edge_probe(store=False, what="%s pre-mush" % pname)
         before[pname] = probe["max_edge_ratio"]
+        visible_before[pname] = probe["max_visible_ratio"]
         check("%s reproduces the recorded #668 baseline stretch" % pname,
               abs(probe["max_edge_ratio"] - recorded[pname]) < BASELINE_REPRO_TOL,
-              "measured %.3f vs recorded %.3f (tol %.2f)"
-              % (probe["max_edge_ratio"], recorded[pname], BASELINE_REPRO_TOL))
+              "measured %.3f (visible %.3f) vs recorded %.3f (tol %.2f)"
+              % (probe["max_edge_ratio"], probe["max_visible_ratio"],
+                 recorded[pname], BASELINE_REPRO_TOL))
         render("%s_before" % pname)
         ok("reset_pose", {"root": root})
 
@@ -369,8 +289,10 @@ def main():
           "tool %.3f vs gate %.3f" % (mush["worst_edge_ratio_before"],
                                       before["crouch"]))
     after = {}
+    visible_after = {}
     probe = edge_probe(store=False, what="crouch post-mush")
     after["crouch"] = probe["max_edge_ratio"]
+    visible_after["crouch"] = probe["max_visible_ratio"]
     check("the tool's own after-ratio agrees with this gate's probe",
           abs(mush["worst_edge_ratio_after"] - after["crouch"]) < 0.02,
           "tool %.3f vs gate %.3f" % (mush["worst_edge_ratio_after"],
@@ -385,6 +307,7 @@ def main():
     pose(root, golem_poses, "extend")
     probe = edge_probe(store=False, what="extend post-mush")
     after["extend"] = probe["max_edge_ratio"]
+    visible_after["extend"] = probe["max_visible_ratio"]
     render("extend_after")
     ok("reset_pose", {"root": root})
 
@@ -392,9 +315,10 @@ def main():
         check("the mush reduced %s stretch by at least %.2f" % (
                   pname, MUSH_MIN_REDUCTION),
               after[pname] <= before[pname] - MUSH_MIN_REDUCTION,
-              "before %.3f -> after %.3f (reduction %.3f; recorded #668 "
-              "residual was %.3f)"
+              "before %.3f -> after %.3f (reduction %.3f; visible "
+              "%.3f -> %.3f; recorded #668 residual was %.3f)"
               % (before[pname], after[pname], before[pname] - after[pname],
+                 visible_before[pname], visible_after[pname],
                  recorded[pname]))
 
     # ---- 3. export honesty: the warning, and the byte-identical drop ------
@@ -462,7 +386,6 @@ def main():
           % (corrective["corrective_displacement"],
              CORRECTIVE_DISPLACEMENT_MIN))
 
-    interp = corrective["interpolator"]
     weight_plug = "%s.%s" % (corrective["blend_shape"], "L_shoulder_fix")
     ramp = py(
         "import maya.cmds as cmds\n"

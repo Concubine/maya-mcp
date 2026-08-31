@@ -98,8 +98,16 @@ class FakeCmds:
     def attributeQuery(self, attr, node=None, exists=False):
         return ("%s.%s" % (node, attr)) in self.string_attrs
 
-    def getAttr(self, plug, **kw):
+    def getAttr(self, plug, lock=False, **kw):
+        if lock:
+            return plug in getattr(self, "locked_plugs", set())
         return self.attr_values.get(plug)
+
+    def pluginInfo(self, name, query=False, loaded=False):
+        return name not in getattr(self, "missing_plugins", set())
+
+    def loadPlugin(self, name, quiet=False):
+        return None
 
 
 def _err(fn, *args):
@@ -250,7 +258,11 @@ class TestAddCorrectiveValidate:
         msg = _err(correctives.validate_corrective, _params(), fake)
         assert "animation curves" in msg
 
-    def test_duplicate_pose_within_tolerance_refuses(self):
+    def test_duplicate_rotation_reuses_the_existing_pose(self):
+        # A second pose within a degree would ill-condition the
+        # interpolation - the plan reuses the recorded pose for the new
+        # target instead of refusing an ordinary rig shape (two shapes
+        # riding one elbow bend).
         fake = FakeCmds()
         fake.types["elbowInterpShape"] = "poseInterpolator"
         fake.conns["elbowInterpShape.driver[0].driverMatrix"] = [
@@ -259,8 +271,38 @@ class TestAddCorrectiveValidate:
         fake.attr_values["elbowInterpShape.mcp_correctives"] = (
             '[{"pose": "bulge", "target": "bulge", "mesh": "|arm", '
             '"blend_shape": "arm_shapes", "rotation": [0.0, 0.0, -89.5]}]')
+        plan = correctives.validate_corrective(_params(), fake)
+        assert plan["reuse_pose"] == "bulge"
+        assert any("reusing pose" in w for w in plan["warnings"])
+
+    def test_unreadable_record_refuses_instead_of_overwriting(self):
+        fake = FakeCmds()
+        fake.types["elbowInterpShape"] = "poseInterpolator"
+        fake.conns["elbowInterpShape.driver[0].driverMatrix"] = [
+            "|arm_01|arm_02.matrix"]
+        fake.string_attrs.add("elbowInterpShape.mcp_correctives")
+        fake.attr_values["elbowInterpShape.mcp_correctives"] = "{not json"
         msg = _err(correctives.validate_corrective, _params(), fake)
-        assert "bulge" in msg
+        assert "unreadable" in msg
+
+    def test_locked_joint_refuses(self):
+        fake = FakeCmds()
+        fake.locked_plugs = {"|arm_01|arm_02.rotateY"}
+        msg = _err(correctives.validate_corrective, _params(), fake)
+        assert "locked" in msg
+
+    def test_constrained_joint_refuses_with_the_source_named(self):
+        fake = FakeCmds()
+        fake.types["oc1"] = "orientConstraint"
+        fake.conns["|arm_01|arm_02.rotateX"] = ["oc1.constraintRotateX"]
+        msg = _err(correctives.validate_corrective, _params(), fake)
+        assert "oc1" in msg
+
+    def test_missing_plugin_refuses_with_a_hint(self):
+        fake = FakeCmds()
+        fake.missing_plugins = {"poseInterpolator"}
+        msg = _err(correctives.validate_corrective, _params(), fake)
+        assert "poseInterpolator" in msg and "plugin" in msg
 
     def test_nearby_but_distinct_pose_passes(self):
         fake = FakeCmds()

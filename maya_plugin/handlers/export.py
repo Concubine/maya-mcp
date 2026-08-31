@@ -914,13 +914,21 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
 
     declared_shapes = _scene_shape_aliases(cmds, nodes)
 
-    # #771: name every relaxation the file will silently lose.
-    mush_warnings = [
-        "deltaMush %r on %s does not travel in FBX - the exported mesh "
-        "deforms WITHOUT it (measured: with/without exports are "
-        "byte-identical); the relaxation exists only in Maya"
-        % (mush, shape)
-        for shape, mush in _live_delta_mushes(cmds, nodes)]
+    # #771: name every relaxation the file will silently lose. Guarded like
+    # the texture-claim walk below: this is a warning-only measurement, and
+    # a measurement that fails must cost the measurement, not the export.
+    try:
+        mush_warnings = [
+            "deltaMush %r on %s does not travel in FBX - the exported mesh "
+            "deforms WITHOUT it (measured: with/without exports are "
+            "byte-identical); the relaxation exists only in Maya"
+            % (mush, shape)
+            for shape, mush in _live_delta_mushes(cmds, nodes)]
+    except Exception as mush_exc:  # noqa: BLE001 - see comment above
+        mush_warnings = [
+            "the deltaMush check could not walk this scene's history (%s) "
+            "- if a deltaMush is live, its relaxation will NOT be in the "
+            "file" % mush_exc]
 
     # #714: what the SCENE says its materials carry. Read-only queries; the
     # scene is never modified. Scoped to the exported shapes, like shape

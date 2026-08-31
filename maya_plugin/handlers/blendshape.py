@@ -131,26 +131,6 @@ def create_blendshape(params: Dict[str, Any]) -> Dict[str, Any]:
     resolved = _validated_targets(cmds, mesh_long, params.get("targets"),
                                   existing)
 
-    # #771, MEASURED (evals/correctives_probe/probe_bs_hang.py): creating a
-    # NEW blendShape with frontOfChain=True while a deltaMush sits in the
-    # history hangs Maya's deformer-reorder for 20+ minutes on an 8k-vert
-    # mesh. Every neighbouring operation is instant - adding a target to an
-    # EXISTING node under the same mush measured 0.0 s - so only the
-    # node-creation path refuses.
-    if node is None:
-        mushes = cmds.ls(cmds.listHistory(mesh_shape, pruneDagObjects=True)
-                         or [], type="deltaMush") or []
-        if mushes:
-            raise HandlerError(
-                "%s carries a deltaMush (%s) and no blendShape yet - "
-                "creating the blendShape under it would hang Maya's "
-                "deformer reorder (measured: 20+ minutes on an 8k-vertex "
-                "mesh)" % (mesh_long, mushes[0]),
-                hint="author blend shapes BEFORE the mush - or "
-                     "delete_objects the mush, wire the targets, and "
-                     "apply_delta_mush again (re-applying is cheap and "
-                     "measured identical)")
-
     base_count = cmds.polyEvaluate(mesh_long, vertex=True)
     for name, t_long in resolved:
         t_count = cmds.polyEvaluate(t_long, vertex=True)
@@ -162,6 +142,41 @@ def create_blendshape(params: Dict[str, Any]) -> Dict[str, Any]:
                 hint="a target must be a same-topology copy of the base "
                      "(maya_duplicate, then sculpt) - there is no wrap "
                      "fallback")
+
+    # #771, MEASURED (evals/correctives_probe/probe_bs_hang.py): creating a
+    # NEW blendShape with frontOfChain=True while a deltaMush sits in the
+    # history hangs Maya's deformer-reorder for 20+ minutes on an 8k-vert
+    # mesh. Every neighbouring operation is instant - adding a target to an
+    # EXISTING node under the same mush measured 0.0 s - so only the
+    # node-creation path refuses. Checked AFTER the topology gate so the
+    # caller learns about a bad target before being told to tear down the
+    # mush. The hint reads the live settings off the node - the re-apply it
+    # prescribes must be able to reproduce them, and nothing else records
+    # them.
+    if node is None:
+        mushes = cmds.ls(cmds.listHistory(mesh_shape, pruneDagObjects=True)
+                         or [], type="deltaMush") or []
+        if mushes:
+            mush = mushes[0]
+            try:
+                settings = (
+                    "smoothing_iterations=%d, smoothing_step=%g, "
+                    "pin_border_vertices=%s, distance_weight=%g" % (
+                        cmds.getAttr(mush + ".smoothingIterations"),
+                        cmds.getAttr(mush + ".smoothingStep"),
+                        bool(cmds.getAttr(mush + ".pinBorderVertices")),
+                        cmds.getAttr(mush + ".distanceWeight")))
+            except Exception:  # noqa: BLE001 - the hint must not fail the refusal
+                settings = "its settings were unreadable - note them by hand"
+            raise HandlerError(
+                "%s carries a deltaMush (%s) and no blendShape yet - "
+                "creating the blendShape under it would hang Maya's "
+                "deformer reorder (measured: 20+ minutes on an 8k-vertex "
+                "mesh)" % (mesh_long, mush),
+                hint="author blend shapes BEFORE the mush - or "
+                     "delete_objects the mush, wire the targets, and "
+                     "apply_delta_mush again with the SAME settings (%s)"
+                     % settings)
 
     session.auto_checkpoint("create_blendshape")
 
@@ -249,21 +264,12 @@ def set_blendshape_weights(params: Dict[str, Any]) -> Dict[str, Any]:
                 % (name, value))
         # #771: only the REQUESTED weights are checked - a corrective on
         # one target must not lock every other target's hand control.
-        # (animCurve sources are the clip guard's job, above, and that one
-        # deliberately covers ALL aliases.)
-        srcs = cmds.listConnections("%s.%s" % (node, name), source=True,
-                                    destination=False, plugs=True) or []
-        driven_by = [s for s in srcs
-                     if not cmds.nodeType(s.split(".")[0]).startswith(
-                         "animCurve")]
-        if driven_by:
-            raise HandlerError(
-                "weight %r is a corrective, driven by %s - a hand-set "
-                "value cannot land on a connected plug"
-                % (name, driven_by[0]),
-                hint="pose the driver joint instead (that IS the "
-                     "corrective's control), or delete_objects the "
-                     "interpolator to return the weight to static control")
+        # (Time-based animCurve sources are the clip guard's job, above,
+        # and that one deliberately covers ALL aliases.)
+        src, kind = clip.driven_weight_source(cmds, "%s.%s" % (node, name))
+        if kind is not None and kind != "clip":
+            clip.refuse_driven_weight("set_blendshape_weights", name, src,
+                                      kind)
 
     session.auto_checkpoint("set_blendshape_weights")
 

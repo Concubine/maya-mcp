@@ -1851,25 +1851,48 @@ class TestLiveDeltaMushes:
     silently lose (measured: with/without-mush exports are byte-identical)."""
 
     class _Cmds:
-        def __init__(self, history):
+        """Classification by node TYPE, never by name - the production walk
+        is cmds.ls(type="deltaMush"), and a name-prefix fake could not fail
+        for a renamed mush (review catch)."""
+
+        def __init__(self, history, node_types):
             self.history = history
+            self.node_types = node_types
 
         def ls(self, nodes=None, dagObjects=False, type=None, long=False,
                noIntermediate=False, **kw):
             if type == "mesh":
-                return list(self.history)
-            if type == "deltaMush":
-                return [n for n in (nodes or []) if n.startswith("deltaMush")]
+                pool = list(self.history)
+                if nodes:
+                    return [s for s in pool
+                            if any(s.startswith(n) for n in nodes)]
+                return pool
+            if type is not None:
+                return [n for n in (nodes or [])
+                        if self.node_types.get(n) == type]
             return list(nodes or [])
 
         def listHistory(self, node, pruneDagObjects=False, **kw):
             return list(self.history.get(node, []))
 
-    def test_finds_a_mush_in_exported_history(self):
-        cmds = self._Cmds({"|arm|armShape": ["deltaMush1", "arm_skin"]})
+    def test_finds_a_renamed_mush_by_type(self):
+        cmds = self._Cmds({"|arm|armShape": ["arm_relax", "arm_skin"]},
+                          {"arm_relax": "deltaMush",
+                           "arm_skin": "skinCluster"})
         assert export._live_delta_mushes(cmds, None) == [
-            ("|arm|armShape", "deltaMush1")]
+            ("|arm|armShape", "arm_relax")]
 
     def test_clean_history_reports_nothing(self):
-        cmds = self._Cmds({"|arm|armShape": ["arm_skin", "arm_shapes"]})
+        cmds = self._Cmds({"|arm|armShape": ["arm_skin", "arm_shapes"]},
+                          {"arm_skin": "skinCluster",
+                           "arm_shapes": "blendShape"})
         assert export._live_delta_mushes(cmds, None) == []
+
+    def test_selected_export_scopes_the_walk(self):
+        cmds = self._Cmds(
+            {"|arm|armShape": ["arm_relax", "arm_skin"],
+             "|leg|legShape": ["leg_relax", "leg_skin"]},
+            {"arm_relax": "deltaMush", "leg_relax": "deltaMush",
+             "arm_skin": "skinCluster", "leg_skin": "skinCluster"})
+        assert export._live_delta_mushes(cmds, ["|leg"]) == [
+            ("|leg|legShape", "leg_relax")]

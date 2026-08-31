@@ -181,7 +181,10 @@ class FakeCmds:
     # --- animation -------------------------------------------------------
     def setKeyframe(self, node, attribute=None, time=None, value=None):
         plug = "%s.%s" % (node, attribute)
-        self.curves.setdefault(plug, plug.replace("|", "_") + "_crv")
+        # No dot in the generated name: real Maya node names cannot carry
+        # one, and the #771 classifier splits "node.attr" sources on it.
+        self.curves.setdefault(
+            plug, plug.replace("|", "_").replace(".", "_") + "_crv")
         self.keys.setdefault(plug, {})[float(time)] = float(value)
 
     def keyTangent(self, node, attribute=None, edit=False, time=None,
