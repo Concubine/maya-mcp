@@ -67,6 +67,7 @@ class TestRegistration:
             "maya_save_scene",
             "maya_export_fbx",
             "maya_bake_textures",
+            "maya_bake_mesh_maps",
             "maya_reset_namespace",
             "maya_create_primitive",
             "maya_duplicate",
@@ -2638,3 +2639,73 @@ class TestRetargetTools:
         sent = conn.calls[0]["params"]
         assert sent["filter"] == {"window": 7}
         assert sent["lock_contacts"] is False
+
+
+def _meshmaps_result_stub():
+    return {"meshes": ["|limb"], "out_dir": "C:/out", "resolution": 1024,
+            "maps": ["ao"], "baked": [], "applied": [],
+            "checkpoint_id": None, "warnings": []}
+
+
+def _meshmaps_result_with(**overrides):
+    """Push a handler response through the real maya_bake_mesh_maps tool and
+    back into BakeMeshMapsResult - proving a field the wire carries survives
+    the extra='ignore' boundary (#757)."""
+    conn = FakeConn(responses={
+        "bake_mesh_maps": dict(_meshmaps_result_stub(), **overrides)})
+    mcp = server_mod.create_server(conn)
+    result = run(mcp.call_tool("maya_bake_mesh_maps",
+                               {"meshes": ["|limb"], "out_dir": "C:/out"}))
+    return schemas.BakeMeshMapsResult(**result.structured_content)
+
+
+class TestBakeMeshMaps:
+    def test_baked_entries_survive_the_wire(self):
+        """#770: stats and the padded flag are what a reviewer reads to
+        trust a map - they must not vanish at the schema boundary."""
+        result = _meshmaps_result_with(baked=[{
+            "mesh": "|limb", "map": "ao", "file": "C:/out/limb_ao.png",
+            "basename": "limb_ao.png", "resolution": 1024, "padded": True,
+            "stats": {"distinct_values": 1519, "pixel_count": 1048576,
+                      "non_uniform": True, "blank": False}}])
+        entry = result.baked[0]
+        assert entry.map == "ao"
+        assert entry.padded is True
+        assert entry.stats.non_uniform is True
+        assert entry.stats.blank is False
+
+    def test_applied_entries_survive_the_wire(self):
+        result = _meshmaps_result_with(
+            applied=[{"material": "limb_mat", "attr": "baseColor",
+                      "file": "C:/out/limb_mat_color_ao.png",
+                      "basename": "limb_mat_color_ao.png",
+                      "file_node": "limb_mat_color_ao1",
+                      "wearers": ["|limb"],
+                      "replaced_file": "C:/kit/kit_albedo.png",
+                      "overlap_fraction": 0.0,
+                      "deleted_nodes": ["kit_file"]}],
+            checkpoint_id="cp_3")
+        applied = result.applied[0]
+        assert applied.replaced_file == "C:/kit/kit_albedo.png"
+        assert applied.overlap_fraction == 0.0
+        assert applied.deleted_nodes == ["kit_file"]
+        assert result.checkpoint_id == "cp_3"
+
+    def test_params_reach_the_wire(self):
+        conn = FakeConn(responses={"bake_mesh_maps": _meshmaps_result_stub()})
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_bake_mesh_maps", {
+            "meshes": ["|limb"], "out_dir": "C:/out", "maps": ["ao"],
+            "resolution": 2048, "apply_ao": True, "curvature_radius": 0.25,
+            "curvature_output": "both"}))
+        assert conn.calls[0]["params"] == {
+            "meshes": ["|limb"], "out_dir": "C:/out", "maps": ["ao"],
+            "resolution": 2048, "apply_ao": True, "curvature_radius": 0.25,
+            "curvature_output": "both"}
+
+    def test_annotations(self):
+        mcp = server_mod.create_server(FakeConn())
+        by_name = {t.name: t for t in run(mcp.list_tools())}
+        bake = by_name["maya_bake_mesh_maps"].annotations
+        assert (bake.read_only_hint, bake.destructive_hint,
+                bake.idempotent_hint) == (False, True, False)

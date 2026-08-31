@@ -946,3 +946,45 @@ specifically when it finds one — this is separate from, and does not
 replace, the "worn by several requested meshes" warning above. A shading
 group that cannot answer the membership query degrades to no warning
 rather than failing the bake.
+
+## Commands (mesh maps / #770)
+
+| Command | Params | Result |
+|---|---|---|
+| `bake_mesh_maps` | `{ meshes, out_dir, maps?, resolution?, apply_ao?, curvature_radius?, curvature_output? }` | `{ meshes, out_dir, resolution, maps, baked: [...], applied: [...], checkpoint_id, warnings }` |
+
+`bake_mesh_maps` bakes **geometry-derived** maps — `ao`, `curvature`,
+`world_normal` (default: all three) — per mesh, through each mesh's UVs,
+with Arnold's render-to-texture. This is the other half of `bake_textures`:
+that tool flattens procedural *shader networks*; this one bakes what only
+the *geometry* knows — where parts meet (AO sees **other meshes** as
+occluders, measured), where edges are (curvature), which way surfaces face
+(world normal; its G channel is an up-facing dust mask).
+
+The bake phase mutates nothing: the map shaders render via
+`arnoldRenderToTexture`'s `-shader` flag and are **never assigned** to the
+mesh (measured). Each bake runs one mesh into a private empty folder —
+Arnold names its own outputs and renames them on short-name collisions, a
+rule this tool refuses to model, which is also why two requested meshes
+sharing a short name refuse upfront. A UV-less mesh refuses upfront too:
+Maya does not — it returns success and writes a corrupt EXR that only
+fails at read (measured).
+
+Every map is converted EXR→PNG (a **linear** conversion, measured: AO 0.5
+lands on 127/128) and verified: missing/unreadable/drew-nothing refuse;
+**flat only warns**, because flat can be honest here — a lone convex
+mesh's AO is all-white, and concave curvature on convex-only geometry is
+all-black (both measured). `stats` carries the numbers per map.
+
+`apply_ao=true` is the one scene edit, checkpointed: the AO is multiplied
+into each material's colour slot **sRGB-correctly** (decode base → linear
+multiply → re-encode; the AO png is linear data) and the slot is rewired
+to the new composite file — a plain file→slot wiring `export_fbx`
+carries. The input colour map is never overwritten. Refusals fire before
+any bake runs: a procedural colour slot (bake_textures flattens it
+first), a non-PNG base, a material worn by a mesh outside the request, or
+per-face assignment. A material shared by several *requested* meshes
+composites the union of their AO bakes, masked by each bake's alpha —
+those bakes run **unpadded**, because `extend_edges` floods alpha to 1.0
+over the whole image (measured); texels claimed twice are reported as
+`overlap_fraction` and warned above 1%.

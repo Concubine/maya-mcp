@@ -1241,6 +1241,90 @@ class BakeTexturesResult(BaseModel):
     warnings: List[str] = Field(default_factory=list)
 
 
+class MeshMapStats(BaseModel):
+    """Whether a geometry-derived bake can be trusted (#770)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    pixel_count: int
+    distinct_values: int = Field(description=(
+        "Distinct pixel values seen; capped at 2 once non-uniformity is "
+        "proven (nothing downstream reads a larger number)."))
+    non_uniform: Optional[bool] = Field(default=None, description=(
+        "False means the map is FLAT. Unlike maya_bake_textures, flat can "
+        "be HONEST here (a lone convex mesh's AO is all-white; concave "
+        "curvature on convex-only geometry is all-black, measured) - so "
+        "flat maps ship with a warning instead of refusing."))
+    blank: Optional[bool] = Field(default=None, description=(
+        "True would have refused: every pixel transparent means the bake "
+        "drew nothing (the #765 class). Shipped maps are always False."))
+
+
+class BakedMeshMap(BaseModel):
+    """One geometry-derived map, verified and written to disk."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    mesh: str
+    map: str = Field(description="ao, curvature, or world_normal.")
+    file: str = Field(description="Absolute path of the PNG written.")
+    basename: str
+    resolution: int
+    padded: bool = Field(description=(
+        "True when the bake ran with extend_edges (shell borders padded so "
+        "bilinear sampling does not bleed background at seams). False only "
+        "for the AO bake of a mesh in a shared-material composite, where "
+        "alpha must keep marking the real UV shells - padding floods alpha "
+        "to 1.0 over the whole image (measured)."))
+    stats: MeshMapStats
+
+
+class AppliedAo(BaseModel):
+    """One material whose colour map now carries the baked contact shadow."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    material: str
+    attr: str
+    file: str = Field(description="The composited colour map written.")
+    basename: str
+    file_node: str = Field(description=(
+        "The new file node now driving the colour slot."))
+    wearers: List[str] = Field(default_factory=list)
+    replaced_file: Optional[str] = Field(default=None, description=(
+        "The colour map the slot read before, when it was file-backed. "
+        "That input file is NEVER overwritten - the composite is a new "
+        "file next to it."))
+    overlap_fraction: float = Field(default=0.0, description=(
+        "Fraction of composited texels claimed by more than one wearer's "
+        "UV shells - the AO multiplies twice there, which is wrong exactly "
+        "there. Non-zero above 1% also lands in warnings."))
+    deleted_nodes: List[str] = Field(default_factory=list)
+
+
+class BakeMeshMapsResult(BaseModel):
+    """What maya_bake_mesh_maps measured, wrote, and (with apply_ao) rewired.
+
+    The bake itself mutates nothing - maps render through a shader that is
+    never assigned. Only apply_ao edits the scene, and that edit is
+    persistent on purpose: the next render shows the shipped contact
+    shadow, so re-judge it before exporting.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    meshes: List[str]
+    out_dir: str
+    resolution: int
+    maps: List[str]
+    baked: List[BakedMeshMap] = Field(default_factory=list)
+    applied: List[AppliedAo] = Field(default_factory=list)
+    checkpoint_id: Optional[str] = Field(default=None, description=(
+        "Taken before the apply_ao rewire; null when nothing was applied - "
+        "the bake phase alone changes no scene state worth checkpointing."))
+    warnings: List[str] = Field(default_factory=list)
+
+
 class SkeletonJoint(BaseModel):
     model_config = ConfigDict(extra="ignore")
 

@@ -32,6 +32,7 @@ from .schemas import (
     AssembleResult,
     AuthorClipResult,
     AuthorPhysicsResult,
+    BakeMeshMapsResult,
     BakeTexturesResult,
     BlendshapeTargetSpec,
     ClipKeySpec,
@@ -1027,6 +1028,76 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 "bake_textures",
                 {"meshes": meshes, "out_dir": out_dir,
                  "resolution": resolution, "slots": slots},
+                timeout_s=EXPORT_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Bake AO/curvature/normal from geometry",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_bake_mesh_maps(
+        meshes: Annotated[List[str], Field(description=(
+            "Meshes to bake maps for. Each needs UVs (maya_uv_atlas) - a "
+            "UV-less mesh writes a corrupt bake Maya does not refuse "
+            "(measured), so this tool refuses it upfront. Other scene "
+            "meshes still occlude: bake the whole assembly's parts in one "
+            "scene so contact shadows land where parts actually meet."
+        ))],
+        out_dir: Annotated[str, Field(description=(
+            "Absolute directory the map PNGs are written to. It must "
+            "already exist; there is no default, because a guessed "
+            "location is how bake files get lost from a delivery."
+        ))],
+        maps: Annotated[Optional[List[str]], Field(description=(
+            "Which maps to bake: 'ao' (contact shadow / pocket-grime "
+            "mask), 'curvature' (edge-wear mask), 'world_normal' "
+            "(world-space normals; the G channel is an up-facing dust "
+            "mask). Omit for all three."
+        ))] = None,
+        resolution: Annotated[int, Field(description=(
+            "Square bake size: 256, 512, 1024, 2048 or 4096."
+        ))] = 1024,
+        apply_ao: Annotated[bool, Field(description=(
+            "True composites the baked AO into each material's colour map "
+            "(sRGB-correct multiply) and rewires the slot to the new file "
+            "- a persistent scene edit, checkpointed. The colour slot "
+            "must be a plain value or a readable PNG; procedural slots "
+            "refuse (maya_bake_textures flattens them first)."
+        ))] = False,
+        curvature_radius: Annotated[float, Field(description=(
+            "Sampling radius in scene units; 0.1 suits metre-scale assets."
+        ))] = 0.1,
+        curvature_output: Annotated[
+            Literal["convex", "concave", "both"], Field(description=(
+                "convex = edges/wear, concave = crevices/grime, both = "
+                "signed around mid-grey. Concave is honestly all-black on "
+                "convex-only geometry (measured) - that ships with a "
+                "warning, not a refusal."
+            ))] = "convex",
+    ) -> BakeMeshMapsResult:
+        """Bake geometry-derived maps - AO, curvature, world-normal - per mesh.
+
+        The maps come from the geometry itself (Arnold renders them through
+        each mesh's UVs), which is what a procedural network cannot know:
+        where parts meet, where edges are, which way surfaces face. The
+        shipped weakness this cures is measured: joins that read as
+        floating because no contact shadow exists in the texture.
+
+        The bake mutates nothing. apply_ao is the one scene edit: it
+        multiplies the AO into the colour map so the contact shadow ships
+        in the texture - re-judge the next render, then export. Every map
+        is verified (readable, drew something) with stats reported; flat
+        maps warn but ship, because flat can be honest here."""
+        return BakeMeshMapsResult.model_validate(
+            maya.request(
+                "bake_mesh_maps",
+                {"meshes": meshes, "out_dir": out_dir, "maps": maps,
+                 "resolution": resolution, "apply_ao": apply_ao,
+                 "curvature_radius": curvature_radius,
+                 "curvature_output": curvature_output},
                 timeout_s=EXPORT_TIMEOUT_S,
             )
         )
