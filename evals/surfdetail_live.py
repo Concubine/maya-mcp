@@ -17,7 +17,10 @@ measures four things:
   3. the render AFTER differs from the render BEFORE - both in relative
      mean luma and in how many pixels moved, measured against a
      same-scene render-to-render NOISE FLOOR so "Arnold is stochastic"
-     cannot be mistaken for "the detail is visible";
+     cannot be mistaken for "the detail is visible". GRAIN is measured
+     separately and in the render: the colour effects are applied first
+     and rendered, then grain alone is added and rendered again, so the
+     pixels grain moves are grain's own and nothing else's;
   4. the composite and height maps ride the exported FBX's bytes with
      nothing dropped.
 
@@ -31,14 +34,9 @@ MUTATES THE ANSWERING MAYA'S CURRENT SCENE (new_scene first). Point
 MAYA_MCP_PORT at a disposable Maya you launched yourself - never the
 user's session on 9877.
 
-It also prints FINDING lines: measurements it reports but does not gate
-on, because they name a known open defect rather than a regression this
-run could have caused. Read them - one of them is currently the reason
-grain's "surface relief" claim is proven only in the height MAP here and
-not in the render.
-
 Exit: 0 pass, 1 fail. Writes renders, maps, composites and the FBX to
-evals/surfdetail_live/ - report BOTH renders for visual judgment; a
+evals/surfdetail_live/ - report the before and after renders for visual
+judgment (the colour-only middle one isolates grain by eye too); a
 correlation ratio cannot see "that reads as mould, not wear", which is
 exactly the failure mode a directed-detail tool has.
 """
@@ -59,6 +57,9 @@ OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                        "surfdetail_live")
 BEFORE_RENDER = os.path.join(OUT_DIR, "surfdetail_before.png")
 BEFORE_RENDER_B = os.path.join(OUT_DIR, "surfdetail_before_noisefloor.png")
+# The colour effects applied, grain not yet: the baseline grain's own
+# render-level contribution is measured against.
+MID_RENDER = os.path.join(OUT_DIR, "surfdetail_colour_only.png")
 AFTER_RENDER = os.path.join(OUT_DIR, "surfdetail_after.png")
 AFTER_FBX = os.path.join(OUT_DIR, "surfdetail_after.fbx")
 
@@ -82,14 +83,14 @@ RENDER_PARAMS = {"angles": ["three_quarter"], "renderer": "arnold",
                  "resolution": 1024, "samples": 4, "zoom": 3.0}
 LIGHT_INTENSITY = 0.5
 
-# The effect strengths this gate drives at. NOT the tool's defaults (wear
-# 0.5, grime 0.5, grain 0.3): measured in run 1, the defaults are honest but
-# sub-visible - the whole limb composite spanned six 8-bit levels and the
-# render moved 1573 pixels against a 1173-pixel noise floor, i.e. nothing an
-# eye could find. These are the smallest values the look probe found legible,
-# and they are ordinary art-direction settings well inside STRENGTH_MAX=4.
-# The defaults themselves are a finding for the ticket, not something this
-# gate silently papers over - see the task-6 report.
+# The effect strengths this gate drives at. These ARE the tool's defaults
+# now: the look probe measured the original 0.5/0.5/0.3 as sub-visible (the
+# whole limb composite spanned six 8-bit levels and the render moved 1573
+# pixels against a 1173-pixel noise floor), and the fix round raised
+# DEFAULT_STRENGTH to exactly these values, so the gate drives what a blind
+# caller gets. They are stated here rather than read from the handler on
+# purpose - a gate that imports its own expectation cannot catch a change to
+# it, and if these drift apart the pinned bars below say so.
 WEAR_STRENGTH = 2.0
 GRIME_STRENGTH = 1.5
 GRAIN_STRENGTH = 2.0
@@ -140,18 +141,25 @@ RENDER_RELATIVE_DELTA_MIN = 0.007
 RENDER_MOVED_PIXELS_MIN = 30000
 LUMA_MOVE_EPS = 4  # a pixel "moved" when its mean-RGB shifts by this much
 
+# GRAIN, measured in the render and on its own. This bar exists because the
+# grain bump network was wired, reported correct by every result field, and
+# completely INERT: pngwrite emits RGB with no alpha, so the file node's
+# outAlpha - the plug that drives bump2d.bumpValue - was a CONSTANT 1.0
+# until apply_surface_detail started setting alphaIsLuminance. Measured on
+# this geometry at 1024/zoom 3 (task-6 probe, grain alone):
+#   bumpDepth 2.0, flag off   1972 pixels moved  \ indistinguishable from
+#   bumpDepth 4.0, flag off   1977 pixels moved  / the noise floor
+#   same-scene noise floor    2011 pixels
+#   bumpDepth 4.0, flag ON   85734 pixels moved, max luma delta 155
+# So the gate must not settle for "the connections exist" - a mask-space
+# correlation and a connection check both PASSED throughout the inert
+# period. 20000 is 10x the measured noise floor and ~4x under the measured
+# signal, leaving room for the gate's strength 2.0 to land under the
+# probe's 4.0 while still being unmistakably relief rather than sampling.
+GRAIN_MOVED_PIXELS_MIN = 20000
+
 failures: list[str] = []
 findings: list[str] = []
-notes: list[str] = []
-
-
-def note(text: str) -> None:
-    """A measurement the gate REPORTS but does not yet gate on, because the
-    thing it measures is a known open defect rather than a regression this
-    run could have caused. Printed loudly every run so it cannot go quiet."""
-    line = "FINDING %s" % text
-    print(line, flush=True)
-    notes.append(line)
 
 
 def check(name: str, ok: bool, detail: str) -> None:
@@ -299,9 +307,9 @@ def correlation_check(name: str, signal: list, values: list) -> None:
 def height_file_node(applied: dict) -> dict | None:
     """Ask MAYA about the file node feeding the grain bump - not the tool's
     own report (#764's lesson: a result field can agree with itself while the
-    scene disagrees). Returns None rather than raising: this feeds a note,
-    and a diagnostic that breaks the gate it informs is worse than no
-    diagnostic."""
+    scene disagrees). Returns None if it cannot be located, which the caller
+    turns into a FAILED check: an unmeasurable bump node is exactly the state
+    this gate exists to refuse."""
     path = (applied.get("height_file") or "").replace("\\", "/")
     if not path:
         return None
@@ -383,26 +391,42 @@ def main() -> int:
               % (stats.get("non_uniform"), stats.get("blank"),
                  stats.get("distinct_values")))
 
-    # --- the tool under test, three meshes, three effect mixes ------------
+    # --- the tool under test ----------------------------------------------
+    # The COLOUR effects first, on all three meshes; grain is applied in a
+    # second pass below with a render in between, so the pixels grain moves
+    # can be attributed to grain and to nothing else. (Splitting the limb's
+    # two effects across two calls is not a workaround: apply_surface_detail
+    # is documented to be callable per effect mix, grain touches no colour
+    # slot and wear touches no normalCamera, so neither call can see the
+    # other's work.)
     applied = {}
-    for mesh_key, effects in (
-            ("limb", [{"kind": "wear", "strength": WEAR_STRENGTH},
-                      {"kind": "grain", "strength": GRAIN_STRENGTH}]),
-            ("ground", [{"kind": "grime", "strength": GRIME_STRENGTH}]),
-            ("collar", [{"kind": "wear", "strength": WEAR_STRENGTH},
-                        {"kind": "grime", "strength": GRIME_STRENGTH}])):
-        applied[mesh_key] = must(
+
+    def apply_to(mesh_key, effects, label):
+        result = must(
             call("apply_surface_detail",
                  {"mesh": scene[mesh_key], "maps_dir": OUT_DIR,
                   "out_dir": OUT_DIR, "effects": effects},
                  timeout_s=900.0),
-            "apply_surface_detail(%s)" % mesh_key)
-        print("%s: %r" % (mesh_key,
-                          [(e["kind"], round(e["changed_fraction"], 4))
-                           for e in applied[mesh_key]["effects"]]), flush=True)
-        for warning in applied[mesh_key].get("warnings") or []:
+            "apply_surface_detail(%s)" % label)
+        print("%s: %r" % (label, [(e["kind"], round(e["changed_fraction"], 4))
+                                  for e in result["effects"]]), flush=True)
+        for warning in result.get("warnings") or []:
             print("WARNING from apply_surface_detail(%s): %s"
-                  % (mesh_key, warning), flush=True)
+                  % (label, warning), flush=True)
+        return result
+
+    for mesh_key, effects in (
+            ("limb", [{"kind": "wear", "strength": WEAR_STRENGTH}]),
+            ("ground", [{"kind": "grime", "strength": GRIME_STRENGTH}]),
+            ("collar", [{"kind": "wear", "strength": WEAR_STRENGTH},
+                        {"kind": "grime", "strength": GRIME_STRENGTH}])):
+        applied[mesh_key] = apply_to(mesh_key, effects, mesh_key)
+
+    # Colour applied, no grain yet. This render is grain's baseline.
+    mid = render_to(MID_RENDER, "colour-only")
+
+    grain = apply_to("limb", [{"kind": "grain", "strength": GRAIN_STRENGTH}],
+                     "limb-grain")
 
     # --- 2. correlation, computed here from the files ---------------------
     # The base every composite started from is the flat baseColor, encoded
@@ -428,46 +452,11 @@ def main() -> int:
     # grain on the limb: the height map against its own blend mask,
     # 0.5*curvature + 0.5*inverted-AO (surfdetail._grain_pixels).
     limb_ao = reds(by_mesh_map[(scene["limb"], "ao")]["file"])
-    limb_height = reds(applied["limb"]["height_file"])
+    limb_height = reds(grain["height_file"])
     blend = [0.5 * limb_curv[i] + 0.5 * (255 - limb_ao[i])
              for i in range(len(limb_curv))]
     correlation_check("grain_follows_blend_mask:limb", blend,
                       [float(v) for v in limb_height])
-
-    # --- the grain bump network: wired, and INERT -------------------------
-    # MEASURED by this gate's look probe, and the reason grain is the one
-    # effect whose claim is not yet gated in the render. apply_surface_detail
-    # writes the height PNG through pngwrite, which emits RGB (no alpha
-    # channel), and drives bump2d.bumpValue from the file node's .outAlpha.
-    # A Maya `file` node returns a CONSTANT outAlpha of 1.0 for an image with
-    # no alpha unless alphaIsLuminance is on - which this tool does not set.
-    # So the bump reads one flat value everywhere and perturbs no normal.
-    #
-    # Evidence, grain alone on this geometry at 1024/zoom 3 (scratchpad probe,
-    # task-6 report): bumpDepth 2.0 and bumpDepth 4.0 rendered IDENTICALLY,
-    # 1972 and 1977 pixels moved against a 2011-pixel noise floor. Flipping
-    # ONLY alphaIsLuminance on the same node in the same scene took it to
-    # 85734 pixels moved, max luma delta 155, and the limb rendered as
-    # unmistakable cast-stone relief. One line next to the existing
-    # colorSpace setAttr fixes it; it is out of this task's commit scope.
-    #
-    # This is reported, not checked, because a check here would fail on a
-    # defect that predates this gate. Promote it to check() in the same
-    # change that sets alphaIsLuminance.
-    bump = height_file_node(applied["limb"])
-    if bump is None:
-        note("the grain height file node could not be located - the "
-             "alphaIsLuminance measurement below did not run")
-    elif not bump["alphaIsLuminance"]:
-        note("grain bump is INERT: %s.alphaIsLuminance=%r, .outAlpha=%r - a "
-             "CONSTANT, so bump2d has no gradient to shade and bumpDepth "
-             "does nothing. See the comment above this line for the measured "
-             "before/after." % (bump["node"], bump["alphaIsLuminance"],
-                                bump["outAlpha"]))
-    else:
-        note("grain bump reads per-texel now (%s.alphaIsLuminance=True) - "
-             "the defect above is fixed; promote this to a render-measured "
-             "check()." % bump["node"])
 
     # --- 3. the render moved, past its own noise floor --------------------
     after = render_to(AFTER_RENDER, "after")
@@ -483,6 +472,30 @@ def main() -> int:
                             RENDER_MOVED_PIXELS_MIN, noise_floor,
                             100.0 * noise_floor / len(after)))
 
+    # --- 3b. GRAIN specifically, in the render, isolated ------------------
+    # mid -> after is the grain apply and nothing else, so these are grain's
+    # own pixels. See GRAIN_MOVED_PIXELS_MIN for why a map-space correlation
+    # and a connection check were both insufficient here.
+    grain_moved = moved_pixels(mid, after)
+    check("grain_moves_the_render", grain_moved >= GRAIN_MOVED_PIXELS_MIN,
+          "%d of %d pixels moved >=%d by the grain apply alone (min %d; "
+          "same-scene noise floor was %d)"
+          % (grain_moved, len(after), LUMA_MOVE_EPS, GRAIN_MOVED_PIXELS_MIN,
+             noise_floor))
+
+    # The mechanism behind that number, asked of MAYA rather than of the
+    # tool's report: with no alpha channel in the height PNG, outAlpha is a
+    # constant 1.0 unless alphaIsLuminance is on, and a constant bumpValue
+    # shades nothing at any bumpDepth.
+    bump = height_file_node(grain)
+    check("grain_bump_reads_per_texel", bool(bump) and bump["alphaIsLuminance"],
+          ("%s.alphaIsLuminance=%r colorSpace=%r (the static .outAlpha read "
+           "is %r either way - getAttr samples no texel, which is why the "
+           "render check above, not this one, is the evidence)"
+           % (bump["node"], bump["alphaIsLuminance"], bump["colorSpace"],
+              bump["outAlpha"])) if bump else
+          "the grain height file node could not be located in the scene")
+
     # --- 4. it ships ------------------------------------------------------
     export = must(call("export_fbx",
                        {"path": AFTER_FBX.replace("\\", "/"),
@@ -495,7 +508,7 @@ def main() -> int:
         fbx_bytes = fh.read()
     wanted = [applied[k]["color_basename"] for k in
               ("ground", "limb", "collar")]
-    wanted.append(applied["limb"]["height_basename"])
+    wanted.append(grain["height_basename"])
     for basename in wanted:
         check("map_in_fbx_bytes:%s" % basename,
               bool(basename) and basename.encode() in fbx_bytes,
@@ -514,10 +527,9 @@ def main() -> int:
     for warning in bake.get("warnings") or []:
         print("WARNING from bake_mesh_maps: %s" % warning, flush=True)
 
-    print("\n%s - %d checks, %d failed, %d finding(s) reported but not "
-          "gated. Renders: %s / %s"
+    print("\n%s - %d checks, %d failed. Renders: %s / %s / %s"
           % ("GATE FAILED" if failures else "GATE PASSED",
-             len(findings), len(failures), len(notes), BEFORE_RENDER,
+             len(findings), len(failures), BEFORE_RENDER, MID_RENDER,
              AFTER_RENDER), flush=True)
     return 1 if failures else 0
 

@@ -55,7 +55,15 @@ EFFECT_KEYS = ("kind", "strength", "scale", "color")
 EFFECT_SYNONYMS = {"type": "kind", "intensity": "strength",
                    "amount": "strength", "size": "scale", "colour": "color"}
 
-DEFAULT_STRENGTH = {"wear": 0.5, "grime": 0.5, "grain": 0.3}
+# Measured, not taste (#775 task 6 look probe). The original 0.5/0.5/0.3
+# were sub-visible: on the gate's geometry the whole limb colour composite
+# spanned six 8-bit levels and the render moved 1573 pixels against a
+# 1173-pixel render-to-render noise floor - nothing an eye could find. A
+# blind consumer asking for "wear" with no strength must get detail that
+# reads, so the defaults are the smallest values the look probe found
+# legible; they are ordinary art-direction settings well inside
+# STRENGTH_MAX and a caller who wants subtlety can still ask for it.
+DEFAULT_STRENGTH = {"wear": 2.0, "grime": 1.5, "grain": 2.0}
 DEFAULT_SCALE = 1.0
 DEFAULT_SEED = 0
 STRENGTH_MAX = 4.0
@@ -486,6 +494,19 @@ def apply_surface_detail(params: Dict[str, Any]) -> Dict[str, Any]:
             # Data, not colour - same reasoning as pbr.py's normal/mask maps.
             cmds.setAttr(fnode + ".colorSpace", "Raw", type="string")
             cmds.setAttr(fnode + ".ignoreColorSpaceFileRules", True)
+            # WITHOUT THIS THE WHOLE BUMP NETWORK IS INERT (#775 task 6,
+            # measured live). pngwrite emits RGB with no alpha channel, and
+            # a Maya `file` node then returns a CONSTANT outAlpha of 1.0 -
+            # so bump2d, which reads the height from outAlpha (below), sees
+            # one flat value at every texel and perturbs no normal at any
+            # bumpDepth. Measured on the live gate's limb at 1024: bumpDepth
+            # 2.0 and 4.0 rendered identically (1972 / 1977 pixels moved
+            # against a 2011-pixel noise floor); flipping ONLY this flag on
+            # the same node took it to 85734 pixels moved and the limb
+            # rendered as unmistakable relief. alphaIsLuminance makes the
+            # file synthesise outAlpha from the image's luminance, which is
+            # exactly what a grayscale height map carries.
+            cmds.setAttr(fnode + ".alphaIsLuminance", True)
 
             place = cmds.shadingNode(
                 "place2dTexture", asUtility=True,

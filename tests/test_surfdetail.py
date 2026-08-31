@@ -251,15 +251,22 @@ class TestValidation:
             surfdetail.validate(params, fake)
 
     def test_defaults_strength_and_scale(self, fake, tmp_path):
+        # 2.0, not the original 0.5: #775 task 6's look probe measured the
+        # old defaults as sub-visible in a render (six 8-bit levels across
+        # the whole composite), and a caller who cannot see must get detail
+        # that reads from the default.
         out = surfdetail.validate(_params(tmp_path, effects=[{"kind": "wear"}]),
                                   fake)
-        assert out["effects"][0]["strength"] == 0.5
+        assert out["effects"][0]["strength"] == 2.0
         assert out["effects"][0]["scale"] == 1.0
 
-    def test_grain_default_strength_is_lower(self, fake, tmp_path):
-        out = surfdetail.validate(
+    def test_grime_and_grain_defaults(self, fake, tmp_path):
+        grime = surfdetail.validate(
+            _params(tmp_path, effects=[{"kind": "grime"}]), fake)
+        assert grime["effects"][0]["strength"] == 1.5
+        grain = surfdetail.validate(
             _params(tmp_path, effects=[{"kind": "grain"}]), fake)
-        assert out["effects"][0]["strength"] == 0.3
+        assert grain["effects"][0]["strength"] == 2.0
 
     def test_default_seed_is_zero(self, fake, tmp_path):
         out = surfdetail.validate(_params(tmp_path), fake)
@@ -529,6 +536,11 @@ class TestApply:
         assert len(file_nodes) == 1
         fnode = file_nodes[0]
         assert (fnode + ".outAlpha", bump + ".bumpValue") in fake.connected
+        # Without alphaIsLuminance the whole network is INERT: pngwrite
+        # emits RGB with no alpha, so the file node's outAlpha - the plug
+        # driving bumpValue on the line above - is a CONSTANT 1.0 and no
+        # bumpDepth can make it shade (#775 task 6, measured live).
+        assert fake.attr_values[fnode + ".alphaIsLuminance"] is True
         assert (bump + ".outNormal", "limb_mat.normalCamera") in fake.connected
 
     def test_changed_fraction_below_floor_warns(self, fake, tmp_path,

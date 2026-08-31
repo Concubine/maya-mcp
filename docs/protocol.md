@@ -1017,12 +1017,16 @@ composite like wear/grime.
 
 | field | default | range |
 |---|---|---|
-| `strength` | 0.5 (`grain`: 0.3) | `(0, 4]` |
+| `strength` | 2.0 (`grime`: 1.5) | `(0, 4]` |
 | `scale` | 1.0 | `(0, 16]` |
 | `color` (wear/grime only) | built-in wear/grime colour | 3-list of LINEAR floats in `[0, 1]` |
 
 Colour is always LINEAR — the same convention `assign_material` uses,
 never re-derived as sRGB.
+
+The default strengths are the smallest values a live look probe (#775)
+measured as legible in a render — a caller who cannot see the result must
+get detail that reads. Pass a smaller `strength` for subtlety.
 
 Refusals, all before any file is written or scene node created:
 - an unknown top-level or effect-dict key (`maps_dir`/`effects` and

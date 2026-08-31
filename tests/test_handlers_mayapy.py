@@ -6207,7 +6207,14 @@ class TestApplySurfaceDetailInMaya:
                                          plugs=True, destination=False)
         assert value_src, "bumpValue has no incoming connection"
         assert value_src[0].endswith(".outAlpha")
-        assert cmds.nodeType(value_src[0].split(".")[0]) == "file"
+        height_file_node = value_src[0].split(".")[0]
+        assert cmds.nodeType(height_file_node) == "file"
+        # The connection alone is not the claim. The height PNG has no
+        # alpha channel, so this file node's outAlpha is a CONSTANT 1.0
+        # unless alphaIsLuminance is on - a wired-but-inert bump that no
+        # bumpDepth can make shade (#775 task 6, measured live: bumpDepth
+        # 2.0 vs 4.0 rendered identically until this flag was set).
+        assert cmds.getAttr(height_file_node + ".alphaIsLuminance")
 
         normal_src = cmds.listConnections("grain_mat.normalCamera",
                                           source=True, destination=False)
