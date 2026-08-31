@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Two-Maya policy: 9877 is the USER's session — never `new_scene` it. Gates run on a disposable Maya launched on 9878 via `Start-Process 'E:\Autodesk\Maya2027\bin\maya.exe' -WindowStyle Minimized -WorkingDirectory 'D:\devel\maya-mcp' -PassThru`, pid-verified with `netstat -ano | findstr 987`, killed with `taskkill /F /T /PID <pid>`.
+- Two-Maya policy: 9877 is the USER's session — never `new_scene` it. Gates run on a disposable Maya launched on 9878 via `$env:MAYA_MCP_PORT='9878'; Start-Process 'E:\Autodesk\Maya2027\bin\maya.exe' -WindowStyle Minimized -WorkingDirectory 'D:\devel\maya-mcp' -PassThru` — the env var MUST be set before Start-Process in the same invocation, or the plugin defaults to 9877, finds it taken, and binds NOTHING (measured, Task 1: first launch sat listener-less with a PortInUseError only in its own log). Pid-verified with `netstat -ano | findstr 9878`, killed with `taskkill /F /T /PID <pid>`, port release verified.
 - Suites measured with `--junitxml` (stdout buffering loses the summary line). Baselines: headless 1838 pass, mayapy 211 pass.
 - Never touch `evals/golem_rerun_665/out_v4/` (another agent's in-flight work).
 - Every refusal is a `HandlerError` with a `hint`; unknown params refused via `dispatcher.require_known_keys` with a synonym map (#764).
