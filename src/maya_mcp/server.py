@@ -1129,7 +1129,7 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         effects: Annotated[List[dict], Field(min_length=1, description=(
             'One entry per kind (a kind may not repeat), each '
             '{kind, strength?, scale?, color?}: '
-            '"wear" — bright-edge grime driven by the baked CURVATURE '
+            '"wear" — bright edge-wear driven by the baked CURVATURE '
             'mask (edges wear first); '
             '"grime" — recess/pocket buildup driven by the baked AO mask '
             'INVERTED (occluded = dirty); '
@@ -1178,9 +1178,12 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         `<material>_color_detail.png` next to the material's existing
         colour map and rewire the slot to it; grain writes a new
         `<short>_height.png` and wires file -> bump2d(bumpInterp=0) ->
-        normalCamera. Every mutation happens under one checkpoint; a
-        failure mid-apply deletes whatever nodes this call created and
-        names the checkpoint to restore."""
+        normalCamera. Re-applying to the same material replaces this
+        tool's own previous `<material>_color_detail.png` composite in
+        place (a warning is returned), not the original input, so detail
+        compounds if the same kind is re-applied. Every mutation happens
+        under one checkpoint; a failure mid-apply deletes whatever nodes
+        this call created and names the checkpoint to restore."""
         return ApplySurfaceDetailResult.model_validate(
             maya.request(
                 "apply_surface_detail",

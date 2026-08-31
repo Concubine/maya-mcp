@@ -63,7 +63,21 @@ wear first, grime over it (grime settles on top of worn paint; the order
 is the tool's, not the caller's list order, so results are
 order-independent for the caller). Colour compositing runs through #770's
 machinery: sRGB-decode → linear blend → re-encode, written to a NEW file `<mat>_color_detail.png` via the
-`.part.png` → `os.replace` commit; the input file is never overwritten.
+`.part.png` → `os.replace` commit; the ORIGINAL input file is never
+overwritten.
+
+**Amended 2026-08-31 (fix wave, F2):** "never overwritten" is true only of
+the original input. A re-apply to the same material resolves ITS OWN
+previous `<mat>_color_detail.png` as the new base (the rewire from the
+first apply made that the colour slot's current file) and writes the new
+composite to that same path — so a second apply DOES replace the first
+apply's output, and detail compounds rather than starting fresh from the
+original bake each time. The tool now warns when this happens (the
+resolved base's path equals the output path about to be written); a hard
+refusal was considered and deferred to a follow-up rather than folded in
+here, per repo discipline (#769) of amending the spec when measurement
+corrects it instead of silently diverging code from doc.
+
 Rewire uses meshmaps' `_rewire_color` shape; the whole apply is one
 checkpoint (`session.auto_checkpoint`), failed builds sweep exactly their
 own nodes, and `texclaim.material_claims` is the postcondition.

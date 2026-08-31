@@ -1049,13 +1049,26 @@ Refusals, all before any file is written or scene node created:
   explicit `resolution`
 - `grain` requested when the shader already carries a bump/normal network
   on `normalCamera` — this tool will not stack onto an existing one
+- `grain` requested with a `color` key — grain writes a HEIGHT map, there
+  is no colour to tint; `color` belongs on `wear`/`grime`
+- colour effects (`wear`/`grime`) also inherit #770's base-colour refusals
+  via `meshmaps.plan_apply`, unchanged here: a procedural colour base
+  (hints `maya_bake_textures`), more than one shading group on the mesh, a
+  material also worn by a mesh outside the request, a colour slot driven
+  by more than one file terminal, or a base file that cannot be read as a
+  PNG
 
 The only mutation happens under one `checkpoint_id`; a mid-apply failure
 deletes every node this call created and names the checkpoint to restore.
-Input files are never overwritten: `wear`/`grime` composite into a new
-`<material>_color_detail.png` and rewire the colour slot to it (any
-existing colour map is left in place on disk); `grain` writes a new
-`<short>_height.png`. Each `effects[]` result entry reports the
+The ORIGINAL input colour map is never overwritten: `wear`/`grime`
+composite into a new `<material>_color_detail.png` and rewire the colour
+slot to it (any existing colour map is left in place on disk); `grain`
+writes a new `<short>_height.png`. Re-applying to the same material,
+however, replaces THIS tool's own previous `<material>_color_detail.png`
+composite in place rather than starting again from the original base — a
+warning is returned (`"<name> is already <material>'s colour base..."`),
+and detail compounds if the same effect kind is re-applied on top of its
+own prior result. Each `effects[]` result entry reports the
 `changed_fraction` of texels the effect actually touched — near-zero
 still ships, but with a warning, since a caller asking for detail that
 produced almost nothing should know rather than ship a file that quietly

@@ -121,6 +121,12 @@ def _validate_color(kind: str, i: int, raw: Any) -> Optional[List[float]]:
         if kind == "grime":
             return list(surfdetail_math.DEFAULT_GRIME_COLOR)
         return None  # grain has no colour slot
+    if kind == "grain":
+        raise HandlerError(
+            "effects[%d].color is not valid for kind='grain'" % i,
+            hint="grain writes a HEIGHT map, not a colour composite - "
+                 "there is no colour to tint; color belongs on the "
+                 "wear/grime effects instead")
     ok = (isinstance(raw, (list, tuple)) and len(raw) == 3
           and all(isinstance(c, (int, float)) and not isinstance(c, bool)
                  for c in raw)
@@ -158,8 +164,9 @@ def _validate_effect(i: int, raw: Any, seen_kinds: set) -> Dict[str, Any]:
         raise HandlerError(
             "effects[%d].strength must be a number in (0, %g]"
             % (i, STRENGTH_MAX),
-            hint="got %r; default is %g (grain: %g)"
-                 % (strength, DEFAULT_STRENGTH["wear"], DEFAULT_STRENGTH["grain"]))
+            hint="got %r; default is wear %g, grime %g, grain %g"
+                 % (strength, DEFAULT_STRENGTH["wear"], DEFAULT_STRENGTH["grime"],
+                    DEFAULT_STRENGTH["grain"]))
 
     scale = raw.get("scale", DEFAULT_SCALE)
     if (isinstance(scale, bool) or not isinstance(scale, (int, float))
@@ -457,6 +464,21 @@ def apply_surface_detail(params: Dict[str, Any]) -> Dict[str, Any]:
         if color_pixels is not None:
             color_basename = "%s_color_detail.png" % color_job["material"]
             color_file = os.path.join(settings["out_dir"], color_basename)
+            # F2 (#775 fix wave): re-applying to the same material resolves
+            # its own previous composite as the base (meshmaps.plan_apply
+            # reads whatever the colour slot is now wired to) and is about
+            # to write over that exact path. The ORIGINAL input is never
+            # touched, but THIS file is - and a same-kind re-apply on top
+            # of it compounds rather than starting fresh, so say so.
+            prior_path = (color_job["base"].get("path") or "").replace(
+                "\\", "/")
+            if prior_path == color_file.replace("\\", "/"):
+                warnings.append(
+                    "%s is already %s's colour base and is about to be "
+                    "replaced by this composite - the previous composite "
+                    "is being overwritten, and detail will compound if "
+                    "the same effect kind is re-applied here again"
+                    % (color_basename, color_job["material"]))
             part = os.path.join(settings["out_dir"],
                                 color_basename + ".part.png")
             pngwrite.write_png(part, resolution, resolution, color_pixels)

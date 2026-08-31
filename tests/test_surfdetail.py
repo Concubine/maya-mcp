@@ -308,6 +308,20 @@ class TestValidation:
             {"kind": "wear", "color": [0.2, 0.2, 0.2]}]), fake)
         assert out["effects"][0]["color"] == [0.2, 0.2, 0.2]
 
+    # F1 (#775 fix wave): grain writes a HEIGHT map - a `color` on it was
+    # silently accepted and dropped by _validate_color before this fix.
+    def test_grain_with_color_refuses(self, fake, tmp_path):
+        params = _params(tmp_path, effects=[
+            {"kind": "grain", "color": [0.1, 0.1, 0.1]}])
+        with pytest.raises(HandlerError, match="grain") as exc:
+            surfdetail.validate(params, fake)
+        # names the actual problem (no colour to tint) and redirects the
+        # caller, rather than a bare "invalid" - this assertion fails if
+        # the refusal is ever swapped back for silent acceptance.
+        assert "HEIGHT map" in (exc.value.hint or "")
+        assert "wear" in (exc.value.hint or "")
+        assert "grime" in (exc.value.hint or "")
+
     # 5: maps_dir / out_dir
     def test_maps_dir_required(self, fake, tmp_path):
         params = _params(tmp_path)
@@ -518,6 +532,23 @@ class TestApply:
         assert "kit_file" in fake.deleted
         assert os.path.isfile(str(base))  # the input atlas is never touched
 
+    # F2 (#775 fix wave): a second apply to the same material resolves its
+    # own previous composite as the new base (the first apply's rewire made
+    # that the colour slot's current file) and is about to write over that
+    # same path - warn rather than silently compound.
+    def test_reapply_to_same_material_warns_and_still_succeeds(self, fake,
+                                                                tmp_path):
+        _masks(tmp_path)
+        first = surfdetail.apply_surface_detail(_params(tmp_path))
+        assert not any("colour base" in w for w in first["warnings"])
+
+        second = surfdetail.apply_surface_detail(_params(tmp_path))
+        assert second["color_file"] == first["color_file"]
+        assert any("colour base" in w for w in second["warnings"])
+        assert any("limb_mat_color_detail.png" in w
+                   for w in second["warnings"])
+        assert os.path.isfile(second["color_file"])
+
     def test_grain_happy_path_wires_bump_network(self, fake, tmp_path):
         _masks(tmp_path)
         out = surfdetail.apply_surface_detail(
@@ -591,9 +622,6 @@ class TestApply:
                                                 monkeypatch):
         _masks(tmp_path)
 
-        def _boom(cmds, tracker_target, name=None, **kw):
-            raise RuntimeError("kaboom")
-
         # Fail on the bump2d creation, after the file+place2d already exist.
         real_shading_node = fake.shadingNode
 
@@ -609,5 +637,5 @@ class TestApply:
         # the file + place2d created before the failure are gone again
         remaining = [n for n in fake.created if n not in fake.deleted]
         assert not any(fake.types.get(n) in ("file", "place2dTexture")
-                       for n in remaining if n in fake.deleted or True)
+                       for n in remaining)
         assert all(n in fake.deleted for n in fake.created)
