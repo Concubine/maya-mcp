@@ -1040,11 +1040,16 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
     )
     def maya_bake_mesh_maps(
         meshes: Annotated[List[str], Field(description=(
-            "Meshes to bake maps for. Each needs UVs (maya_uv_atlas) - a "
-            "UV-less mesh writes a corrupt bake Maya does not refuse "
-            "(measured), so this tool refuses it upfront. Other scene "
-            "meshes still occlude: bake the whole assembly's parts in one "
-            "scene so contact shadows land where parts actually meet."
+            "Meshes to bake maps for. Each needs UVs whose shells do NOT "
+            "overlap: overlapping shells (e.g. box projection on a torus "
+            "or a capped cylinder) rasterize conflicting surfaces into "
+            "the same texels - measured to turn a whole AO map uniform "
+            "black. Native primitive UVs are non-overlapping; so is "
+            "maya_uv_atlas on box-friendly shapes. A UV-less mesh writes "
+            "a corrupt bake Maya does not refuse (measured), so it "
+            "refuses upfront. Other scene meshes still occlude: bake the "
+            "whole assembly's parts in one scene so contact shadows land "
+            "where parts actually meet."
         ))],
         out_dir: Annotated[str, Field(description=(
             "Absolute directory the map PNGs are written to. It must "

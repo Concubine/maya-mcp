@@ -968,7 +968,13 @@ Arnold names its own outputs and renames them on short-name collisions, a
 rule this tool refuses to model, which is also why two requested meshes
 sharing a short name refuse upfront. A UV-less mesh refuses upfront too:
 Maya does not — it returns success and writes a corrupt EXR that only
-fails at read (measured).
+fails at read (measured). UV shells must not OVERLAP: overlapping shells
+(box projection on a torus, or on a capped cylinder) rasterize
+conflicting surfaces into the same texels, and a buried or down-facing
+surface — honestly black — can win every texel it shares (measured: a
+collar's whole AO baked uniform black through box-projected UVs and
+correctly through its native ones). The tool cannot see the layout, so
+this surfaces as a flat-map warning, not a refusal.
 
 Every map is converted EXR→PNG (a **linear** conversion, measured: AO 0.5
 lands on 127/128) and verified: missing/unreadable/drew-nothing refuse;
