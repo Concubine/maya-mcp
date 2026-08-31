@@ -28,6 +28,7 @@ from maya_plugin import logsetup
 from . import images, refstore
 from .connection import MayaConnection
 from .schemas import (
+    ApplySurfaceDetailResult,
     ArrayResult,
     AssembleResult,
     AuthorClipResult,
@@ -1103,6 +1104,86 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                  "resolution": resolution, "apply_ao": apply_ao,
                  "curvature_radius": curvature_radius,
                  "curvature_output": curvature_output},
+                timeout_s=EXPORT_TIMEOUT_S,
+            )
+        )
+
+    @mcp.tool(
+        title="Apply directed wear/grime/grain",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False
+        ),
+    )
+    def maya_apply_surface_detail(
+        mesh: Annotated[str, Field(description=(
+            "The single mesh to add directed detail to (canonical long "
+            "name)."
+        ))],
+        maps_dir: Annotated[str, Field(description=(
+            "Absolute directory holding this mesh's baked masks from "
+            "maya_bake_mesh_maps, named `<short>_curvature.png` / "
+            "`<short>_ao.png` where <short> is the mesh's short name. "
+            "wear needs curvature; grime and grain need ao; grain needs "
+            "both."
+        ))],
+        effects: Annotated[List[dict], Field(min_length=1, description=(
+            'One entry per kind (a kind may not repeat), each '
+            '{kind, strength?, scale?, color?}: '
+            '"wear" — bright-edge grime driven by the baked CURVATURE '
+            'mask (edges wear first); '
+            '"grime" — recess/pocket buildup driven by the baked AO mask '
+            'INVERTED (occluded = dirty); '
+            '"grain" — a height map blended from BOTH curvature and '
+            'inverted AO, wired as a bump2d network (not a colour '
+            'effect). '
+            'strength is a number in (0, 4], default 0.5 (grain: 0.3); '
+            'scale is a pattern-frequency multiplier in (0, 16], default '
+            '1.0. color (wear/grime only) is a 3-list of LINEAR floats '
+            'in [0, 1] - the same convention maya_assign_material uses, '
+            'never sRGB; omit for the built-in wear/grime default.'
+        ))],
+        out_dir: Annotated[Optional[str], Field(description=(
+            "Absolute directory new files are written to. Defaults to "
+            "maps_dir. Must already exist."
+        ))] = None,
+        resolution: Annotated[Optional[int], Field(description=(
+            "Square output size: 256, 512, 1024, 2048 or 4096. Defaults "
+            "to the loaded masks' resolution (all masks used must agree "
+            "in size, or pass this explicitly)."
+        ))] = None,
+        seed: Annotated[int, Field(description=(
+            "Pattern seed for the procedural wear/grime/grain noise - "
+            "same seed, same pattern."
+        ))] = 0,
+    ) -> ApplySurfaceDetailResult:
+        """Composite directed wear, grime, and grain onto a mesh's textures.
+
+        Unlike hand-painted detail, the direction comes from the mesh's own
+        geometry, baked by maya_bake_mesh_maps: wear rides the curvature
+        mask (raised edges wear first), grime rides the AO mask INVERTED
+        (occluded pockets and seams collect grime), and grain blends BOTH
+        masks into a height map wired through a new bump2d network onto the
+        shader's normalCamera - it is not a colour effect like wear/grime.
+
+        A FLAT mask REFUSES here (unlike maya_bake_mesh_maps, where flat
+        only warns): a mask with no variation has no direction to give an
+        effect, so shipping one would silently do nothing. grain also
+        refuses outright when the shader already carries a bump/normal
+        network - this tool will not stack onto an existing one; bake it
+        into the colour/normal map first (maya_bake_textures) or remove it.
+
+        Input files are never overwritten. wear/grime composite into a new
+        `<material>_color_detail.png` next to the material's existing
+        colour map and rewire the slot to it; grain writes a new
+        `<short>_height.png` and wires file -> bump2d(bumpInterp=0) ->
+        normalCamera. Every mutation happens under one checkpoint; a
+        failure mid-apply deletes whatever nodes this call created and
+        names the checkpoint to restore."""
+        return ApplySurfaceDetailResult.model_validate(
+            maya.request(
+                "apply_surface_detail",
+                {"mesh": mesh, "maps_dir": maps_dir, "effects": effects,
+                 "out_dir": out_dir, "resolution": resolution, "seed": seed},
                 timeout_s=EXPORT_TIMEOUT_S,
             )
         )

@@ -113,6 +113,7 @@ class TestRegistration:
             "maya_create_curve_form",
             "maya_retarget_clip",
             "maya_clean_clip",
+            "maya_apply_surface_detail",
         }
 
     def test_annotations_declare_read_only_vs_destructive(self):
@@ -2709,3 +2710,88 @@ class TestBakeMeshMaps:
         bake = by_name["maya_bake_mesh_maps"].annotations
         assert (bake.read_only_hint, bake.destructive_hint,
                 bake.idempotent_hint) == (False, True, False)
+
+
+def _surfdetail_result_stub():
+    return {"mesh": "|limb", "effects": [
+                {"kind": "wear", "strength": 0.5, "scale": 1.0,
+                 "changed_fraction": 0.12}],
+            "color_file": "C:/out/limb_mat_color_detail.png",
+            "color_basename": "limb_mat_color_detail.png",
+            "height_file": None, "height_basename": None,
+            "file_nodes": ["limb_mat_color_detail1"],
+            "checkpoint_id": "cp_9", "warnings": []}
+
+
+def _surfdetail_result_with(**overrides):
+    """Push a handler response through the real maya_apply_surface_detail
+    tool and back into ApplySurfaceDetailResult - proving a field the wire
+    carries survives the extra='ignore' boundary (#757's discipline)."""
+    conn = FakeConn(responses={
+        "apply_surface_detail": dict(_surfdetail_result_stub(), **overrides)})
+    mcp = server_mod.create_server(conn)
+    result = run(mcp.call_tool("maya_apply_surface_detail", {
+        "mesh": "|limb", "maps_dir": "C:/maps",
+        "effects": [{"kind": "wear"}]}))
+    return schemas.ApplySurfaceDetailResult(**result.structured_content)
+
+
+class TestApplySurfaceDetail:
+    def test_effects_survive_the_wire(self):
+        result = _surfdetail_result_with(effects=[
+            {"kind": "wear", "strength": 0.5, "scale": 1.0,
+             "changed_fraction": 0.12},
+            {"kind": "grain", "strength": 0.3, "scale": 2.0,
+             "changed_fraction": 0.004}])
+        assert [e.kind for e in result.effects] == ["wear", "grain"]
+        assert result.effects[1].changed_fraction == 0.004
+
+    def test_height_and_color_files_survive_the_wire(self):
+        result = _surfdetail_result_with(
+            color_file="C:/out/mat_color_detail.png",
+            color_basename="mat_color_detail.png",
+            height_file="C:/out/limb_height.png",
+            height_basename="limb_height.png",
+            file_nodes=["mat_color_detail1", "limb_height_tex",
+                        "limb_height_p2d", "limb_height_bump"],
+            checkpoint_id="cp_10")
+        assert result.color_file == "C:/out/mat_color_detail.png"
+        assert result.height_basename == "limb_height.png"
+        assert result.file_nodes == ["mat_color_detail1", "limb_height_tex",
+                                     "limb_height_p2d", "limb_height_bump"]
+        assert result.checkpoint_id == "cp_10"
+
+    def test_params_reach_the_wire(self):
+        conn = FakeConn(responses={
+            "apply_surface_detail": _surfdetail_result_stub()})
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_apply_surface_detail", {
+            "mesh": "|limb", "maps_dir": "C:/maps",
+            "effects": [{"kind": "wear", "strength": 0.8},
+                       {"kind": "grain", "scale": 2.0}],
+            "out_dir": "C:/out", "resolution": 2048, "seed": 7}))
+        assert conn.calls[0]["params"] == {
+            "mesh": "|limb", "maps_dir": "C:/maps",
+            "effects": [{"kind": "wear", "strength": 0.8},
+                       {"kind": "grain", "scale": 2.0}],
+            "out_dir": "C:/out", "resolution": 2048, "seed": 7}
+
+    def test_params_default_out_dir_resolution_seed(self):
+        conn = FakeConn(responses={
+            "apply_surface_detail": _surfdetail_result_stub()})
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_apply_surface_detail", {
+            "mesh": "|limb", "maps_dir": "C:/maps",
+            "effects": [{"kind": "wear"}]}))
+        assert conn.calls[0]["params"] == {
+            "mesh": "|limb", "maps_dir": "C:/maps",
+            "effects": [{"kind": "wear"}],
+            "out_dir": None, "resolution": None, "seed": 0}
+        assert conn.calls[0]["timeout_s"] == server_mod.EXPORT_TIMEOUT_S
+
+    def test_annotations(self):
+        mcp = server_mod.create_server(FakeConn())
+        by_name = {t.name: t for t in run(mcp.list_tools())}
+        detail = by_name["maya_apply_surface_detail"].annotations
+        assert (detail.read_only_hint, detail.destructive_hint,
+                detail.idempotent_hint) == (False, True, False)

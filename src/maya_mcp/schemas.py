@@ -1325,6 +1325,46 @@ class BakeMeshMapsResult(BaseModel):
     warnings: List[str] = Field(default_factory=list)
 
 
+class AppliedEffect(BaseModel):
+    """One wear/grime/grain effect as it actually landed (#775)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    kind: str
+    strength: float
+    scale: float
+    changed_fraction: float = Field(description=(
+        "Fraction of texels this effect actually touched. Below the "
+        "tool's floor it still ships, but a warning names it - a caller "
+        "asking for wear/grime/grain that produced almost nothing should "
+        "know rather than ship a file that quietly does nothing."))
+
+
+class ApplySurfaceDetailResult(BaseModel):
+    """What maya_apply_surface_detail composited, wrote, and wired (#775)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    mesh: str
+    effects: List[AppliedEffect]
+    color_file: Optional[str] = Field(default=None, description=(
+        "The new colour-detail PNG, when wear/grime were requested. The "
+        "input colour map is never overwritten."))
+    color_basename: Optional[str] = None
+    height_file: Optional[str] = Field(default=None, description=(
+        "The new height PNG driving a bump2d network, when grain was "
+        "requested."))
+    height_basename: Optional[str] = None
+    file_nodes: List[str] = Field(default_factory=list, description=(
+        "Every node this call created (file/place2dTexture/bump2d); on "
+        "failure these are exactly what gets deleted before the error is "
+        "raised."))
+    checkpoint_id: Optional[str] = Field(default=None, description=(
+        "Taken before the one mutation this tool makes; restore this to "
+        "recover the pre-apply scene."))
+    warnings: List[str] = Field(default_factory=list)
+
+
 class SkeletonJoint(BaseModel):
     model_config = ConfigDict(extra="ignore")
 

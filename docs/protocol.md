@@ -994,3 +994,65 @@ composites the union of their AO bakes, masked by each bake's alpha —
 those bakes run **unpadded**, because `extend_edges` floods alpha to 1.0
 over the whole image (measured); texels claimed twice are reported as
 `overlap_fraction` and warned above 1%.
+
+## Commands (surface detail / #775)
+
+| cmd | params | result |
+|---|---|---|
+| `apply_surface_detail` | `{ mesh, maps_dir, effects, out_dir?, resolution?, seed? }` | `{ mesh, effects: [{kind, strength, scale, changed_fraction}], color_file, color_basename, height_file, height_basename, file_nodes, checkpoint_id, warnings }` |
+
+`apply_surface_detail` composites directed wear, grime, and grain onto one
+mesh's textures, consuming the masks `bake_mesh_maps` bakes from geometry
+(`<short>_curvature.png` / `<short>_ao.png` in `maps_dir`, where `<short>`
+is the mesh's short name). Direction always comes from a baked mask,
+never guesswork: `wear` rides the CURVATURE mask (raised edges wear
+first), `grime` rides the AO mask INVERTED (occluded pockets/seams
+collect grime), and `grain` blends BOTH masks (curvature un-inverted plus
+inverted AO) into a height field wired as a `file -> bump2d(bumpInterp=0)
+-> normalCamera` network — grain is a bump network, not a colour
+composite like wear/grime.
+
+`effects` is a non-empty list, at most one entry per `kind` (`wear`,
+`grime`, `grain`), each `{kind, strength?, scale?, color?}`:
+
+| field | default | range |
+|---|---|---|
+| `strength` | 0.5 (`grain`: 0.3) | `(0, 4]` |
+| `scale` | 1.0 | `(0, 16]` |
+| `color` (wear/grime only) | built-in wear/grime colour | 3-list of LINEAR floats in `[0, 1]` |
+
+Colour is always LINEAR — the same convention `assign_material` uses,
+never re-derived as sRGB.
+
+Refusals, all before any file is written or scene node created:
+- an unknown top-level or effect-dict key (`maps_dir`/`effects` and
+  `kind`/`strength`/`scale`/`color` have a synonym map, same #764
+  discipline as `bake_mesh_maps`)
+- missing/empty `mesh`, or a `mesh` that does not resolve in the scene
+- missing/empty `effects`, a non-object entry, or an unknown `kind`
+- the same `kind` repeated across two entries
+- `strength` outside `(0, 4]`, `scale` outside `(0, 16]`
+- `color` not a 3-list of numbers in `[0, 1]`
+- `maps_dir` (required) or `out_dir` (optional) not an absolute, existing
+  directory
+- `resolution`, when given, not one of the standard bake sizes
+- `seed` not an integer
+- a needed mask file (`<short>_curvature.png` / `<short>_ao.png`)
+  missing, unreadable, **or FLAT** — unlike `bake_mesh_maps`, a flat mask
+  REFUSES here instead of warning, because a flat mask has no directional
+  signal to drive an effect from
+- `grain` requested with curvature/AO masks of disagreeing size and no
+  explicit `resolution`
+- `grain` requested when the shader already carries a bump/normal network
+  on `normalCamera` — this tool will not stack onto an existing one
+
+The only mutation happens under one `checkpoint_id`; a mid-apply failure
+deletes every node this call created and names the checkpoint to restore.
+Input files are never overwritten: `wear`/`grime` composite into a new
+`<material>_color_detail.png` and rewire the colour slot to it (any
+existing colour map is left in place on disk); `grain` writes a new
+`<short>_height.png`. Each `effects[]` result entry reports the
+`changed_fraction` of texels the effect actually touched — near-zero
+still ships, but with a warning, since a caller asking for detail that
+produced almost nothing should know rather than ship a file that quietly
+does nothing.
