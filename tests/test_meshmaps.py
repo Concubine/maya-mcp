@@ -172,7 +172,9 @@ class FakeCmds:
             arg = args[0]
             self.selection = list(arg) if isinstance(arg, list) else [arg]
 
-    def pluginInfo(self, name, query=False, loaded=False):
+    def pluginInfo(self, name, query=False, loaded=False, path=False):
+        if path:
+            return getattr(self, "plugin_path", "")
         return name in self.plugins_loaded
 
     def loadPlugin(self, name, quiet=False):
@@ -194,7 +196,7 @@ def _fake_bake(fake, exr_name="bakeShape.exr"):
 def _fake_convert(rows=None, colour_type=6):
     """Stand in for the MImage EXR->PNG conversion: write a REAL png so the
     stats machinery runs for real."""
-    def _convert(src, dst):
+    def _convert(cmds, src, dst):
         _png(dst, rows or _rich_rgba_rows(), colour_type=colour_type)
     return _convert
 
@@ -394,7 +396,7 @@ class TestBake:
                                                    monkeypatch):
         # MEASURED (Q5): this is where a UV-less-style corrupt EXR actually
         # surfaces - the conversion, not the bake.
-        def _boom(src, dst):
+        def _boom(cmds, src, dst):
             raise RuntimeError("(kFailure): Unexpected Internal Failure")
         monkeypatch.setattr(meshmaps, "_exr_to_png", _boom)
         with pytest.raises(HandlerError, match="could not be read"):
@@ -405,6 +407,66 @@ class TestBake:
         fake.selection = ["|somethingElse"]
         meshmaps.bake_mesh_maps(_params(tmp_path, maps=["ao"]))
         assert fake.selection == ["|somethingElse"]
+
+
+class TestConversionTooling:
+    """MEASURED (live gate, first run): MImage.writeToFile('png') zeroes
+    the ALPHA CHANNEL in a GUI Maya session while the same call on the
+    same EXR is correct under maya.standalone - every headless test was
+    green while the live bake read as 'drew nothing'. The conversion
+    therefore runs through Arnold's own oiiotool, a subprocess that
+    behaves identically everywhere (byte-identical output measured)."""
+
+    def test_oiiotool_is_found_next_to_the_mtoa_plugin(self, fake, tmp_path):
+        plugin_dir = tmp_path / "Arnold" / "plug-ins"
+        bin_dir = tmp_path / "Arnold" / "bin"
+        plugin_dir.mkdir(parents=True)
+        bin_dir.mkdir(parents=True)
+        exe = bin_dir / ("oiiotool.exe" if os.name == "nt" else "oiiotool")
+        exe.write_bytes(b"")
+        fake.plugin_path = str(plugin_dir / "mtoa.mll")
+        assert meshmaps._find_oiiotool(fake) == str(exe)
+
+    def test_a_missing_oiiotool_refuses_rather_than_falling_back(
+            self, fake, tmp_path):
+        # The MImage path is measured BROKEN in GUI sessions - silently
+        # falling back to it would resurrect the exact defect the live
+        # gate caught.
+        fake.plugin_path = str(tmp_path / "nowhere" / "mtoa.mll")
+        with pytest.raises(HandlerError, match="oiiotool"):
+            meshmaps._find_oiiotool(fake)
+
+
+class TestEvidenceKeeping:
+    def test_a_blank_bake_keeps_its_part_file_for_inspection(
+            self, fake, tmp_path, monkeypatch):
+        # The refusal hint names the part file as left on disk - so it
+        # must actually BE left (live gate, first run: the hint promised
+        # a file the sweep had already deleted).
+        monkeypatch.setattr(
+            meshmaps, "_exr_to_png",
+            _fake_convert(rows=[[(9, 9, 9, 0)] * 4] * 4))
+        with pytest.raises(HandlerError, match="drew nothing"):
+            meshmaps.bake_mesh_maps(_params(tmp_path, maps=["ao"]))
+        assert list(tmp_path.glob("*.part.png"))  # evidence kept
+
+    def test_earlier_good_parts_are_still_swept_on_a_later_refusal(
+            self, fake, tmp_path, monkeypatch):
+        calls = {"n": 0}
+        good = _fake_convert()
+
+        def _convert(cmds_arg, src, dst):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                _png(dst, [[(9, 9, 9, 0)] * 4] * 4, colour_type=6)
+            else:
+                good(cmds_arg, src, dst)
+        monkeypatch.setattr(meshmaps, "_exr_to_png", _convert)
+        with pytest.raises(HandlerError, match="drew nothing"):
+            meshmaps.bake_mesh_maps(_params(tmp_path,
+                                            maps=["ao", "curvature"]))
+        parts = [p.name for p in tmp_path.glob("*.part.png")]
+        assert parts == ["limb_curvature.png.part.png"]  # only the evidence
 
 
 class TestCompositeMath:

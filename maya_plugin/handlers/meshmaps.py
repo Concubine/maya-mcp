@@ -345,15 +345,56 @@ def _arnold_bake(cmds, shape: str, folder: str, resolution: int,
                                aa_samples=3)
 
 
-def _exr_to_png(src: str, dst: str) -> None:
-    """MImage is the measured EXR reader (linear passthrough, T1). It
-    raises kFailure on the corrupt EXR a UV-less bake writes - the caller
-    turns that into the honest refusal."""
-    import maya.OpenMaya as om1  # noqa: PLC0415 - only importable inside Maya
+def _find_oiiotool(cmds) -> str:
+    """Arnold's own oiiotool, located from the loaded mtoa plugin.
 
-    img = om1.MImage()
-    img.readFromFile(src)
-    img.writeToFile(dst, "png")
+    Why not MImage: MEASURED on the live gate's first run - in a GUI Maya
+    session, MImage.writeToFile('png') zeroes the ALPHA CHANNEL of the
+    converted EXR while the very same call on the very same file is
+    correct under maya.standalone. Every headless test was green while
+    the live bake read as "drew nothing". oiiotool is a subprocess with
+    no session to inherit, and its output was measured BYTE-IDENTICAL to
+    the correct standalone conversion (same pixel census, same linear
+    transfer). No MImage fallback on purpose: falling back would
+    resurrect the exact defect the gate caught.
+    """
+    try:
+        plugin_path = cmds.pluginInfo("mtoa", query=True, path=True) or ""
+    except Exception:  # noqa: BLE001 - reported below with the same hint
+        plugin_path = ""
+    if plugin_path:
+        root = os.path.dirname(os.path.dirname(plugin_path))
+        exe = os.path.join(root, "bin",
+                           "oiiotool.exe" if os.name == "nt" else "oiiotool")
+        if os.path.isfile(exe):
+            return exe
+    raise HandlerError(
+        "oiiotool was not found next to the mtoa plugin (looked from %r)"
+        % plugin_path,
+        hint="the EXR->PNG conversion runs through Arnold's bundled "
+             "oiiotool because Maya's MImage was measured to corrupt the "
+             "alpha channel in GUI sessions; check the MtoA install's bin "
+             "directory")
+
+
+def _exr_to_png(cmds, src: str, dst: str) -> None:
+    """Convert one baked EXR to PNG via oiiotool (see _find_oiiotool for
+    why not MImage). The conversion is a LINEAR passthrough (measured:
+    AO 0.5 lands on 127/128, and oiiotool's census matches it exactly).
+    A corrupt EXR - what a UV-less bake writes - fails here; the caller
+    turns that into the honest refusal."""
+    import subprocess  # noqa: PLC0415 - only this path spawns a process
+
+    exe = _find_oiiotool(cmds)
+    creationflags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
+    proc = subprocess.run([exe, src, "-o", dst], capture_output=True,
+                          timeout=120, creationflags=creationflags)
+    if proc.returncode != 0 or not os.path.isfile(dst):
+        tail = (proc.stderr or proc.stdout or b"").decode(
+            "utf-8", "replace").strip()[-400:]
+        raise RuntimeError(
+            "oiiotool exited %d converting %s: %s"
+            % (proc.returncode, src, tail or "(no output)"))
 
 
 def _make_bake_shader(cmds, map_name: str,
@@ -396,7 +437,7 @@ def _bake_one(cmds, shape: str, shader: str, resolution: int,
                 hint="nothing was changed; check that the mesh renders at "
                      "all (maya_render_scene) and that mtoa is healthy")
         try:
-            _exr_to_png(exrs[0], part_path)
+            _exr_to_png(cmds, exrs[0], part_path)
         except HandlerError:
             raise
         except Exception as exc:  # noqa: BLE001 - relabelled, never laundered
@@ -418,22 +459,29 @@ def _map_stats(path: str, mesh: str, map_name: str,
     always-varied procedural networks."""
     uni = pngprobe.uniformity(path)
     if uni["non_uniform"] is None:
-        raise HandlerError(
+        err = HandlerError(
             "the %s bake of %s could not be measured (%s)"
             % (map_name, mesh, uni["unavailable_reason"]),
             hint="nothing was changed; the file is at %s" % path)
+        # The hint promises the file for inspection, so the phase-A sweep
+        # must actually leave it (the texbake keep_evidence idiom - and a
+        # promise the live gate's first run caught being broken).
+        err.keep_evidence = True
+        raise err
     opa = pngprobe.opacity(path)
     if opa["blank"] is not False:
         # blank=True is the #765 class - a bake that drew NOTHING (every
         # pixel transparent); blank=None means it could not be measured.
         # Either way this map cannot be trusted, and unlike flatness there
         # is no honest geometry that produces it through real UVs.
-        raise HandlerError(
+        err = HandlerError(
             "the %s bake of %s drew nothing (%s)"
             % (map_name, mesh,
                opa["unavailable_reason"] or "every pixel is transparent"),
             hint="nothing was changed; the file is at %s - the usual cause "
                  "is a UV layout whose shells cover no texels" % path)
+        err.keep_evidence = True
+        raise err
     if not uni["non_uniform"]:
         warnings.append(
             "the %s bake of %s is flat (every pixel identical) - for ao "
@@ -616,8 +664,14 @@ def bake_mesh_maps(params: Dict[str, Any]) -> Dict[str, Any]:
                         cmds.delete(shader)
                     except Exception:  # noqa: BLE001 - already gone is fine
                         pass
-    except Exception:
+    except Exception as exc:
+        # A refusal that names its part file as evidence keeps exactly
+        # that file - always attempted[-1]: it was appended right before
+        # the call that raised (the texbake phase-A discipline).
+        keep = getattr(exc, "keep_evidence", False)
         for part in attempted:
+            if keep and part == attempted[-1]:
+                continue
             try:
                 os.unlink(part)
             except OSError:
