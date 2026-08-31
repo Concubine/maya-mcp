@@ -595,10 +595,15 @@ def composite_ao(base: Dict[str, Any], ao_layers: List[Dict[str, Any]],
 # --------------------------------------------------------------------------
 
 
-def _rewire_color(cmds, job: Dict[str, Any], final_path: str) -> str:
+def _rewire_color(cmds, job: Dict[str, Any], final_path: str,
+                  suffix: str = "color_ao") -> str:
     """file.outColor -> material.<colorAttr>, the #714-measured shape that
-    survives an FBX export. Returns the new file node."""
-    base = "%s_color_ao" % job["material"]
+    survives an FBX export. Returns the new file node.
+
+    `suffix` names the node base (`<material>_<suffix>`) - #775's
+    apply_surface_detail reuses this exact wiring for its own composite
+    with suffix="color_detail" rather than re-deriving it."""
+    base = "%s_%s" % (job["material"], suffix)
     node = cmds.shadingNode("file", asTexture=True,
                             name=naming.unique_name(cmds, base))
     cmds.setAttr(node + ".fileTextureName", final_path, type="string")
