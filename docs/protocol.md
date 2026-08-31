@@ -614,23 +614,36 @@ verifies its own wire (`weight_at_pose` re-read through the real graph at
 the trigger; an inert wire refuses and rolls back) and restores the
 joint's rotation. Refusals: unknown params; no blendShape / unknown
 target; joint missing or not a joint; all-zero rotation (that IS the
-neutral); a target already driven (by a clip's curves, another corrective,
-or any connection); animation curves on the driver joint; a pose within
-1 degree of one this tool already recorded on that interpolator (stored in
-the interpolator's `mcp_correctives` string attr).
+neutral); a target already driven (a clip's curves, a set-driven key,
+another corrective, or any other connection - each named as what it
+actually is); a driver joint this handler cannot pose (locked or
+connection-fed rotation, including animation curves); an unreadable
+`mcp_correctives` record (refused rather than silently overwritten -
+overwriting would erase every prior pose's memory). A second target at
+(nearly) the same rotation - within 1 degree of a pose this tool already
+recorded in the interpolator's `mcp_correctives` string attr - REUSES
+that pose rather than stacking a near-duplicate that would ill-condition
+the interpolation: both weights ride one pose, and the result says so in
+`warnings`. The poseInterpolator plugin is loaded on demand and its
+absence refuses with a hint.
 
 Removal: `delete_objects` the interpolator's transform — every weight it
 drives returns to static control. There is no per-pose removal (v1).
 
-Guard closures that arrive with this surface:
-- `set_blendshape_weights` refuses a REQUESTED weight that a corrective
+Guard closures that arrive with this surface (one shared classifier,
+`clip.driven_weight_source`, so every guard names a weight's owner as
+what it actually is — a corrective, a set-driven key, or another
+connection — instead of misdiagnosing anim-layer/expression sources):
+- `set_blendshape_weights` refuses a REQUESTED weight that a connection
   drives (a hand-set value cannot land on a connected plug — measured);
   a corrective on one target does not lock the others.
-- `author_clip` refuses a `blend_weights` channel that a corrective drives
-  — measured: `setKeyframe` on a connection-fed plug silently no-ops
-  (returns 0, creates no curve), so without the refusal the clip would
-  ship without a channel it claims to key. Key the JOINT instead; the
-  corrective follows it.
+- `author_clip` refuses a `blend_weights` channel that a connection
+  drives — measured: `setKeyframe` on a connection-fed plug silently
+  no-ops (returns 0, creates no curve), so without the refusal the clip
+  would ship without a channel it claims to key. Key the JOINT instead;
+  the corrective follows it. Boundary pins for OTHER clips' channels
+  that became driven out-of-band are skipped with a warning rather than
+  claimed as pinned.
 
 Export facts (measured, `evals/correctives_probe/`): a live deltaMush is
 DROPPED by FBX export with byte-identical output — `export_fbx` warns,
