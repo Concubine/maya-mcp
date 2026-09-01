@@ -388,9 +388,10 @@ def assemble(params: Dict[str, Any]) -> Dict[str, Any]:
             if wanted is not None:
                 cmds.xform(result["name"], worldSpace=True, pivots=tuple(wanted))
             # Query Maya back rather than trust either combine.unite's
-            # pre-freeze snapshot or the caller's own input: a chunk always
-            # gets SOME pivot treatment here (the global mode, at minimum),
-            # so this is never None for a combined object.
+            # report (a post-freeze query since #803, but taken before the
+            # explicit write above) or the caller's own input: a chunk
+            # always gets SOME pivot treatment here (the global mode, at
+            # minimum), so this is never None for a combined object.
             placed = list(cmds.xform(result["name"], query=True,
                                      worldSpace=True, rotatePivot=True))
             objects.append({
@@ -418,10 +419,13 @@ def assemble(params: Dict[str, Any]) -> Dict[str, Any]:
                 # the FBX export unit gate refuses (#629), so the same call
                 # with the same flags runs here, where there is no unite.
                 #
-                # It has to precede the pivot write below: makeIdentity resets
-                # pivots to the world origin, which is exactly why the merged
-                # branch writes its explicit pivot AFTER unite rather than
-                # handing it in.
+                # It precedes the pivot write below so that what is reported
+                # is what the freeze left. MEASURED (#803,
+                # evals/combine_pivot_probe_803.py): makeIdentity does NOT
+                # move the pivot - the earlier "resets pivots to the world
+                # origin" was a plan-doc sentence - so the order is a
+                # convention now, not a rescue; the query-back below is what
+                # keeps the report honest either way.
                 if freeze:
                     cmds.makeIdentity(node, apply=True, translate=True,
                                       rotate=True, scale=True)
@@ -430,11 +434,13 @@ def assemble(params: Dict[str, Any]) -> Dict[str, Any]:
                     cmds.xform(node, worldSpace=True, pivots=tuple(wanted))
                 if wanted is not None or freeze:
                     # Query back, not the input echoed. The freeze counts as
-                    # pivot treatment even with no `wanted`: makeIdentity
-                    # moves the pivot to the origin, so reporting None here
-                    # would claim the pivot was left alone while this call
-                    # had just moved it. None still means untouched, which
-                    # is what it has always promised.
+                    # pivot treatment even with no `wanted`: it is a write to
+                    # the transform this call made, so `null` ("left alone")
+                    # would be a claim about a node the call has just
+                    # touched - reporting the measured pivot is the honest
+                    # answer even though the freeze leaves it in place (#803).
+                    # None still means untouched, which is what it has
+                    # always promised.
                     placed = list(cmds.xform(node, query=True, worldSpace=True,
                                              rotatePivot=True))
                 shape = cmds.listRelatives(node, shapes=True, fullPath=True,

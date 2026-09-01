@@ -394,14 +394,13 @@ class FakeCmds:
     def makeIdentity(self, name, apply=None, translate=None, rotate=None, scale=None):
         self._require(name)
         self.calls.append(("makeIdentity", name, apply, translate, rotate, scale))
-        # #799 contract 3: a freeze is not a no-op. It RESETS THE PIVOT TO
-        # THE WORLD ORIGIN - measured in this repo for exactly this call
-        # (docs/superpowers/plans/2026-08-15-golem-articulated.md: "mesh_
-        # cleanup defaults freeze_transforms=True, which resets pivots to the
-        # origin"), and the reason assemble.py orders its pivot writes after
-        # combine.unite. test_assemble.py's fake has modelled it all along;
-        # the three doubles of this call now agree.
-        self.pivots.pop(name, None)
+        # A freeze LEAVES THE PIVOT WHERE IT IS. MEASURED (#803,
+        # evals/combine_pivot_probe_803.py) through mesh_cleanup's exact
+        # sequence - polyMergeVertex, makeIdentity, delete history - on a
+        # rotated, scaled mesh with a world pivot at (0,5,0): (0,5,0) at
+        # every step. #799 had this fake throw the pivot away, citing a
+        # plan-doc sentence as a measurement; the pinned "defect" was the
+        # fake's. test_combine.py's and test_assemble.py's doubles agree.
 
 
 @pytest.fixture(autouse=True)
@@ -1444,21 +1443,19 @@ def test_mesh_cleanup_freeze_transforms_false_skips_makeIdentity(monkeypatch):
     assert not any(c[0] == "makeIdentity" for c in fake.calls)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "#799: freeze_transforms defaults to true, and makeIdentity RESETS THE "
-    "PIVOT TO THE WORLD ORIGIN - measured for this exact call in "
-    "docs/superpowers/plans/2026-08-15-golem-articulated.md. mesh_cleanup "
-    "returns warnings: [] and never says so, which is what forced the #601 "
-    "golem run to add a second pass re-placing all 29 chunk pivots by hand."))
-def test_mesh_cleanup_reports_the_pivot_its_freeze_threw_away(monkeypatch):
+def test_mesh_cleanup_keeps_the_callers_pivot_across_its_freeze(monkeypatch):
+    # #803 MEASURED: the default freeze does NOT move the pivot, so the
+    # empty warnings list is honest. #799 pinned the opposite on a plan-doc
+    # sentence; what the #601 golem run lost was boolean_op's NEW node and
+    # the mirror, not this freeze.
     fake = _mesh_fake("|dirty")
     fake.pivots["|dirty"] = (0.0, 5.0, 0.0)   # the rig point the caller placed
     monkeypatch.setattr(modeling, "_cmds", lambda: fake)
     monkeypatch.setattr(meshcheck, "mesh_stats", _fake_mesh_stats([]))
     result = modeling.mesh_cleanup({"mesh": "|dirty"})
-    # Maya has moved it; that half is not in dispute.
-    assert fake.pivots.get("|dirty") is None
-    assert any("pivot" in w for w in result["warnings"])
+    assert any(c[0] == "makeIdentity" for c in fake.calls)
+    assert fake.pivots["|dirty"] == (0.0, 5.0, 0.0)
+    assert result["warnings"] == []
 
 
 def test_mesh_cleanup_delete_history_false_skips_delete(monkeypatch):
@@ -1677,13 +1674,13 @@ class TestTheFakeRefusesWhatMayaRefuses:
             "pc1.constraintTranslate")
         assert child_fed._write_blocker("|a.rotatePivotZ") == "|a.rotatePivot"
 
-    def test_a_freeze_throws_the_live_pivot_away(self):
+    def test_a_freeze_keeps_the_live_pivot_as_measured(self):
+        # #803 MEASURED: makeIdentity leaves the pivot in place.
         fake = FakeCmds(objects={"|a"})
         fake.xform("|a", worldSpace=True, pivots=(1.0, 2.0, 3.0))
-        assert fake.pivots["|a"] == (1.0, 2.0, 3.0)
         fake.makeIdentity("|a", apply=True)
         assert fake.xform("|a", query=True, worldSpace=True,
-                          rotatePivot=True) == [0, 0, 0]
+                          rotatePivot=True) == [1.0, 2.0, 3.0]
 
     def test_a_grouped_child_keeps_its_shape_at_the_new_path(self):
         # cmds.group RENAMES: the old absolute path names nothing afterwards,

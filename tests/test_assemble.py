@@ -244,12 +244,12 @@ class FakeCmds:
     def makeIdentity(self, node, **kw):
         self._require(node)
         self.calls.append(("freeze", node))
-        # Models the real Maya gotcha this module's own docstring names:
-        # freeze resets pivots to the world origin. Without this, a refactor
-        # that hoists an explicit pivot write to BEFORE combine.unite would
-        # stay green here even though it silently loses the pivot in a real
-        # Maya session.
-        self.pivots.pop(node, None)
+        # A freeze LEAVES THE PIVOT WHERE IT IS. MEASURED (#803,
+        # evals/combine_pivot_probe_803.py): the "resets pivots to the world
+        # origin" this fake used to model was a plan-doc sentence, never a
+        # reading. assemble still freezes before it writes a pivot - that is
+        # a convention now, not a rescue - and reports the query-back.
+        # test_combine.py's and test_modeling.py's doubles agree.
 
     # --- deformer
     def nonLinear(self, node, type=None, **kw):
@@ -501,11 +501,13 @@ class TestFreeze:
 
     def test_a_frozen_chunk_reports_where_its_pivot_ended_up(self, fake):
         """`pivot: null` promises the pivot was left alone, so a freeze -
-        which makeIdentity moves to the origin - has to be reported.
+        a write to the transform this call made - has to be reported as
+        the measured pivot, even though (#803, measured) makeIdentity
+        leaves it in place.
 
         Before this, a single-part chunk with no entry in `pivots` came back
-        null while the freeze had just moved its pivot, which is the schema
-        saying the opposite of what happened.
+        null while the call had just frozen it, which is the schema saying
+        nothing happened to a node it had touched.
         """
         result = assemble.assemble({"name": "solo", "atlas": None,
                                     "parts": _parts(1)})
@@ -526,10 +528,11 @@ class TestFreeze:
         assert any(c[0] == "polyUnite" for c in fake.calls)
 
     def test_an_explicit_pivot_outlives_the_freeze_on_a_lone_part(self, fake):
-        """makeIdentity resets pivots to the world origin, so the freeze has
-        to happen BEFORE the caller's pivot is written or the pivot is
-        silently thrown away - the ordering the merged branch already relies
-        on, now owed by this branch too."""
+        """The freeze happens BEFORE the caller's pivot is written - the
+        ordering the merged branch already relies on, now owed by this
+        branch too. #803 measured that makeIdentity would have left the
+        pivot alone anyway; the order stays, as the convention that what is
+        reported is what the freeze left."""
         result = assemble.assemble({
             "name": "golem", "atlas": None,
             "parts": [{"pos": [0, 1, 0], "dim": [1, 1, 1], "chunk": "fist"}],
@@ -969,14 +972,14 @@ class TestTheFakeRefusesWhatMayaRefuses:
         with pytest.raises(AssertionError):
             fake.polyEvaluate("|aShape", edge=True)
 
-    def test_a_freeze_throws_the_live_pivot_away(self):
+    def test_a_freeze_keeps_the_live_pivot_as_measured(self):
+        # #803 MEASURED: makeIdentity leaves the pivot in place.
         fake = FakeCmds()
         fake._add("a")
         fake.xform("|a", worldSpace=True, pivots=(1.0, 2.0, 3.0))
-        assert fake.pivots["|a"] == (1.0, 2.0, 3.0)
         fake.makeIdentity("|a", apply=True)
         assert fake.xform("|a", query=True, worldSpace=True,
-                          rotatePivot=True) == [0.0, 0.0, 0.0]
+                          rotatePivot=True) == [1.0, 2.0, 3.0]
 
     def test_a_shading_group_is_a_node_the_fake_answers_about(self):
         # The other direction of the same rule: a shadingEngine is a DG node

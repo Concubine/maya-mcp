@@ -1657,7 +1657,11 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "Two or more meshes to merge. All are consumed."
         ))],
         name: Annotated[Optional[str], Field(description=(
-            "Name for the merged object; defaults to <first input>_combined."
+            "Name for the merged object; defaults to <first input>_combined. "
+            "This MAY be an input's own name - every input is consumed, so "
+            "merging body and arm and calling the result body is expressible "
+            "and usually what you want. Only a name held by some OTHER object "
+            "gets a _NNN suffix, and then warnings says so."
         ))] = None,
         pivot: Annotated[Literal["center", "origin", "keep"], Field(description=(
             "Where the result's pivot lands. 'center' (default) is the bounding "

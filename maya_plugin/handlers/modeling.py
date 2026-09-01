@@ -1109,6 +1109,11 @@ def mesh_cleanup(params: Dict[str, Any]) -> Dict[str, Any]:
     if params.get("conform_normals", True):
         cmds.polyNormal(mesh_long, normalMode=2, constructionHistory=False)
     if params.get("freeze_transforms", True):
+        # The caller's pivot SURVIVES this. MEASURED (#803,
+        # evals/combine_pivot_probe_803.py): makeIdentity on a rotated,
+        # scaled mesh with a world pivot at (0,5,0) leaves it at (0,5,0),
+        # through this exact sequence. The "freeze resets pivots to the
+        # origin" belief that #799 pinned came from a plan-doc sentence.
         cmds.makeIdentity(mesh_long, apply=True, translate=True, rotate=True, scale=True)
         ledger.record(cmds, mesh_long)  # frozen transform is a tool write
     if params.get("delete_history", True):

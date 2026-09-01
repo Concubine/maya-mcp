@@ -157,7 +157,13 @@ class FakeCmds:
             self._require(m)
         self.calls.append(("polyUnite", tuple(members), kwargs.get("ch")))
         asked = kwargs.get("name") or "polySurface1"
-        actual = self._unite_name or asked
+        # MEASURED (#803, evals/combine_pivot_probe_803.py): the result is
+        # named while the inputs STILL EXIST, so asking for an input's own
+        # name (or any held name) gets body1 - and the input's name is free
+        # once the unite has consumed it. A fake that handed the asked name
+        # straight back could not fail for the uniquify-first order.
+        taken = {o.split("|")[-1] for o in self.objects}
+        actual = self._unite_name or (asked + "1" if asked in taken else asked)
         node = "|" + actual
         for m in members:
             # Consumed, not merely hidden: the transform and its shape both
@@ -189,6 +195,9 @@ class FakeCmds:
     def xform(self, node, **kwargs):
         self._require(node)
         if kwargs.get("query"):
+            # Logged like a write, so a test can assert WHEN the handler
+            # asked (the #803 query-after-freeze rule is an ordering).
+            self.calls.append(("xform", node, dict(kwargs)))
             if kwargs.get("boundingBox"):
                 return [-1.5, -1.5, -1.5, 1.5, 1.5, 1.5]
             return list(self.pivots.get(node, (0.0, 0.0, 0.0))) \
@@ -215,13 +224,14 @@ class FakeCmds:
         self._require(node)
         self.frozen.append(node)
         self.calls.append(("makeIdentity", node, None))
-        # #799 contract 3: a freeze is not a no-op. It RESETS PIVOTS TO THE
-        # WORLD ORIGIN - measured in this repo for mesh_cleanup
-        # (docs/superpowers/plans/2026-08-15-golem-articulated.md), and the
-        # reason assemble.py writes its explicit pivots AFTER combine.unite
-        # rather than handing them in. test_assemble.py's fake has modelled it
-        # for exactly that reason; the two doubles of this call now agree.
-        self.pivots.pop(node, None)
+        # A freeze LEAVES THE PIVOT WHERE IT IS. MEASURED (#803,
+        # evals/combine_pivot_probe_803.py, Maya 2027): after makeIdentity
+        # on a rotated, scaled, off-origin mesh the world rotate and scale
+        # pivots answer exactly what was written. #799 had this fake throw
+        # the pivot away on a "measured" citation that was a plan-doc
+        # sentence (2026-08-15-golem-articulated.md) - a fake wrong in the
+        # strict direction, which pinned a defect the handler never had.
+        # test_modeling.py's and test_assemble.py's doubles agree.
 
     def delete(self, node, **kwargs):
         self._require(node)
@@ -233,6 +243,11 @@ class FakeCmds:
 
     def rename(self, node, new):
         self._require(node)
+        # Maya never refuses a rename collision; it suffixes. Modelled so a
+        # handler that renames onto a held name is caught by the name it
+        # gets back, the way it would be live.
+        if "|" + new in self.objects and "|" + new != node:
+            new = new + "1"
         self.objects.remove(node)
         renamed = "|" + new
         self.objects.append(renamed)
@@ -296,16 +311,28 @@ class TestCombine:
         assert out["shells"] == 2
         assert out["inputs"] == 2
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "#799: polyUnite CONSUMES its inputs, so an input's name is free by "
-        "the time the result needs it - but combine uniquifies the requested "
-        "name BEFORE the unite and hands back body_001. This is #640 exactly, "
-        "which boolean_op fixed with _claim_name after the operands stop "
-        "existing; combine never got the same treatment."))
     def test_the_result_may_take_a_consumed_input_s_own_name(self):
+        # #803 (the #640 defect): polyUnite CONSUMES its inputs, so an
+        # input's name is free by the time the result needs it. combine used
+        # to uniquify BEFORE the unite, while Maya still held body, and hand
+        # back body_001. Now it asks for body, gets Maya's body1 (measured),
+        # and claims body once the inputs are gone.
         fake = FakeCmds(objects=("|body", "|arm"))
         out = _run(fake, names=["|body", "|arm"], name="body")
         assert out["name"] == "|body"
+        assert ("rename", "|body1", "body") in fake.calls
+        assert out["warnings"] == []
+        assert fake.ls("body", long=True) == ["|body"]
+
+    def test_a_name_held_by_an_unrelated_object_gets_the_suffix_and_a_warning(self):
+        # The other half of the claim: a name some OTHER object holds is not
+        # taken from it. The result gets the deterministic suffix and the
+        # caller is told - the same contract boolean_op states for new_name.
+        fake = FakeCmds(objects=("|a", "|b", "|body"))
+        out = _run(fake, names=["|a", "|b"], name="body")
+        assert out["name"] == "|body_001"
+        assert fake.ls("body", long=True) == ["|body"]      # untouched
+        assert any("body" in w and "body_001" in w for w in out["warnings"])
 
     def test_re_resolves_when_maya_renames_the_result(self):
         # Maya hands back polySurface7 despite being asked for kit_piece
@@ -315,11 +342,9 @@ class TestCombine:
         assert ("rename", "|polySurface7", "kit_piece") in fake.calls
 
     def test_pivot_defaults_to_the_bounding_box_centre(self):
-        # Asserted on the WRITE, not on the pivot the fake still holds
-        # afterwards: freeze is on by default and resets pivots to the world
-        # origin, so live state is empty here whatever the mode was (#799).
-        # The box is deliberately off-origin, or "center" would be
-        # indistinguishable from "origin" and from no write at all.
+        # Asserted on the WRITE. The box is deliberately off-origin, or
+        # "center" would be indistinguishable from "origin" and from no
+        # write at all.
         fake = FakeCmds()
         fake.bboxes["|p"] = [1.0, 2.0, 3.0, 3.0, 4.0, 5.0]
         _run(fake, names=["|a", "|b"], name="p")
@@ -331,24 +356,28 @@ class TestCombine:
         _run(fake, names=["|a", "|b"], name="p", pivot="origin")
         assert fake.pivot_writes == [("|p", (0.0, 0.0, 0.0))]
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "#799: combine reports the pivot it WROTE, then freezes. makeIdentity "
-        "resets pivots to the world origin, so with the default "
-        "pivot='center', freeze=True the reported pivot names a place Maya "
-        "does not have - assemble.py avoids this by writing its pivot AFTER "
-        "unite and querying Maya back, which combine never does."))
     def test_the_reported_pivot_is_where_maya_actually_has_it(self):
+        # #803: the report is the QUERY after the freeze, never the value
+        # written. Measured, the two coincide (a freeze leaves the pivot in
+        # place), which is why the fake's makeIdentity keeps it; the query
+        # is what keeps the report honest if that ever changes.
         fake = FakeCmds()
         fake.bboxes["|p"] = [1.0, 2.0, 3.0, 3.0, 4.0, 5.0]
         out = _run(fake, names=["|a", "|b"], name="p")
         assert out["frozen"] is True
+        assert out["pivot"] == [2.0, 3.0, 4.0]
         assert out["pivot"] == list(
             fake.xform("|p", query=True, worldSpace=True, rotatePivot=True)
         )
+        queries = [i for i, c in enumerate(fake.calls)
+                   if c[0] == "xform" and c[2].get("query") and c[2].get("rotatePivot")]
+        freezes = [i for i, c in enumerate(fake.calls) if c[0] == "makeIdentity"]
+        assert queries and freezes
+        assert queries[-1] > freezes[-1], "queried BEFORE the freeze"
 
     def test_the_reported_pivot_is_honest_when_nothing_freezes_it(self):
-        # The same assertion with freeze off passes, which is what makes the
-        # xfail above a statement about the FREEZE and not about _place_pivot.
+        # The same assertion with freeze off: the query-back is not gated on
+        # the freeze.
         fake = FakeCmds()
         fake.bboxes["|p"] = [1.0, 2.0, 3.0, 3.0, 4.0, 5.0]
         out = _run(fake, names=["|a", "|b"], name="p", freeze=False)
@@ -471,14 +500,27 @@ class TestTheFakeRefusesWhatMayaRefuses:
         with pytest.raises(AssertionError):
             fake.polyEvaluate("|a", uvcoord=True)
 
-    def test_a_freeze_throws_the_live_pivot_away(self):
+    def test_a_freeze_keeps_the_live_pivot_as_measured(self):
+        # #803 MEASURED: makeIdentity leaves the pivot in place. The #799
+        # fake threw it away, which pinned a defect combine never had.
         fake = FakeCmds()
         fake.xform("|a", worldSpace=True, pivots=(1.0, 2.0, 3.0))
-        assert fake.xform("|a", query=True, worldSpace=True,
-                          rotatePivot=True) == [1.0, 2.0, 3.0]
         fake.makeIdentity("|a", apply=True)
         assert fake.xform("|a", query=True, worldSpace=True,
-                          rotatePivot=True) == [0.0, 0.0, 0.0]
+                          rotatePivot=True) == [1.0, 2.0, 3.0]
+
+    def test_polyunite_names_the_result_while_the_inputs_still_exist(self):
+        # #803 MEASURED: polyUnite(name=<an input's name>) -> body1, and the
+        # input's name is free afterwards; a free name is honoured directly.
+        fake = FakeCmds(objects=("|body", "|arm"))
+        assert fake.polyUnite(["|body", "|arm"], ch=False, name="body")[0] == "|body1"
+        assert fake.ls("body") == []
+        fake = FakeCmds(objects=("|body", "|arm"))
+        assert fake.polyUnite(["|body", "|arm"], ch=False, name="fresh")[0] == "|fresh"
+
+    def test_rename_onto_a_held_name_suffixes_as_maya_does(self):
+        fake = FakeCmds(objects=("|a", "|b"))
+        assert fake.rename("|a", "b") == "|b1"
 
     def test_a_shading_group_is_a_node_the_fake_answers_about(self):
         # The other direction of the same rule: a shadingEngine is a DG node

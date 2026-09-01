@@ -1,0 +1,147 @@
+{
+ "1_centre_written": [
+  2.0,
+  3.0,
+  4.0
+ ],
+ "1_rp_after_place_before_freeze": [
+  2.0,
+  3.0,
+  4.0
+ ],
+ "1_rp_after_freeze": [
+  2.0,
+  3.0,
+  4.0
+ ],
+ "1_sp_after_freeze": [
+  2.0,
+  3.0,
+  4.0
+ ],
+ "1_translate_after_freeze": [
+  0.0,
+  0.0,
+  0.0
+ ],
+ "3_centre_written": [
+  2.0,
+  3.0,
+  4.0
+ ],
+ "3_rp_after_freeze_then_place": [
+  2.0,
+  3.0,
+  4.0
+ ],
+ "3_sp_after_freeze_then_place": [
+  2.0,
+  3.0,
+  4.0
+ ],
+ "3_translate": [
+  0.0,
+  0.0,
+  0.0
+ ],
+ "3b_rp_after_second_freeze": [
+  2.0,
+  3.0,
+  4.0
+ ],
+ "2_polyUnite_returned": [
+  "body1"
+ ],
+ "2_exists_body": false,
+ "2_ls_body_long": [],
+ "2_ls_all_transforms": [
+  "body1",
+  "front",
+  "persp",
+  "side",
+  "top"
+ ],
+ "2_result_nodeType": "transform",
+ "2_rename_to_body": {
+  "returned": "body",
+  "long": [
+   "|body"
+  ]
+ },
+ "2c_ch_true_returned": [
+  "body1",
+  "polyUnite1"
+ ],
+ "2c_ch_true_transforms": [
+  "arm",
+  "body",
+  "body1",
+  "front",
+  "persp",
+  "side",
+  "top",
+  "transform1",
+  "transform2"
+ ],
+ "2d_free_name_returned": [
+  "fresh"
+ ],
+ "4_rp_before": [
+  0.0,
+  5.0,
+  0.0
+ ],
+ "4_rp_after_freeze": [
+  0.0,
+  5.0,
+  0.0
+ ],
+ "4_rp_after_replace": [
+  0.0,
+  5.0,
+  0.0
+ ],
+ "4_sp_after_replace": [
+  0.0,
+  5.0,
+  0.0
+ ],
+ "4_translate_after": [
+  0.0,
+  0.0,
+  0.0
+ ],
+ "4b_rp_after_move": [
+  1.0,
+  6.0,
+  1.0
+ ],
+ "5_attrs_after_freeze": {
+  "translate": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "rotatePivot": [
+   4.0,
+   5.0,
+   0.0
+  ],
+  "scalePivot": [
+   4.0,
+   5.0,
+   0.0
+  ],
+  "rotatePivotTranslate": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "scalePivotTranslate": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
+ "maya_version": "2027"
+}

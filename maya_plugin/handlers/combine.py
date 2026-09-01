@@ -145,18 +145,37 @@ def unite(
             if sg not in shaders_in:
                 shaders_in.append(sg)
 
-    target_name = naming.unique_name(cmds, requested)
-    result = cmds.polyUnite(longs, ch=False, name=target_name)
+    # Ask for the name the caller WANTS, not a pre-uniquified one. polyUnite
+    # consumes its inputs, so an input's own name is free by the time the
+    # result needs it - but only after the unite. Uniquifying first, while
+    # Maya still held the input, turned `combine(body, arm, name="body")`
+    # into body_001 (#803 - the #640 defect boolean_op fixed with
+    # _claim_name). MEASURED (evals/combine_pivot_probe_803.py): Maya
+    # answers body1 for that request, and body is free to rename to
+    # afterwards.
+    result = cmds.polyUnite(longs, ch=False, name=requested)
     node = _long(cmds, result[0] if isinstance(result, (list, tuple)) else result)
 
-    # Maya renames on collision. Match by SHORT NAME and correct it, rather
-    # than believing the name we asked for.
-    if _short(node) != target_name:
-        node = _long(cmds, cmds.rename(node, target_name))
+    warnings: List[str] = []
+    # Maya renames on collision. Match by SHORT NAME and claim the name now
+    # that the inputs are gone; only a name some UNRELATED object holds
+    # forces the suffix, and then the caller is told.
+    if _short(node) != requested:
+        node = _long(cmds, cmds.rename(node, naming.unique_name(cmds, requested)))
+        if _short(node) != requested:
+            warnings.append(
+                "name %r is held by another object; the result is %s"
+                % (requested, _short(node)))
 
-    pivot = _place_pivot(cmds, node, pivot_mode)
+    _place_pivot(cmds, node, pivot_mode)
     if freeze:
         cmds.makeIdentity(node, apply=True, translate=True, rotate=True, scale=True)
+    # Report where Maya HAS the pivot, never the value that was written.
+    # MEASURED (#803): makeIdentity leaves the pivot where it was placed -
+    # the belief that a freeze resets it to the origin was a plan-doc
+    # sentence, never a reading - but the query is the honest report
+    # whatever a future Maya does with it, and it is what assemble does.
+    pivot = list(cmds.xform(node, query=True, worldSpace=True, rotatePivot=True))
 
     shape = _require_mesh(cmds, node)
     shading = meshcheck.ensure_object_shading(
@@ -170,7 +189,6 @@ def unite(
         "shells": cmds.polyEvaluate(shape, shell=True),
     }
 
-    warnings: List[str] = []
     if len(shaders_in) > 1:
         warnings.append(
             "inputs carried %d different shading groups; the result is one "

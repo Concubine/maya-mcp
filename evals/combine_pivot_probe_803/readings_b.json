@@ -1,0 +1,109 @@
+{
+ "A_hist_before": [
+  3.0,
+  7.0,
+  0.0
+ ],
+ "A_hist_after_freeze": [
+  3.0,
+  7.0,
+  0.0
+ ],
+ "A_history_after": [
+  "transformGeometry1",
+  "polyCube1"
+ ],
+ "B_kid_before": [
+  12.0,
+  3.0,
+  0.0
+ ],
+ "B_kid_after_freeze": [
+  12.0,
+  3.0,
+  0.0
+ ],
+ "B_kid_local_attrs": {
+  "translate": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "rotate": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "scale": [
+   1.0,
+   1.0,
+   1.0
+  ],
+  "rotatePivot": [
+   1.616025,
+   0.799038,
+   0.0
+  ]
+ },
+ "C_before": [
+  0.0,
+  5.0,
+  0.0
+ ],
+ "C_after_merge": [
+  0.0,
+  5.0,
+  0.0
+ ],
+ "C_after_freeze": [
+  0.0,
+  5.0,
+  0.0
+ ],
+ "C_after_history_delete": [
+  0.0,
+  5.0,
+  0.0
+ ],
+ "D_result_long": [
+  "|p"
+ ],
+ "D_centre_written": [
+  2.0,
+  3.039614,
+  4.039614
+ ],
+ "D_rp_after_freeze": [
+  2.0,
+  3.039614,
+  4.039614
+ ],
+ "D_grp_exists_after": false,
+ "E_before": [
+  1.5,
+  1.0,
+  1.0
+ ],
+ "E_after_freeze": [
+  1.5,
+  1.0,
+  1.0
+ ],
+ "E_attrs": {
+  "translate": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "rotatePivot": [
+   1.5,
+   1.0,
+   1.0
+  ],
+  "rotatePivotTranslate": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ }
+}
