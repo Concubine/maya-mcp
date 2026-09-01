@@ -9,6 +9,19 @@ from maya_plugin.handlers import session
 
 
 class FakeCmds:
+    """#799: this handler's Maya surface is files and queues, not nodes -
+    there is nothing here to delete and no plug to write, so contract points
+    1 and 2 have no purchase. Point 3 does: `redo` could never fail while
+    `undo` could, which left redo's queue-exhausted branch with no test in
+    the file, and `workspace` answered the project ROOT for a bare call that
+    Maya answers with the workspace NAME.
+
+    Round 2 correction: round 1 claimed `workspace` "used to answer any
+    flags at all". It did not - HEAD's signature had no **kw, so an
+    unmodelled flag already raised TypeError. What it really answered
+    wrongly was the bare call, and round 1's guard could not refuse that
+    either because both its flags defaulted to True. See workspace() below."""
+
     def __init__(self, tmp_path, scene_name=""):
         self._tmp = str(tmp_path)
         self.scene_name = scene_name
@@ -18,7 +31,19 @@ class FakeCmds:
         self.new_calls = 0
         self.undo_calls = 0
         self.redo_calls = 0
-        self.undo_fail_after = None  # raise RuntimeError after N successful undos
+        # Raise RuntimeError after N successful steps, which is what both
+        # handlers are written against ("except RuntimeError: break").
+        #
+        # UNMEASURED, and deliberately not flipped here: nobody has checked
+        # whether real cmds.undo() on an empty queue RAISES or merely prints
+        # "// Warning: There are no more commands to undo". If it warns, both
+        # handlers over-report - undo({"steps": 5}) on an empty queue would
+        # return undone=5. Modelling that outcome here would be asserting a
+        # failure no one has seen (the #796 round-4 pairBlend mistake), so
+        # this fake keeps the measured-by-nobody-but-believed-by-the-handler
+        # behaviour and the question is carried in the ticket instead.
+        self.undo_fail_after = None
+        self.redo_fail_after = None
         self.unit_preference = "m"  # what a new scene comes up in
         self.linear = "m"  # a session left in metres, as an eval can leave it
         self.unit_set_calls = []
@@ -67,7 +92,28 @@ class FakeCmds:
             return None
         raise AssertionError("unexpected file call %r %r" % (args, kw))
 
-    def workspace(self, query=True, rootDirectory=True):
+    def workspace(self, *args, **kw):
+        # #799 round 2: the round-1 guard was inert and its rationale was
+        # wrong about HEAD. The signature was `workspace(self, query=True,
+        # rootDirectory=True)` with no **kw, so `fileRule`/`active`/
+        # `directory` already raised TypeError before round 1 touched it -
+        # and BOTH flags defaulting to True meant the only call the new
+        # assert could refuse was an explicit query=False, which no handler
+        # writes. Reverting that method to HEAD's one-line `return
+        # self._tmp` changed no test.
+        #
+        # What actually needs refusing is the BARE call. `cmds.workspace()`
+        # in Maya returns the current workspace NAME, not its root
+        # directory, so a handler that dropped the flags would be handed a
+        # path-shaped answer here and a name in the live session - the
+        # #714/#764 shape exactly. Defaulting both to False is what lets
+        # the assert see it.
+        assert not args, "the checkpoint dir asks a QUERY, with no operand: %r" % (args,)
+        assert kw.get("query") and kw.get("rootDirectory"), (
+            "the checkpoint dir comes from the project ROOT and nothing else; "
+            "a bare cmds.workspace() answers the workspace NAME in Maya (%r)" % (kw,))
+        assert set(kw) == {"query", "rootDirectory"}, (
+            "unmodelled workspace flag: %r" % (sorted(set(kw) - {"query", "rootDirectory"}),))
         return self._tmp
 
     def undo(self):
@@ -76,6 +122,12 @@ class FakeCmds:
         self.undo_calls += 1
 
     def redo(self):
+        # #799: symmetric with undo. `redo` that can never fail is an
+        # answers-anything surface - it made session.redo's whole
+        # queue-exhausted branch unreachable, which is why redo had no test
+        # in this file at all while undo had two.
+        if self.redo_fail_after is not None and self.redo_calls >= self.redo_fail_after:
+            raise RuntimeError("nothing to redo")
         self.redo_calls += 1
 
 
@@ -248,6 +300,21 @@ def test_undo_rejects_bad_steps(fake):
         session.undo({"steps": 0})
 
 
+def test_redo_counts_steps_and_stops_at_queue_end(fake):
+    # #799: redo had no test whatsoever, because the fake's redo() could not
+    # fail. Its "except RuntimeError: break" was dead code under test, and
+    # so was every claim the result makes about how many steps really ran.
+    fake.redo_fail_after = 3
+    assert session.redo({"steps": 5}) == {"redone": 3, "requested": 5}
+    assert fake.redo_calls == 3
+
+
+def test_redo_rejects_bad_steps(fake):
+    with pytest.raises(HandlerError):
+        session.redo({"steps": session.MAX_UNDO_STEPS + 1})
+    assert fake.redo_calls == 0
+
+
 def test_new_scene_requires_confirm(fake):
     with pytest.raises(HandlerError) as exc:
         session.new_scene({})
@@ -373,17 +440,28 @@ def test_undo_handlers_are_chunk_exempt():
 
 class RecordingIprCmds:
     """Only what stop_idle_ipr touches; every surface is recorded."""
+
+    WINDOW = "ArnoldRenderView"
+
     def __init__(self, batch=False, window=True):
         self.batch, self.window_open = batch, window
         self.calls = []
 
     def about(self, batch=False):
+        assert batch, "stop_idle_ipr asks one thing about the session"
         return self.batch
 
     def window(self, name, exists=False):
-        return self.window_open
+        # #799: `return self.window_open` for ANY name meant this fake would
+        # have reported an open view for a window stop_idle_ipr never asks
+        # about, so a typo in the measured name (#721p2 measured it as
+        # exactly "ArnoldRenderView") could not fail a test here.
+        assert exists, "existence is the only question asked of a window"
+        return self.window_open if name == self.WINDOW else False
 
     def deleteUI(self, name):
+        if name != self.WINDOW:
+            raise RuntimeError("Object '%s' not found." % name)
         self.calls.append(("deleteUI", name))
         self.window_open = False
 
@@ -407,3 +485,85 @@ class TestStopIdleIpr:
         class Bare:
             pass
         assert session.stop_idle_ipr(Bare()) == []
+
+
+class TestTheFakeRefusesWhatMayaRefuses:
+    """#799 round 2: nothing asserted the round-1 hardening, so reverting it
+    left the suite green - the "a green suite proves nothing" failure this
+    ticket exists to remove, one level up in the harness.
+
+    Only what THIS fake models. session.py's Maya surface is files, a
+    workspace query and two undo queues; it holds no node, so there is no
+    deleted-node query, no connection-fed or locked plug and no
+    setKeyframe here (grep over session.py finds zero setAttr/xform/
+    connectAttr/setKeyframe calls). The node-shaped barriers live in the
+    fakes that own those calls.
+    """
+
+    def test_a_bare_workspace_call_is_refused_not_answered_with_the_root(self, fake):
+        # In Maya this returns the workspace NAME. Answering it with the
+        # project root - which is what HEAD and round 1 both did - is the
+        # #764 shape: a handler drops the flags, the test stays green, the
+        # live session hands back a name and the checkpoint dir is garbage.
+        with pytest.raises(AssertionError, match="workspace NAME"):
+            fake.workspace()
+
+    def test_a_workspace_query_for_something_else_is_refused(self, fake):
+        with pytest.raises(AssertionError, match="ROOT"):
+            fake.workspace(query=True, fileRule="images")
+
+    def test_a_workspace_flag_the_handler_never_uses_is_refused(self, fake):
+        with pytest.raises(AssertionError, match="unmodelled workspace flag"):
+            fake.workspace(query=True, rootDirectory=True, active=True)
+
+    def test_the_one_call_the_handler_really_makes_still_answers(self, fake, tmp_path):
+        # The counterpart, so the guard cannot be tightened into refusing
+        # the live call: strict-direction wrongness is as bad as permissive.
+        assert fake.workspace(query=True, rootDirectory=True) == str(tmp_path)
+
+    def test_a_file_call_the_handler_never_makes_is_refused(self, fake):
+        # The `file` fake's fallback is an AssertionError, not an invented
+        # answer - reference edits, imports and exportSelected are not
+        # session.py's surface and must not be silently accepted.
+        with pytest.raises(AssertionError, match="unexpected file call"):
+            fake.file("anything.ma", reference=True)
+
+    def test_an_unmodelled_file_query_is_refused(self, fake):
+        with pytest.raises(AssertionError, match="unexpected file query"):
+            fake.file(query=True, list=True)
+
+    def test_the_unit_query_refuses_anything_but_the_linear_unit(self, fake):
+        with pytest.raises(AssertionError):
+            fake.currentUnit(query=True, linear=False)
+
+    def test_redo_can_run_out_the_way_undo_can(self, fake):
+        # The round-1 change that WAS real: a redo() that could never fail
+        # made session.redo's "except RuntimeError: break" dead code. If
+        # someone removes redo_fail_after, this goes red.
+        fake.redo_fail_after = 0
+        with pytest.raises(RuntimeError, match="nothing to redo"):
+            fake.redo()
+        assert session.redo({"steps": 3}) == {"redone": 0, "requested": 3}
+
+
+class TestTheIprFakeRefusesWhatMayaRefuses:
+    """RecordingIprCmds: #721p2 measured the window as exactly
+    "ArnoldRenderView", and a fake that reported an open view for ANY name
+    could not fail for a typo in it."""
+
+    def test_a_window_the_handler_never_asks_about_is_not_reported_open(self):
+        cmds = RecordingIprCmds()
+        assert cmds.window("ArnoldRenderVeiw", exists=True) is False
+        assert cmds.window(RecordingIprCmds.WINDOW, exists=True) is True
+
+    def test_asking_a_window_anything_but_existence_is_refused(self):
+        with pytest.raises(AssertionError, match="existence"):
+            RecordingIprCmds().window(RecordingIprCmds.WINDOW)
+
+    def test_deleting_a_window_that_is_not_there_raises_the_way_maya_does(self):
+        with pytest.raises(RuntimeError, match="not found"):
+            RecordingIprCmds().deleteUI("ArnoldRenderVeiw")
+
+    def test_about_answers_one_question_only(self):
+        with pytest.raises(AssertionError, match="one thing"):
+            RecordingIprCmds().about()

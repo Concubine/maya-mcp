@@ -17,14 +17,37 @@ from maya_plugin.handlers import units
 
 
 class FakeCmds:
+    """The scene's linear unit, and nothing else.
+
+    #799. Points 1 and 2 do not apply - units.py names no node, so there is
+    nothing here to vanish and no plug to write. Point 3 does: `currentUnit`
+    answers what it was ASKED for rather than one stored string whatever the
+    flags say, and refuses a unit Maya does not know instead of storing it.
+    """
+
+    _KNOWN = ("mm", "cm", "m", "km", "in", "ft", "yd", "mi")
+
     def __init__(self, linear="cm"):
         self.linear = linear
         self.set_calls = []
 
-    def currentUnit(self, query=False, linear=None):
+    def currentUnit(self, query=False, linear=None, angle=None, time=None):
         if query:
+            # Maya answers ONE unit per query, whichever flag was raised.
+            # Answering the linear unit to an angle query is how a fake
+            # certifies a conversion that would silently be wrong.
+            if angle or time:
+                raise AssertionError(
+                    "units_block must ask for the linear unit, not %s"
+                    % ("angle" if angle else "time")
+                )
             assert linear is True, "query must ask for the linear unit"
             return self.linear
+        # `currentUnit -linear furlong` is an error in Maya, not a stored
+        # string: require_known_unit is what keeps the call from getting
+        # here, so the fake has to be able to notice if it ever stopped.
+        if linear not in self._KNOWN:
+            raise RuntimeError("Invalid unit name: %s" % (linear,))
         self.set_calls.append(linear)
         self.linear = linear
         return linear
@@ -111,10 +134,25 @@ class TestRequireKnownUnit:
 
 
 class FakeAngleCmds:
+    """The scene's ANGLE unit.
+
+    #799 contract point 3: this used to return its one string for every
+    question asked of it - a linear query, a time query, even a set - so a
+    handler that asked for the wrong unit got a plausible answer back and no
+    test could see it. It answers the angle query and refuses the rest.
+    """
+
     def __init__(self, unit):
         self._unit = unit
 
-    def currentUnit(self, query=False, angle=False, **kw):
+    def currentUnit(self, query=False, angle=False, linear=None, time=None):
+        if not query:
+            raise AssertionError("degrees_to_ui/ui_to_degrees must only query")
+        if not angle:
+            raise AssertionError(
+                "the angle conversion must ask for the ANGLE unit, not %s"
+                % ("linear" if linear else "time")
+            )
         return self._unit
 
 
@@ -136,3 +174,42 @@ class TestAngleUnits:
         from maya_plugin.dispatcher import HandlerError
         with pytest.raises(HandlerError, match="angle unit"):
             units.degrees_to_ui(FakeAngleCmds("grad"), 1.0)
+
+
+class TestTheFakeRefusesWhatMayaRefuses:
+    """#799 round 2: the hardening in the two fakes above has to be ASSERTED.
+
+    Both fakes used to answer their one stored string to whatever they were
+    asked, so a handler reading the wrong unit - a conversion silently wrong
+    by a factor of 57.3, or by 100 - looked exactly like a correct one. If
+    someone loosens either fake back, these go red. Points 1 and 2 of the
+    contract have nothing to pin here: units.py names no node and writes no
+    plug, so there is no vanished name and no connected attribute to refuse.
+    """
+
+    def test_the_linear_fake_answers_only_the_linear_query(self):
+        fake = FakeCmds("cm")
+        assert fake.currentUnit(query=True, linear=True) == "cm"
+        with pytest.raises(AssertionError, match="angle"):
+            fake.currentUnit(query=True, angle=True)
+        with pytest.raises(AssertionError, match="time"):
+            fake.currentUnit(query=True, time=True)
+        with pytest.raises(AssertionError):
+            fake.currentUnit(query=True)  # no flag names no unit
+
+    def test_the_linear_fake_refuses_a_unit_maya_does_not_know(self):
+        fake = FakeCmds("cm")
+        with pytest.raises(RuntimeError, match="Invalid unit name"):
+            fake.currentUnit(linear="furlong")
+        assert fake.set_calls == []
+        assert fake.linear == "cm"
+
+    def test_the_angle_fake_answers_only_the_angle_query(self):
+        fake = FakeAngleCmds("deg")
+        assert fake.currentUnit(query=True, angle=True) == "deg"
+        with pytest.raises(AssertionError, match="linear"):
+            fake.currentUnit(query=True, linear=True)
+        with pytest.raises(AssertionError, match="time"):
+            fake.currentUnit(query=True, time=True)
+        with pytest.raises(AssertionError, match="only query"):
+            fake.currentUnit(angle="rad")

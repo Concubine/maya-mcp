@@ -32,6 +32,77 @@ class FakeCmds:
         # topology, so the fake stays a no-op by default - edge_count never
         # moves - to exercise sculpt.py's changed-anything guard.
         self.edge_count = 12
+        # DG nodes with no DAG path of their own: the deformer that cmds
+        # .nonLinear/lattice/sculpt returns as nodes[0]. cmds.ls does not list
+        # them the way it lists transforms, but getAttr/setAttr address them,
+        # so _live has to know they exist (#799).
+        self.dg_nodes = set()
+        # #799 contract 1: what stopped existing. `delete` used to drop a
+        # transform from `objects` and leave its shape entry standing, so
+        # nodeType went on answering about a shape whose transform was gone -
+        # the exact blind spot that hid #796's first blocking defect.
+        self.deleted = []
+        # #799 contract 2: plug -> the node feeding it. setAttr and xform
+        # refuse a static write to a connected or locked plug, and to a
+        # compound whose CHILD is fed. Empty by default: every pre-existing
+        # test here writes to something it just built.
+        self.connected_plugs = {}
+
+    # --- existence --------------------------------------------------------
+    def _live(self, name):
+        node = name.split(".")[0]      # ".vtx[*]" / ".curvature" name a node
+        known = (list(self.objects) + [s for s, _k in self.shapes.values()]
+                 + list(self.dg_nodes))
+        if node in known:
+            return True
+        # An ABSOLUTE path names one node and nothing else; a short name
+        # matches whatever cmds.ls would match.
+        if node.startswith("|"):
+            return False
+        return any(n.split("|")[-1] == node for n in known)
+
+    def _require(self, name):
+        """#799 contract 1: real Maya raises "No object matches name" for any
+        query about a node it no longer has. Answering a default instead is
+        what let #796 ship a nodeType call on a node the same handler had
+        just deleted."""
+        if not self._live(name):
+            raise RuntimeError("No object matches name: %s" % name.split(".")[0])
+
+    def _write_blocker(self, plug):
+        """The connection that makes a static write to `plug` raise, or None.
+
+        Maya refuses setAttr/xform on a connected or locked plug AND on a
+        compound whose CHILD is connected - the asymmetry #796 measured on
+        the live rig.
+        """
+        if plug in self.connected_plugs:
+            return plug
+        node, _, attr = plug.rpartition(".")
+        # rotatePivot is a compound with X/Y/Z children like the other three,
+        # and modeling.transform writes one. The four copies of this helper
+        # disagreed on that single entry (#799 round 2), which is how the
+        # next reader concludes Maya's behaviour differs by handler. They
+        # match now.
+        compounds = ("translate", "rotate", "scale", "rotatePivot")
+        if attr in compounds:
+            for child in ("%s.%s%s" % (node, attr, ax) for ax in "XYZ"):
+                if child in self.connected_plugs:
+                    return child
+        elif attr[:-1] in compounds and attr[-1] in "XYZ":
+            parent = "%s.%s" % (node, attr[:-1])
+            if parent in self.connected_plugs:
+                return parent
+        return None
+
+    def _refuse_static_write(self, command, plug):
+        blocker = self._write_blocker(plug)
+        if blocker:
+            raise RuntimeError(
+                "%s: The attribute '%s' is locked or connected and cannot be "
+                "modified (%s feeds it)"
+                % (command, plug, self.connected_plugs[blocker])
+            )
 
     def objExists(self, name):
         return any(o == name or o.split("|")[-1] == name for o in self.objects)
@@ -50,6 +121,12 @@ class FakeCmds:
         flat = []
         for a in args:
             flat.extend(a) if isinstance(a, list) else flat.append(a)
+        # #799 contract 1: selecting a node Maya no longer has raises. That
+        # matters here because _bridge RESTORES a selection it captured
+        # before running polyBridgeEdge, and nothing guarantees every node in
+        # it survived the operation.
+        for entry in flat:
+            self._require(entry)
         self.selection = flat
 
     def polyBridgeEdge(self, constructionHistory=False):
@@ -59,6 +136,7 @@ class FakeCmds:
         return list(self.selection)
 
     def listRelatives(self, node, shapes=False, children=False, fullPath=False, noIntermediate=False):
+        self._require(node)
         if shapes:
             assert shapes and fullPath and noIntermediate
             entry = self.shapes.get(node)
@@ -71,10 +149,15 @@ class FakeCmds:
         ] or None
 
     def nodeType(self, node):
+        # #799 contract 1: a node that has stopped existing raises the way
+        # Maya raises, rather than falling through to an AssertionError that
+        # reads as a fixture problem - or, for a shape whose transform was
+        # deleted, still answering "mesh" from a stale entry.
+        self._require(node)
         for shape, ntype in self.shapes.values():
             if shape == node:
                 return ntype
-        raise AssertionError("unexpected nodeType call")
+        return "transform"
 
     def polyCube(self, name=None, constructionHistory=False, **kw):
         return self._create("polyCube", name, kw)
@@ -90,6 +173,7 @@ class FakeCmds:
         return [name, name + "Shape"]
 
     def getAttr(self, plug, type=False):
+        self._require(plug)
         assert type, "the fake only serves type queries"
         return "doubleAngle" if plug.split(".")[-1] in self.angle_attrs else "double"
 
@@ -98,6 +182,18 @@ class FakeCmds:
         return self.angle_unit
 
     def xform(self, name, **kw):
+        self._require(name)
+        if not kw.get("query"):
+            # #799 contract 2: an xform write lands on the same plugs setAttr
+            # writes, and Maya refuses it on a connected or locked one - the
+            # second of #796's three blocking defects, in the call this
+            # module makes most often.
+            for key, channel in (("translation", "translate"),
+                                 ("rotation", "rotate"), ("scale", "scale")):
+                if key in kw:
+                    self._refuse_static_write("xform", "%s.%s" % (name, channel))
+            if "pivots" in kw:
+                self._refuse_static_write("xform", name + ".rotatePivot")
         if kw.get("query"):
             if ".vtx[" in name:
                 built = any(c[0] in ("nonLinear", "lattice", "sculpt") for c in self.calls)
@@ -117,12 +213,25 @@ class FakeCmds:
         self.calls.append(("xform", name, kw))
 
     def delete(self, *names, **kw):
+        for n in names:
+            self._require(n)
         self.calls.append(("delete", names))
         if not kw.get("constructionHistory"):
             for n in names:
-                self.objects.discard(n)
+                # Resolve a short name to the path it actually names, and take
+                # the SHAPE with it: leaving the shape entry behind is what
+                # kept nodeType answering "mesh" about a deleted mesh (#799).
+                long = next((o for o in self.objects
+                             if o == n or o.split("|")[-1] == n), None)
+                if long is None:
+                    continue
+                self.objects.discard(long)
+                self.shapes.pop(long, None)
+                self.deleted.append(long)
 
     def group(self, *names, name=None):
+        for n in names:
+            self._require(n)
         self.calls.append(("group", names, name))
         long_name = "|" + name
         self.objects.add(long_name)
@@ -136,9 +245,15 @@ class FakeCmds:
             if child in self.xf:
                 self.xf[new_long] = self.xf[child]
                 del self.xf[child]
+            # The shape travels with its transform: keeping it filed under the
+            # pre-group path would leave a path that no longer resolves
+            # answering queries (#799).
+            if child in self.shapes:
+                self.shapes[new_long] = self.shapes.pop(child)
         return name
 
     def duplicate(self, source, name=None, returnRootsOnly=False):
+        self._require(source)
         self.calls.append(("duplicate", source, name))
         long_name = "|" + name
         self.objects.add(long_name)
@@ -146,28 +261,39 @@ class FakeCmds:
         return [name]
 
     def setAttr(self, attr, value):
+        self._require(attr)
+        self._refuse_static_write("setAttr", attr)
         self.calls.append(("setAttr", attr, value))
 
     def nonLinear(self, name, type=None, **kw):
+        self._require(name)
         self.calls.append(("nonLinear", name, type, kw))
         deformer_name = type + "1"
         handle_name = type + "Handle1"
+        # The deformer is a DG node with no DAG path; the handle is a
+        # transform. Both exist, and setAttr addresses the first (#799).
+        self.dg_nodes.add(deformer_name)
         self.objects.add("|" + handle_name)
         return [deformer_name, handle_name]
 
     def lattice(self, name, divisions=None, objectCentered=None, **kw):
+        self._require(name)
         self.calls.append(("lattice", name, divisions, objectCentered, kw))
+        self.dg_nodes.add("ffd1")
         self.objects.add("|ffd1Lattice")
         self.objects.add("|ffd1Base")
         return ["ffd1", "ffd1Lattice", "ffd1Base"]
 
     def sculpt(self, name, **kw):
+        self._require(name)
         self.calls.append(("sculpt", name, kw))
+        self.dg_nodes.add("sculpt1")
         self.objects.add("|sculptor1")
         self.objects.add("|sculpt1StretchOrigin")
         return ["sculpt1", "sculptor1", "sculpt1StretchOrigin"]
 
     def polyEvaluate(self, name, face=False, triangle=False, vertex=False, edge=False):
+        self._require(name)
         self.calls.append(("polyEvaluate", name, face, triangle, vertex, edge))
         if face:
             return self.face_count
@@ -180,6 +306,7 @@ class FakeCmds:
         raise AssertionError("unexpected polyEvaluate call")
 
     def polySelect(self, name, edgeRing=None):
+        self._require(name)
         self.calls.append(("polySelect", name, edgeRing))
 
     def polySplitRing(self, rootEdge=None, splitType=None, weight=None,
@@ -192,21 +319,34 @@ class FakeCmds:
         # fix-review) - this is what exercises the changed-anything guard.
 
     def polySplit(self, name, insertpoint=None, constructionHistory=False):
+        self._require(name)
         self.calls.append(("polySplit", name, insertpoint))
         # No-op by default, for the same reason as polySplitRing above.
 
     def polyReduce(self, name, percentage=None, constructionHistory=False):
+        self._require(name)
         self.calls.append(("polyReduce", name, percentage))
         self.reduced_percentage = percentage
 
     def polyMergeVertex(self, name, distance=None):
+        self._require(name)
         self.calls.append(("polyMergeVertex", name, distance))
 
     def polyNormal(self, name, normalMode=None, constructionHistory=False):
+        self._require(name)
         self.calls.append(("polyNormal", name, normalMode))
 
     def makeIdentity(self, name, apply=None, translate=None, rotate=None, scale=None):
+        self._require(name)
         self.calls.append(("makeIdentity", name, apply, translate, rotate, scale))
+        # #799 contract 3: a freeze is not a no-op. It RESETS THE PIVOT TO
+        # THE WORLD ORIGIN - measured in this repo for exactly this call
+        # (docs/superpowers/plans/2026-08-15-golem-articulated.md: "mesh_
+        # cleanup defaults freeze_transforms=True, which resets pivots to the
+        # origin"), and the reason assemble.py orders its pivot writes after
+        # combine.unite. test_assemble.py's fake has modelled it all along;
+        # the three doubles of this call now agree.
+        self.pivots.pop(name, None)
 
 
 @pytest.fixture(autouse=True)
@@ -238,7 +378,11 @@ def test_bridge_restores_the_users_selection(monkeypatch):
     # polyBridgeEdge reads the active selection, so bridge is the one op that
     # must touch it - but an artist's live selection has to survive the call.
     # It previously ended with select(clear=True), silently discarding it.
-    fake = FakeCmds(objects={"|col"}, shapes={"|col": ("|col|colShape", "mesh")})
+    # The two selected nodes are put in the scene, not just in `selection`:
+    # cmds.ls(selection=True) cannot hand back names the scene does not
+    # contain, and cmds.select refuses to restore one that is gone (#799).
+    fake = FakeCmds(objects={"|col", "|golem|torso", "|golem|head"},
+                    shapes={"|col": ("|col|colShape", "mesh")})
     monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
     fake.selection = ["|golem|torso", "|golem|head"]
 
@@ -512,6 +656,29 @@ def test_transform_pivot_rejects_bad_shape(monkeypatch):
     with pytest.raises(HandlerError) as exc:
         modeling.transform({"names": ["|a"], "pivot": [1.0, 2.0]})
     assert "pivot" in str(exc.value)
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "#799: a constrained/driven translate plug REFUSES the write in Maya - "
+    "cmds.xform raises 'locked or connected and cannot be modified', the "
+    "second of #796's three blocking defects. transform writes one object at "
+    "a time with no guard, so the raw RuntimeError escapes as a traceback "
+    "AND the earlier names in the list are already moved, with no report of "
+    "the partial write. delete_objects promises all-or-nothing on the same "
+    "shape of input; transform does not."))
+def test_transform_is_all_or_nothing_when_a_plug_refuses_the_write(monkeypatch):
+    fake = FakeCmds(objects={"|a", "|b"})
+    # What a parentConstraint, an anim layer or a set-driven key leaves on a
+    # rigged object. Only ONE child of the compound is fed, which is enough:
+    # Maya refuses the whole compound write.
+    fake.connected_plugs["|b.translateX"] = "|b_parentConstraint1"
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError) as exc:
+        modeling.transform({"names": ["|a", "|b"], "translate": [1.0, 0.0, 0.0]})
+    assert "|b" in str(exc.value)
+    assert not [c for c in fake.calls if c[0] == "xform"], (
+        "|a was moved before the refusal was discovered"
+    )
 
 
 def test_transform_still_refuses_an_empty_call(monkeypatch):
@@ -1218,6 +1385,23 @@ def test_mesh_cleanup_freeze_transforms_false_skips_makeIdentity(monkeypatch):
     assert not any(c[0] == "makeIdentity" for c in fake.calls)
 
 
+@pytest.mark.xfail(strict=True, reason=(
+    "#799: freeze_transforms defaults to true, and makeIdentity RESETS THE "
+    "PIVOT TO THE WORLD ORIGIN - measured for this exact call in "
+    "docs/superpowers/plans/2026-08-15-golem-articulated.md. mesh_cleanup "
+    "returns warnings: [] and never says so, which is what forced the #601 "
+    "golem run to add a second pass re-placing all 29 chunk pivots by hand."))
+def test_mesh_cleanup_reports_the_pivot_its_freeze_threw_away(monkeypatch):
+    fake = _mesh_fake("|dirty")
+    fake.pivots["|dirty"] = (0.0, 5.0, 0.0)   # the rig point the caller placed
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    monkeypatch.setattr(meshcheck, "mesh_stats", _fake_mesh_stats([]))
+    result = modeling.mesh_cleanup({"mesh": "|dirty"})
+    # Maya has moved it; that half is not in dispute.
+    assert fake.pivots.get("|dirty") is None
+    assert any("pivot" in w for w in result["warnings"])
+
+
 def test_mesh_cleanup_delete_history_false_skips_delete(monkeypatch):
     fake = _mesh_fake("|dirty")
     monkeypatch.setattr(modeling, "_cmds", lambda: fake)
@@ -1267,3 +1451,117 @@ def test_every_primitive_size_is_passed_explicitly_never_defaulted(monkeypatch):
         assert size_flags & set(kwargs), (
             "%s relies on Maya's default size, which is in the INTERNAL unit" % kind
         )
+
+
+class TestTheFakeRefusesWhatMayaRefuses:
+    """The regression barrier for #799's hardening of THIS fake.
+
+    Round 1 taught the fake to refuse what Maya refuses. A round-2 review
+    then measured that forcing `_live` to True and neutering
+    `_write_blocker` - a complete revert to the answers-anything fake -
+    left the whole suite green, because not one assertion read either. Each
+    test below pins one contract point, so loosening the fake goes RED here
+    rather than silently.
+    """
+
+    def test_a_query_about_a_node_that_never_existed_raises(self):
+        fake = FakeCmds()
+        with pytest.raises(RuntimeError):
+            fake.nodeType("|ghost")
+        with pytest.raises(RuntimeError):
+            fake.xform("|ghost", query=True, worldSpace=True, translation=True)
+        with pytest.raises(RuntimeError):
+            fake.polyEvaluate("|ghost", face=True)
+        with pytest.raises(RuntimeError):
+            fake.setAttr("|ghost.translateX", 1.0)
+
+    def test_a_query_about_a_deleted_node_raises_shape_included(self):
+        fake = _mesh_fake()
+        assert fake.nodeType("|blob|blobShape") == "mesh"
+        fake.delete("|blob")
+        with pytest.raises(RuntimeError):
+            fake.nodeType("|blob")
+        # The shape went with its transform. Leaving it behind is what kept
+        # nodeType answering "mesh" about a deleted mesh.
+        with pytest.raises(RuntimeError):
+            fake.nodeType("|blob|blobShape")
+
+    def test_a_history_only_delete_leaves_the_node_alive(self):
+        fake = _mesh_fake()
+        fake.delete("|blob", constructionHistory=True)
+        assert fake.nodeType("|blob|blobShape") == "mesh"
+        assert fake.deleted == []
+
+    def test_a_name_freed_by_a_delete_is_live_again_once_recreated(self):
+        # No permanent tombstone: Maya forgets a name the moment the node is
+        # gone, and a fake that remembers hides every re-creation.
+        fake = _mesh_fake()
+        fake.delete("|blob")
+        fake.objects.add("|blob")
+        assert fake.nodeType("|blob") == "transform"
+
+    def test_selecting_a_node_that_is_gone_raises(self):
+        # sculpt._bridge captures a selection, runs polyBridgeEdge and
+        # RESTORES it; nothing guarantees every node in it survived.
+        fake = FakeCmds(objects={"|a"})
+        fake.select("|a")
+        with pytest.raises(RuntimeError):
+            fake.select(["|a", "|gone"])
+
+    def test_a_deformer_is_a_dg_node_the_fake_answers_about(self):
+        # The strict direction is a defect too: cmds.nonLinear returns a DG
+        # node with no DAG path, and setAttr addresses it by bare name. A
+        # fake that refused it would refuse a call deform.py legitimately
+        # makes.
+        fake = FakeCmds(objects={"|blob"})
+        deformer, handle = fake.nonLinear("|blob", type="bend")
+        assert fake.ls(deformer, long=True) == []      # no DAG path of its own
+        assert fake.ls(handle, long=True) == ["|bendHandle1"]
+        fake.setAttr(deformer + ".curvature", 30.0)
+        assert ("setAttr", "bend1.curvature", 30.0) in fake.calls
+
+    def test_a_write_to_a_connection_fed_plug_raises_both_ways(self):
+        # A compound write when a CHILD is fed...
+        fake = FakeCmds(objects={"|a"})
+        fake.connected_plugs["|a.translateX"] = "|a_parentConstraint1"
+        with pytest.raises(RuntimeError):
+            fake.xform("|a", worldSpace=True, translation=(1.0, 0.0, 0.0))
+        assert not [c for c in fake.calls if c[0] == "xform"]
+        # ...and a CHILD write when the compound is fed.
+        other = FakeCmds(objects={"|a"})
+        other.connected_plugs["|a.scale"] = "|a_scaleBlend"
+        with pytest.raises(RuntimeError):
+            other.setAttr("|a.scaleY", 2.0)
+        assert other._write_blocker("|a.scaleY") == "|a.scale"
+
+    def test_a_pivot_write_to_a_fed_rotatepivot_raises_both_ways(self):
+        fake = FakeCmds(objects={"|a"})
+        fake.connected_plugs["|a.rotatePivotX"] = "pc1"
+        with pytest.raises(RuntimeError):
+            fake.xform("|a", worldSpace=True, pivots=(1.0, 2.0, 3.0))
+        assert fake.pivots == {}
+        child_fed = FakeCmds(objects={"|a"})
+        child_fed.connected_plugs["|a.rotatePivot"] = "pc1"
+        assert child_fed._write_blocker("|a.rotatePivotZ") == "|a.rotatePivot"
+
+    def test_a_freeze_throws_the_live_pivot_away(self):
+        fake = FakeCmds(objects={"|a"})
+        fake.xform("|a", worldSpace=True, pivots=(1.0, 2.0, 3.0))
+        assert fake.pivots["|a"] == (1.0, 2.0, 3.0)
+        fake.makeIdentity("|a", apply=True)
+        assert fake.xform("|a", query=True, worldSpace=True,
+                          rotatePivot=True) == [0, 0, 0]
+
+    def test_a_grouped_child_keeps_its_shape_at_the_new_path(self):
+        # cmds.group RENAMES: the old absolute path names nothing afterwards,
+        # and the shape travels with the transform rather than staying filed
+        # under a path that no longer resolves.
+        fake = _mesh_fake()
+        fake.group("|blob", name="rig")
+        with pytest.raises(RuntimeError):
+            fake.nodeType("|blob")
+        assert fake.nodeType("|rig|blob") == "transform"
+        # The shape entry moved with the transform, so it is still reachable
+        # rather than filed under a path that no longer resolves.
+        assert fake.shapes["|rig|blob"] == ("|blob|blobShape", "mesh")
+        assert fake.nodeType("|blob|blobShape") == "mesh"

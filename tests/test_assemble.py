@@ -17,16 +17,124 @@ class FakeCmds:
         self.shapes = {}
         self.calls = []
         self.attrs = {}
+        # #799: nodes Maya no longer has - deleted outright, consumed by
+        # polyUnite, or renamed away. `deleted` used to record history-only
+        # deletes too, which would make every tapered part read as vanished;
+        # it now holds exactly what stopped existing, the way test_clip.py's
+        # fake does. The ("delete", node, True) entry in `calls` is what a
+        # history delete leaves behind.
         self.deleted = []
         self.uv_calls = []
         self.fail_on = None
         self.pivots = {}
+        # #799 contract 2: plug -> the node feeding it. A fed plug refuses a
+        # static write, and so does a compound whose child is fed. Empty by
+        # default: nothing assemble builds is connected to anything, so every
+        # pre-existing test writes freely. A test that wants the refusal sets
+        # an entry.
+        self.connected_plugs = {}
+        # #799 contract 3: shape -> the shading groups it belongs to.
+        # listSets used to answer [] unconditionally, which is why the
+        # multi-shader collapse warning in combine.unite has no test at all.
+        self.sg_members = {}
+        # shading group -> members, as cmds.sets(sg, query=True) reports them.
+        self.set_members = {}
+        # DG nodes with no DAG path of their own - a shadingEngine is one.
+        # cmds.ls does not list them the way it lists transforms, but
+        # cmds.sets and cmds.listConnections address them by name, so _live
+        # has to know they exist (#799 round 2: refusing a shading group as
+        # if it were a missing DAG node is wrong in the STRICT direction, and
+        # it made ensure_object_shading's healthy branch untestable).
+        self.dg_nodes = set()
+        # node/plug -> connections, for the typed listConnections queries.
+        self.connections = {}
+        # node -> world bounding box. Per node, not one constant for the whole
+        # scene (#799 round 2): an origin-centred box for everything makes
+        # pivot="center" indistinguishable from pivot="origin" and from a
+        # pivot that was never placed - the defect fixed in test_combine.py's
+        # fake and left standing here, where the same code path runs.
+        self.bboxes = {}
 
     def _add(self, name, kind="mesh"):
         long = "|" + name.lstrip("|")
         self.objects.append(long)
         self.shapes[long] = long + "Shape"
         return long
+
+    # --- existence -------------------------------------------------------
+    # #799 contract 1: real Maya answers no query about a node it no longer
+    # has - it raises "No object matches name". The fake used to answer
+    # anything, which is the shape that hid #796's first blocking defect (a
+    # nodeType asked about a node the same handler had just deleted). Every
+    # modelled query below goes through _require first.
+    def _live(self, name):
+        node = name.split(".")[0]      # a component/plug names its node
+        known = (list(self.objects) + list(self.shapes.values())
+                 + list(self.dg_nodes))
+        if node in known:
+            return True
+        # An ABSOLUTE path names one node and nothing else; a short name
+        # matches the way cmds.ls matches it.
+        if node.startswith("|"):
+            return False
+        return any(n.split("|")[-1] == node for n in known)
+
+    def _require(self, name):
+        if not self._live(name):
+            raise RuntimeError("No object matches name: %s" % name.split(".")[0])
+
+    def add_shading_group(self, sg, members=()):
+        """Declare a shadingEngine and who is in it, the way a scene has one.
+
+        Registers it as a DG node too, because `cmds.sets(sg, query=True)` is
+        a call Maya ANSWERS: a fake that refuses it is wrong in the strict
+        direction, and the only way round it would be to put the SG in
+        `objects`, where cmds.ls and naming.unique_name would then see it -
+        a lie about the scene (#799 round 2).
+        """
+        self.dg_nodes.add(sg)
+        self.set_members[sg] = list(members)
+        for member in members:
+            node = member.split(".")[0]
+            self.sg_members.setdefault(node, [])
+            if sg not in self.sg_members[node]:
+                self.sg_members[node].append(sg)
+
+    def _write_blocker(self, plug):
+        """The connection that makes a static write to `plug` raise, or None.
+
+        Maya refuses setAttr/xform on a connected plug AND on a compound whose
+        CHILD is connected - the asymmetry #796 measured and this fake now
+        carries, so a handler that writes a driven channel cannot look fine
+        here and raise in a live session.
+        """
+        if plug in self.connected_plugs:
+            return plug
+        node, _, attr = plug.rpartition(".")
+        # rotatePivot is a compound with X/Y/Z children like the other three,
+        # and a pivot write is exactly the write this module makes most - the
+        # four copies of this helper disagreed on that one entry (#799 round
+        # 2), which is how the next reviewer concludes Maya's behaviour
+        # differs by handler. They match now.
+        compounds = ("translate", "rotate", "scale", "rotatePivot")
+        if attr in compounds:
+            for child in ("%s.%s%s" % (node, attr, ax) for ax in "XYZ"):
+                if child in self.connected_plugs:
+                    return child
+        elif attr[:-1] in compounds and attr[-1] in "XYZ":
+            parent = "%s.%s" % (node, attr[:-1])
+            if parent in self.connected_plugs:
+                return parent
+        return None
+
+    def _refuse_static_write(self, command, plug):
+        blocker = self._write_blocker(plug)
+        if blocker:
+            raise RuntimeError(
+                "%s: The attribute '%s' is locked or connected and cannot be "
+                "modified (%s feeds it)"
+                % (command, plug, self.connected_plugs[blocker])
+            )
 
     # --- names
     def ls(self, pattern=None, long=False, **kw):
@@ -40,15 +148,18 @@ class FakeCmds:
 
     def listRelatives(self, node, shapes=False, fullPath=False,
                       noIntermediate=False, **kw):
+        self._require(node)
         if shapes and node in self.shapes:
             return [self.shapes[node]]
         return None
 
     def nodeType(self, node):
-        return "mesh" if node.endswith("Shape") else "transform"
+        self._require(node)
+        return "mesh" if node in self.shapes.values() else "transform"
 
     def rename(self, node, new):
-        self.objects.remove(node)
+        self._require(node)
+        self.objects.remove(node)      # the old path stops resolving (#799)
         renamed = "|" + new
         self.objects.append(renamed)
         self.shapes[renamed] = self.shapes.pop(node, renamed + "Shape")
@@ -91,6 +202,16 @@ class FakeCmds:
 
     # --- transforms
     def xform(self, node, **kw):
+        self._require(node)
+        if not kw.get("query"):
+            # #799 contract 2: xform is a static write to the same plugs
+            # setAttr refuses, and refuses on the same terms.
+            for key, channel in (("translation", "translate"),
+                                 ("rotation", "rotate"), ("scale", "scale")):
+                if key in kw:
+                    self._refuse_static_write("xform", "%s.%s" % (node, channel))
+            if "pivots" in kw:
+                self._refuse_static_write("xform", node + ".rotatePivot")
         if kw.get("query"):
             if kw.get("rotatePivot"):
                 # Logged separately from the (untouched) generic query
@@ -117,9 +238,11 @@ class FakeCmds:
         return None
 
     def exactWorldBoundingBox(self, node):
-        return [-1.5, -1.5, -1.5, 1.5, 1.5, 1.5]
+        self._require(node)
+        return list(self.bboxes.get(node, [-1.5, -1.5, -1.5, 1.5, 1.5, 1.5]))
 
     def makeIdentity(self, node, **kw):
+        self._require(node)
         self.calls.append(("freeze", node))
         # Models the real Maya gotcha this module's own docstring names:
         # freeze resets pivots to the world origin. Without this, a refactor
@@ -130,6 +253,7 @@ class FakeCmds:
 
     # --- deformer
     def nonLinear(self, node, type=None, **kw):
+        self._require(node)
         if self.fail_on == "flare":
             raise RuntimeError("forced failure creating flare")
         self.calls.append(("nonLinear", node, type))
@@ -138,17 +262,21 @@ class FakeCmds:
         return [deformer, handle]
 
     def setAttr(self, attr, *value, **kw):
+        self._require(attr)
+        self._refuse_static_write("setAttr", attr)
         self.attrs[attr] = value[0] if len(value) == 1 else value
 
     def delete(self, node, **kw):
+        self._require(node)
         self.calls.append(("delete", node, kw.get("constructionHistory")))
-        self.deleted.append(node)
         if not kw.get("constructionHistory") and node in self.objects:
             self.objects.remove(node)
             self.shapes.pop(node, None)
+            self.deleted.append(node)
 
     # --- UVs
     def polyAutoProjection(self, shape, **kw):
+        self._require(shape)
         self.uv_calls.append(("project", shape, kw.get("scaleMode")))
 
     def currentUnit(self, query=False, linear=None):
@@ -159,15 +287,19 @@ class FakeCmds:
         return "cm"
 
     def polyProjection(self, comp, **kw):
+        self._require(comp)
         self.uv_calls.append(("planar", comp, None))
 
     def polyNormalizeUV(self, comp, **kw):
+        self._require(comp)
         self.uv_calls.append(("normalize", comp, None))
 
     def polyEditUV(self, comp, **kw):
+        self._require(comp)
         self.uv_calls.append(("edit", comp, kw))
 
     def polyEvaluate(self, shape, **kw):
+        self._require(shape)
         if kw.get("boundingBox2d"):
             return [(0.0, 1.0), (0.0, 1.0)]
         if kw.get("triangle"):
@@ -178,26 +310,48 @@ class FakeCmds:
             return 6
         if kw.get("shell"):
             return 1
-        return 0
+        # #799 contract 3: an unmodelled flag used to come back as 0 rather
+        # than failing, which is a plausible-looking count no test can catch.
+        raise AssertionError("unmodelled polyEvaluate flags: %r" % (kw,))
 
     # --- merging
     def polyUnite(self, members, **kw):
         name = kw.get("name")
+        for m in members:
+            self._require(m)
         self.calls.append(("polyUnite", tuple(members), name))
         for m in members:
+            # polyUnite CONSUMES its inputs. They stop existing here, so any
+            # later question about one has to raise (#799 contract 1) rather
+            # than answer from a stale entry.
             if m in self.objects:
                 self.objects.remove(m)
+                self.deleted.append(m)
             self.shapes.pop(m, None)
         return [self._add(name)]
 
     def listSets(self, object=None, type=None, **kw):
-        return []
+        self._require(object)
+        return list(self.sg_members.get(object, []))
 
     def sets(self, *args, **kw):
-        return "|set1"
+        target = args[0] if args else None
+        self._require(target)
+        if kw.get("query"):
+            return list(self.set_members.get(target, []))
+        sg = kw.get("forceElement")
+        # The SG a forceElement names exists from here on, so a later
+        # cmds.sets(sg, query=True) is answerable rather than refused.
+        self.dg_nodes.add(sg)
+        members = self.set_members.setdefault(sg, [])
+        if target not in members:
+            members.append(target)
+        self.sg_members[target] = [sg]
+        return sg
 
     def listConnections(self, plug, **kw):
-        return []
+        self._require(plug)
+        return list(self.connections.get(plug, []))
 
 
 @pytest.fixture
@@ -643,6 +797,12 @@ class TestPivots:
 
     def test_assemble_unlisted_chunks_keep_the_mode(self, monkeypatch):
         fake = FakeCmds()
+        # OFF-ORIGIN, deliberately: with the constant origin-centred box this
+        # fake used to hand back for every node, the "center" mode wrote
+        # (0,0,0) - byte-identical to the "origin" mode, so this test could
+        # not tell the mode it is named for from either of the other two
+        # (#799 round 2). Centre of [1,2,3]..[3,4,5] is (2,3,4).
+        fake.bboxes["|b"] = [1.0, 2.0, 3.0, 3.0, 4.0, 5.0]
         monkeypatch.setattr(assemble, "_cmds", lambda: fake)
         result = assemble.assemble({
             "name": "golem",
@@ -657,6 +817,31 @@ class TestPivots:
         by_chunk = {o["name"].split("|")[-1]: o for o in result["objects"]}
         assert by_chunk["a"]["pivot"] == [9.0, 9.0, 9.0]
         assert by_chunk["b"]["pivot"] != [9.0, 9.0, 9.0]
+        # The default mode really is "center": assert the WRITE, which is the
+        # only place the mode is still visible - the freeze that follows
+        # resets the live pivot to the origin whatever mode placed it.
+        assert ("xform", "|b",
+                {"worldSpace": True, "pivots": (2.0, 3.0, 4.0)}) in fake.calls
+
+    def test_assemble_pivot_origin_is_not_the_same_write_as_center(self, monkeypatch):
+        # The other half of the discrimination: the same scene under
+        # pivot="origin" writes (0,0,0), so a regression that ignored
+        # pivot_mode inside assemble's merge loop can no longer stay green.
+        fake = FakeCmds()
+        fake.bboxes["|b"] = [1.0, 2.0, 3.0, 3.0, 4.0, 5.0]
+        monkeypatch.setattr(assemble, "_cmds", lambda: fake)
+        assemble.assemble({
+            "name": "golem",
+            "parts": [
+                {"kind": "cube", "pos": [0, 3, 0], "dim": [1, 1, 1], "chunk": "b"},
+                {"kind": "cube", "pos": [0, 4, 0], "dim": [1, 1, 1], "chunk": "b"},
+            ],
+            "pivot": "origin",
+        })
+        assert ("xform", "|b",
+                {"worldSpace": True, "pivots": (0.0, 0.0, 0.0)}) in fake.calls
+        assert ("xform", "|b",
+                {"worldSpace": True, "pivots": (2.0, 3.0, 4.0)}) not in fake.calls
 
     def test_assemble_pivots_rejects_an_unknown_chunk(self, monkeypatch):
         fake = FakeCmds()
@@ -678,3 +863,159 @@ class TestPivots:
                 "parts": [{"kind": "cube", "pos": [0, 1, 0], "dim": [1, 1, 1], "chunk": "arm"}],
                 "pivots": {"arm": [0.0, 0.0]},
             })
+
+
+class TestTheFakeRefusesWhatMayaRefuses:
+    """The regression barrier for #799's hardening of THIS fake.
+
+    Round 1 taught the fake to refuse what Maya refuses. A round-2 review
+    then measured that reverting every one of those refusals - `_live`
+    forced to True, `_write_blocker` neutered - left the whole suite green,
+    because not one assertion read them. Each test below pins one contract
+    point, so loosening the fake goes RED here rather than silently.
+    """
+
+    def test_a_query_about_a_node_that_never_existed_raises(self):
+        fake = FakeCmds()
+        with pytest.raises(RuntimeError):
+            fake.nodeType("|ghost")
+        with pytest.raises(RuntimeError):
+            fake.exactWorldBoundingBox("|ghost")
+        with pytest.raises(RuntimeError):
+            fake.listRelatives("|ghost", shapes=True, fullPath=True)
+        with pytest.raises(RuntimeError):
+            fake.setAttr("|ghost.translateX", 1.0)
+
+    def test_a_query_about_a_deleted_node_raises(self):
+        fake = FakeCmds()
+        fake._add("part")
+        assert fake.nodeType("|part") == "transform"
+        fake.delete("|part")
+        with pytest.raises(RuntimeError):
+            fake.nodeType("|part")
+        with pytest.raises(RuntimeError):
+            fake.nodeType("|partShape")
+        with pytest.raises(RuntimeError):
+            fake.polyEvaluate("|partShape", triangle=True)
+
+    def test_a_history_only_delete_leaves_the_node_alive(self):
+        # The strict direction is a defect too: cmds.delete(ch=True) removes
+        # construction history, not the node, and every tapered part in this
+        # module gets one.
+        fake = FakeCmds()
+        fake._add("part")
+        fake.delete("|part", constructionHistory=True)
+        assert fake.nodeType("|part") == "transform"
+        assert fake.deleted == []
+
+    def test_a_node_polyunite_consumed_stops_answering(self):
+        fake = FakeCmds()
+        fake._add("a")
+        fake._add("b")
+        fake.polyUnite(["|a", "|b"], name="merged")
+        with pytest.raises(RuntimeError):
+            fake.nodeType("|a")
+        with pytest.raises(RuntimeError):
+            fake.polyAutoProjection("|bShape")
+        assert fake.nodeType("|merged") == "transform"
+
+    def test_a_renamed_away_path_stops_resolving(self):
+        fake = FakeCmds()
+        fake._add("part")
+        fake.rename("|part", "fist")
+        with pytest.raises(RuntimeError):
+            fake.nodeType("|part")
+        assert fake.nodeType("|fist") == "transform"
+
+    def test_a_name_freed_by_a_delete_is_live_again_once_recreated(self):
+        # No permanent tombstone: Maya has no memory of a name once the node
+        # is gone, and a fake that keeps one hides every re-creation.
+        fake = FakeCmds()
+        fake._add("part")
+        fake.delete("|part")
+        fake._add("part")
+        assert fake.nodeType("|part") == "transform"
+
+    def test_a_write_to_a_connection_fed_plug_raises_both_ways(self):
+        # A compound write when a CHILD is fed...
+        fake = FakeCmds()
+        fake._add("a")
+        fake.connected_plugs["|a.translateX"] = "|a_parentConstraint1"
+        with pytest.raises(RuntimeError):
+            fake.xform("|a", worldSpace=True, translation=(1.0, 0.0, 0.0))
+        # ...and a CHILD write when the compound is fed.
+        other = FakeCmds()
+        other._add("a")
+        other.connected_plugs["|a.scale"] = "|a_scaleBlend"
+        with pytest.raises(RuntimeError):
+            other.setAttr("|a.scaleY", 2.0)
+        assert other._write_blocker("|a.scaleY") == "|a.scale"
+
+    def test_a_pivot_write_to_a_fed_rotatepivot_raises_both_ways(self):
+        fake = FakeCmds()
+        fake._add("a")
+        fake.connected_plugs["|a.rotatePivotX"] = "pc1"
+        with pytest.raises(RuntimeError):
+            fake.xform("|a", worldSpace=True, pivots=(1.0, 2.0, 3.0))
+        assert fake.pivots == {}
+        child_fed = FakeCmds()
+        child_fed._add("a")
+        child_fed.connected_plugs["|a.rotatePivot"] = "pc1"
+        assert child_fed._write_blocker("|a.rotatePivotZ") == "|a.rotatePivot"
+
+    def test_an_unmodelled_polyevaluate_flag_refuses_rather_than_answering_0(self):
+        fake = FakeCmds()
+        fake._add("a")
+        with pytest.raises(AssertionError):
+            fake.polyEvaluate("|aShape", edge=True)
+
+    def test_a_freeze_throws_the_live_pivot_away(self):
+        fake = FakeCmds()
+        fake._add("a")
+        fake.xform("|a", worldSpace=True, pivots=(1.0, 2.0, 3.0))
+        assert fake.pivots["|a"] == (1.0, 2.0, 3.0)
+        fake.makeIdentity("|a", apply=True)
+        assert fake.xform("|a", query=True, worldSpace=True,
+                          rotatePivot=True) == [0.0, 0.0, 0.0]
+
+    def test_a_shading_group_is_a_node_the_fake_answers_about(self):
+        # The other direction of the same rule: a shadingEngine is a DG node
+        # with no DAG path, and cmds.sets(sg, query=True) is a call Maya
+        # ANSWERS. Refusing it as a missing DAG object would make the healthy
+        # branch of ensure_object_shading unreachable in this fixture.
+        fake = FakeCmds()
+        fake._add("a")
+        fake.add_shading_group("blinn1SG", ["|aShape"])
+        assert fake.sets("blinn1SG", query=True) == ["|aShape"]
+        assert fake.listSets(object="|aShape", type=1) == ["blinn1SG"]
+        assert "blinn1SG" not in fake.ls()
+
+    def test_a_chunk_already_on_one_shader_is_not_reassigned(self, fake):
+        # What the SG modelling buys: the healthy branch of the collapse.
+        # The merged node's shape is already the sole member of one SG, so
+        # unite must leave it alone rather than force-assigning
+        # initialShadingGroup over it.
+        fake.add_shading_group("blinn1SG", ["|armShape"])
+        result = assemble.assemble({
+            "name": "golem",
+            "parts": [
+                {"kind": "cube", "pos": [0, 1, 0], "dim": [1, 1, 1], "chunk": "arm"},
+                {"kind": "cube", "pos": [0, 2, 0], "dim": [1, 1, 1], "chunk": "arm"},
+            ],
+        })
+        assert result["warnings"] == []
+        assert fake.set_members == {"blinn1SG": ["|armShape"]}
+        assert "initialShadingGroup" not in fake.dg_nodes
+
+    def test_an_unshaded_chunk_is_force_assigned_instead(self):
+        # The contrast that makes the test above mean something: with no SG
+        # on the result, unite falls back to initialShadingGroup and the
+        # forceElement really runs.
+        fake = FakeCmds()
+        fake._add("a")
+        fake._add("b")
+        from maya_plugin.handlers import combine as combine_mod
+
+        out = combine_mod.unite(fake, ["|a", "|b"], "merged")
+        assert out["shading"] == {"sg": "initialShadingGroup", "repaired": True}
+        assert fake.set_members["initialShadingGroup"] == ["|mergedShape"]

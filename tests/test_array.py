@@ -30,6 +30,71 @@ class FakeCmds:
         self.xforms = {}          # long name -> dict of relative deltas applied
         self.parents = {}         # child -> parent
         self._dup_n = 0
+        # #799 contract 1: what stopped existing. cmds.parent and cmds.group
+        # RENAME as well as move, so the paths they invalidate belong here
+        # too - the fake already raised on a stale path handed to parent(),
+        # and now every other modelled query does the same.
+        self.deleted = []
+        # #799 contract 2: plug -> the node feeding it. A connected or locked
+        # plug refuses setAttr/xform/rotate, and so does a compound whose
+        # child is fed. Empty by default: every node array writes to is one
+        # it has just duplicated or grouped.
+        self.connected_plugs = {}
+        # long name -> (translate, rotate, scale) as a world-space query
+        # reports them. Modelled rather than three constants (#799 contract
+        # 3): with a constant answer ledger.check can never fire, so array's
+        # "moved outside maya-mcp" warning branch has no test at all.
+        self.xf = {}
+
+    # --- existence ---------------------------------------------------------
+    def _live(self, name):
+        node = name.split(".")[0]
+        known = list(self.objects) + [s for s, _k in self.shapes.values()]
+        if node in known:
+            return True
+        # An ABSOLUTE path names one node and nothing else, so a path
+        # cmds.group or cmds.parent has invalidated resolves to nothing -
+        # short names still match the way cmds.ls matches them.
+        if node.startswith("|"):
+            return False
+        return any(n.split("|")[-1] == node for n in known)
+
+    def _require(self, name):
+        """#799 contract 1: real Maya raises for a query about a node it does
+        not have. The fake used to answer defaults for anything - including a
+        path cmds.group or cmds.parent had just invalidated, which is the one
+        thing _mirror's re-resolve dance exists to avoid getting wrong."""
+        if not self._live(name):
+            raise RuntimeError("No object matches name: %s" % name.split(".")[0])
+
+    def _write_blocker(self, plug):
+        if plug in self.connected_plugs:
+            return plug
+        node, _, attr = plug.rpartition(".")
+        # rotatePivot is a compound with X/Y/Z children like the other three,
+        # and array.py writes one (line 287, cmds.xform(grp, pivots=...)).
+        # The four copies of this helper disagreed on that single entry
+        # (#799 round 2) - which is how a reader concludes Maya's behaviour
+        # differs by handler. They match now.
+        compounds = ("translate", "rotate", "scale", "rotatePivot")
+        if attr in compounds:
+            for child in ("%s.%s%s" % (node, attr, ax) for ax in "XYZ"):
+                if child in self.connected_plugs:
+                    return child
+        elif attr[:-1] in compounds and attr[-1] in "XYZ":
+            parent = "%s.%s" % (node, attr[:-1])
+            if parent in self.connected_plugs:
+                return parent
+        return None
+
+    def _refuse_static_write(self, command, plug):
+        blocker = self._write_blocker(plug)
+        if blocker:
+            raise RuntimeError(
+                "%s: The attribute '%s' is locked or connected and cannot be "
+                "modified (%s feeds it)"
+                % (command, plug, self.connected_plugs[blocker])
+            )
 
     # --- name resolution ---------------------------------------------------
     def ls(self, pattern=None, long=False, **kwargs):
@@ -43,6 +108,7 @@ class FakeCmds:
 
     # --- creation ----------------------------------------------------------
     def duplicate(self, source, name=None, returnRootsOnly=False, **kwargs):
+        self._require(source)
         self._dup_n += 1
         new = "|" + (name or ("%s_dup%d" % (source.split("|")[-1], self._dup_n)))
         self.objects.append(new)
@@ -50,6 +116,8 @@ class FakeCmds:
         return [new]
 
     def group(self, *members, **kwargs):
+        for m in members:
+            self._require(m)
         name = kwargs.get("name") or "group1"
         grp = "|" + name
         self.objects.append(grp)
@@ -68,8 +136,7 @@ class FakeCmds:
         return grp
 
     def parent(self, child, target=None, world=False, **kwargs):
-        if child not in self.objects:
-            raise RuntimeError("No object matches name: %s" % child)
+        self._require(child)
         self.calls.append(("parent", child))
         # Maya renames on reparent too: the new long path is rooted wherever
         # it lands (here, world) plus the child's short name. Keep
@@ -83,47 +150,71 @@ class FakeCmds:
         return [new_path]
 
     def delete(self, name, **kwargs):
+        self._require(name)
         self.calls.append(("delete", name))
-        if name in self.objects and not kwargs:
+        if not kwargs.get("constructionHistory") and name in self.objects:
             self.objects.remove(name)
+            self.deleted.append(name)
 
     # --- transforms --------------------------------------------------------
     def xform(self, name, query=False, **kwargs):
+        self._require(name)
         if query:
+            t, r, s = self.xf.get(name, ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0),
+                                         (1.0, 1.0, 1.0)))
             if kwargs.get("translation"):
-                return [0.0, 0.0, 0.0]
+                return list(t)
             if kwargs.get("rotation"):
-                return [0.0, 0.0, 0.0]
+                return list(r)
             if kwargs.get("scale"):
-                return [1.0, 1.0, 1.0]
+                return list(s)
             if kwargs.get("boundingBox"):
                 return [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]
             return [0.0, 0.0, 0.0]
+        # #799 contract 2: a worldSpace xform write lands on the same plugs
+        # setAttr writes, and Maya refuses it on a connected or locked one.
+        for key, channel in (("translation", "translate"),
+                             ("rotation", "rotate"), ("scale", "scale")):
+            if key in kwargs:
+                self._refuse_static_write("xform", "%s.%s" % (name, channel))
+        # ...and so does a PIVOT write, which array.py:287 makes on the group
+        # it hands back. Round 1 claimed the four fakes carried this idiom
+        # alike and this one did not have it at all (#799 round 2).
+        if "pivots" in kwargs:
+            self._refuse_static_write("xform", name + ".rotatePivot")
         self.calls.append(("xform", name))
         record = self.xforms.setdefault(name, [])
         record.append({k: v for k, v in kwargs.items() if k != "query"})
         return None
 
     def rotate(self, rx, ry, rz, name, **kwargs):
+        self._require(name)
+        self._refuse_static_write("rotate", name + ".rotate")
         self.calls.append(("rotate", name))
         self.xforms.setdefault(name, []).append(
             {"rotate": [rx, ry, rz], "pivot": kwargs.get("pivot")}
         )
 
     def setAttr(self, plug, *values, **kwargs):
+        self._require(plug)
+        self._refuse_static_write("setAttr", plug)
         self.calls.append(("setAttr", plug))
         self.attrs[plug] = values[0] if len(values) == 1 else list(values)
 
     def getAttr(self, plug, **kwargs):
+        self._require(plug)
         return self.attrs.get(plug, 0.0)
 
     def makeIdentity(self, name, **kwargs):
+        self._require(name)
         self.calls.append(("makeIdentity", name))
 
     def polyNormal(self, name, **kwargs):
+        self._require(name)
         self.calls.append(("polyNormal", name))
 
     def listRelatives(self, name, **kwargs):
+        self._require(name)
         if kwargs.get("children"):
             prefix = name + "|"
             children = [
@@ -137,10 +228,16 @@ class FakeCmds:
         return None
 
     def nodeType(self, name):
+        # #799 contract 3: the old unconditional `return "mesh"` could never
+        # fail a test - every unregistered node, and every node that had
+        # stopped existing, came back as a mesh. A registered shape answers
+        # its own type; a transform answers "transform"; anything else raises
+        # the way Maya does.
+        self._require(name)
         for shape, ntype in self.shapes.values():
             if shape == name:
                 return ntype
-        return "mesh"
+        return "transform"
 
 
 @pytest.fixture
@@ -555,3 +652,93 @@ class TestMirror:
         assert "mirror needs a single polygon mesh" in exc.value.hint
         # Fails fast: no duplicate was made and left behind in the scene.
         assert not any(op == "duplicate" for op, _ in f.calls)
+
+
+class TestTheFakeRefusesWhatMayaRefuses:
+    """The regression barrier for #799's hardening of THIS fake.
+
+    Round 1 taught the fake to refuse what Maya refuses. A round-2 review
+    then measured that forcing `_live` to True and neutering
+    `_write_blocker` - a complete revert - left the suite green, because no
+    assertion read either. Each test below pins one contract point, so
+    loosening the fake goes RED here.
+    """
+
+    def test_a_query_about_a_node_that_never_existed_raises(self):
+        fake = FakeCmds()
+        with pytest.raises(RuntimeError):
+            fake.nodeType("|ghost")
+        with pytest.raises(RuntimeError):
+            fake.duplicate("|ghost", name="copy")
+        with pytest.raises(RuntimeError):
+            fake.getAttr("|ghost.translateX")
+        with pytest.raises(RuntimeError):
+            fake.listRelatives("|ghost", children=True)
+
+    def test_a_query_about_a_deleted_node_raises(self):
+        fake = FakeCmds()
+        fake.delete("|tooth")
+        with pytest.raises(RuntimeError):
+            fake.nodeType("|tooth")
+        with pytest.raises(RuntimeError):
+            fake.polyNormal("|tooth")
+
+    def test_a_path_group_invalidated_stops_resolving(self):
+        # cmds.group RENAMES: |tooth becomes |row|tooth. The old absolute
+        # path names nothing, which is the whole reason array._mirror
+        # re-resolves rather than reusing the name it handed in.
+        fake = FakeCmds()
+        fake.group("|tooth", name="row")
+        with pytest.raises(RuntimeError):
+            fake.xform("|tooth", query=True, worldSpace=True, translation=True)
+        assert fake.nodeType("|row|tooth") == "transform"
+
+    def test_a_short_name_still_matches_the_way_cmds_ls_matches_it(self):
+        # The strict direction is a defect too: Maya resolves a unique short
+        # name, and a fake that insisted on absolute paths would refuse calls
+        # the handler legitimately makes.
+        fake = FakeCmds()
+        fake.group("|tooth", name="row")
+        assert fake.nodeType("tooth") == "transform"
+
+    def test_a_name_freed_by_a_delete_is_live_again_once_recreated(self):
+        fake = FakeCmds()
+        fake.delete("|tooth")
+        fake.objects.append("|tooth")
+        assert fake.nodeType("|tooth") == "transform"
+
+    def test_a_write_to_a_connection_fed_plug_raises_both_ways(self):
+        # A compound write when a CHILD is fed...
+        fake = FakeCmds()
+        fake.connected_plugs["|tooth.translateX"] = "|tooth_parentConstraint1"
+        with pytest.raises(RuntimeError):
+            fake.xform("|tooth", worldSpace=True, translation=(1.0, 0.0, 0.0))
+        assert fake.xforms == {}
+        # ...and a CHILD write when the compound is fed.
+        other = FakeCmds()
+        other.connected_plugs["|tooth.rotate"] = "|tooth_orientConstraint1"
+        with pytest.raises(RuntimeError):
+            other.setAttr("|tooth.rotateY", 90.0)
+        with pytest.raises(RuntimeError):
+            other.rotate(0.0, 90.0, 0.0, "|tooth")
+        assert other.attrs == {}
+
+    def test_a_pivot_write_to_a_fed_rotatepivot_raises_both_ways(self):
+        # array.py:287 writes cmds.xform(grp, worldSpace=True, pivots=...).
+        fake = FakeCmds()
+        fake.connected_plugs["|tooth.rotatePivotX"] = "pc1"
+        with pytest.raises(RuntimeError):
+            fake.xform("|tooth", worldSpace=True, pivots=(1.0, 2.0, 3.0))
+        assert fake.xforms == {}
+        child_fed = FakeCmds()
+        child_fed.connected_plugs["|tooth.rotatePivot"] = "pc1"
+        assert child_fed._write_blocker("|tooth.rotatePivotZ") == "|tooth.rotatePivot"
+
+    def test_nodetype_no_longer_calls_everything_a_mesh(self):
+        # The removed answers-anything fallback: an unregistered transform
+        # used to come back as "mesh", which is what let array's mirror guard
+        # pass on a group it could never have mirrored.
+        fake = FakeCmds(objects=("|rig",), shapes={})
+        assert fake.nodeType("|rig") == "transform"
+        mesh = FakeCmds()
+        assert mesh.nodeType("|toothShape") == "mesh"

@@ -29,10 +29,109 @@ class FakeCmds:
         self.bind_poses = []    # set by tests: dagPose(query=True, bindPose=True)
         self.positions = {}    # node long name -> [x, y, z] for xform queries
         self.matrices = {}     # node long name -> 16 floats for matrix queries
+        self.vertex_tables = {}  # mesh long -> flat [x,y,z,...] world points
+        self.shapes = {}       # transform long -> shape long (tests wire more)
+        self.deleted = []      # #799: what cmds.delete took away
+        self.driven_plugs = {}  # plug -> source plug (constraint, blend, SDK)
+        self.locked_plugs = set()          # plugs a rigger locked
+        self.string_attrs = {}             # node -> {attr: value}
+
+    # --- existence (#799) ------------------------------------------------
+    def _live(self):
+        """Every name some fixture actually put in this scene, in order.
+
+        #799 contract points 1 and 3. `ls` used to answer `[n]` for a name
+        nothing had ever created and `nodeType` defaulted to "joint", so a
+        typo, a stale long name, or a node this fake had DELETED resolved
+        and typed as a perfectly good joint. That is the shape of blindness
+        that let #796 ship a nodeType-after-delete crash: real Maya answers
+        "No object matches name" to every one of these.
+        """
+        out, seen = [], set()
+
+        def add(name):
+            if name and name not in seen:
+                seen.add(name)
+                out.append(name)
+
+        for n in self.objects:
+            add(n)
+        for child, parent in self.parents.items():
+            add(child)
+            add(parent)
+        for shape in self.shapes.values():
+            add(shape)
+        for sc in list(self.skin_clusters) + list(self.skin_history):
+            add(sc)
+        for sc, influences in self.skin_influences.items():
+            add(sc)
+            for j in influences:
+                add(j)
+        for sc, geometry in self.skin_geometry.items():
+            add(sc)
+            for g in geometry:
+                add(g)
+        for n in self.node_types:
+            add(n)
+        # An attribute cannot be set on a node that does not exist: a
+        # fixture writing attrs["|r|L_a.rotate"] has declared that joint.
+        for plug in self.attrs:
+            add(plug.split(".", 1)[0])
+        for node in self.string_attrs:
+            add(node)
+        # A curve exists only as a consequence of `curve_plugs`; a
+        # constraint/blend node only of `driven_plugs`. Both get asked for
+        # their nodeType by clip.partition_driven_keys and the blend walk.
+        for plug in getattr(self, "curve_plugs", ()):
+            add(self._curve_for(plug))
+        for src in self.driven_plugs.values():
+            add(src.split(".")[0])
+        return [n for n in out if n not in self.deleted]
+
+    def _resolve(self, name):
+        """Every LIVE long name `name` addresses. Maya's own resolution: a
+        unique short name is as good as a long one (cmds.joint returns the
+        SHORT name and the handler writes through it), and a component or
+        plug resolves iff its node does."""
+        node = name.split(".", 1)[0]
+        return [o for o in self._live()
+                if o == node or o.split("|")[-1] == node]
+
+    def _require(self, name):
+        if not self._resolve(name):
+            raise RuntimeError("No object matches name: %s" % name)
+
+    def _with_descendants(self, roots):
+        """Deleting a DAG node takes its children and its shape with it."""
+        out, frontier = [], list(roots)
+        while frontier:
+            n = frontier.pop()
+            if n in out:
+                continue
+            out.append(n)
+            frontier.extend(c for c, p in self.parents.items() if p == n)
+            shape = self.shapes.get(n)
+            if shape:
+                frontier.append(shape)
+        return out
+
+    def _revive(self, *names):
+        """A name is gone only until something CREATES it again. ROUND 2
+        (#799): a permanent tombstone is a fake wrong in the STRICT
+        direction - a node re-made under a deleted name would stay
+        invisible forever, and Maya has no such memory."""
+        for n in names:
+            while n in self.deleted:
+                self.deleted.remove(n)
+
+    @staticmethod
+    def _curve_for(plug):
+        return plug.replace("|", "_").replace(".", "_") + "_crv"
 
     # --- names
     def objExists(self, name):
-        return any(o.split("|")[-1] == name or o == name for o in self.objects)
+        return any(o.split("|")[-1] == name or o == name
+                   for o in self._live())
 
     def ls(self, pattern=None, long=False, type=None, **kw):
         if type == "skinCluster":
@@ -45,19 +144,36 @@ class FakeCmds:
             # list IS the filtered result - present only when a bind exists.
             nodes = pattern if isinstance(pattern, list) else ([pattern] if pattern else [])
             return list(nodes) if self.skin_history else []
+        live = self._live()
         if pattern is None:
-            return list(self.objects)
+            return live
         names = pattern if isinstance(pattern, list) else [pattern]
         out = []
         for n in names:
-            matches = [o for o in self.objects
-                      if o == n or o.split("|")[-1] == n]
-            out.extend(matches or [n])
+            # #799: NOT `matches or [n]`. Maya's `ls` returns nothing for a
+            # name that is not in the scene - inventing the name back made
+            # naming.require_object incapable of refusing anything.
+            if "." in n:
+                # A component or plug ("|hum.vtx[0]"): it resolves exactly
+                # when its node does, which is what the faces->vertices
+                # conversion asks about.
+                node = n.split(".", 1)[0]
+                if any(o == node or o.split("|")[-1] == node for o in live):
+                    out.append(n)
+                continue
+            out.extend(o for o in live
+                       if o == n or o.split("|")[-1] == n)
         return out
 
     def nodeType(self, node):
+        self._require(node)
         if node in self.node_types:
             return self.node_types[node]
+        if node.endswith("_crv"):
+            # What `curve_plugs` conjures is a ROTATION curve; answering
+            # "joint" for it left clip.partition_driven_keys bucketing it
+            # right by luck rather than by type (#799).
+            return "animCurveTA"
         # a shape node (by naming convention, "...Shape") is a mesh unless a
         # test says otherwise; anything else defaults to "joint" - the fake
         # never has to know about "transform" until a test asks for one.
@@ -78,55 +194,178 @@ class FakeCmds:
         name = kw["name"]
         parent = self.selection[0] if self.selection else None
         long = (parent + "|" + name) if parent else ("|" + name)
+        self._revive(long)
         self.objects.append(long)
         self.parents[long] = parent
         self.attrs[long + ".jointOrient"] = [(0.0, 0.0, 0.0)]
+        # ROUND 2 (#799): a created joint HAS a world position - `cmds.joint
+        # -position` places it - so record it instead of leaving the xform
+        # query to the invented [1,2,3] this fake used to answer.
+        self.positions.setdefault(long, [float(v) for v in kw["position"]])
         self.calls.append(("joint", name, tuple(kw["position"]), parent))
         return name
 
     def listRelatives(self, node, children=False, parent=False,
-                      allDescendents=False, type=None, fullPath=False, **kw):
+                      allDescendents=False, shapes=False, type=None,
+                      fullPath=False, **kw):
+        self._require(node)
         if parent:
             p = self.parents.get(node)
             return [p] if p else None
-        kids = [o for o, p in self.parents.items() if p == node]
+        if shapes:
+            # #799: `shapes=True` used to fall through to the CHILDREN
+            # branch, so any joint with a child answered a shape query -
+            # which made rigging._bound_meshes call a bare joint chain a
+            # set of bound meshes and measure vertex positions on it.
+            shape = self.shapes.get(node)
+            if shape is None or type not in (None, "mesh"):
+                return None
+            return [shape]
+        out = [o for o, p in self.parents.items() if p == node]
         if allDescendents:
-            out = []
-            frontier = list(kids)
+            walked = []
+            frontier = list(out)
             while frontier:
                 k = frontier.pop()
-                out.append(k)
+                walked.append(k)
                 frontier.extend(o for o, p in self.parents.items() if p == k)
-            return out or None
-        return kids or None
+            out = walked
+        if type is not None:
+            # #799: `type` was accepted and ignored. Maya matches DERIVED
+            # types, so a joint answers type="transform" - but a mesh SHAPE
+            # never does.
+            out = [k for k in out
+                   if (self.nodeType(k) == type
+                       or (type == "transform"
+                           and self.nodeType(k) != "mesh"))]
+        return out or None
+
+    # #799 contract point 2. MEASURED in #771 and #796: a plug a connection
+    # feeds - a constraint, a pairBlend, an anim layer, a driven key, a
+    # poseInterpolator - refuses a static write, and so does a LOCKED one;
+    # Maya raises "locked or connected and cannot be modified". A compound
+    # write refuses when any CHILD is fed, and a child write refuses when
+    # the connection landed on the compound. This fake wrote to anything,
+    # which is exactly why #796's compound-setAttr crash was invisible
+    # headlessly.
+    _COMPOUNDS = ("rotate", "translate", "scale", "jointOrient",
+                  "preferredAngle")
+
+    def _static_write_blocker(self, plug):
+        """What makes a static write to `plug` raise, or None."""
+        node, _, attr = plug.rpartition(".")
+        fed = set(getattr(self, "curve_plugs", ())) | set(self.driven_plugs)
+        candidates = [plug]
+        if attr in self._COMPOUNDS:
+            candidates += ["%s.%s%s" % (node, attr, ax) for ax in "XYZ"]
+        elif attr[:-1] in self._COMPOUNDS and attr[-1] in "XYZ":
+            candidates.append("%s.%s" % (node, attr[:-1]))
+        for candidate in candidates:
+            if candidate in self.locked_plugs:
+                return candidate + " (locked)"
+            if candidate in fed:
+                return self.driven_plugs.get(candidate,
+                                             self._curve_for(candidate))
+        return None
 
     def xform(self, node, query=False, worldSpace=False, translation=False,
               matrix=False, **kw):
+        self._require(node)
         if query and matrix:
             self.calls.append(("xform_matrix", node))
-            return self.matrices.get(
-                node, [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])
+            if node not in self.matrices:
+                # ROUND 2 (#799): an invented IDENTITY is a measurement no
+                # fixture made. Maya reads a real world matrix here; a fake
+                # that answers "unrotated, unmoved" for any node lets a
+                # handler's arithmetic look right against nothing.
+                raise AssertionError(
+                    "FakeCmds.xform: no matrix declared for %s - wire "
+                    "`fake.matrices` rather than inherit an identity (#799)"
+                    % node)
+            return list(self.matrices[node])
         if not query and not isinstance(translation, bool):
+            # An `xform -translation` is a static write to node.translate,
+            # and refuses on the same connections setAttr does (#799).
+            blocker = self._static_write_blocker(node + ".translate")
+            if blocker:
+                raise RuntimeError(
+                    "xform: The attribute '%s.translate' is locked or "
+                    "connected and cannot be modified (%s)"
+                    % (node, blocker))
             self.calls.append(("xform_set", node, tuple(translation)))
             return None
         self.calls.append(("xform_query", node))
-        return list(self.positions.get(node, [1.0, 2.0, 3.0]))
+        if node in self.positions:
+            return list(self.positions[node])
+        if node.endswith(".vtx[*]"):
+            # sculpt.vertex_positions asks a whole mesh for its points.
+            # ROUND 2 (#799): the [1,2,3] below answered this too, so every
+            # mesh in this file measured as ONE vertex that never moves -
+            # the fiction that made ten TestPoseIk displacement assertions
+            # green against nothing. `vertex_tables` is how a test declares
+            # a mesh's real points; an undeclared mesh has none to give.
+            return list(self.vertex_tables.get(node[:-len(".vtx[*]")], []))
+        if "." in node:
+            raise AssertionError(
+                "FakeCmds.xform: no position declared for the component %s "
+                "- it used to answer an invented [1,2,3] for any plug or "
+                "component of any live node (#799)" % node)
+        # A transform nothing has moved sits at the origin, which is what
+        # Maya answers - not the [1,2,3] this used to invent.
+        return [0.0, 0.0, 0.0]
 
     def setAttr(self, plug, *values, **kw):
+        self._require(plug.rpartition(".")[0])
+        blocker = self._static_write_blocker(plug)
+        if blocker:
+            raise RuntimeError(
+                "setAttr: The attribute '%s' is locked or connected and "
+                "cannot be modified (%s)" % (plug, blocker))
         self.attrs[plug] = [tuple(values)] if len(values) == 3 else list(values)
         self.calls.append(("setAttr", plug, values))
 
-    def getAttr(self, plug, type=False, **kw):
+    def getAttr(self, plug, type=False, lock=False, **kw):
+        node, _, attr = plug.rpartition(".")
+        self._require(node)
+        if lock:
+            # ROUND 2 (#799): `lock=True` used to fall into **kw and drop
+            # through to the compound default, which answers [(0,0,0)] -
+            # TRUTHY - so a guard shaped like
+            # correctives._joint_rotation_writable would call EVERY joint
+            # locked. A fake that is wrong in the strict direction produces
+            # spurious failures the next person "fixes" by weakening it.
+            return plug in self.locked_plugs
         if type:
             return "doubleAngle"
-        return self.attrs.get(plug, [(0.0, 0.0, 0.0)])
+        if plug in self.attrs:
+            return self.attrs[plug]
+        if attr in self.string_attrs.get(node, {}):
+            return self.string_attrs[node][attr]
+        if attr in self._COMPOUNDS:
+            # Maya's own zero default for an unwritten transform compound.
+            return [(0.0, 0.0, 0.0)]
+        # #799: `self.attrs.get(plug, [(0.0, 0.0, 0.0)])` answered a rotate
+        # triple for EVERY attribute, scalars included - so a handler
+        # reading an attribute no fixture ever set read as "zero" instead
+        # of raising the way Maya does.
+        raise RuntimeError("No object matches name: %s" % plug)
 
     def currentUnit(self, query=False, angle=False, linear=False, **kw):
         return self._angle_unit if angle else "cm"
 
     # --- binding
     def listHistory(self, node, pruneDagObjects=False, **kw):
+        self._require(node)
         self.calls.append(("listHistory", node))
+        # ROUND 2 (#799): `return list(self.skin_history)` answered ONE
+        # global history for EVERY node in the scene, so a bare JOINT read
+        # as bound to whatever mesh a fixture had bound, and
+        # _skin_cluster_for's "is not bound" refusal could only ever fire
+        # by emptying skin_history globally - never for the one unbound
+        # mesh in a scene that also holds a bound one. A deformer stack
+        # belongs to the GEOMETRY it deforms; nothing else has one.
+        if self.nodeType(node) != "mesh":
+            return []
         return list(self.skin_history)
 
     def skinCluster(self, *args, **kw):
@@ -143,11 +382,13 @@ class FakeCmds:
     def ikHandle(self, startJoint=None, endEffector=None, solver=None,
                  name=None, **kw):
         handle, effector = "|" + name, "|" + name + "_eff"
+        self._revive(handle, effector)
         self.objects.extend([handle, effector])
         self.calls.append(("ikHandle", startJoint, endEffector, solver, name))
         return [handle, effector]
 
     def spaceLocator(self, name=None, **kw):
+        self._revive("|" + name)
         self.objects.append("|" + name)
         self.calls.append(("spaceLocator", name))
         return ["|" + name]
@@ -159,8 +400,20 @@ class FakeCmds:
     def delete(self, *names, **kw):
         self.calls.append(("delete", names))
         for n in names:
-            if n in self.objects:
-                self.objects.remove(n)
+            self._require(n)
+            # #799: RECORD the deletion. Dropping the name from `objects`
+            # alone was not enough - a name a fixture had also mentioned in
+            # `parents` (every joint) stayed answerable forever.
+            # ROUND 2: record the LONG names, and the descendants Maya
+            # takes with them. `self.deleted.append(n)` stored whatever
+            # string the caller used while `_live()` filters by exact name,
+            # so a delete addressed by SHORT name tombstoned nothing and
+            # nodeType/objExists/ls kept answering for the dead node.
+            for long in self._with_descendants(self._resolve(n)):
+                if long not in self.deleted:
+                    self.deleted.append(long)
+                if long in self.objects:
+                    self.objects.remove(long)
 
     # --- posing
     def dagPose(self, *args, query=False, bindPose=False, restore=False, **kw):
@@ -171,16 +424,42 @@ class FakeCmds:
         return None
 
     def attributeQuery(self, attr, node=None, exists=False):
-        # For clip metadata check - always return False (no mcp_clip attr)
+        # #799: this answered False unconditionally, so clip.clip_meta could
+        # never find an mcp_clip record and guard_static_pose's "(clip
+        # 'walk')" naming branch was dead code under this fake. It is a
+        # modelled lookup now; `string_attrs` is how a test declares one.
+        self._require(node)
         if exists:
-            return False
-        return None
+            return attr in self.string_attrs.get(node, {})
+        raise AssertionError(
+            "FakeCmds.attributeQuery models exists= only (#799)")
 
     def listConnections(self, plug, source=False, destination=True,
-                        type=None):
+                        type=None, plugs=False, **kw):
+        # `plugs` was ABSENT from this signature, so every
+        # clip.driven_weight_source call raised TypeError and was swallowed
+        # by the blend walk's broad except - the entire indirect-curve arm
+        # of guard_static_pose could not run here at all (#799).
+        self._require(plug.split(".")[0])
+        if not source:
+            raise AssertionError(
+                "FakeCmds.listConnections models source queries only (#799)")
+        srcs = []
         if plug in getattr(self, "curve_plugs", ()):
-            return [plug.replace("|", "_").replace(".", "_") + "_crv"]
-        return None
+            srcs.append(self._curve_for(plug) + ".output")
+        if plug in self.driven_plugs:
+            srcs.append(self.driven_plugs[plug])
+        if type is not None:
+            # Maya's type filter matches DERIVED types, so an animCurveTA
+            # answers type="animCurve" (the #796 defect-1 trap).
+            srcs = [x for x in srcs
+                    if self.nodeType(x.split(".")[0]) == type
+                    or (type == "animCurve"
+                        and self.nodeType(x.split(".")[0]).startswith(
+                            "animCurve"))]
+        if not srcs:
+            return None
+        return srcs if plugs else [x.split(".")[0] for x in srcs]
 
 
 @pytest.fixture
@@ -205,6 +484,22 @@ class TestCreateSkeleton:
         assert [j["parent"] for j in out["joints"]] == [None, "|s_01", "|s_01|s_02"]
 
     def test_positions_are_measured_back_not_echoed(self, fake):
+        # ROUND 2 (#799): this used to read back the fake's invented
+        # [1,2,3] - an answer no fixture ever declared. The scene now
+        # DISAGREES with the request on purpose (Maya's own orient pass
+        # moves a joint the caller asked for at the origin), and the report
+        # has to carry what the scene says, not what was asked for.
+        real_joint = fake.joint
+
+        def displaced(*a, **kw):
+            if kw.get("edit"):
+                return real_joint(*a, **kw)
+            name = real_joint(*a, **kw)
+            long = [o for o in fake.objects if o.split("|")[-1] == name][0]
+            fake.positions[long] = [1.0, 2.0, 3.0]
+            return name
+
+        fake.joint = displaced
         out = rigging.create_skeleton({"chain": [[0, 0, 0], [0, 9, 0]]})
         assert out["joints"][0]["position"] == [1.0, 2.0, 3.0]
 
@@ -733,6 +1028,14 @@ class TestPoseIk:
                           "|pelvis|hip": [0.1, 0.95, 0.0],
                           "|pelvis|hip|knee": [0.1, 0.5, knee_z],
                           "|pelvis|hip|knee|ankle": [0.1, 0.08, 0.0]}
+        # ROUND 2 (#799): the fake no longer invents an identity world
+        # matrix for any node asked. solve_ik_and_bake reads one per
+        # INTERIOR joint to turn a world-space prebend into that joint's
+        # local frame, so the fixture declares the frame it means: local
+        # axes parallel to world, sitting at the joint.
+        fake.matrices = {
+            joint: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0] + list(pos) + [1]
+            for joint, pos in fake.positions.items()}
 
     def test_default_start_is_two_joints_up(self, fake):
         self._rig(fake)
@@ -907,6 +1210,76 @@ class TestClipGuard:
         assert out["applied"] == 1
 
 
+class TestConnectionGuard:
+    """#799: `guard_static_pose` refuses CURVES, and nothing else.
+
+    Its own docstring counts "FOUR kinds of CURVE" - so a rotate channel a
+    CONSTRAINT owns (an orientConstraint, an HIK retarget, an expression, a
+    poseInterpolator) and a channel a rigger simply LOCKED both walk past
+    it into `cmds.setAttr(joint + ".rotate", ...)`. Maya refuses that write
+    with "locked or connected and cannot be modified" - #771 MEASURED it on
+    that class of plug, and `correctives._joint_rotation_writable` exists to
+    pre-empt exactly this for add_corrective's driver joint. The three
+    commands that pose a skeleton never got the same guard.
+
+    Pinned, not fixed: the fix belongs with a live-Maya gate (#796 spent six
+    review rounds learning that), and the fake models the refusal from what
+    #771 measured, not from a guess.
+    """
+
+    @staticmethod
+    def _constrained(fake):
+        """|r|a's rotation owned by an orientConstraint - which lands per
+        CHILD plug, the wiring #796's live gate measured for pairBlend."""
+        fake.objects += ["|r", "|r|a"]
+        fake.parents = {"|r|a": "|r"}
+        fake.node_types = {"|oc1": "orientConstraint"}
+        fake.driven_plugs = {"|r|a.rotate%s" % ax: "|oc1.constraintRotate%s" % ax
+                             for ax in "XYZ"}
+
+    @pytest.mark.xfail(strict=True, reason=(
+        "#799: pose_skeleton refuses animation curves only, so a "
+        "constraint-driven joint reaches cmds.setAttr and Maya raises a raw "
+        "'locked or connected' RuntimeError after the checkpoint"))
+    def test_pose_skeleton_refuses_a_constrained_joint(self, fake):
+        self._constrained(fake)
+        with pytest.raises(HandlerError, match="connect|constraint|driven"):
+            rigging.pose_skeleton({"root": "r",
+                                   "rotations": {"a": [0, 0, 10]}})
+
+    @staticmethod
+    def _locked(fake):
+        """|r|a's rotateX locked by a rigger. ONE axis is enough: the
+        handler writes the COMPOUND, and Maya refuses a compound write when
+        any child is locked."""
+        fake.objects += ["|r", "|r|a"]
+        fake.parents = {"|r|a": "|r"}
+        fake.locked_plugs = {"|r|a.rotateX"}
+
+    @pytest.mark.xfail(strict=True, reason=(
+        "#799: reset_pose zeroes joint by joint with no lock check, so the "
+        "locked joint reaches cmds.setAttr and Maya raises a raw 'locked or "
+        "connected' RuntimeError where a HandlerError belongs"))
+    def test_reset_pose_refuses_a_locked_rotate_channel(self, fake):
+        self._locked(fake)
+        with pytest.raises(HandlerError, match="lock"):
+            rigging.reset_pose({"root": "r"})
+
+    @pytest.mark.xfail(strict=True, reason=(
+        "#799: the refusal has to land BEFORE the first write - reset_pose "
+        "zeroes |r, Maya then raises on |r|a, and nothing rolls |r back, so "
+        "the call half-poses the rig and reports nothing"))
+    def test_reset_pose_refuses_before_it_writes_any_joint(self, fake):
+        self._locked(fake)
+        with pytest.raises((HandlerError, RuntimeError)):
+            rigging.reset_pose({"root": "r"})
+        # ROUND 2 (#799): the damage a pre-mutation guard prevents, asserted
+        # as its ABSENCE. Round 1 asserted the refusal AND the half-write in
+        # one body - a pair no fix can satisfy at once, so that strict
+        # marker could never XPASS and the fix would have landed unannounced.
+        assert not [c for c in fake.calls if c[0] == "setAttr"]
+
+
 class TestPositionsSurviveExplicitOrient:
     """#719: `orient` used to cost the caller their positions. Maya lays a
     child's translate in the PARENT's frame, so overwriting a parent's
@@ -1046,3 +1419,192 @@ class TestBoundMeshes:
         fake.skin_influences = {"scA": ["|root|jnt_a"]}
         fake.skin_geometry = {"scA": ["|meshA|meshAShape"]}
         assert rigging._bound_meshes(fake, {"|root|jnt_a"}) == ["|meshA"]
+
+
+class TestTheFakeRefusesWhatMayaRefuses:
+    """#799 round 2: the regression barrier for THIS file's FakeCmds.
+
+    Round 1 hardened the fake and nothing asserted the hardening - a
+    reviewer measured that reverting every behavioural change left the
+    suite fully green, which is this ticket's own "a green suite proves
+    nothing" moved up one level. Every assertion below fails the day
+    someone loosens the fake back toward answering anything.
+
+    Only what this fake models is pinned here: it has no setKeyframe (no
+    rigging handler calls one), so the driven-key/pairBlend return codes
+    belong to the files whose fakes do.
+    """
+
+    _GONE = "No object matches name"
+
+    def test_a_node_no_fixture_created_raises_from_every_query(self, fake):
+        fake.objects = ["|r"]
+        calls = [
+            lambda: fake.nodeType("|ghost"),
+            lambda: fake.listRelatives("|ghost", children=True),
+            lambda: fake.listRelatives("|ghost", shapes=True),
+            lambda: fake.listHistory("|ghost"),
+            lambda: fake.getAttr("|ghost.rotate"),
+            lambda: fake.setAttr("|ghost.rotate", 0.0, 0.0, 0.0),
+            lambda: fake.xform("|ghost", query=True, worldSpace=True,
+                               translation=True),
+            lambda: fake.delete("|ghost"),
+            lambda: fake.attributeQuery("mcp_clip", node="|ghost",
+                                        exists=True),
+            lambda: fake.listConnections("|ghost.rotate", source=True),
+        ]
+        for call in calls:
+            with pytest.raises(RuntimeError, match=self._GONE):
+                call()
+        # `ls` answers nothing rather than inventing the name back, which is
+        # what makes naming.require_object able to refuse at all.
+        assert fake.ls("|ghost") == []
+        assert fake.ls(["|ghost"]) == []
+        assert fake.objExists("|ghost") is False
+
+    def test_a_deleted_node_stops_answering(self, fake):
+        fake.objects = ["|r", "|r|a"]
+        fake.parents = {"|r|a": "|r"}
+        assert fake.nodeType("|r|a") == "joint"
+        fake.delete("|r|a")
+        with pytest.raises(RuntimeError, match=self._GONE):
+            fake.nodeType("|r|a")
+        assert fake.ls("|r|a") == []
+        assert fake.objExists("|r|a") is False
+
+    def test_a_delete_by_short_name_kills_the_long_name(self, fake):
+        # Round-1 minor: `deleted.append(n)` stored the literal string the
+        # caller used while the liveness filter matched exact names, so a
+        # short-name delete tombstoned nothing and the node kept answering.
+        fake.objects = ["|r", "|r|a"]
+        fake.parents = {"|r|a": "|r"}
+        fake.delete("a")
+        with pytest.raises(RuntimeError, match=self._GONE):
+            fake.nodeType("|r|a")
+        assert fake.objExists("a") is False
+        assert fake.ls("a") == []
+
+    def test_deleting_a_parent_takes_its_children_and_shape(self, fake):
+        fake.objects = ["|r", "|r|a"]
+        fake.parents = {"|r|a": "|r"}
+        fake.shapes = {"|r|a": "|r|a|aShape"}
+        fake.delete("|r")
+        for gone in ("|r", "|r|a", "|r|a|aShape"):
+            with pytest.raises(RuntimeError, match=self._GONE):
+                fake.nodeType(gone)
+
+    def test_a_name_created_again_answers_again(self, fake):
+        # The other direction: a PERMANENT tombstone is a fake wrong in the
+        # strict direction, and Maya keeps no memory of a deleted name.
+        fake.spaceLocator(name="pole1")
+        fake.delete("|pole1")
+        with pytest.raises(RuntimeError, match=self._GONE):
+            fake.nodeType("|pole1")
+        fake.spaceLocator(name="pole1")
+        assert fake.objExists("|pole1") is True
+
+    def test_a_write_to_a_fed_plug_refuses_in_both_compound_directions(
+            self, fake):
+        fake.objects = ["|r|a"]
+        fake.node_types = {"|oc1": "orientConstraint", "|pb1": "pairBlend"}
+        # the connection landed on the CHILD; the handler writes the compound
+        fake.driven_plugs = {"|r|a.rotateX": "|oc1.constraintRotateX"}
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            fake.setAttr("|r|a.rotate", 0.0, 0.0, 0.0)
+        # the connection landed on the COMPOUND; the handler writes a child
+        fake.driven_plugs = {"|r|a.translate": "|pb1.outTranslate"}
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            fake.setAttr("|r|a.translateY", 1.0)
+        # and it does NOT over-refuse: a free channel still writes. A fake
+        # wrong in the strict direction is as bad as a permissive one.
+        fake.setAttr("|r|a.scaleY", 2.0)
+        assert ("setAttr", "|r|a.scaleY", (2.0,)) in fake.calls
+
+    def test_an_animation_curve_refuses_the_same_write(self, fake):
+        fake.objects = ["|r|a"]
+        fake.curve_plugs = ["|r|a.rotateY"]
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            fake.setAttr("|r|a.rotate", 0.0, 0.0, 0.0)
+
+    def test_a_locked_channel_refuses_and_getAttr_lock_reports_it(self, fake):
+        fake.objects = ["|r|a"]
+        fake.locked_plugs = {"|r|a.rotateX"}
+        with pytest.raises(RuntimeError, match="locked"):
+            fake.setAttr("|r|a.rotate", 0.0, 0.0, 0.0)
+        # ROUND 2: `lock=True` is MODELLED. It used to fall into **kw and
+        # drop through to the compound default [(0,0,0)] - truthy - so a
+        # guard shaped like correctives._joint_rotation_writable would have
+        # called every joint in the scene locked, and the two reset_pose
+        # xfails above could never have XPASSed.
+        assert fake.getAttr("|r|a.rotateX", lock=True) is True
+        assert fake.getAttr("|r|a.rotateY", lock=True) is False
+        assert fake.getAttr("|r|a.rotate", lock=True) is False
+
+    def test_an_xform_translate_refuses_a_fed_translate(self, fake):
+        fake.objects = ["|loc"]
+        fake.node_types = {"|pb1": "pairBlend"}
+        fake.driven_plugs = {"|loc.translateY": "|pb1.outTranslateY"}
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            fake.xform("|loc", worldSpace=True, translation=[0.0, 1.0, 0.0])
+
+    def test_xform_invents_neither_a_matrix_nor_a_component_position(
+            self, fake):
+        # Round-1 minor: an invented [1,2,3] for any plug or component of
+        # any live node, and an invented identity matrix for any node - the
+        # fallback the report blames for ten fictional TestPoseIk asserts.
+        fake.objects = ["|hum"]
+        with pytest.raises(AssertionError, match="no matrix declared"):
+            fake.xform("|hum", query=True, worldSpace=True, matrix=True)
+        with pytest.raises(AssertionError, match="no position declared"):
+            fake.xform("|hum.vtx[999]", query=True, worldSpace=True,
+                       translation=True)
+        # An undeclared mesh has NO points to give - not one vertex at
+        # (1,2,3) that never moves however the rig is posed.
+        assert fake.xform("|hum.vtx[*]", query=True, worldSpace=True,
+                          translation=True) == []
+        fake.vertex_tables = {"|hum": [0.0, 1.0, 0.0]}
+        assert fake.xform("|hum.vtx[*]", query=True, worldSpace=True,
+                          translation=True) == [0.0, 1.0, 0.0]
+
+    def test_only_geometry_answers_a_deformer_history(self, fake):
+        # Round-1 minor: ONE global history answered for every node, so a
+        # bare joint read as bound to whatever mesh a fixture had bound and
+        # "is not bound" could only fire by emptying skin_history globally.
+        fake.objects = ["|hum", "|hum|humShape", "|r", "|r|a"]
+        fake.parents = {"|r|a": "|r"}
+        fake.skin_history = ["skin1"]
+        assert fake.listHistory("|hum|humShape") == ["skin1"]
+        assert fake.listHistory("|r|a") == []
+
+    def test_a_shapes_query_never_answers_children(self, fake):
+        fake.objects = ["|r", "|r|a"]
+        fake.parents = {"|r|a": "|r"}
+        assert fake.listRelatives("|r", shapes=True) is None
+        assert fake.listRelatives("|r", children=True) == ["|r|a"]
+        fake.shapes = {"|r": "|r|rShape"}
+        assert fake.listRelatives("|r", shapes=True) == ["|r|rShape"]
+
+    def test_listConnections_models_sources_and_derived_types(self, fake):
+        fake.objects = ["|r|a"]
+        fake.node_types = {"|crv1": "animCurveTA"}
+        fake.driven_plugs = {"|r|a.rotateX": "|crv1.output"}
+        assert fake.listConnections("|r|a.rotateX", source=True,
+                                    plugs=True) == ["|crv1.output"]
+        # Maya's type filter matches DERIVED types (the #796 defect-1 trap)
+        assert fake.listConnections("|r|a.rotateX", source=True,
+                                    type="animCurve") == ["|crv1"]
+        assert fake.listConnections("|r|a.rotateX", source=True,
+                                    type="pairBlend") is None
+        with pytest.raises(AssertionError, match="source queries only"):
+            fake.listConnections("|r|a.rotateX", destination=True)
+
+    def test_attributeQuery_and_getAttr_answer_only_what_was_declared(
+            self, fake):
+        fake.objects = ["|r"]
+        fake.string_attrs = {"|r": {"mcp_clip": "walk"}}
+        assert fake.attributeQuery("mcp_clip", node="|r", exists=True) is True
+        assert fake.attributeQuery("nope", node="|r", exists=True) is False
+        assert fake.getAttr("|r.mcp_clip") == "walk"
+        # An attribute nothing declared is not a zero - it is a refusal.
+        with pytest.raises(RuntimeError, match=self._GONE):
+            fake.getAttr("|r.maxInfluences")

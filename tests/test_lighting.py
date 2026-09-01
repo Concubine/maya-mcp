@@ -13,13 +13,40 @@ class FakeCmds:
     """A tiny in-memory scene graph: enough of cmds to test setup_lighting's
     logic without Maya. Node identifiers are long paths ("|parent|child");
     a "shape" is just a node whose type isn't "transform".
+
+    #799. The three rules, wherever this fake models the call at all:
+
+      1. a query - OR A WRITE - aimed at a node this scene does not hold
+         RAISES the way Maya does; `objExists` is the one exception.
+         replace_existing deletes nodes and _build_dome renames one, so this
+         is the file where a call can meet a name that stopped answering.
+      2. `setAttr` and `xform` refuse a plug a connection feeds - the dome's
+         `.color` is a connected plug the moment its ramp is wired. The
+         refusal follows the node through a rename and CLEARS when the
+         source is deleted, so a re-light can rebuild at the same path.
+      3. nothing answers unconditionally. `nodeType` answered "unknown" for
+         every node it had never heard of, and `objExists` compared a name
+         against LONG PATHS only - so `mcpLight_domeRamp` never looked taken,
+         naming.unique_name handed the same name back every time and the
+         fake quietly overwrote one node with the next. `ls` with no type
+         flag answered [] to every name, which is an answer no real ls gives.
     """
 
     _LIGHT_TYPES = {"directionalLight", "pointLight", "spotLight", "areaLight", "light"}
 
+    # Maya hands back the SHAPE from shadingNode(asLight=True) in some
+    # versions and the auto-created TRANSFORM in others - _build_dome
+    # normalises for both. This fake returned the shape unconditionally, so
+    # the transform half of that normalisation was dead code under test.
+    shading_node_returns_transform = False
+
     def __init__(self, existing_lights=()):
         self.deleted = []
         self.created = []
+        # destination plug -> source plug, as connectAttr wires it. A plug in
+        # here is unwritable by setAttr or xform (#799 contract point 2).
+        self.connections = {}
+        self.locked = set()
         # Every node built through shadingNode(asLight=True). Tracked separately
         # from `created` because WHICH command built a light is the whole
         # difference between one that lights and one that only draws.
@@ -58,6 +85,17 @@ class FakeCmds:
         self.add_shape(transform, shape_name, "directionalLight")
         return transform
 
+    # -- resolution --
+    def _matches(self, name):
+        """`ls`'s answer for a name: Maya resolves a SHORT name as readily as
+        a long path, which is the whole basis of naming.unique_name."""
+        return sorted(n for n in self.objects
+                      if n == name or n.split("|")[-1] == name)
+
+    def _require(self, name):
+        if not self._matches(name):
+            raise RuntimeError("No object matches name: %s" % name)
+
     # -- fake cmds surface --
     def ls(self, *args, long=False, type=None, **kw):
         if type == "light":
@@ -68,7 +106,9 @@ class FakeCmds:
             if type in lighting.ARNOLD_LIGHT_TYPES and not self.mtoa_loaded:
                 raise RuntimeError("Unknown object type: %s" % type)
             return [n for n, t in self.node_type.items() if t == type]
-        return []
+        if not args:
+            return sorted(self.objects)
+        return sorted({m for a in args for m in self._matches(a)})
 
     # -- mtoa, which is installed-but-unloaded on a cold Maya --
     mtoa_installed = True
@@ -77,7 +117,11 @@ class FakeCmds:
     def pluginInfo(self, name, query=False, loaded=False, **kw):
         if loaded:
             return self.mtoa_loaded
-        return None
+        # #799 round 2: the trailing `return None` answered every OTHER query
+        # flag - version, path, registered - with "no", which is an answer,
+        # not an absence. Refuse what this fake has not been taught.
+        raise AssertionError(
+            "unmodelled pluginInfo(%r, query=%r, %r)" % (name, query, sorted(kw)))
 
     def loadPlugin(self, name, **kw):
         if not self.mtoa_installed:
@@ -96,6 +140,7 @@ class FakeCmds:
 
     def listRelatives(self, node, parent=False, shapes=False, children=False,
                        fullPath=False, type=None, **kw):
+        self._require(node)
         if parent:
             p = self.parent.get(node)
             return [p] if p else None
@@ -108,7 +153,7 @@ class FakeCmds:
         return kids or None
 
     def objExists(self, name):
-        return name in self.objects
+        return bool(self._matches(name))
 
     def _delete_recursive(self, path):
         if path not in self.objects:
@@ -117,6 +162,14 @@ class FakeCmds:
             self._delete_recursive(child)
         self.deleted.append(path)
         self.objects.discard(path)
+        # #799 round 2: a deleted node takes its connections with it, both
+        # ways. Leaving them behind made the setAttr refusal PERMANENT - a
+        # dome rebuilt at the same path after a re-light was refused a write
+        # to `.color` forever, which manufactures a failure Maya never has.
+        self.connections = {
+            dst: src for dst, src in self.connections.items()
+            if dst.split(".")[0] != path and src.split(".")[0] != path
+        }
         self.node_type.pop(path, None)
         parent = self.parent.pop(path, None)
         self.children.pop(path, None)
@@ -125,7 +178,8 @@ class FakeCmds:
 
     def delete(self, *names, **kw):
         for n in names:
-            self._delete_recursive(n)
+            self._require(n)
+            self._delete_recursive(self._matches(n)[0])
 
     def directionalLight(self, name=None, intensity=1.0, **kw):
         tname = name or "dirLight"
@@ -143,7 +197,10 @@ class FakeCmds:
             transform = self.add_transform(shape_name.replace("Shape", "") + "_xf")
             self.created.append((node_type, name))
             self.as_light.append((node_type, name))
-            return self.add_shape(transform, shape_name, node_type)
+            shape = self.add_shape(transform, shape_name, node_type)
+            # Which of the two Maya hands back is a version difference, and
+            # _build_dome claims to survive either (#799 point 3).
+            return transform if self.shading_node_returns_transform else shape
         tname = name or node_type
         path = "|" + tname
         self.objects.add(path)
@@ -154,17 +211,80 @@ class FakeCmds:
         return path
 
     def nodeType(self, node):
-        return self.node_type.get(node, "unknown")
+        self._require(node)
+        # A node the fixture built without a recorded type is a plain
+        # transform, which is what Maya would call it - "unknown" was an
+        # answer no scene ever gives.
+        return self.node_type.get(node, "transform")
 
     def connectAttr(self, src, dst, force=False, **kw):
+        # #799 round 2: contract point 1 stopped at the read/write boundary -
+        # a connectAttr aimed at a stale pre-rename path (the #796 shape, and
+        # exactly what _build_dome would leave if its re-resolve went away)
+        # was RECORDED as a success. Maya raises for either end.
+        self._require(src.split(".")[0])
+        self._require(dst.split(".")[0])
         self.attrs.setdefault("__connections__", []).append((src, dst))
+        if force:
+            self.connections.pop(dst, None)
+        self.connections[dst] = src
+
+    def _blocker(self, plug):
+        """The connection or lock that makes `plug` unwritable, or None.
+
+        Maya's compound/child asymmetry, both directions: `rotate` refuses
+        when only `rotateY` is driven, and `rotateY` refuses when the whole
+        compound is.
+        """
+        fed = set(self.connections) | self.locked
+        if plug in fed:
+            return plug
+        node, _, attr = plug.rpartition(".")
+        for suffix in ("R", "G", "B", "X", "Y", "Z"):
+            if "%s.%s%s" % (node, attr, suffix) in fed:
+                return "%s.%s%s" % (node, attr, suffix)
+        if attr[-1:] in ("R", "G", "B", "X", "Y", "Z"):
+            parent = "%s.%s" % (node, attr[:-1])
+            if parent in fed:
+                return parent
+        return None
 
     def xform(self, name, **kw):
+        self._require(name)
         if kw.get("query"):
-            return [0.0, 0.0, 0.0]
+            # #799 round 2: this used to answer [0,0,0] to EVERY query flag -
+            # a pivot, a bounding box, a matrix - which is a made-up answer,
+            # and lighting.py asks none of them. Refuse until one is taught.
+            raise AssertionError(
+                "unmodelled xform query(%r, %r)" % (name, sorted(kw)))
+        # An xform is a STATIC WRITE to the same plugs setAttr refuses: a
+        # light whose rotation an expression or a constraint drives cannot be
+        # swung by the rig builder (#799 contract point 2).
+        for flag, plug_attr in (("rotation", "rotate"),
+                                ("translation", "translate"),
+                                ("scale", "scale")):
+            if kw.get(flag) is None:
+                continue
+            blocker = self._blocker("%s.%s" % (name, plug_attr))
+            if blocker:
+                raise RuntimeError(
+                    "xform: The attribute '%s' is locked or connected and "
+                    "cannot be modified" % blocker
+                )
         self.attrs.setdefault(name, []).append(kw)
 
     def setAttr(self, attr, *value, **kw):
+        # #799 round 2: lighting.py:348 writes the dome's intensity onto a
+        # shape it re-resolved two lines earlier. Delete that re-resolve and
+        # the write lands on the pre-rename path - which this fake used to
+        # RECORD as a success. In Maya it raises "No object matches name".
+        self._require(attr.split(".")[0])
+        blocker = self._blocker(attr)
+        if blocker:
+            raise RuntimeError(
+                "setAttr: The attribute '%s' is locked or connected and "
+                "cannot be modified." % blocker
+            )
         self.attrs[attr] = value
 
     def rename(self, old, new):
@@ -175,8 +295,11 @@ class FakeCmds:
         to the name it was tracking - the fake agreeing with the handler instead
         of behaving like Maya.
         """
-        if old not in self.objects:
-            return new
+        # #799: renaming a node that is not there raises in Maya. Handing the
+        # new name back regardless is the same answers-anything shape as the
+        # stub this docstring already warns about.
+        self._require(old)
+        old = self._matches(old)[0]
         parent = self.parent.get(old)
         new_path = (parent + "|" if parent else "|") + new
 
@@ -194,6 +317,21 @@ class FakeCmds:
                 self.parent[kid_target] = target
 
         move(old, new_path)
+
+        # A rename rewrites every plug name that referenced the node, so a
+        # connection recorded against the OLD path has to follow it - or the
+        # fake keeps a write-block on a name nothing answers to any more
+        # while the live node's plug looks free (#799 round 2).
+        def follow(plug):
+            node, dot, attr = plug.partition(".")
+            if node == old:
+                node = new_path
+            elif node.startswith(old + "|"):
+                node = new_path + node[len(old):]
+            return node + dot + attr
+
+        self.connections = {follow(d): follow(s)
+                            for d, s in self.connections.items()}
         self.parent[new_path] = parent
         if parent and parent in self.children:
             self.children[parent] = [
@@ -484,6 +622,34 @@ class TestEnvironmentDome:
         fake.add_light("keyShape")
         assert lighting.light_shapes(fake) == ["|key|keyShape"]
 
+    def test_a_maya_that_hands_back_the_transform_gets_the_same_dome(self, monkeypatch):
+        """#799 contract point 3. _build_dome normalises both of Maya's
+        answers to shadingNode(asLight=True) - the shape in some versions,
+        the auto-created transform in others - and this fake returned the
+        shape unconditionally, so the transform half of that normalisation
+        had no test at all.
+        """
+        fake = self._fake(monkeypatch, shading_node_returns_transform=True)
+        result = lighting.setup_lighting({"preset": "environment",
+                                          "intensity": 1.0})
+        assert result["lights"] == ["|mcpLight_dome"]
+        # the intensity landed on the SHAPE, not on the transform it came in as
+        assert fake.attrs["|mcpLight_dome|mcpLight_domeShape.intensity"] == (1.0,)
+        assert [c for c in fake.as_light if c[0] == "aiSkyDomeLight"]
+
+    @pytest.mark.xfail(strict=True, reason=(
+        "#799: replace_existing removes light TRANSFORMS only. The ramp that "
+        "fed the old dome's colour (and the file node an hdri dome uses) is "
+        "left in the scene wired to nothing, and Maya never reaps a "
+        "disconnected shading node - so each re-light adds one more dead ramp, "
+        "which naming.unique_name then has to number around"))
+    def test_replacing_a_dome_takes_its_ramp_with_it(self, monkeypatch):
+        fake = self._fake(monkeypatch)
+        lighting.setup_lighting({"preset": "environment"})
+        lighting.setup_lighting({"preset": "environment"})
+        ramps = sorted(n for n, t in fake.node_type.items() if t == "ramp")
+        assert ramps == ["|mcpLight_domeRamp"], ramps
+
 
 class TestFullyLitUnit:
     """#617: intensity 1.0 must mean a surface facing the key reads its own
@@ -546,3 +712,163 @@ class TestFullyLitUnit:
         lighting.setup_lighting({"preset": "environment", "intensity": 1.0,
                                  "replace_existing": False})
         assert self._built(fake)[0][1] == pytest.approx(math.pi)
+
+
+
+class TestTheFakeRefusesWhatMayaRefuses:
+    """#799 round 2: the hardening in FakeCmds has to be ASSERTED somewhere.
+
+    Reverting every behavioural change in the fake left this suite fully
+    green, because not one test exercised the new refusals - "a green suite
+    proves nothing", one level up. These pin the contract points this fake
+    actually models, so loosening it goes red here first.
+    """
+
+    def _dome(self):
+        """_build_dome's own opening sequence: a light shape under an
+        auto-created transform, then the transform renamed."""
+        fake = FakeCmds()
+        shape = fake.shadingNode("aiSkyDomeLight", asLight=True,
+                                 name="mcpLight_domeShape")
+        transform = fake.listRelatives(shape, parent=True, fullPath=True)[0]
+        fake.rename(transform, "mcpLight_dome")
+        return fake, shape
+
+    def _lit_dome(self):
+        """...and its ramp wired into the shape's colour."""
+        fake, _ = self._dome()
+        shape = fake.listRelatives("|mcpLight_dome", shapes=True,
+                                   fullPath=True)[0]
+        ramp = fake.shadingNode("ramp", asTexture=True, name="mcpLight_domeRamp")
+        fake.connectAttr(ramp + ".outColor", shape + ".color", force=True)
+        return fake, shape, ramp
+
+    # -- point 1: a name that stopped answering ---------------------------
+    def test_every_query_about_a_node_that_never_existed_raises(self):
+        fake = FakeCmds()
+        fake.add_light("keyShape")
+        for call in (lambda: fake.nodeType("|ghost"),
+                     lambda: fake.listRelatives("|ghost", parent=True,
+                                                fullPath=True),
+                     lambda: fake.xform("|ghost", rotation=(0, 0, 0),
+                                        worldSpace=True),
+                     lambda: fake.rename("|ghost", "haunt"),
+                     lambda: fake.delete("|ghost")):
+            with pytest.raises(RuntimeError, match="No object matches name"):
+                call()
+        assert fake.objExists("|ghost") is False  # the question that answers
+
+    def test_a_write_aimed_at_a_stale_pre_rename_path_raises(self):
+        # The half of contract point 1 the first pass left out, and the sharp
+        # case: this is lighting.py:348's write with the re-resolve at
+        # 346-347 removed - the #796 shape, recorded as a success before.
+        fake, stale = self._dome()
+        assert fake.objExists(stale) is False
+        with pytest.raises(RuntimeError, match="No object matches name"):
+            fake.setAttr(stale + ".intensity", 4.0)
+        ramp = fake.shadingNode("ramp", asTexture=True, name="mcpLight_domeRamp")
+        with pytest.raises(RuntimeError, match="No object matches name"):
+            fake.connectAttr(ramp + ".outColor", stale + ".color", force=True)
+
+    def test_the_renamed_node_takes_the_write_instead(self):
+        # The other direction: the re-resolved path really is writable, so
+        # the refusal above is about the stale name, not about strictness.
+        fake, _ = self._dome()
+        shape = fake.listRelatives("|mcpLight_dome", shapes=True,
+                                   fullPath=True)[0]
+        fake.setAttr(shape + ".intensity", 4.0)
+        assert fake.attrs[shape + ".intensity"] == (4.0,)
+
+    # -- point 2: a plug something already drives -------------------------
+    def test_setAttr_refuses_a_connected_plug(self):
+        fake, shape, _ = self._lit_dome()
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            fake.setAttr(shape + ".color", 1.0, 1.0, 1.0, type="double3")
+        fake.setAttr(shape + ".intensity", 2.0)  # a free plug still writes
+
+    def test_setAttr_refuses_a_compound_whose_child_is_driven(self):
+        fake = FakeCmds()
+        fake.add_light("keyShape")
+        ramp = fake.shadingNode("ramp", asTexture=True, name="skyRamp")
+        fake.connectAttr(ramp + ".outColorR", "|key|keyShape.colorG")
+        with pytest.raises(RuntimeError, match="keyShape.colorG"):
+            fake.setAttr("|key|keyShape.color", 1.0, 1.0, 1.0, type="double3")
+
+    def test_setAttr_refuses_a_child_whose_compound_is_driven(self):
+        fake, shape, _ = self._lit_dome()
+        with pytest.raises(RuntimeError, match="domeShape.color'"):
+            fake.setAttr(shape + ".colorG", 0.5)
+
+    def test_setAttr_refuses_a_locked_plug_with_nothing_connected(self):
+        fake = FakeCmds()
+        fake.add_light("keyShape")
+        fake.locked.add("|key|keyShape.intensity")
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            fake.setAttr("|key|keyShape.intensity", 3.0)
+
+    def test_xform_refuses_a_driven_rotation_and_lets_a_free_one_through(self):
+        fake = FakeCmds()
+        fake.add_light("keyShape")
+        ramp = fake.shadingNode("ramp", asTexture=True, name="driver")
+        fake.connectAttr(ramp + ".outColorR", "|key.rotateY")
+        with pytest.raises(RuntimeError, match="key.rotateY"):
+            fake.xform("|key", rotation=(-35.0, 40.0, 0.0), worldSpace=True)
+        fake.xform("|key", translation=(0.0, 1.0, 0.0), worldSpace=True)
+        assert {"translation": (0.0, 1.0, 0.0),
+                "worldSpace": True} in fake.attrs["|key"]
+
+    def test_deleting_the_source_frees_the_plug_again(self):
+        # The refusal has to CLEAR. A re-light deletes the old dome and
+        # rebuilds at the same resolved path; a fake that refuses forever
+        # manufactures a failure Maya never has.
+        fake, shape, _ = self._lit_dome()
+        fake.delete("|mcpLight_dome")
+        rebuilt_shape = fake.shadingNode("aiSkyDomeLight", asLight=True,
+                                         name="mcpLight_domeShape")
+        transform = fake.listRelatives(rebuilt_shape, parent=True,
+                                       fullPath=True)[0]
+        fake.rename(transform, "mcpLight_dome")
+        rebuilt = fake.listRelatives("|mcpLight_dome", shapes=True,
+                                     fullPath=True)[0]
+        assert rebuilt == shape, "the rebuild landed on the same path"
+        fake.setAttr(rebuilt + ".color", 1.0, 1.0, 1.0, type="double3")
+
+    def test_a_rename_carries_the_connection_with_it(self):
+        # The mirror of the above: the block follows the node, rather than
+        # staying pinned to a name nothing answers to any more.
+        fake, _, _ = self._lit_dome()
+        fake.rename("|mcpLight_dome", "mcpLight_dome_001")
+        moved = fake.listRelatives("|mcpLight_dome_001", shapes=True,
+                                   fullPath=True)[0]
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            fake.setAttr(moved + ".color", 1.0, 1.0, 1.0, type="double3")
+
+    # -- point 3: nothing answers unconditionally -------------------------
+    def test_ls_with_no_type_flag_resolves_a_name(self):
+        # It used to answer [] to every name, which is an answer no real ls
+        # gives - and it is what naming.unique_name reads to pick a suffix.
+        fake = FakeCmds()
+        fake.add_light("keyShape")
+        assert fake.ls("key", long=True) == ["|key"]
+        assert fake.ls("|key|keyShape", long=True) == ["|key|keyShape"]
+        assert fake.ls("nothing_here", long=True) == []
+
+    def test_nodeType_does_not_answer_unknown_for_a_plain_transform(self):
+        fake = FakeCmds()
+        fake.add_light("keyShape")
+        assert fake.nodeType("|key") == "transform"
+        assert fake.nodeType("|key|keyShape") == "directionalLight"
+        # ...and a node a fixture put in the scene without recording a type
+        # is a plain transform. "unknown" is an answer no real scene gives,
+        # and _build_dome branches on nodeType == "aiSkyDomeLight".
+        fake.objects.add("|handmade")
+        assert fake.nodeType("|handmade") == "transform"
+
+    def test_pluginInfo_and_an_xform_query_refuse_what_they_never_modelled(self):
+        fake = FakeCmds()
+        fake.add_light("keyShape")
+        assert fake.pluginInfo("mtoa", query=True, loaded=True) is False
+        with pytest.raises(AssertionError, match="unmodelled pluginInfo"):
+            fake.pluginInfo("mtoa", query=True, version=True)
+        with pytest.raises(AssertionError, match="unmodelled xform query"):
+            fake.xform("|key", query=True, translation=True, worldSpace=True)

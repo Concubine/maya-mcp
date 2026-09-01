@@ -445,15 +445,86 @@ def test_include_skins_must_be_a_bool(tmp_path):
 
 
 class FakeCmds:
-    """Just enough Maya to drive the handler: record the calls, write a file."""
+    """Just enough Maya to drive the handler: record the calls, write a file.
+
+    #799 rewrote the scene half of this fake. Five methods - ls, listHistory,
+    listAttr, listSets, attributeQuery - used to end in an unconditional
+    `return []` / `return False`, which is exactly the shape contract point 3
+    is about: a method that answers anything can never fail a test. Here they
+    silently emptied _exported_mesh_shapes, _scene_shape_aliases,
+    _live_delta_mushes, _scene_clips and the whole texture-claim walk for
+    EVERY test in this file. They now answer from a modelled scene
+    (`node_types` / `history` / `aliases` / `shading`) and raise Maya's
+    "No object matches name" for a node that was deleted or never created.
+
+    The scene starts practically empty, which is what every pre-#799 test in
+    this file assumed - so the modelled answers are the same answers, for a
+    reason instead of by default.
+    """
 
     def __init__(self, existing=("golem_C_pelvis",), load_plugin_raises=None,
-                 plugin_loaded=True):
+                 plugin_loaded=True, node_types=None, history=None,
+                 aliases=None, shading=None, attrs=None,
+                 empty_ls_is_scene_wide=None):
         self.existing = set(existing)
         self.calls = []
         self.load_plugin_raises = load_plugin_raises
         self.plugin_loaded = plugin_loaded
+        # name -> node type. Anything named here exists; anything else does
+        # not, and every query about it raises.
+        self.node_types = dict(node_types or {})
+        for name in self.existing:
+            self.node_types.setdefault(name, "transform")
+        self.history = dict(history or {})   # node -> pruned history nodes
+        self.aliases = dict(aliases or {})   # blendShape -> weight aliases
+        self.shading = dict(shading or {})   # shape -> [shadingEngine]
+        # node -> the dynamic attrs authored on it. #799 round 2: this was
+        # the file's last leftover constant - attributeQuery answered a bare
+        # False for everything, so no test could vary it. Empty by default,
+        # which is still every scene here, but a scene CAN now carry an
+        # authored attr and the answer follows the scene.
+        self.attrs = dict(attrs or {})
+        self.deleted = []
+        # Which of the two candidate semantics `ls` takes when it is handed
+        # an EMPTY list - see the comment on ls() below.
+        #
+        # #799 round 2: this DEFAULTED TO FALSE, the forgiving reading, in a
+        # file whose two strict xfails assert the other reading as fact. The
+        # file therefore answered one and the same Maya call two ways and
+        # made the permissive one the default - the exact pattern this
+        # ticket exists to remove, retained behind a switch. There is no
+        # default now: a test that reaches the empty-operand branch must say
+        # which reading it is testing under, and one that does not say gets
+        # a refusal naming the choice, not an invented answer.
+        self.empty_ls_is_scene_wide = empty_ls_is_scene_wide
 
+    # --- existence -------------------------------------------------------
+    def _require(self, node):
+        # #799 round 2: existence is decided by `node_types` ALONE. The
+        # `deleted` list is an audit log and nothing resolves against it, so
+        # a name re-created after a delete is visible again the way it is in
+        # Maya. A permanent tombstone would be strict-direction wrongness -
+        # as bad as a permissive fake, and worse in one way, because the
+        # spurious failure it causes gets "fixed" by weakening the fake.
+        name = str(node).split(".")[0]
+        if name not in self.node_types:
+            raise RuntimeError("No object matches name: %s" % name)
+        return name
+
+    def delete(self, *names):
+        for name in names:
+            self.deleted.append(name)   # audit log only
+            self.existing.discard(name)
+            self.node_types.pop(name, None)
+            self.history.pop(name, None)
+            self.aliases.pop(name, None)
+            self.shading.pop(name, None)
+            self.attrs.pop(name, None)
+
+    def _live(self):
+        return list(self.node_types)
+
+    # --- plugin / unit ---------------------------------------------------
     def loadPlugin(self, name, quiet=False):
         self.calls.append(("loadPlugin", name))
         if self.load_plugin_raises is not None:
@@ -461,6 +532,7 @@ class FakeCmds:
         self.plugin_loaded = True
 
     def pluginInfo(self, name, query=False, loaded=False):
+        assert query and loaded, "the handler asks one thing about fbxmaya"
         self.calls.append(("pluginInfo", name))
         return self.plugin_loaded
 
@@ -469,12 +541,99 @@ class FakeCmds:
         self.plugin_loaded = False
 
     def currentUnit(self, query=False, time=False):
+        assert query and time, "the reload guard reads the TIME unit only"
         return "ntsc"
 
+    # --- scene reads -----------------------------------------------------
     def objExists(self, name):
-        return name in self.existing
+        # #799's one exception: objExists ANSWERS for a name nothing holds.
+        return name in self.node_types
 
+    def ls(self, nodes=None, dagObjects=False, type=None, long=False,
+           noIntermediate=False, **kw):
+        """`ls` is the non-raising query: an unmatched name is an empty
+        result, never an error.
+
+        The EMPTY-LIST case is the one that matters, and the one nobody has
+        measured. Production calls
+        `cmds.ls(cmds.listHistory(shape, pruneDagObjects=True) or [],
+                 type="deltaMush")`
+        and a mesh with no construction history makes that argument `[]`.
+        Maya flattens list arguments into the command's operand list, so an
+        empty list plausibly contributes NO operands - leaving `ls -type
+        deltaMush`, which answers SCENE-WIDE. If that is what really
+        happens, the walk stops being scoped to the mesh it was asked about.
+        Note that the `nodes is None` branch just above already commits to
+        exactly that reading for the no-operand call, which is the argument
+        for it - an argument, not a measurement.
+
+        #799 round 2 settles the contradiction the reviewer found: round 1
+        made the forgiving reading the DEFAULT while the two strict xfails
+        below assert the other one as fact. Neither is the default now.
+        `empty_ls_is_scene_wide` has no value until a test gives it one, and
+        the empty-operand branch REFUSES rather than picking a side - so a
+        test written tomorrow against blendshape.py:58/171 or rigging.py:
+        203/494 (the same `cmds.ls(listHistory(...) or [], type=...)` shape)
+        cannot inherit a forgiving answer by accident and ship green.
+
+        Round 2 tried to measure it and could not: the maya MCP at
+        127.0.0.1:9877 refused the connection (no Maya running), so this is
+        still a live-confirmation job. `cmds.ls([], type="mesh")` against
+        `cmds.ls(type="mesh")` in any session answers it in one call.
+        """
+        if nodes is None:
+            pool = self._live()
+        elif not nodes:
+            assert self.empty_ls_is_scene_wide is not None, (
+                "cmds.ls([], type=%r): whether Maya's list-flattening leaves "
+                "this scene-wide or selects nothing is UNMEASURED, and this "
+                "fake will not pick a side for you. Pass "
+                "empty_ls_is_scene_wide=True or False and name the reading "
+                "your test asserts under." % (type,))
+            pool = self._live() if self.empty_ls_is_scene_wide else []
+        elif dagObjects:
+            pool = [n for n in self._live()
+                    if any(n == r or n.startswith(r + "|") for r in nodes)]
+        else:
+            pool = [n for n in nodes if n in self._live()]
+        if type is not None:
+            pool = [n for n in pool if self.node_types.get(n) == type]
+        return list(pool)
+
+    def listHistory(self, node, pruneDagObjects=False, **kw):
+        self._require(node)
+        return list(self.history.get(node, []))
+
+    def listAttr(self, attr, multi=False, **kw):
+        node = self._require(attr)
+        return list(self.aliases.get(node, [])) or None
+
+    def listSets(self, object=None, type=None):
+        """The texclaim walker's entry point. Empty for a shape with no
+        shading assignment - which is every shape in this file's scenes
+        unless a test wires one - but a shape that does not exist raises."""
+        self._require(object)
+        return list(self.shading.get(object, []))
+
+    def attributeQuery(self, attr, node=None, exists=False):
+        """The texclaim walker's slot probe, and clip_meta's mcp_clip probe.
+
+        #799 round 2: this returned a bare False for every attr on every
+        node - a constant no test could vary, which is the answers-anything
+        shape one step short of the ones round 1 removed. It answers from
+        the scene's `attrs` table now (empty in every scene here, so the
+        answer is unchanged and now has a reason), and existence is the only
+        question it will take. Asking about a node that is gone raises,
+        which is the #796 defect class this whole ticket exists for."""
+        self._require(node)
+        assert exists, "the walkers ask whether an attr EXISTS, nothing else"
+        return attr in self.attrs.get(node, ())
+
+    # --- writes ----------------------------------------------------------
     def select(self, names, replace=False):
+        assert replace, "a selected export must replace the selection"
+        for name in names:
+            self._require(name)
         self.calls.append(("select", names))
 
     def file(self, path, **kw):
@@ -482,36 +641,22 @@ class FakeCmds:
         with open(path, "wb") as fh:
             fh.write(b"not really an fbx")
 
-    def ls(self, nodes=None, **kw):
-        """Stub for listing objects. For shape-less test scenes, return empty."""
-        # The fake cmds needs to support ls calls for _scene_shape_aliases.
-        # By default, return empty list (no shapes/blendShapes in test scenes).
-        return []
-
-    def listHistory(self, node, **kw):
-        """Stub for listHistory. For shape-less test scenes, return empty."""
-        return []
-
-    def listAttr(self, attr, **kw):
-        """Stub for listAttr. For shape-less test scenes, return empty."""
-        return []
-
-    def listSets(self, object=None, type=None):
-        """Stub for listSets - the texclaim walker's entry point. Empty by
-        default so an un-monkeypatched export never reaches a shader."""
-        return []
-
-    def attributeQuery(self, attr, node=None, exists=False):
-        """Stub for attributeQuery - the texclaim walker's slot probe.
-        False by default so an un-monkeypatched export claims nothing."""
-        return False
-
 
 class FakeMel:
     def __init__(self):
         self.evaluated = []
 
     def eval(self, statement):
+        # #799 contract point 3: `self.evaluated.append(statement)` and
+        # nothing else accepted any MEL at all. Real mel.eval answers an
+        # unregistered procedure with RuntimeError("Cannot find procedure
+        # ..."), which is precisely the failure the #695 comment on
+        # loadPlugin describes reaching a caller from here. Everything this
+        # handler evaluates is an FBX* command; anything else is a typo or a
+        # procedure fbxmaya never registered.
+        if not statement.startswith("FBX"):
+            raise RuntimeError("Cannot find procedure \"%s\"."
+                               % statement.split()[0])
         self.evaluated.append(statement)
 
 
@@ -991,6 +1136,27 @@ def test_an_unknown_node_fails_before_writing_anything(monkeypatch, tmp_path):
     assert not path.exists()
 
 
+def test_a_deleted_node_is_refused_before_anything_is_queried(monkeypatch,
+                                                              tmp_path):
+    # #799 contract point 1, in the exact shape of the #796 defects: the
+    # node existed when the caller composed the request and is gone by the
+    # time the export runs. objExists is the one query that answers rather
+    # than raising, and export_fbx asks it FIRST - so the caller gets a
+    # HandlerError, not the RuntimeError every later query on this fake now
+    # throws, and no temp file is written.
+    cmds = FakeCmds()
+    _install(monkeypatch, cmds, _facts([]))
+    cmds.delete("golem_C_pelvis")
+
+    path = tmp_path / "gone.fbx"
+    with pytest.raises(HandlerError) as exc:
+        export.export_fbx({"path": str(path), "metres_per_unit": 1.0,
+                           "nodes": ["golem_C_pelvis"]})
+    assert "golem_C_pelvis" in str(exc.value)
+    assert not path.exists() and not (tmp_path / "gone.fbx.part.fbx").exists()
+    assert not any(c[0] == "select" for c in cmds.calls)
+
+
 def test_the_command_is_registered():
     from maya_plugin import maya_mcp_plugin
     assert maya_mcp_plugin._build_handlers()["export_fbx"] is export.export_fbx
@@ -1102,15 +1268,19 @@ def test_a_shaped_export_with_matching_alias_reports_the_block(
     facts = _facts([node])
     facts.meshes = [(0.0, 0.0, 0.0, 1.0, 2.0, 1.0)]
     facts.geometries = {7: facts.meshes[0]}
-    cmds = FakeCmds()
+    # #799: this used to replace ls/listHistory/listAttr with lambdas that
+    # answered the same thing to every question - `ls` handed back the MESH
+    # for the type="blendShape" query, and listAttr then read weight aliases
+    # off that mesh. The declared alias came out right by accident, through
+    # a wiring no Maya has. Modelled properly: the shape carries a
+    # blendShape in its history, and the blendShape carries the alias.
+    cmds = FakeCmds(
+        node_types={"|tube|tubeShape": "mesh", "tube_shapes": "blendShape"},
+        history={"|tube|tubeShape": ["tube_shapes"]},
+        aliases={"tube_shapes": ["brow_raise"]})
     _install(monkeypatch, cmds, facts)
-    # Override FakeCmds to return a blendShape + alias for this test
     block = _good_shapes_block(["brow_raise"])
     monkeypatch.setattr(export.fbxbytes, "shape_facts", lambda _f: block)
-    # Make FakeCmds.listHistory return a blendShape, and listAttr return the alias
-    cmds.listHistory = lambda node, **kw: ["brow_raiseBlendShape"]
-    cmds.listAttr = lambda attr, **kw: ["brow_raise"]
-    cmds.ls = lambda nodes=None, **kw: [node.name]  # ls with type="mesh" returns the mesh
 
     out = export.export_fbx({"path": str(tmp_path / "shaped.fbx"),
                              "metres_per_unit": 1.0})
@@ -1129,15 +1299,15 @@ def test_a_shape_violation_in_export_raises_with_hint_and_deletes_tmp(
     facts = _facts([node])
     facts.meshes = [(0.0, 0.0, 0.0, 1.0, 2.0, 1.0)]
     facts.geometries = {7: facts.meshes[0]}
-    cmds = FakeCmds()
+    # Scene declares two aliases, the file carries one. Modelled on the fake
+    # rather than lambda-stubbed, for the reason above (#799).
+    cmds = FakeCmds(
+        node_types={"|tube|tubeShape": "mesh", "tube_shapes": "blendShape"},
+        history={"|tube|tubeShape": ["tube_shapes"]},
+        aliases={"tube_shapes": ["brow_raise", "bulge_up"]})
     _install(monkeypatch, cmds, facts)
-    # File carries brow_raise, but scene declares both brow_raise and bulge_up
     file_block = _good_shapes_block(["brow_raise"])
     monkeypatch.setattr(export.fbxbytes, "shape_facts", lambda _f: file_block)
-    # Scene declares two aliases but file only carries one
-    cmds.listHistory = lambda node, **kw: ["brow_raiseBlendShape"]
-    cmds.listAttr = lambda attr, **kw: ["brow_raise", "bulge_up"]
-    cmds.ls = lambda nodes=None, **kw: [node.name]
 
     path = tmp_path / "shape_violation.fbx"
     with pytest.raises(HandlerError) as exc:
@@ -1151,6 +1321,64 @@ def test_a_shape_violation_in_export_raises_with_hint_and_deletes_tmp(
     # The temp file must be cleaned up
     assert not path.exists()
     assert not (tmp_path / "shape_violation.fbx.part.fbx").exists()
+
+
+def _history_less_mesh_scene(scene_wide):
+    """A frozen mesh with NO construction history, exported while some other
+    rig in the same scene wears a blendShape. Nothing about the exported
+    mesh is shaped, so the file correctly carries no blend channels."""
+    return FakeCmds(
+        node_types={"|slab|slabShape": "mesh", "face_shapes": "blendShape"},
+        history={"|slab|slabShape": []},
+        aliases={"face_shapes": ["brow_raise"]},
+        empty_ls_is_scene_wide=scene_wide)
+
+
+def _shapeless_export(monkeypatch, tmp_path, cmds, name):
+    node = fbxbytes.FbxNode(name="slab", kind="Mesh", uid=1, geometry=7)
+    facts = _facts([node])
+    facts.meshes = [(0.0, 0.0, 0.0, 1.0, 2.0, 1.0)]
+    facts.geometries = {7: facts.meshes[0]}
+    _install(monkeypatch, cmds, facts)
+    monkeypatch.setattr(export.fbxbytes, "shape_facts",
+                        lambda _f: {"blend_deformers": 0, "channels": 0,
+                                    "shapes": [], "unavailable_reason": None})
+    return export.export_fbx({"path": str(tmp_path / name),
+                              "metres_per_unit": 1.0})
+
+
+def test_a_history_less_mesh_declares_no_shapes_if_empty_selects_nothing(
+        monkeypatch, tmp_path):
+    # The paired half of the xfail below, under ONE of the two candidate
+    # readings - stated in the name since #799 round 2, because the file
+    # used to assert this outcome flatly while the xfail below asserted the
+    # opposite reading as fact. Here the empty operand list selects nothing,
+    # so the other rig's blendShape is not attributed to this mesh and the
+    # export stands.
+    out = _shapeless_export(monkeypatch, tmp_path,
+                            _history_less_mesh_scene(False), "slab.fbx")
+    assert out["shapes"] is None
+    assert os.path.isfile(out["path"])
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "#799 HYPOTHESIS, NOT MEASURED - stated as a hypothesis since round 2, "
+    "which found this reason claiming Maya's behaviour as fact while the "
+    "fake's default asserted the opposite. IF Maya's list-flattening leaves "
+    "no operands for a history-less mesh, then _scene_shape_aliases' "
+    "cmds.ls(history or [], type='blendShape') degenerates to a scene-wide "
+    "`ls -type blendShape`, ANOTHER rig's weight aliases are declared as "
+    "this export's, and shape_violations refuses a correct file for missing "
+    "a channel it was never supposed to carry. Round 2 tried to measure it "
+    "and could not (the maya MCP at 127.0.0.1:9877 refused the connection). "
+    "One live call settles it: cmds.ls([], type='mesh') vs "
+    "cmds.ls(type='mesh'). This pin XPASSES the day the handler skips the "
+    "ls for an empty history, which is the fix if the hypothesis holds"))
+def test_a_history_less_mesh_is_not_refused_for_another_rigs_shapes(
+        monkeypatch, tmp_path):
+    out = _shapeless_export(monkeypatch, tmp_path,
+                            _history_less_mesh_scene(True), "slab_wide.fbx")
+    assert out["shapes"] is None
 
 
 def test_the_tool_is_exposed():
@@ -1418,20 +1646,17 @@ class TestSceneClips:
 
         from maya_plugin.dispatcher import HandlerError
 
-        class Cmds:
-            def ls(self, type=None, long=False):
-                return ["|rig_a", "|rig_b"]
-
-            def attributeQuery(self, attr, node=None, exists=False):
-                return True
-
-            def getAttr(self, plug):
-                return json.dumps([{"name": "idle", "fps": 30,
-                                    "start_frame": 0, "end_frame": 30,
-                                    "duration_s": 1.0}])
+        # #799: this was a fourth fake in the file whose ls answered any
+        # type, whose attributeQuery answered True about any node and whose
+        # getAttr answered the same records for any plug. It is the scene
+        # FakeClipSceneCmds already models, so it says so instead.
+        records = json.dumps([{"name": "idle", "fps": 30,
+                               "start_frame": 0, "end_frame": 30,
+                               "duration_s": 1.0}])
+        cmds = FakeClipSceneCmds({"|rig_a": records, "|rig_b": records})
 
         with pytest.raises(HandlerError) as excinfo:
-            export._scene_clips(Cmds())
+            export._scene_clips(cmds)
         message = str(excinfo.value)
         assert "rig_a" in message and "rig_b" in message
         assert "several clips" in message and "two skeletons" in message
@@ -1501,13 +1726,12 @@ class TestExportFbxReportsClips:
         node = fbxbytes.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1)
         facts = _facts([node])
 
-        class AnimFakeCmds(FakeCmds):
-            def pluginInfo(self, plugin, query=False, loaded=False):
-                # False skips the unload/reload branch (mayapy-only
-                # behaviour, irrelevant to what this test pins).
-                return False
-
-        cmds = AnimFakeCmds()
+        # fbxmaya not loaded yet, which skips the unload/reload branch
+        # (mayapy-only behaviour, irrelevant to what this test pins). #799:
+        # this was a FakeCmds subclass whose pluginInfo returned False to
+        # every question, flags and all - the fake already models the state
+        # that produces the same answer, so it says so.
+        cmds = FakeCmds(plugin_loaded=False)
         _install(monkeypatch, cmds, facts)
         monkeypatch.setattr(export, "_scene_clips", lambda _cmds: declared)
         monkeypatch.setattr(export.fbxbytes, "anim_facts", lambda _f: clean)
@@ -1562,16 +1786,31 @@ class FakeClipSceneCmds:
     def __init__(self, attrs):
         # attrs: {joint_long_name: mcp_clip string or None}
         self.attrs = attrs
+        self.deleted = []
+
+    def _require(self, node):
+        # #799 contract point 1. attributeQuery and getAttr both used to
+        # answer for a node this scene does not hold - attributeQuery with
+        # False, getAttr with a bare KeyError - so a walk that kept a joint
+        # name past a delete looked healthy here.
+        if node in self.deleted or node not in self.attrs:
+            raise RuntimeError("No object matches name: %s" % node)
+        return node
+
+    def delete(self, *names):
+        self.deleted.extend(names)
 
     def ls(self, type=None, long=False):
-        return list(self.attrs)
+        # #799: it answered `list(self.attrs)` whatever was asked for. The
+        # carriers walk asks for joints and nothing else.
+        assert type == "joint" and long, "_scene_clips walks joints by type"
+        return [n for n in self.attrs if n not in self.deleted]
 
     def attributeQuery(self, attr, node=None, exists=False):
-        return self.attrs.get(node) is not None
+        return self.attrs[self._require(node)] is not None
 
     def getAttr(self, key):
-        node = key.rsplit(".", 1)[0]
-        return self.attrs[node]
+        return self.attrs[self._require(key.rsplit(".", 1)[0])]
 
 
 class TestSceneClipsPredicate:
@@ -1990,9 +2229,12 @@ class TestLiveDeltaMushes:
         is cmds.ls(type="deltaMush"), and a name-prefix fake could not fail
         for a renamed mush (review catch)."""
 
-        def __init__(self, history, node_types):
+        def __init__(self, history, node_types, empty_ls_is_scene_wide=None):
             self.history = history
             self.node_types = node_types
+            # See FakeCmds.ls: the unmeasured half of Maya's list-flattening.
+            # #799 round 2: no default, for the reason given there.
+            self.empty_ls_is_scene_wide = empty_ls_is_scene_wide
 
         def ls(self, nodes=None, dagObjects=False, type=None, long=False,
                noIntermediate=False, **kw):
@@ -2003,12 +2245,33 @@ class TestLiveDeltaMushes:
                             if any(s.startswith(n) for n in nodes)]
                 return pool
             if type is not None:
-                return [n for n in (nodes or [])
-                        if self.node_types.get(n) == type]
-            return list(nodes or [])
+                if not nodes:
+                    # #799: an EMPTY operand list. Either it selects nothing
+                    # (what this fake always assumed) or it drops out of the
+                    # command and leaves a scene-wide `ls -type deltaMush`.
+                    # Round 2: unmeasured, so no default - the caller says.
+                    if nodes is not None:
+                        assert self.empty_ls_is_scene_wide is not None, (
+                            "cmds.ls([], type=%r) is UNMEASURED; pass "
+                            "empty_ls_is_scene_wide and name the reading "
+                            "your test asserts under." % (type,))
+                    pool = (list(self.node_types)
+                            if nodes is not None and self.empty_ls_is_scene_wide
+                            else [])
+                else:
+                    pool = list(nodes)
+                return [n for n in pool if self.node_types.get(n) == type]
+            # #799: `return list(nodes or [])` answered every remaining
+            # question, including ones production never asks. The mush walk
+            # types every ls call it makes.
+            raise AssertionError("_live_delta_mushes always types its ls call")
 
         def listHistory(self, node, pruneDagObjects=False, **kw):
-            return list(self.history.get(node, []))
+            # #799 contract point 1: `self.history.get(node, [])` answered
+            # for a mesh this scene does not hold. Maya raises.
+            if node not in self.history:
+                raise RuntimeError("No object matches name: %s" % node)
+            return list(self.history[node])
 
     def test_finds_a_renamed_mush_by_type(self):
         cmds = self._Cmds({"|arm|armShape": ["arm_relax", "arm_skin"]},
@@ -2023,6 +2286,38 @@ class TestLiveDeltaMushes:
                            "arm_shapes": "blendShape"})
         assert export._live_delta_mushes(cmds, None) == []
 
+    def test_a_history_less_mesh_reports_nothing_if_empty_selects_nothing(self):
+        # A frozen or imported mesh has no construction history at all, so
+        # cmds.listHistory(shape, pruneDagObjects=True) prunes away the only
+        # DAG node it would have returned and the walk is handed an EMPTY
+        # list.
+        #
+        # #799 round 2: the reading is now IN THE NAME and on the call. This
+        # test is true under ONE of the two candidate semantics, not full
+        # stop - it used to take the forgiving one silently from a default,
+        # in a class whose xfail below asserts the other one as fact.
+        cmds = self._Cmds({"|slab|slabShape": []},
+                          {"far_relax": "deltaMush"},
+                          empty_ls_is_scene_wide=False)
+        assert export._live_delta_mushes(cmds, None) == []
+
+    @pytest.mark.xfail(strict=True, reason=(
+        "#799 HYPOTHESIS, NOT MEASURED - stated as a hypothesis since round "
+        "2, which found this reason claiming Maya's behaviour as fact while "
+        "the fake's default asserted the opposite. IF cmds.ls([], "
+        "type='deltaMush') has no operands left after Maya flattens the "
+        "empty list, it degenerates to the scene-wide `ls -type deltaMush` "
+        "and a history-less mesh is reported as carrying every deltaMush in "
+        "the scene. Round 2 tried to measure it and could not (the maya MCP "
+        "at 127.0.0.1:9877 refused the connection). One live call settles "
+        "it. This pin XPASSES the day the handler skips the ls for an empty "
+        "history, which is the fix if the hypothesis holds"))
+    def test_a_history_less_mesh_must_not_inherit_a_foreign_mush(self):
+        cmds = self._Cmds({"|slab|slabShape": []},
+                          {"far_relax": "deltaMush"},
+                          empty_ls_is_scene_wide=True)
+        assert export._live_delta_mushes(cmds, None) == []
+
     def test_selected_export_scopes_the_walk(self):
         cmds = self._Cmds(
             {"|arm|armShape": ["arm_relax", "arm_skin"],
@@ -2031,3 +2326,180 @@ class TestLiveDeltaMushes:
              "arm_skin": "skinCluster", "leg_skin": "skinCluster"})
         assert export._live_delta_mushes(cmds, ["|leg"]) == [
             ("|leg|legShape", "leg_relax")]
+
+
+class TestTheFakeRefusesWhatMayaRefuses:
+    """#799 round 2: the round-1 hardening of this file's fakes was asserted
+    NOWHERE - a reviewer reverted all 24 behavioural edits one at a time and
+    only 3 were covered by any test, so the pass could rot silently. That is
+    "a green suite proves nothing" one level up, in the harness. These are
+    the regression barrier: loosen a fake and they go red.
+
+    Only what these fakes model. export.py's Maya surface is reads plus
+    `select` and `file` (grep: no setAttr, no xform write, no connectAttr,
+    no setKeyframe anywhere in it), so there is no connection-fed or locked
+    plug to refuse in either compound direction and no driven-key source to
+    classify here; those barriers belong to the fakes that own those calls.
+    """
+
+    # --- contract point 1: a node the scene does not hold ----------------
+    def _scene(self):
+        return FakeCmds(
+            node_types={"|tube|tubeShape": "mesh", "tube_shapes": "blendShape"},
+            history={"|tube|tubeShape": ["tube_shapes"]},
+            aliases={"tube_shapes": ["brow_raise"]},
+            shading={"|tube|tubeShape": ["tubeSG"]})
+
+    def test_every_query_about_a_node_that_never_existed_raises(self):
+        cmds = self._scene()
+        for call in (
+            lambda: cmds.listHistory("|ghost|ghostShape", pruneDagObjects=True),
+            lambda: cmds.listAttr("ghost_shapes.w", multi=True),
+            lambda: cmds.listSets(object="|ghost|ghostShape", type=1),
+            lambda: cmds.attributeQuery("mcp_clip", node="ghost", exists=True),
+            lambda: cmds.select(["|ghost"], replace=True),
+        ):
+            with pytest.raises(RuntimeError, match="No object matches name"):
+                call()
+
+    def test_every_query_about_a_deleted_node_raises(self):
+        # The #796 shape exactly: the node existed when the caller composed
+        # the request and is gone by the time the export runs.
+        cmds = self._scene()
+        cmds.delete("|tube|tubeShape")
+        for call in (
+            lambda: cmds.listHistory("|tube|tubeShape", pruneDagObjects=True),
+            lambda: cmds.listSets(object="|tube|tubeShape", type=1),
+            lambda: cmds.attributeQuery("x", node="|tube|tubeShape", exists=True),
+            lambda: cmds.select(["|tube|tubeShape"], replace=True),
+        ):
+            with pytest.raises(RuntimeError, match="No object matches name"):
+                call()
+
+    def test_the_two_non_raising_queries_still_answer(self):
+        # objExists and ls are the exceptions, and they are load-bearing:
+        # export_fbx asks objExists FIRST so a caller gets a HandlerError
+        # rather than a traceback. A fake that raised here would break the
+        # ordering test_a_deleted_node_is_refused_before_anything_is_queried
+        # pins - strict-direction wrongness.
+        cmds = self._scene()
+        cmds.delete("|tube|tubeShape")
+        assert cmds.objExists("|tube|tubeShape") is False
+        assert cmds.objExists("tube_shapes") is True
+        assert cmds.ls(["|tube|tubeShape"], long=True) == []
+
+    def test_deleting_a_name_does_not_tombstone_it_forever(self):
+        cmds = self._scene()
+        cmds.delete("tube_shapes")
+        assert cmds.objExists("tube_shapes") is False
+        cmds.node_types["tube_shapes"] = "blendShape"
+        assert cmds.objExists("tube_shapes") is True
+        assert cmds.listAttr("tube_shapes.w", multi=True) is None
+
+    # --- finding 2: the unmeasured empty-operand ls ----------------------
+    def test_an_empty_operand_ls_refuses_to_pick_a_reading(self):
+        # THE round-2 fix. Round 1 gave this call two different answers and
+        # made the permissive one the default, in a file whose two strict
+        # xfails assert the other reading as fact. Neither is the default
+        # now: a test that reaches this branch must name the reading it
+        # asserts under, so a future test against blendshape.py:58/171 or
+        # rigging.py:203/494 cannot inherit a forgiving answer and ship
+        # green. If someone restores a default, this goes red.
+        with pytest.raises(AssertionError, match="UNMEASURED"):
+            self._scene().ls([], type="blendShape")
+        with pytest.raises(AssertionError, match="UNMEASURED"):
+            TestLiveDeltaMushes._Cmds({"|slab|slabShape": []},
+                                      {"far_relax": "deltaMush"}).ls(
+                                          [], type="deltaMush")
+
+    def test_both_readings_are_reachable_once_a_test_names_one(self):
+        # And the two answers really do differ, which is why the choice
+        # cannot be left to a default.
+        scene_wide = FakeCmds(node_types={"face_shapes": "blendShape"},
+                              empty_ls_is_scene_wide=True)
+        selects_nothing = FakeCmds(node_types={"face_shapes": "blendShape"},
+                                   empty_ls_is_scene_wide=False)
+        assert scene_wide.ls([], type="blendShape") == ["face_shapes"]
+        assert selects_nothing.ls([], type="blendShape") == []
+
+    def test_a_no_operand_ls_is_scene_wide_in_both_fakes(self):
+        # The `nodes is None` branch, which is the real cmds.ls(type=X) and
+        # is not in doubt - and is also the argument for the scene-wide
+        # reading of the empty list above.
+        cmds = self._scene()
+        assert cmds.ls(type="blendShape") == ["tube_shapes"]
+
+    # --- contract point 3: no answers-anything fallback ------------------
+    def test_the_history_of_a_mesh_that_has_none_is_empty_not_invented(self):
+        cmds = FakeCmds(node_types={"|slab|slabShape": "mesh"},
+                        history={"|slab|slabShape": []})
+        assert cmds.listHistory("|slab|slabShape", pruneDagObjects=True) == []
+
+    def test_an_attr_probe_answers_from_the_scene_not_a_constant(self):
+        # Round 1 left this a bare `return False` for everything.
+        cmds = FakeCmds(node_types={"golem_C_pelvis": "transform"},
+                        attrs={"golem_C_pelvis": {"mcp_clip"}})
+        assert cmds.attributeQuery("mcp_clip", node="golem_C_pelvis",
+                                   exists=True) is True
+        assert cmds.attributeQuery("nope", node="golem_C_pelvis",
+                                   exists=True) is False
+
+    def test_an_attr_probe_answers_existence_and_nothing_else(self):
+        with pytest.raises(AssertionError, match="EXISTS"):
+            self._scene().attributeQuery("x", node="tube_shapes")
+
+    def test_a_selection_that_does_not_replace_is_refused(self):
+        with pytest.raises(AssertionError, match="replace the selection"):
+            self._scene().select(["tube_shapes"])
+
+    def test_the_plugin_and_unit_queries_take_one_question_each(self):
+        cmds = self._scene()
+        with pytest.raises(AssertionError, match="one thing about fbxmaya"):
+            cmds.pluginInfo("fbxmaya", query=True)
+        with pytest.raises(AssertionError, match="TIME unit"):
+            cmds.currentUnit(query=True)
+
+    def test_the_mush_walk_fake_refuses_an_untyped_ls(self):
+        cmds = TestLiveDeltaMushes._Cmds({"|arm|armShape": []}, {})
+        with pytest.raises(AssertionError, match="always types its ls call"):
+            cmds.ls(["|arm|armShape"])
+
+    def test_the_mush_walk_fake_refuses_a_mesh_it_does_not_hold(self):
+        cmds = TestLiveDeltaMushes._Cmds({"|arm|armShape": []}, {})
+        with pytest.raises(RuntimeError, match="No object matches name"):
+            cmds.listHistory("|ghost|ghostShape", pruneDagObjects=True)
+
+
+class TestTheMelFakeRefusesWhatMayaRefuses:
+    """FakeMel: round 1 replaced an `append` that accepted any MEL at all.
+    Real mel.eval answers an unregistered procedure with RuntimeError, which
+    is the failure the #695 comment on loadPlugin describes reaching a
+    caller from here."""
+
+    def test_a_procedure_fbxmaya_never_registered_raises(self):
+        with pytest.raises(RuntimeError, match="Cannot find procedure"):
+            FakeMel().eval("polyCube -w 1")
+        with pytest.raises(RuntimeError, match="Cannot find procedure"):
+            FakeMel().eval("setAttr golem.tx 5")
+
+    def test_the_prefix_rule_is_the_LIMIT_of_what_this_fake_models(self):
+        # Disclosed rather than papered over. The fake's rule is "an FBX*
+        # procedure is registered, anything else is not" - so a typo INSIDE
+        # an FBX name still passes here, because this fake does not hold
+        # fbxmaya's procedure registry and inventing one would be modelling
+        # something nobody measured. What it does catch is the whole class
+        # the #695 comment describes: a non-FBX procedure reaching mel.eval.
+        mel = FakeMel()
+        mel.eval("FBXExprtSkins -v true")          # a typo, and it is accepted
+        assert mel.evaluated == ["FBXExprtSkins -v true"]
+
+    def test_a_typo_is_not_silently_recorded_as_having_run(self):
+        mel = FakeMel()
+        with pytest.raises(RuntimeError):
+            mel.eval("notAnFbxCommand")
+        assert mel.evaluated == []
+
+    def test_the_real_commands_still_evaluate(self):
+        mel = FakeMel()
+        mel.eval("FBXExportSkins -v false")
+        assert mel.evaluated == ["FBXExportSkins -v false"]

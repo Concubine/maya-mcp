@@ -31,11 +31,80 @@ class FakeCmds:
         self.conns = {"limbSG.surfaceShader": ["limb_mat.outColor"]}
         self.existing_attrs = {"limb_mat.baseColor"}
         self.attr_values = {"limb_mat.baseColor": [(1.0, 1.0, 1.0)]}
+        # Plugs a rigger locked by hand: the other half of #799 contract
+        # 2's "locked or connected" refusal, which no path in this module
+        # produces on its own.
+        self.locked = set()
         self.connected = []
         self.deleted = []
         self.created = []
         self.checkpoints = []
         self.selection = ["|limb"]
+
+    # existence -------------------------------------------------------
+    def _exists(self, node):
+        """Every name this scene holds: mesh transforms, mesh shapes,
+        shading groups, and every DG node in `types` (which `delete` pops
+        from)."""
+        return (node in self.meshes or node in self.meshes.values()
+                or node in self.types or node in self.sg_members)
+
+    def _require(self, node):
+        """Raise the way real Maya does for a node that was deleted or
+        never created - #799 contract 1.
+
+        Every query below funnels through here. The fake used to answer a
+        DEFAULT for an unknown name (nodeType said "transform", getAttr
+        said ""), which is the shape that hid one of #796's blocking
+        defects: code asking about a node it had just deleted got a
+        plausible answer here and a RuntimeError in Maya. This module's
+        rollback path DELETES every node it created and its colour path
+        sweeps the base file node, so a query about a consumed node is
+        the live risk here.
+
+        Deletion is modelled by `delete` REMOVING the node from the
+        registries `_exists` reads, NOT by a name tombstone: #799 round 2
+        found that consulting `self.deleted` here made a name that was
+        deleted and then re-created present in `types` and absent to every
+        query at the same time - a scene Maya cannot have. `self.deleted`
+        is a RECORD for assertions, never an existence oracle.
+        """
+        if not self._exists(node):
+            raise RuntimeError("No object matches name: %s" % node)
+
+    def _compound_parent(self, plug):
+        """`limb_mat.baseColorR` -> `limb_mat.baseColor`, or None."""
+        node, _, attr = plug.rpartition(".")
+        if len(attr) > 1 and attr[-1] in "RGBXYZ":
+            return "%s.%s" % (node, attr[:-1])
+        return None
+
+    def _static_write_blocker(self, plug):
+        """The connection or lock that makes `setAttr(plug, ...)` raise,
+        or None - #799 contract 2. Maya refuses a static write to a plug
+        something feeds, to a COMPOUND whose CHILD is fed, AND to a CHILD
+        whose parent compound is fed - round 1 modelled only the middle
+        one."""
+        parent = self._compound_parent(plug)
+        for candidate in (plug, parent):
+            if candidate is None:
+                continue
+            if candidate in self.locked:
+                return candidate
+            if candidate in self.conns:
+                return self.conns[candidate][0]
+        node, _, attr = plug.rpartition(".")
+        for dst, srcs in self.conns.items():
+            dnode, _, dattr = dst.rpartition(".")
+            if dnode == node and dattr[:-1] == attr and dattr[-1:] in tuple(
+                    "RGBXYZ"):
+                return srcs[0]
+        for locked in self.locked:
+            lnode, _, lattr = locked.rpartition(".")
+            if lnode == node and lattr[:-1] == attr and lattr[-1:] in tuple(
+                    "RGBXYZ"):
+                return locked
+        return None
 
     def ls(self, *args, **kw):
         """Resolves transforms AND shapes: a shading group's members are
@@ -46,32 +115,74 @@ class FakeCmds:
         name = args[0] if args else kw.get("name")
         known = list(self.meshes) + list(self.meshes.values())
         if name in known:
-            return [name]
-        return [n for n in known if n.split("|")[-1] == name]
+            paths = [name]
+        else:
+            paths = [n for n in known if n.split("|")[-1] == name]
+        if not kw.get("uuid"):
+            return paths
+        # #799: `uuid=True` asks a DIFFERENT question - which NODE - and
+        # the old fake answered it with DAG PATHS. Round 2 corrects the
+        # rationale round 1 gave for this edit: the old answer was NOT
+        # empty and did NOT send `texbake._node_ids` down its degrade arm
+        # (that arm is `return set()` on exception, and was never reached
+        # either way). The old answer was a non-empty set whose members
+        # happened to be paths, and because this fake has no instancing
+        # every downstream decision came out the same. The edit stands on
+        # its own ground - a path is not an identity, and a fake that
+        # conflates them cannot be extended to instancing without lying -
+        # not on a dead branch it did not un-deaden. One node per path is
+        # the honest model here (test_meshmaps' fake owns instancing), and
+        # TestTheFakeRefusesWhatMayaRefuses pins the distinction.
+        return ["uuid:" + p for p in paths]
 
     def objExists(self, name):
-        return (name in self.meshes or name in self.types
-                or name in self.meshes.values())
+        # The one query #799 exempts: objExists ANSWERS for a vanished
+        # node, it does not raise.
+        return self._exists(name)
 
-    def listRelatives(self, node, shapes=False, fullPath=False, **kw):
+    def listRelatives(self, node, shapes=False, fullPath=False,
+                      parent=False, **kw):
+        """Both directions - the shape -> transform one is what
+        meshmaps._transform_short_name asks for, and answering None to it
+        unconditionally sent every call down that helper's "a shape that
+        cannot answer stands for itself" degrade arm (#799 contract 3)."""
+        self._require(node)
+        if parent:
+            for transform, shape in self.meshes.items():
+                if shape == node:
+                    return [transform]
+            return None
         return [self.meshes[node]] if shapes and node in self.meshes else None
 
     def nodeType(self, node):
+        self._require(node)
         if node in self.meshes.values():
             return "mesh"
-        return self.types.get(node, "transform")
+        if node in self.types:
+            return self.types[node]
+        if node in self.sg_members:
+            return "shadingEngine"
+        return "transform"   # _require leaves only self.meshes keys here
 
     def listSets(self, object=None, type=None):
+        self._require(object)
         return list(self.shape_sgs.get(object, []))
 
     def sets(self, name, query=False, **kw):
         if query:
+            # An empty list used to be the answer for a set that does not
+            # EXIST, which reads as "worn by nobody" - Maya raises, and
+            # _outside_wearers' degrade-not-crash guard is what has to
+            # absorb that (#799). An EMPTY set is a different thing and
+            # Maya answers it, so existence - not membership - is the test.
+            self._require(name)
             return list(self.sg_members.get(name, []))
         raise NotImplementedError("query only")
 
     def listConnections(self, plug, source=False, destination=True,
                         plugs=False, **kw):
         node = plug.split(".")[0]
+        self._require(node)
         has_attr = "." in plug
         if source:
             if has_attr:
@@ -95,9 +206,15 @@ class FakeCmds:
         return (dsts if plugs else [d.split(".")[0] for d in dsts]) or None
 
     def attributeQuery(self, attr, node=None, exists=False):
+        self._require(node)
         return ("%s.%s" % (node, attr)) in self.existing_attrs
 
     def getAttr(self, plug, **kw):
+        """The plug's value. "" is the modelled answer for an attribute
+        this fake has no value for - Maya answers the attribute's default
+        the same way - but it is reached only AFTER the node is known to
+        exist, which is the half that used to be missing (#799)."""
+        self._require(plug.split(".")[0])
         return self.attr_values.get(plug, "")
 
     def shadingNode(self, node_type, name=None, **kw):
@@ -106,17 +223,37 @@ class FakeCmds:
         return name
 
     def setAttr(self, plug, *values, **kw):
+        self._require(plug.split(".")[0])
+        blocker = self._static_write_blocker(plug)
+        if blocker:
+            raise RuntimeError(
+                "setAttr: The attribute '%s' is locked or connected and "
+                "cannot be modified (%s feeds it)" % (plug, blocker))
         self.attr_values[plug] = list(values) if len(values) > 1 else (
             values[0] if values else None)
 
     def connectAttr(self, src, dst, force=False):
+        self._require(src.split(".")[0])
+        self._require(dst.split(".")[0])
+        if dst in self.conns and not force:
+            raise RuntimeError(
+                "connectAttr: The destination attribute '%s' cannot be "
+                "connected because it is already connected." % dst)
         self.connected.append((src, dst))
         self.conns[dst] = [src]
 
     def delete(self, *nodes):
         for n in nodes:
             self.deleted.append(n)
+            # Deletion is REGISTRY removal, not a tombstone (#799 round
+            # 2): a name re-created afterwards exists again, exactly as in
+            # Maya - and this module's rollback deletes names its next
+            # attempt builds again.
             self.types.pop(n, None)
+            self.sg_members.pop(n, None)
+            self.shape_sgs.pop(n, None)
+            if n in self.meshes:
+                self.shape_sgs.pop(self.meshes.pop(n), None)
             for dst in list(self.conns):
                 if dst.split(".")[0] == n:
                     del self.conns[dst]
@@ -484,6 +621,10 @@ class TestPlanning:
     def test_grain_refuses_when_shader_already_carries_a_bump_network(
             self, fake, tmp_path):
         _masks(tmp_path)
+        # #799: a node named as a connection SOURCE has to exist, now that
+        # a query about a name the scene does not hold raises here the way
+        # it does in Maya.
+        fake.types["someBump"] = "bump2d"
         fake.conns["limb_mat.normalCamera"] = ["someBump.outNormal"]
         with pytest.raises(HandlerError, match="already carries") as exc:
             surfdetail.apply_surface_detail(
@@ -495,6 +636,7 @@ class TestPlanning:
     def test_grain_only_resolves_the_shader_the_mesh_wears(self, fake,
                                                             tmp_path):
         _masks(tmp_path)
+        fake.types["someBump"] = "bump2d"       # #799: sources exist
         fake.conns["limb_mat.normalCamera"] = ["someBump.outNormal"]
         with pytest.raises(HandlerError, match="limb_mat"):
             surfdetail.apply_surface_detail(
@@ -681,3 +823,149 @@ class TestApply:
         assert not any(fake.types.get(n) in ("file", "place2dTexture")
                        for n in remaining)
         assert all(n in fake.deleted for n in fake.created)
+
+
+class TestTheFakeRefusesWhatMayaRefuses:
+    """#799 round 2: the regression barrier for THIS file's FakeCmds.
+
+    Round 1's hardening was measured to be INERT with respect to the
+    suite - neutering every new refusal left the five look-group files at
+    184 passed / 2 xfailed / 0 failed, so the ticket's own premise ("a
+    green suite proves nothing") was reproduced one level up. Only the
+    contract points this fake actually models are asserted below; there
+    is deliberately no polyEvaluate case, because this fake has none.
+    """
+
+    # contract 1 - a name the scene does not hold ---------------------
+    def test_a_query_about_a_deleted_node_raises(self, fake):
+        fake.shadingNode("bump2d", name="mcpDetail_bump")
+        fake.delete("mcpDetail_bump")
+        for call in (lambda: fake.nodeType("mcpDetail_bump"),
+                     lambda: fake.getAttr("mcpDetail_bump.bumpValue"),
+                     lambda: fake.setAttr("mcpDetail_bump.bumpDepth", 1.0),
+                     lambda: fake.listConnections("mcpDetail_bump.outNormal",
+                                                  source=True),
+                     lambda: fake.attributeQuery("bumpValue",
+                                                 node="mcpDetail_bump",
+                                                 exists=True),
+                     lambda: fake.listRelatives("mcpDetail_bump", shapes=True),
+                     lambda: fake.listSets(object="mcpDetail_bump")):
+            with pytest.raises(RuntimeError, match="No object matches name"):
+                call()
+
+    def test_a_query_about_a_node_that_never_existed_raises(self, fake):
+        with pytest.raises(RuntimeError, match="No object matches name"):
+            fake.nodeType("never_made")
+        with pytest.raises(RuntimeError, match="No object matches name"):
+            fake.getAttr("never_made.outColor")
+
+    def test_objExists_answers_for_a_vanished_node_instead_of_raising(
+            self, fake):
+        fake.shadingNode("bump2d", name="mcpDetail_bump")
+        assert fake.objExists("mcpDetail_bump") is True
+        fake.delete("mcpDetail_bump")
+        assert fake.objExists("mcpDetail_bump") is False
+        assert fake.objExists("never_made") is False
+
+    def test_a_deleted_name_re_created_exists_again(self, fake):
+        """The round-2 BLOCKING defect: `self.deleted` was a permanent
+        tombstone nothing could clear, so a name this module's rollback
+        deleted and its next attempt re-created was present in `types` and
+        absent to `_require` at the same time - a scene Maya cannot
+        have."""
+        fake.shadingNode("bump2d", name="mcpDetail_bump")
+        fake.delete("mcpDetail_bump")
+        fake.shadingNode("bump2d", name="mcpDetail_bump")
+        assert fake.objExists("mcpDetail_bump") is True
+        assert fake.nodeType("mcpDetail_bump") == "bump2d"
+        fake.setAttr("mcpDetail_bump.bumpDepth", 1.0)   # must not raise
+        assert fake.deleted == ["mcpDetail_bump"]       # still a RECORD
+
+    # contract 1, strict direction ------------------------------------
+    def test_an_existing_but_empty_shading_group_answers_rather_than_raises(
+            self, fake):
+        """A set that does not EXIST raises; a set that exists and holds
+        nothing answers []. Round 1 refused both - wrong in the STRICT
+        direction, which produces spurious failures the next agent fixes
+        by weakening the fake back."""
+        # An SG that EXISTS but has no members: registered as a node,
+        # absent from the membership registry. Round 1 keyed the
+        # refusal on membership, so this - a real, empty set - raised.
+        fake.types["emptySG"] = "shadingEngine"
+        assert fake.objExists("emptySG") is True
+        assert fake.sets("emptySG", query=True) == []
+        assert fake.sets("limbSG", query=True) == ["|limbShape"]
+        with pytest.raises(RuntimeError, match="No object matches name"):
+            fake.sets("noSuchSG", query=True)
+
+    # contract 2 - locked or connected --------------------------------
+    def test_setAttr_refuses_a_plug_a_connection_feeds(self, fake):
+        fake.types["someFile"] = "file"
+        fake.conns["limb_mat.baseColor"] = ["someFile.outColor"]
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            fake.setAttr("limb_mat.baseColor", 1.0, 1.0, 1.0)
+
+    def test_setAttr_refuses_both_compound_directions(self, fake):
+        """A child write when the COMPOUND is fed, and a compound write
+        when a CHILD is fed. Round 1 modelled only the second."""
+        fake.types["someFile"] = "file"
+        fake.conns["limb_mat.baseColor"] = ["someFile.outColor"]
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            fake.setAttr("limb_mat.baseColorR", 1.0)
+        fake.conns["limb_mat.emissionColorG"] = ["someFile.outAlpha"]
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            fake.setAttr("limb_mat.emissionColor", 0.0, 0.0, 0.0)
+
+    def test_setAttr_refuses_a_locked_plug_in_both_compound_directions(
+            self, fake):
+        fake.locked.add("limb_mat.specularRoughness")
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            fake.setAttr("limb_mat.specularRoughness", 0.4)
+        fake.locked.add("limb_mat.coatColor")
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            fake.setAttr("limb_mat.coatColorB", 0.4)
+        fake.locked.add("limb_mat.subsurfaceColorR")
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            fake.setAttr("limb_mat.subsurfaceColor", 1.0, 1.0, 1.0)
+
+    def test_setAttr_to_a_free_plug_is_what_getAttr_reads_back(self, fake):
+        fake.setAttr("limb_mat.specularRoughness", 0.25)
+        assert fake.getAttr("limb_mat.specularRoughness") == 0.25
+        assert fake.getAttr("limb_mat.metalness") == ""   # modelled default
+
+    def test_connectAttr_refuses_an_occupied_destination_unless_forced(
+            self, fake):
+        fake.types["mcpDetail_file"] = "file"
+        with pytest.raises(RuntimeError, match="already connected"):
+            fake.connectAttr("mcpDetail_file.outColor",
+                             "limbSG.surfaceShader")
+        fake.connectAttr("mcpDetail_file.outColor", "limbSG.surfaceShader",
+                         force=True)
+        assert fake.conns["limbSG.surfaceShader"] == [
+            "mcpDetail_file.outColor"]
+
+    def test_connectAttr_refuses_a_node_that_is_not_in_the_scene(self, fake):
+        with pytest.raises(RuntimeError, match="No object matches name"):
+            fake.connectAttr("ghost.outColor", "limb_mat.emissionColor")
+        with pytest.raises(RuntimeError, match="No object matches name"):
+            fake.connectAttr("limb_mat.outColor", "ghost.baseColor")
+
+    # contract 3 - answers that used to be constants -------------------
+    def test_ls_with_uuid_answers_identities_not_paths(self, fake):
+        """`uuid=True` asks which NODE, not which path. The old fake
+        answered with DAG paths, so `texbake._node_ids` compared paths
+        while reading as if it compared identities. Pinning it here is
+        what round 1 lacked: reverting `ls` to the old form left all 184
+        tests green."""
+        assert fake.ls("|limbShape", long=True) == ["|limbShape"]
+        ids = fake.ls("|limbShape", uuid=True)
+        assert ids == ["uuid:|limbShape"]
+        assert not set(ids) & {"|limbShape", "|limb"}   # never a path
+
+    def test_listRelatives_answers_the_shape_to_transform_direction(
+            self, fake):
+        """Answering None to `parent=True` unconditionally sent every call
+        down meshmaps._transform_short_name's "a shape that cannot answer
+        stands for itself" degrade arm."""
+        assert fake.listRelatives("|limbShape", parent=True) == ["|limb"]
+        assert fake.listRelatives("|limb", shapes=True) == ["|limbShape"]

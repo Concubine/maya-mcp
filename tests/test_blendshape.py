@@ -36,14 +36,53 @@ class FakeCmds:
         self.edited = []          # blendShape(edit=True) records
         self.checkpoints = []
 
+    # --- existence (#799) ----------------------------------------------
+    def _live(self):
+        """Every name a query may legally be asked about.
+
+        #799 contract point 1: this fake DELETES (create_blendshape
+        consumes its targets), and before this ticket a query about a
+        consumed mesh still answered - nodeType by naming convention,
+        listRelatives/polyEvaluate off dicts `delete` never pruned. Real
+        Maya raises "No object matches name" for all of them, which is the
+        exact blindness that let #796 ship a classify-after-delete crash.
+        """
+        live = (list(self.objects) + list(self.shapes.values())
+                + sorted(self.blend_nodes)
+                + list(getattr(self, "node_types", {})))
+        # Curve nodes exist only as a consequence of `curve_plugs`, and the
+        # corrective/driven-key sources only of `driven_plugs`; both get
+        # asked for their nodeType by clip.partition_driven_keys.
+        for plug in getattr(self, "curve_plugs", ()):
+            live.append(self._curve_for(plug))
+        for src in getattr(self, "driven_plugs", {}).values():
+            live.append(src.split(".")[0])
+        return live
+
+    def _require(self, node):
+        if node not in self._live():
+            raise RuntimeError("No object matches name: %s" % node)
+
+    @staticmethod
+    def _curve_for(plug):
+        return plug.replace("|", "_").replace(".", "_") + "_crv"
+
     # --- resolution ----------------------------------------------------
     def ls(self, pattern=None, long=False, type=None, **kw):
         if isinstance(pattern, list):
+            # ROUND 2 (#799): NOT `list(pattern)`, and NOT nodeType() on a
+            # raw name either. Maya's `ls` DROPS a name that is not in the
+            # scene (it never raises for one), so the list form has to be
+            # filtered to what is live first: inventing the name back is
+            # the same answers-anything fallback round 1 deleted from
+            # tests/test_rigging.py, and it left this fake's deletion purge
+            # unreachable through the list form.
+            live = [n for n in pattern if n in self._live()]
             if type == "blendShape":
-                return [n for n in pattern if n in self.blend_nodes]
+                return [n for n in live if n in self.blend_nodes]
             if type is not None:
-                return [n for n in pattern if self.nodeType(n) == type]
-            return list(pattern)
+                return [n for n in live if self.nodeType(n) == type]
+            return live
         if pattern is None:
             return list(self.objects)
         return [o for o in self.objects
@@ -54,12 +93,18 @@ class FakeCmds:
 
     def listRelatives(self, node, shapes=False, fullPath=False,
                       noIntermediate=False, **kw):
+        self._require(node)
         if shapes:
             s = self.shapes.get(node)
             return [s] if s else None
         return None
 
     def nodeType(self, node):
+        # #799 contract point 3: the naming convention below answers for a
+        # name the fixture built. For one it never built - or one `delete`
+        # consumed - Maya raises, and answering "transform" instead is how
+        # a query-after-delete stays invisible.
+        self._require(node)
         if node in self.blend_nodes:
             return "blendShape"
         override = getattr(self, "node_types", {}).get(node)
@@ -70,9 +115,11 @@ class FakeCmds:
         return "mesh" if node.endswith("Shape") else "transform"
 
     def listHistory(self, node, pruneDagObjects=False, **kw):
+        self._require(node)
         return list(self.history.get(node, []))
 
     def polyEvaluate(self, node, vertex=False, **kw):
+        self._require(node)
         return self.vertex_counts[node]
 
     # --- the blendShape surface the handler drives ----------------------
@@ -102,6 +149,7 @@ class FakeCmds:
 
     def listAttr(self, plug, multi=False):
         node = plug.split(".")[0]
+        self._require(node)
         aliases = self.aliases.get(node)
         if not aliases:
             return None
@@ -113,11 +161,36 @@ class FakeCmds:
             attr = self.aliases[node][int(attr[2:-1])]
         return node, attr
 
-    def setAttr(self, key, value):
+    def _write_blocker(self, key):
+        """The connection that makes a static write to `key` raise, or None.
+
+        #799 contract point 2, MEASURED in #771 (evals/correctives_probe/):
+        setAttr on a driven weight raises "locked or connected". This fake
+        wrote happily to any plug, so every guard that exists to keep this
+        handler off a connected weight was pinned only by its own refusal
+        message - never by the crash the refusal is there to prevent.
+        """
         node, alias = self._resolve_weight_key(key)
+        plug = "%s.%s" % (node, alias)
+        if plug in getattr(self, "curve_plugs", ()):
+            return self._curve_for(plug)
+        return getattr(self, "driven_plugs", {}).get(plug)
+
+    def setAttr(self, key, value):
+        # ROUND 2 (#799): EXISTENCE first. `_resolve_weight_key` reads
+        # `self.aliases[node]`, so a write to `<gone>.w[0]` raised KeyError
+        # where Maya answers "No object matches name".
+        self._require(key.split(".", 1)[0])
+        node, alias = self._resolve_weight_key(key)
+        blocker = self._write_blocker(key)
+        if blocker:
+            raise RuntimeError(
+                "setAttr: The attribute '%s.%s' is locked or connected and "
+                "cannot be modified (%s feeds it)" % (node, alias, blocker))
         self.weights[(node, alias)] = float(value)
 
     def getAttr(self, key, multiIndices=False):
+        self._require(key.split(".", 1)[0])
         if multiIndices:
             node, attr = key.split(".", 1)
             assert attr == "w"
@@ -127,26 +200,49 @@ class FakeCmds:
 
     def delete(self, *names):
         for n in names:
+            self._require(n)
             self.deleted.append(n)
             self.objects.remove(n)
-
-    def attributeQuery(self, attr, node=None, exists=False):
-        # For clip metadata check - always return False (no mcp_clip attr)
-        if exists:
-            return False
-        return None
+            # #799: the node is GONE. Leaving its shape and vertex count in
+            # place let listRelatives/polyEvaluate keep answering for a
+            # target mesh create_blendshape had already consumed.
+            shape = self.shapes.pop(n, None)
+            self.history.pop(shape, None)
+            self.vertex_counts.pop(n, None)
+            # ROUND 2 (#799): a `node_types` entry outlived its node and
+            # `_live` reads that dict, so a deleted target a test had typed
+            # explicitly stayed answerable.
+            getattr(self, "node_types", {}).pop(n, None)
 
     def listConnections(self, plug, source=False, destination=True,
                         type=None, plugs=False):
+        self._require(plug.split(".")[0])
+        if not source:
+            # #799: no handler here walks downstream from a weight plug, so
+            # an unconditional None would let an unmodelled destination
+            # query read as "nothing connected".
+            raise AssertionError(
+                "FakeCmds.listConnections models source queries only (#799)")
+        srcs = []
         if plug in getattr(self, "curve_plugs", ()):
-            crv = plug.replace("|", "_").replace(".", "_") + "_crv"
-            return [crv + ".output"] if plugs else [crv]
+            srcs.append(self._curve_for(plug) + ".output")
         # #771: a corrective-driven plug - a non-animCurve source.
         driven = getattr(self, "driven_plugs", {})
-        if plug in driven and type is None:
-            src = driven[plug]
-            return [src] if plugs else [src.split(".")[0]]
-        return None
+        if plug in driven:
+            srcs.append(driven[plug])
+        if type is not None:
+            # #799: `type` was honoured for driven_plugs and ignored for
+            # curve_plugs. Maya filters BOTH - and matches DERIVED types, so
+            # an animCurveTU answers type="animCurve" (the #796 defect-1
+            # trap).
+            srcs = [s for s in srcs
+                    if self.nodeType(s.split(".")[0]) == type
+                    or (type == "animCurve"
+                        and self.nodeType(s.split(".")[0]).startswith(
+                            "animCurve"))]
+        if not srcs:
+            return None
+        return srcs if plugs else [s.split(".")[0] for s in srcs]
 
 
 @pytest.fixture
@@ -464,3 +560,119 @@ class TestCorrectiveGuard:
         out = blendshape.set_blendshape_weights(
             {"mesh": "humanoid", "weights": {"brow_raise": 0.7}})
         assert out["weights"]["brow_raise"] == 0.7
+
+
+class TestTheFakeRefusesWhatMayaRefuses:
+    """#799 round 2: the regression barrier for THIS file's FakeCmds.
+
+    Round 1 hardened the fake and nothing asserted the hardening - a
+    reviewer measured that reverting every behavioural change left the
+    suite fully green, which is this ticket's own "a green suite proves
+    nothing" moved up one level. These assertions go red the day someone
+    loosens the fake back toward answering anything.
+
+    The compound direction of contract point 2 has no meaning on a weight
+    (a blendShape weight is a scalar); its analogue is the two ways the
+    same plug is addressed - `node.alias` and `node.w[i]` - and both are
+    pinned. This fake has no setKeyframe: no blendshape handler calls one.
+    """
+
+    _GONE = "No object matches name"
+
+    @staticmethod
+    def _wired(fake):
+        """The scene plus one blendShape carrying two weights."""
+        _scene(fake)
+        fake.blend_nodes.add("bs1")
+        fake.aliases["bs1"] = {0: "elbow_fix", 1: "bulge"}
+        fake.weights[("bs1", "elbow_fix")] = 0.0
+        fake.weights[("bs1", "bulge")] = 0.0
+        fake.history["|humanoid|humanoidShape"] = ["bs1"]
+
+    def test_a_node_no_fixture_created_raises_from_every_query(self, fake):
+        _scene(fake)
+        calls = [
+            lambda: fake.nodeType("|ghost"),
+            lambda: fake.listRelatives("|ghost", shapes=True),
+            lambda: fake.listHistory("|ghost"),
+            lambda: fake.polyEvaluate("|ghost", vertex=True),
+            lambda: fake.listAttr("|ghost.w"),
+            lambda: fake.getAttr("|ghost.w", multiIndices=True),
+            lambda: fake.setAttr("|ghost.w[0]", 1.0),
+            lambda: fake.delete("|ghost"),
+            lambda: fake.listConnections("|ghost.w[0]", source=True),
+        ]
+        for call in calls:
+            with pytest.raises(RuntimeError, match=self._GONE):
+                call()
+        assert fake.ls("|ghost") == []
+        # ROUND 2: the list form used to answer `list(pattern)` - inventing
+        # the name back for anything asked, which is the fallback round 1
+        # deleted from tests/test_rigging.py and left standing here.
+        assert fake.ls(["|ghost"]) == []
+        assert fake.objExists("|ghost") is False
+
+    def test_a_consumed_target_stops_answering(self, fake):
+        _scene(fake)
+        assert fake.polyEvaluate("|brow", vertex=True) == 2
+        fake.delete("|brow")
+        for call in (lambda: fake.nodeType("|brow"),
+                     lambda: fake.polyEvaluate("|brow", vertex=True),
+                     lambda: fake.listRelatives("|brow", shapes=True),
+                     lambda: fake.nodeType("|brow|browShape")):
+            with pytest.raises(RuntimeError, match=self._GONE):
+                call()
+        assert fake.ls("|brow") == []
+        assert fake.ls(["|brow"]) == []
+
+    def test_an_explicitly_typed_target_dies_with_the_node(self, fake):
+        # ROUND 2: `_live` reads `node_types`, so an entry a test wrote by
+        # hand outlived the node `delete` consumed.
+        _scene(fake)
+        fake.node_types = {"|brow": "transform"}
+        fake.delete("|brow")
+        with pytest.raises(RuntimeError, match=self._GONE):
+            fake.nodeType("|brow")
+
+    def test_a_driven_weight_refuses_the_write_both_ways_it_is_addressed(
+            self, fake):
+        self._wired(fake)
+        fake.node_types = {"poseInterp1": "poseInterpolator"}
+        fake.driven_plugs = {"bs1.elbow_fix": "poseInterp1.output[0]"}
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            fake.setAttr("bs1.elbow_fix", 1.0)
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            fake.setAttr("bs1.w[0]", 1.0)
+        # and it does NOT over-refuse: the free weight on the same node
+        # still writes. A fake wrong in the strict direction is as bad as a
+        # permissive one.
+        fake.setAttr("bs1.w[1]", 0.5)
+        assert fake.weights[("bs1", "bulge")] == 0.5
+
+    def test_an_animation_curve_on_a_weight_refuses_the_write(self, fake):
+        self._wired(fake)
+        fake.curve_plugs = ["bs1.elbow_fix"]
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            fake.setAttr("bs1.elbow_fix", 1.0)
+
+    def test_listConnections_models_sources_and_derived_types(self, fake):
+        self._wired(fake)
+        fake.curve_plugs = ["bs1.elbow_fix"]
+        crv = fake._curve_for("bs1.elbow_fix")
+        fake.node_types = {crv: "animCurveTU"}
+        assert fake.listConnections("bs1.elbow_fix", source=True,
+                                    plugs=True) == [crv + ".output"]
+        # ROUND 1 fixed the half of this that ignored `type` for curves;
+        # Maya's filter also matches DERIVED types (the #796 defect-1 trap).
+        assert fake.listConnections("bs1.elbow_fix", source=True,
+                                    type="animCurve") == [crv]
+        assert fake.listConnections("bs1.elbow_fix", source=True,
+                                    type="poseInterpolator") is None
+        with pytest.raises(AssertionError, match="source queries only"):
+            fake.listConnections("bs1.elbow_fix", destination=True)
+
+    def test_listAttr_answers_none_for_a_node_with_no_targets(self, fake):
+        self._wired(fake)
+        assert fake.listAttr("bs1.w") == ["elbow_fix", "bulge"]
+        fake.aliases["bs1"] = {}
+        assert fake.listAttr("bs1.w") is None

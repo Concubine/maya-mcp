@@ -22,9 +22,21 @@ class FakeLensCmds:
     The point of apply_framing_fov is that it READS the film back rather
     than assuming one, so the fake has to be able to disagree with Maya's
     defaults - that is the whole assertion.
+
+    #799: it now holds a node REGISTRY rather than a bare plug dict.
+    `listRelatives` used to answer "camShape" for any string handed to it,
+    so `apply_framing_fov(cmds, "a camera nobody made")` looked healthy
+    here and raises "No object matches name" in Maya. Writes to a
+    connection-fed plug refuse too - an animated or expression-driven
+    focalLength is a plug this helper writes unguarded.
     """
 
     def __init__(self, h_aperture=1.4173, v_aperture=0.9449):
+        self.shape_of = {"cam": "camShape"}
+        self.deleted = []
+        # plug -> the source feeding it. A connected (or locked) plug
+        # refuses a static setAttr in real Maya (#799 contract 2).
+        self.driven_plugs = {}
         self.attrs = {
             "camShape.horizontalFilmAperture": h_aperture,
             "camShape.verticalFilmAperture": v_aperture,
@@ -33,15 +45,43 @@ class FakeLensCmds:
         }
         self.sets = []
 
+    def _require(self, node):
+        """Maya's answer for a node that was deleted or never made."""
+        if node in self.deleted or (
+            node not in self.shape_of and node not in self.shape_of.values()
+        ):
+            raise RuntimeError("No object matches name: %s" % node)
+        return node
+
+    def _require_plug(self, plug):
+        node, _, _attr = plug.rpartition(".")
+        self._require(node)
+        if plug not in self.attrs:
+            raise RuntimeError("No object matches name: %s" % plug)
+        return plug
+
     def listRelatives(self, node, shapes=False, fullPath=False, **kw):
-        return ["camShape"] if shapes else None
+        self._require(node)
+        if not shapes:
+            return None
+        shape = self.shape_of.get(node)
+        return [shape] if shape else None
 
     def getAttr(self, plug):
-        return self.attrs[plug]
+        return self.attrs[self._require_plug(plug)]
 
     def setAttr(self, plug, *values, **kw):
+        self._require_plug(plug)
+        source = self.driven_plugs.get(plug)
+        if source:
+            raise RuntimeError(
+                "setAttr: The attribute '%s' is locked or connected and "
+                "cannot be modified (%s feeds it)" % (plug, source))
         self.attrs[plug] = values[0]
         self.sets.append((plug, values[0]))
+
+    def delete(self, *nodes):
+        self.deleted.extend(nodes)
 
 
 class TestFramingFov:
@@ -80,6 +120,15 @@ class TestFramingFov:
         assert odd.attrs["camShape.focalLength"] != pytest.approx(
             capture.focal_length_for_fov(capture._FOV_DEG,
                                          capture.MAYA_HORIZONTAL_APERTURE_IN))
+
+    def test_it_refuses_a_camera_that_does_not_exist(self):
+        """#799 contract 1: the fake used to answer "camShape" for any
+        string, so this helper looked healthy against a name nobody made.
+        Maya raises "No object matches name" from listRelatives instead."""
+        fake = FakeLensCmds()
+        fake.delete("cam")
+        with pytest.raises(RuntimeError, match="No object matches name"):
+            capture.apply_framing_fov(fake, "cam")
 
     def test_it_pins_film_fit_to_horizontal(self):
         """Which aperture governs is a FUNCTION of filmFit, so leaving it at
@@ -182,14 +231,29 @@ class FakeIsolateCmds:
     editor()/selectionConnection() raise — the isolate path must never touch
     the mainListConnection machinery (locking it breaks VP2 shading-group
     resolution for per-face/groupId bindings; redmine #575).
+
+    #799: the panel is a REGISTERED name now. Every method used to accept
+    any string as a live panel and answer for it, which is the viewport
+    version of the vanished-node fallback: a handler that asked
+    modelEditor/isolateSelect about a panel that no longer exists (a
+    torn-off viewport the user closed mid-capture) got a plausible answer
+    here and a RuntimeError in Maya. The view-selected SET is registered
+    the same way: sets() answers for the panel's own set, not for any name.
     """
 
-    def __init__(self, set_members=None, view_selected=False):
+    def __init__(self, set_members=None, view_selected=False, panel="panelX"):
         self.calls = []
+        self.panels = [panel]
         self.set_members = list(set_members or [])
         self.view_selected = view_selected
 
+    def _require_panel(self, panel):
+        if panel not in self.panels:
+            raise RuntimeError("Object '%s' not found." % panel)
+        return panel
+
     def isolateSelect(self, panel, **kw):
+        self._require_panel(panel)
         self.calls.append(("isolateSelect", panel, kw))
         if kw.get("state") is not None:
             self.view_selected = bool(kw["state"])
@@ -199,6 +263,7 @@ class FakeIsolateCmds:
             self.set_members.remove(kw["removeDagObject"])
 
     def modelEditor(self, panel, **kw):
+        self._require_panel(panel)
         self.calls.append(("modelEditor", panel, kw))
         if kw.get("query"):
             if kw.get("viewObjects"):
@@ -209,6 +274,11 @@ class FakeIsolateCmds:
 
     def sets(self, name, **kw):
         self.calls.append(("sets", name, kw))
+        # #799: only the panel's own view-selected set answers. Answering
+        # for any string made "is this set real?" unaskable, and
+        # _isolate_members' whole job is to decide that.
+        if name not in ["%sViewSelectedSet" % p for p in self.panels]:
+            raise RuntimeError("No object matches name: %s" % name)
         if kw.get("query"):
             return list(self.set_members)
         return None
@@ -424,10 +494,46 @@ class FakeCaptureCmds:
     it off" (the mid-capture edit call) apart from "restore put it back"
     (the final edit call in _PanelState.restore) by value, not just by call
     order.
+
+    #799: nodes and panels are REGISTERED. Before this, `listRelatives`
+    answered "<anything>Shape", `getAttr` answered [(0,0,0)] for every plug
+    it did not recognise, `ls(x, long=True)` answered "|x" for any string,
+    and every panel-taking method accepted any panel name - so a capture
+    that asked Maya about a camera it had already deleted, or about a panel
+    that had gone away mid-call, could not fail here. This is the same
+    class of blindness as #765 (a picture of nothing reported as a
+    success): the fake agreed with the handler instead of with Maya.
     """
 
     def __init__(self):
         self.calls = []
+        # The panels that exist, by type, and the only camera. `persp` is
+        # the panel's camera, so angle="current" has something real to shoot
+        # through. Typed rather than a bare name list because getPanel used
+        # to answer "modelPanel" for whatever had focus, so find_model_panel
+        # never took its search branches - and an agent-driven Maya almost
+        # always has focus somewhere other than the viewport (#799).
+        self.panel_types = {"modelPanel1": "modelPanel"}
+        self.visible_panels = ["modelPanel1"]
+        self.nodes = {"|persp": "|persp|perspShape"}   # long -> shape (or None)
+        self.plugs = {
+            "|persp.translate": (0.0, 0.0, 0.0),
+            "|persp.rotate": (0.0, 0.0, 0.0),
+            "|persp|perspShape.horizontalFilmAperture":
+                capture.MAYA_HORIZONTAL_APERTURE_IN,
+            "|persp|perspShape.filmFit": 0,
+            "|persp|perspShape.focalLength": 35.0,
+        }
+        # Shapes cmds.ls(geometry=True, visible=True) reports. EMPTY by
+        # default, which is why _capture_one's frame_all branch has only
+        # ever taken its `viewFit(allObjects=True)` fallback here (#799).
+        self.geometry = []
+        self.node_types = {"|persp": "transform", "|persp|perspShape": "camera"}
+        self.boxes = {}
+        self.view_selected = False
+        self.isolate_members = []
+        self.undo_state = True
+        self.selection = []
         self.editor_state = {
             "displayAppearance": "smoothShaded",
             "wireframeOnShaded": True,
@@ -447,36 +553,74 @@ class FakeCaptureCmds:
         self._create_seq = 0
         self.renamed = []
         self.deleted = []
-        self.existing_names = set()
         # When set, cmds.ls(<this name>, long=True) reports TWO matches
-        # instead of one - reproduces a scene with a stray node sharing the
-        # temp camera's short name, without require_object being involved
-        # (capture.py's cosmetic `camera` field must never raise on this).
+        # instead of one - reproduces a stray node that appeared between
+        # naming.unique_name's objExists check and the rename (the race the
+        # handler's own comment names), so the cosmetic `camera` field meets
+        # an ambiguous short name. Deliberately NOT registered as a node:
+        # registering it would make unique_name suffix the temp camera and
+        # the ambiguity - the thing under test - would never arise.
         self.ambiguous_name = None
+
+    # -- #799 existence ---------------------------------------------------
+    def _long_names(self):
+        """Every node in the fake scene - transforms AND their shapes."""
+        return list(self.nodes) + [s for s in self.nodes.values() if s]
+
+    def _resolve(self, name):
+        """The registered long name for `name`, or None. Matches Maya's own
+        short-name lookup: a bare tail resolves if exactly one node has it."""
+        name = str(name)
+        known = self._long_names()
+        if name in known:
+            return name
+        short = name.rsplit("|", 1)[-1]
+        hits = [n for n in known if n.rsplit("|", 1)[-1] == short]
+        return hits[0] if len(hits) == 1 else None
+
+    def _require(self, name):
+        resolved = self._resolve(name)
+        if resolved is None:
+            # The raise that found #796's blocking defects, in this file's
+            # territory: a capture asking Maya about a temp camera it has
+            # already deleted gets this, not an answer.
+            raise RuntimeError("No object matches name: %s" % name)
+        return resolved
+
+    def _require_panel(self, panel):
+        if panel not in self.panel_types:
+            raise RuntimeError("Object '%s' not found." % panel)
+        return panel
+
+    def _plug(self, plug):
+        node, _, attr = str(plug).rpartition(".")
+        return "%s.%s" % (self._require(node), attr)
 
     def getPanel(self, **kw):
         if kw.get("withFocus"):
             return self.focus_panel
-        if kw.get("typeOf") == self.focus_panel:
-            return "modelPanel"
-        if kw.get("type") == "modelPanel":
-            return [self.focus_panel]
+        if "typeOf" in kw:
+            return self.panel_types.get(kw["typeOf"])
+        if kw.get("type"):
+            return [p for p, t in self.panel_types.items() if t == kw["type"]]
         if kw.get("visiblePanels"):
-            return [self.focus_panel]
+            return list(self.visible_panels)
         return None
 
     def modelPanel(self, panel, **kw):
+        self._require_panel(panel)
         if kw.get("query") and kw.get("camera"):
             return self.active_camera
         return None
 
     def modelEditor(self, panel, **kw):
+        self._require_panel(panel)
         self.calls.append(("modelEditor", panel, dict(kw)))
         if kw.get("query"):
             if kw.get("viewSelected"):
-                return False
+                return self.view_selected
             if kw.get("viewObjects"):
-                return ""
+                return "%sViewSelectedSet" % panel if self.view_selected else ""
             for flag, value in self.editor_state.items():
                 if kw.get(flag):
                     return value
@@ -487,45 +631,149 @@ class FakeCaptureCmds:
         return None
 
     def undoInfo(self, **kw):
-        return True if kw.get("query") else None
+        # #799: answering True to every query and nothing to every edit made
+        # "did the capture put undo recording back?" unaskable, and a
+        # perception tool that leaves it off has broken the user's undo.
+        if kw.get("query"):
+            return self.undo_state
+        if "stateWithoutFlush" in kw:
+            self.undo_state = bool(kw["stateWithoutFlush"])
+        return None
 
     def listRelatives(self, node, shapes=False, fullPath=False, **kw):
-        # apply_framing_fov (#772) sets the lens on the camera SHAPE.
-        return ["%sShape" % node] if shapes else None
+        # apply_framing_fov (#772) sets the lens on the camera SHAPE. It used
+        # to answer "<anything>Shape" for any string, which made the helper's
+        # `or [camera]` fallback (a SHAPELESS node) untestable and let a
+        # deleted camera answer (#799).
+        resolved = self._require(node)
+        if not shapes:
+            return None
+        shape = self.nodes.get(resolved)
+        return [shape] if shape else None
 
     def getAttr(self, attr):
         if attr == "hardwareRenderingGlobals.ssaoEnable":
             return self.ssao
-        if attr.endswith(".horizontalFilmAperture"):
-            return capture.MAYA_HORIZONTAL_APERTURE_IN
-        return [(0.0, 0.0, 0.0)]  # .translate / .rotate
+        plug = self._plug(attr)
+        if plug not in self.plugs:
+            raise RuntimeError("No object matches name: %s" % attr)
+        value = self.plugs[plug]
+        # Maya wraps a double3 query in a one-tuple list; capture reads
+        # getAttr(...)[0] for translate/rotate.
+        return [tuple(value)] if isinstance(value, tuple) else value
 
     def setAttr(self, attr, *args, **kw):
         if attr == "hardwareRenderingGlobals.ssaoEnable":
             self.ssao = args[0]
+            return None
+        plug = self._plug(attr)
+        self.plugs[plug] = tuple(args) if len(args) > 1 else args[0]
         return None
 
     def ls(self, *args, **kw):
         if args and kw.get("long"):
-            name = str(args[0]).lstrip("|")
-            if self.ambiguous_name and name == self.ambiguous_name:
-                return ["|dupA|%s" % name, "|dupB|%s" % name]
-            return ["|%s" % name]
+            name = str(args[0])
+            if self.ambiguous_name and name.lstrip("|") == self.ambiguous_name:
+                short = name.lstrip("|")
+                return ["|dupA|%s" % short, "|dupB|%s" % short]
+            # A name nobody made answers with NOTHING - `ls` is the one
+            # existence query that reports rather than raises.
+            resolved = self._resolve(name)
+            return [resolved] if resolved else []
         if kw.get("geometry"):
-            return []
+            return list(self.geometry)
+        if kw.get("selection"):
+            return list(self.selection)
         return []
 
     def select(self, *a, **kw):
+        names = []
+        if a and not kw.get("clear"):
+            names = list(a[0]) if isinstance(a[0], (list, tuple)) else [a[0]]
+            names = [self._require(name) for name in names]
+        # It really CHANGES the selection (#799): returning None and keeping
+        # ls(selection=True) at a constant [] made "did restore give the user
+        # their selection back?" unaskable.
+        self.selection = names
+        self.calls.append(("select", names, dict(kw)))
         return None
 
-    def lookThru(self, *a, **kw):
+    def refresh(self, **kw):
         return None
 
-    def setFocus(self, *a, **kw):
+    # -- isolate, the other branch a constant answer kept dead (#799) ------
+    # modelEditor answered viewSelected=False / viewObjects="" for every
+    # panel, so _capture_one's isolate branch - and with it the
+    # `state.isolate_dirty = True` that stops a capture leaving the user's
+    # viewport isolated forever - was never executed in this file.
+    def isolateSelect(self, panel, **kw):
+        self._require_panel(panel)
+        self.calls.append(("isolateSelect", panel, dict(kw)))
+        if kw.get("state") is not None:
+            self.view_selected = bool(kw["state"])
+        if "addDagObject" in kw:
+            self.isolate_members.append(self._require(kw["addDagObject"]))
+        if "removeDagObject" in kw:
+            self.isolate_members.remove(kw["removeDagObject"])
+        return None
+
+    def sets(self, name, **kw):
+        if name not in ["%sViewSelectedSet" % p for p in self.panel_types]:
+            raise RuntimeError("No object matches name: %s" % name)
+        return list(self.isolate_members) if kw.get("query") else None
+
+    # -- geometry, so _capture_one can actually FRAME something (#799) -----
+    # Without these three the fake answered ls(geometry=True) with a constant
+    # [], so _scene_bbox always short-circuited to its unit-box fallback and
+    # _capture_one's frame_all branch only ever took `viewFit(allObjects=True)`
+    # - the very call #639 says must never happen for a real scene. The `if
+    # fit_set:` half could have been deleted and every test here stayed green.
+    def nodeType(self, node):
+        return self.node_types[self._require(node)]
+
+    def getClassification(self, node_type, satisfies=None):
+        return (["drawdb/light:light"]
+                if node_type in FakeSceneCmds.LIGHT_TYPES else [])
+
+    def exactWorldBoundingBox(self, *targets, **kw):
+        boxes = [self.boxes[self._require(t)] for t in targets]
+        if not boxes:
+            return [1e20, 1e20, 1e20, -1e20, -1e20, -1e20]
+        return [min(b[i] for b in boxes) for i in range(3)] + [
+            max(b[i] for b in boxes) for i in range(3, 6)
+        ]
+
+    def add_geometry(self, shape, node_type="mesh", box=(-1, -1, -1, 1, 1, 1)):
+        """Register a visible shape ls(geometry=True) will report."""
+        transform = shape.rsplit("|", 1)[0] or "|" + shape.lstrip("|")
+        self.nodes[transform] = shape
+        self.node_types[transform] = "transform"
+        self.node_types[shape] = node_type
+        self.boxes[shape] = tuple(box)
+        self.geometry.append(shape)
+        return shape
+
+    def lookThru(self, panel, camera, *a, **kw):
+        self._require_panel(panel)
+        # It really MOVES the panel's eye (#799). Returning None and
+        # changing nothing made "did restore put the user's camera back
+        # before deleting the temp one?" an unaskable question - and
+        # getting that order wrong leaves the panel pointed at a node that
+        # no longer exists, which is what the next _PanelState would then
+        # ask Maya about.
+        self.active_camera = self._require(camera)
+        self.calls.append(("lookThru", panel, camera))
+        return None
+
+    def setFocus(self, panel, *a, **kw):
+        # It really MOVES focus (#799). _grab_pixels takes focus to
+        # playblast and _PanelState.restore has to hand it back, which is
+        # unaskable while this returns None and changes nothing.
+        self.focus_panel = self._require_panel(panel)
         return None
 
     def objExists(self, name):
-        return str(name).lstrip("|") in self.existing_names
+        return self._resolve(name) is not None
 
     def camera(self, **kw):
         # Deliberately ignores kw["name"] - matches the live Maya quirk
@@ -534,17 +782,56 @@ class FakeCaptureCmds:
         self._create_seq += 1
         transform = "camera%d" % self._create_seq
         shape = "camera%dShape" % self._create_seq
+        long_t, long_s = "|" + transform, "|%s|%s" % (transform, shape)
+        self.nodes[long_t] = long_s
+        self.node_types[long_t] = "transform"
+        self.node_types[long_s] = "camera"
+        self.plugs[long_t + ".translate"] = (0.0, 0.0, 0.0)
+        self.plugs[long_t + ".rotate"] = (0.0, 0.0, 0.0)
+        self.plugs[long_t + ".visibility"] = True
+        self.plugs[long_s + ".horizontalFilmAperture"] = \
+            capture.MAYA_HORIZONTAL_APERTURE_IN
+        self.plugs[long_s + ".filmFit"] = 0
+        self.plugs[long_s + ".focalLength"] = 35.0
         return [transform, shape]
 
     def rename(self, node, new_name):
+        resolved = self._require(node)
         self.renamed.append((node, new_name))
+        new_long = "|" + str(new_name).lstrip("|")
+        old_shape = self.nodes.pop(resolved)
+        new_shape = None
+        if old_shape:
+            new_shape = "%s|%sShape" % (new_long, str(new_name).lstrip("|"))
+        self.nodes[new_long] = new_shape
+        self.node_types[new_long] = self.node_types.pop(resolved, "transform")
+        if old_shape:
+            self.node_types[new_shape] = self.node_types.pop(old_shape, "camera")
+        for plug in list(self.plugs):
+            if plug.startswith(resolved + "."):
+                self.plugs[new_long + plug[len(resolved):]] = self.plugs.pop(plug)
+            elif old_shape and plug.startswith(old_shape + "."):
+                self.plugs[new_shape + plug[len(old_shape):]] = self.plugs.pop(plug)
         return new_name
 
-    def viewFit(self, *a, **kw):
+    def viewFit(self, camera=None, **kw):
+        if camera is not None:
+            self._require(camera)
+        self.calls.append(("viewFit", camera, dict(kw)))
         return None
 
     def delete(self, *a, **kw):
         self.deleted.extend(a)
+        for name in a:
+            resolved = self._resolve(name)
+            if resolved is None:
+                raise RuntimeError("No object matches name: %s" % name)
+            shape = self.nodes.pop(resolved)
+            for plug in list(self.plugs):
+                if plug.startswith(resolved + ".") or (
+                    shape and plug.startswith(shape + ".")
+                ):
+                    del self.plugs[plug]
         return None
 
 
@@ -564,9 +851,11 @@ class TestIconHiding:
             "current", "smoothShaded", True, "beauty", None, True, 256
         )
 
+        # `calls` records more than modelEditor now that lookThru/select/
+        # viewFit are modelled too (#799), so the kind has to be named.
         edit_calls = [
             c[2] for c in cmds.calls
-            if not c[2].get("query") and "lights" in c[2]
+            if c[0] == "modelEditor" and not c[2].get("query") and "lights" in c[2]
         ]
         assert len(edit_calls) == 2, "expected one capture edit + one restore edit"
         capture_kwargs, restore_kwargs = edit_calls
@@ -636,6 +925,153 @@ class TestTempCamera:
         assert shot["camera"] == "|dupA|mayaMcpTempCam"  # first match, no raise
 
 
+class TestCaptureOneFramesTheScene:
+    """#799: what a constant `ls(geometry=True) -> []` was hiding.
+
+    Every other _capture_one test here runs against an EMPTY fake scene, so
+    _scene_bbox short-circuits to its unit-box fallback and the frame_all
+    branch always lands on `viewFit(allObjects=True)` - the one call #639
+    says must never happen for a real scene, because viewFit refits to the
+    sky dome the placement math just excluded and puts the camera 5498
+    units out. The `if fit_set:` half could have been deleted outright and
+    the file stayed green.
+    """
+
+    def _fake(self, monkeypatch):
+        cmds = FakeCaptureCmds()
+        cmds.add_geometry("|golem|golemShape", box=(-2.5, -2.5, -2.5, 2.5, 2.5, 2.5))
+        cmds.add_geometry("|mcpLight_dome|mcpLight_domeShape", "aiSkyDomeLight",
+                          box=(-1000, -1000, -1000, 1000, 1000, 1000))
+        monkeypatch.setattr(capture, "_cmds", lambda: cmds)
+        monkeypatch.setattr(
+            capture, "_grab_pixels",
+            lambda *a, **k: (b"fakepng", {"blank": False,
+                                          "unavailable_reason": None}))
+        return cmds
+
+    def test_it_fits_an_explicit_selection_never_all_objects(self, monkeypatch):
+        cmds = self._fake(monkeypatch)
+        capture._capture_one(
+            "front", "smoothShaded", True, "beauty", None, True, 256)
+        fits = [c for c in cmds.calls if c[0] == "viewFit"]
+        assert len(fits) == 1
+        assert fits[0][2].get("allObjects") is None, (
+            "viewFit allObjects refits to the dome the placement excluded (#639)"
+        )
+        # ...on the framable geometry, which is the cube and NOT the dome.
+        selected = [c[1] for c in cmds.calls if c[0] == "select" and c[1]]
+        assert selected[-1] == ["|golem|golemShape"]
+
+    def test_the_dome_does_not_decide_where_the_camera_goes(self, monkeypatch):
+        cmds = self._fake(monkeypatch)
+        shot = capture._capture_one(
+            "front", "smoothShaded", True, "beauty", None, True, 256)
+        # A 5-unit cube frames from single digits away; the dome's own box
+        # would have put this past 5000 (#639, measured 5294 on a real run).
+        assert abs(shot["camera_position"][2]) < 20.0
+
+    def test_a_named_target_frames_on_it_alone(self, monkeypatch):
+        cmds = self._fake(monkeypatch)
+        cmds.add_geometry("|floor|floorShape", box=(-50, -1, -50, 50, 0, 50))
+        near = capture._capture_one(
+            "front", "smoothShaded", True, "beauty", None, True, 256,
+            frame_on=["|golem|golemShape"])
+        far = capture._capture_one(
+            "front", "smoothShaded", True, "beauty", None, True, 256)
+        assert near["camera_position"][2] < far["camera_position"][2]
+
+    def test_the_panel_is_not_left_looking_through_a_deleted_camera(
+        self, monkeypatch
+    ):
+        """The ORDER in _capture_one's finally: restore's lookThru has to
+        put the user's camera back BEFORE the temp camera is deleted. A
+        panel pointed at a vanished node is what the NEXT _PanelState then
+        asks Maya about - and Maya raises rather than answering (#799)."""
+        cmds = self._fake(monkeypatch)
+        capture.capture_viewport({"angles": ["front", "current"]})
+        assert cmds.active_camera == "|persp"
+        assert "mayaMcpTempCam" in cmds.deleted
+        assert cmds._resolve("mayaMcpTempCam") is None
+
+    def test_an_isolating_capture_turns_isolate_back_off(self, monkeypatch):
+        """`state.isolate_dirty = True` is what makes restore unwind the
+        isolate. Delete that one line and a capture leaves the user's
+        viewport showing only the object it was asked about, forever - and
+        until #799 nothing in this file executed the branch that sets it."""
+        cmds = self._fake(monkeypatch)
+        capture._capture_one(
+            "front", "smoothShaded", True, "beauty", ["|golem|golemShape"],
+            True, 256)
+        assert any(c[0] == "isolateSelect" and c[2].get("addDagObject")
+                   for c in cmds.calls)
+        assert cmds.view_selected is False   # the user had it off
+        assert cmds.isolate_members == []
+
+    def test_an_isolating_capture_puts_the_users_own_isolate_back(
+        self, monkeypatch
+    ):
+        cmds = self._fake(monkeypatch)
+        cmds.view_selected = True
+        cmds.isolate_members = ["|floor|floorShape"]
+        cmds.add_geometry("|floor|floorShape", box=(-50, -1, -50, 50, 0, 50))
+        capture._capture_one(
+            "front", "smoothShaded", True, "beauty", ["|golem|golemShape"],
+            True, 256)
+        assert cmds.view_selected is True
+        assert cmds.isolate_members == ["|floor|floorShape"]
+
+    def test_it_captures_when_focus_is_not_on_a_viewport(self, monkeypatch):
+        """getPanel(typeOf=...) answered "modelPanel" for whatever had
+        focus, so find_model_panel's SEARCH branches were dead code here -
+        and an agent-driven Maya normally has focus in the script editor,
+        which is the very session #765 was measured on."""
+        cmds = self._fake(monkeypatch)
+        cmds.panel_types["scriptEditorPanel1"] = "scriptEditor"
+        cmds.focus_panel = "scriptEditorPanel1"
+        assert capture.find_model_panel(cmds) == "modelPanel1"
+        shot = capture._capture_one(
+            "front", "smoothShaded", True, "beauty", None, True, 256)
+        assert shot["png_b64"]
+        # and the user's focus is where they left it
+        assert cmds.focus_panel == "scriptEditorPanel1"
+
+    def test_it_refuses_when_there_is_no_viewport_at_all(self, monkeypatch):
+        cmds = self._fake(monkeypatch)
+        cmds.panel_types = {"scriptEditorPanel1": "scriptEditor"}
+        cmds.visible_panels = ["scriptEditorPanel1"]
+        cmds.focus_panel = "scriptEditorPanel1"
+        with pytest.raises(HandlerError, match="no model panel"):
+            capture.find_model_panel(cmds)
+
+    def test_the_users_selection_survives_the_capture(self, monkeypatch):
+        """_capture_one selects to viewFit and clears to keep the highlight
+        out of the pixels, so it walks all over the selection. The fake
+        answered ls(selection=True) with a constant [], so restoring it was
+        untested (#799)."""
+        cmds = self._fake(monkeypatch)
+        cmds.selection = ["|golem|golemShape"]
+        capture._capture_one(
+            "front", "smoothShaded", True, "beauty", None, True, 256)
+        assert cmds.selection == ["|golem|golemShape"]
+
+    def test_undo_recording_is_put_back(self, monkeypatch):
+        """Perception must not pollute the undo queue, so the capture turns
+        recording off - and has to turn it back on."""
+        cmds = self._fake(monkeypatch)
+        capture._capture_one(
+            "front", "smoothShaded", True, "beauty", None, True, 256)
+        assert cmds.undo_state is True
+
+    def test_a_target_that_does_not_exist_is_refused(self, monkeypatch):
+        cmds = self._fake(monkeypatch)
+        with pytest.raises(HandlerError, match="not found"):
+            capture._capture_one(
+                "front", "smoothShaded", True, "beauty", None, True, 256,
+                frame_on=["|ghost"])
+        # and nothing was left behind by the attempt
+        assert cmds.nodes.get("|mayaMcpTempCam") is None
+
+
 def test_turntable_defaults_to_eight_frames_evenly_spaced(monkeypatch):
     fake = FakeCaptureCmds()
     monkeypatch.setattr(capture, "_cmds", lambda: fake)
@@ -687,6 +1123,11 @@ class FakeSceneCmds:
         return list(self.shapes)
 
     def nodeType(self, name):
+        # #799: Maya's own words for a node that is not there, rather than a
+        # KeyError - is_light_shape swallows every exception, so the shape of
+        # the failure is what a reader has to be able to trust.
+        if name not in self.shapes:
+            raise RuntimeError("No object matches name: %s" % name)
         return self.shapes[name][0]
 
     def getClassification(self, node_type, satisfies=None):
@@ -699,6 +1140,9 @@ class FakeSceneCmds:
         return name in self.shapes
 
     def exactWorldBoundingBox(self, *names, **kwargs):
+        for name in names:
+            if name not in self.shapes:
+                raise RuntimeError("No object matches name: %s" % name)
         boxes = [self.shapes[n][1] for n in names]
         if kwargs.get("ignoreInvisible"):
             boxes = [
@@ -981,3 +1425,152 @@ class TestUnrealizedWindow:
         assert result["warnings"] == ["showed the window"]
         turn = capture.capture_turntable({"n_frames": 2})
         assert turn["warnings"] == ["showed the window"]
+
+
+class TestTheFakesRefuseWhatMayaRefuses:
+    """The regression barrier for the four fakes above (#799 round 2).
+
+    Round 1 replaced their answers-anything fallbacks and asserted almost
+    none of it: reverting the behavioural changes left the suite green,
+    which is this ticket's own complaint - "a green suite proves nothing" -
+    one level up. `FakeLensCmds.driven_plugs` and the refusal branch it
+    gates were the clearest case: set by no test, read by no test.
+
+    Each claim below is a contract point the fake it names actually models.
+    """
+
+    # -- FakeLensCmds ------------------------------------------------------
+    def test_the_lens_fake_refuses_a_camera_nobody_made(self):
+        fake = FakeLensCmds()
+        with pytest.raises(RuntimeError, match="No object matches name"):
+            capture.apply_framing_fov(fake, "nobodyMadeThisCam")
+        with pytest.raises(RuntimeError, match="No object matches name"):
+            fake.getAttr("camShape.coneAngle")
+
+    def test_the_lens_fake_refuses_a_connection_fed_focal_length(self):
+        """An animated focal length - a zoom - is a plug apply_framing_fov
+        writes unguarded, and Maya refuses a static write to it. The branch
+        that models this was reachable from no test at all."""
+        fake = FakeLensCmds()
+        fake.driven_plugs["camShape.focalLength"] = "camShape_focalLength_anim"
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            capture.apply_framing_fov(fake, "cam")
+        assert fake.attrs["camShape.focalLength"] == 35.0
+
+    def test_the_lens_fake_refuses_a_locked_film_fit(self):
+        # filmFit is written FIRST, so a locked one stops the helper before
+        # it reads the aperture: nothing is half-applied.
+        fake = FakeLensCmds()
+        fake.driven_plugs["camShape.filmFit"] = "referenced-and-locked"
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            capture.apply_framing_fov(fake, "cam")
+        assert fake.sets == []
+
+    def test_a_free_lens_still_takes_its_write(self):
+        # The refusal must not become the answer to everything.
+        fake = FakeLensCmds()
+        focal = capture.apply_framing_fov(fake, "cam")
+        assert fake.attrs["camShape.focalLength"] == pytest.approx(focal)
+
+    # -- FakeIsolateCmds ---------------------------------------------------
+    def test_the_isolate_fake_refuses_a_panel_that_is_not_there(self):
+        # A torn-off viewport the user closed mid-capture: every
+        # panel-taking method answered plausibly for it before #799.
+        fake = FakeIsolateCmds()
+        for call in (
+            lambda: fake.isolateSelect("closedPanel", state=1),
+            lambda: fake.modelEditor("closedPanel", query=True, viewSelected=True),
+        ):
+            with pytest.raises(RuntimeError, match="not found"):
+                call()
+
+    def test_the_isolate_fake_answers_only_for_a_real_view_selected_set(self):
+        fake = FakeIsolateCmds(set_members=["|golem"])
+        # The panel's own set answers - refusing this would be the strict
+        # error, and _isolate_members asks exactly this question.
+        assert fake.sets("panelXViewSelectedSet", query=True) == ["|golem"]
+        with pytest.raises(RuntimeError, match="No object matches name"):
+            fake.sets("someSetNobodyMade", query=True)
+
+    # -- FakeCaptureCmds ---------------------------------------------------
+    def test_the_capture_fake_refuses_every_query_about_a_ghost_node(self):
+        fake = FakeCaptureCmds()
+        ghost = "|nobodyMadeThis"
+        for call in (
+            lambda: fake.getAttr(ghost + ".translate"),
+            lambda: fake.setAttr(ghost + ".translate", 0, 0, 0),
+            lambda: fake.nodeType(ghost),
+            lambda: fake.listRelatives(ghost, shapes=True),
+            lambda: fake.select(ghost),
+            lambda: fake.lookThru("modelPanel1", ghost),
+            lambda: fake.viewFit(ghost),
+            lambda: fake.delete(ghost),
+            lambda: fake.exactWorldBoundingBox(ghost),
+        ):
+            with pytest.raises(RuntimeError, match="No object matches name"):
+                call()
+
+    def test_the_capture_fake_stops_answering_about_a_deleted_camera(self):
+        fake = FakeCaptureCmds()
+        transform, _shape = fake.camera()
+        fake.delete(transform)
+        assert fake.objExists(transform) is False
+        for call in (
+            lambda: fake.nodeType(transform),
+            lambda: fake.getAttr("|" + transform + ".translate"),
+            lambda: fake.listRelatives(transform, shapes=True),
+        ):
+            with pytest.raises(RuntimeError, match="No object matches name"):
+                call()
+
+    def test_the_capture_fake_refuses_a_panel_that_went_away(self):
+        fake = FakeCaptureCmds()
+        for call in (
+            lambda: fake.modelPanel("tornOff", query=True, camera=True),
+            lambda: fake.modelEditor("tornOff", query=True, grid=True),
+            lambda: fake.isolateSelect("tornOff", state=1),
+            lambda: fake.lookThru("tornOff", "|persp"),
+            lambda: fake.setFocus("tornOff"),
+        ):
+            with pytest.raises(RuntimeError, match="not found"):
+                call()
+
+    def test_the_capture_fakes_ls_and_objexists_report_rather_than_raise(self):
+        fake = FakeCaptureCmds()
+        assert fake.ls("|nobodyMadeThis", long=True) == []
+        assert fake.objExists("|nobodyMadeThis") is False
+        assert fake.ls("persp", long=True) == ["|persp"]
+
+    def test_the_capture_fake_answers_the_sentinel_for_an_empty_frame(self):
+        # Maya's "nothing to measure" answer, measured on 2027: an INVERTED
+        # box. A plausible unit box here is what let a camera be placed
+        # 5.8e20 units out and the file stay green (#640).
+        fake = FakeCaptureCmds()
+        assert fake.exactWorldBoundingBox() == [1e20, 1e20, 1e20,
+                                                -1e20, -1e20, -1e20]
+
+    def test_the_capture_fake_records_undo_edits_and_focus_moves(self):
+        fake = FakeCaptureCmds()
+        fake.undoInfo(stateWithoutFlush=False)
+        assert fake.undoInfo(query=True, state=True) is False
+        fake.panel_types["scriptEditorPanel1"] = "scriptEditor"
+        fake.setFocus("scriptEditorPanel1")
+        assert fake.focus_panel == "scriptEditorPanel1"
+        fake.select(["|persp"])
+        assert fake.ls(selection=True) == ["|persp"]
+
+    # -- FakeSceneCmds -----------------------------------------------------
+    def test_the_scene_fake_refuses_a_shape_that_is_not_in_it(self):
+        fake = FakeSceneCmds(DOME_SCENE)
+        with pytest.raises(RuntimeError, match="No object matches name"):
+            fake.nodeType("nobodyMadeThisShape")
+        with pytest.raises(RuntimeError, match="No object matches name"):
+            fake.exactWorldBoundingBox("nobodyMadeThisShape")
+
+    def test_the_scene_fake_answers_the_sentinel_when_nothing_is_visible(self):
+        fake = FakeSceneCmds(DOME_SCENE)
+        for name in fake.shapes:
+            fake.visible[name] = False
+        assert fake.exactWorldBoundingBox(
+            *fake.shapes, ignoreInvisible=True) == [1e20, 1e20, 1e20,
+                                                   -1e20, -1e20, -1e20]

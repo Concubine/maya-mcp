@@ -94,7 +94,43 @@ class FakeCmds:
 
     Records every mutation so the tests can assert the scene came back as it
     was - the house rule for perception tools (capture._PanelState).
+
+    #799 replaced four answers-anything fallbacks:
+
+    - `ls(x, long=True)` answered "|x" for any string at all, and `getAttr`
+      answered 0 for any plug it did not recognise, so nothing here could
+      tell a live node from one that was deleted or never made.
+    - `listRelatives(parent=True)` ended in an unconditional
+      `return ["mayaMcpTempKey"]`: ask it for the parent of anything and it
+      named the fallback light.
+    - `camera()` handed back a transform with NO SHAPE, so
+      capture.apply_framing_fov fell down its shapeless-node fallback and
+      read the film back off the TRANSFORM - where this fake answered 0, so
+      the render camera's focal length came out 0.0 and the #772 fix, whose
+      whole point is that the render eye really has its 40 deg, was never
+      once exercised on the render path.
+    - `getAttr("<cam>.translate")` answered a constant [(0,0,0)], so the
+      camera_positions this tool REPORTS were never compared with what it
+      set.
+
+    Round 2 caught a fifth: `exactWorldBoundingBox` was the one
+    string-accepting method left off the registry, answering a unit box for
+    a name nobody made and never able to produce Maya's inverted sentinel -
+    which left capture._scene_bbox's #640 fallback unreachable from here.
+    `TestTheFakeRefusesWhatMayaRefuses` below is the barrier for all of it:
+    round 1's hardening was asserted by nothing, so reverting it left the
+    suite green.
+
+    `attrs` deliberately keeps a plug after its node is deleted: it doubles
+    as the mutation log the restore tests read once a render has finished
+    and cleaned up. Existence is decided by the node registry, not by it.
     """
+
+    # DG singletons: no DAG node behind them, and every one of them is
+    # asked for by name.
+    _DG_NODES = ("defaultRenderGlobals", "defaultResolution",
+                 "defaultArnoldRenderOptions", "defaultArnoldDriver",
+                 "hardwareRenderingGlobals")
 
     def __init__(self, lights=(), geometry=("|ball|ballShape", "|floor|floorShape")):
         self.attrs = {
@@ -132,6 +168,79 @@ class FakeCmds:
         # Per-shape world boxes, for tests that care where things are. Anything
         # unlisted is the unit box.
         self.boxes = {}
+        # plug -> the node feeding it. A visibility plug an anim curve or a
+        # constraint drives refuses `cmds.hide` in real Maya, and hiding is
+        # how this module isolates (#799 contract 2).
+        #
+        # Round 2: hiding is NOT the only persistent write this module
+        # makes. `_orient_rig`/`_restore_rig` setAttr .rotateY on the tool's
+        # own rig lights - `mcpLight_*` nodes that live in the user's scene
+        # and can be keyed or constrained like any other - so the same
+        # refusal applies to setAttr, and both writes there sit inside a
+        # bare `except Exception: pass`. Narrowing this to `hide` on the
+        # premise that everything else render.py writes is a temp camera or
+        # a render-globals plug was simply wrong.
+        self.driven_plugs = {}
+        self.undo_state = True
+        # Nodes this fake MADE (cameras, the fallback light) plus the
+        # parent/shape wiring Maya would have given them (#799).
+        self._made = set()
+        self.shape_of = {}
+        self.parent_of = {}
+        self.node_types = {}
+        self._create_seq = 0
+
+    # --- #799 existence --------------------------------------------------
+    def _scene_nodes(self):
+        """Every node that exists RIGHT NOW.
+
+        `deleted` is a LOG, not a tombstone: it is deliberately not
+        subtracted here. Subtracting it made a name unusable forever, so a
+        second render_scene against one fake built its temp camera, renamed
+        it to the name the first render had deleted, and then could not
+        find the node it had just made - a fake wrong in the STRICT
+        direction, which produces spurious failures the next reader "fixes"
+        by weakening it back. `delete` unregisters instead.
+        """
+        nodes = set(self._geometry) | set(self._transforms) | set(self._lights)
+        # A light shape's transform: real lights hang under one.
+        nodes |= {s.rsplit("|", 1)[0] for s in self._lights if s.count("|") > 1}
+        nodes |= self._made
+        return nodes
+
+    def _resolve(self, name):
+        name = str(name)
+        nodes = self._scene_nodes()
+        if name in nodes:
+            return name
+        short = name.rsplit("|", 1)[-1]
+        hits = [n for n in nodes if n.rsplit("|", 1)[-1] == short]
+        return hits[0] if len(hits) == 1 else None
+
+    def _require(self, name):
+        """Maya's answer for a node that was deleted or never made.
+
+        The render path deletes its temp camera and its fallback light in a
+        `finally`, and anything that asks about either afterwards gets this
+        rather than a plausible default (#796's blocking-defect class).
+        """
+        if str(name) in self._DG_NODES:
+            return str(name)
+        resolved = self._resolve(name)
+        if resolved is None:
+            raise RuntimeError("No object matches name: %s" % name)
+        return resolved
+
+    def _make(self, transform, shape, node_type):
+        self._made.update((transform, shape))
+        self.shape_of[transform] = shape
+        self.parent_of[shape] = transform
+        self.node_types[transform] = "transform"
+        self.node_types[shape] = node_type
+        self.attrs[transform + ".translate"] = [0.0, 0.0, 0.0]
+        self.attrs[transform + ".rotate"] = [0.0, 0.0, 0.0]
+        self.attrs[transform + ".rotateY"] = 0.0
+        return transform, shape
 
     # --- queries
     def ls(self, *args, **kwargs):
@@ -150,13 +259,18 @@ class FakeCmds:
             return [name.rsplit("|", 1)[-1] for name in self._geometry]
         if args:
             name = args[0]
-            if kwargs.get("long"):
-                return [name if name.startswith("|") else "|" + name]
-            return [name]
+            # #799: a name nobody made answers with NOTHING. It used to
+            # answer "|<whatever you asked>", which is why _hide_non_targets'
+            # `or [name]` fallback and every "is this really there?" question
+            # in this module were unaskable here.
+            resolved = self._resolve(name)
+            if resolved is None:
+                return []
+            return [resolved] if kwargs.get("long") else [name]
         return []
 
     def objExists(self, name):
-        return name in self._transforms or name in self._geometry or name in self.created
+        return self._resolve(name) is not None
 
     def exactWorldBoundingBox(self, *targets, **kwargs):
         """A transform's box INCLUDES its descendants - and, unless
@@ -167,28 +281,47 @@ class FakeCmds:
         ignoreInvisible=True reports 0.5. A fake that ignored the flag would let
         #640's second half - a sheet cell framed on the whole subtree it had
         just hidden - stay green.
+
+        #799 round 2: it takes the node registry like every other
+        string-accepting method here (it answered a unit box for a name
+        nobody made), and it answers Maya's INVERTED SENTINEL when nothing
+        under the targets is visible. Measured on 2027 as [1e20]*3 +
+        [-1e20]*3; a plausible unit box instead left capture._scene_bbox's
+        sentinel fallback (capture.py:470-475, the #640 fix that stops a
+        camera being placed 5.8e20 units out) unreachable from this file,
+        deletable with the suite still green. Short names resolve, as Maya
+        resolves them - `ls(geometry=True)` hands this module short names.
         """
         ignore_invisible = bool(kwargs.get("ignoreInvisible"))
         boxes = []
         for target in targets:
+            resolved = self._require(target)
             for shape in self._geometry:
-                if shape != target and not shape.startswith(target + "|"):
+                if shape != resolved and not shape.startswith(resolved + "|"):
                     continue
                 if ignore_invisible and not self.visibility.get(shape, True):
                     continue
                 boxes.append(self.boxes.get(shape, (-1.0, -1.0, -1.0, 1.0, 1.0, 1.0)))
         if not boxes:
-            return [-1.0, -1.0, -1.0, 1.0, 1.0, 1.0]
+            return [1e20, 1e20, 1e20, -1e20, -1e20, -1e20]
         return [min(b[i] for b in boxes) for i in range(3)] + [
             max(b[i] for b in boxes) for i in range(3, 6)
         ]
 
     def getAttr(self, attr):
-        if attr.endswith(".translate") or attr.endswith(".rotate"):
-            return [(0.0, 0.0, 0.0)]
-        if attr.endswith(".visibility"):
-            return self.visibility.get(attr[: -len(".visibility")], True)
-        return self.attrs.get(attr, 0)
+        node, _, name = str(attr).rpartition(".")
+        self._require(node)
+        if name == "visibility":
+            return self.visibility.get(node, True)
+        if attr not in self.attrs:
+            raise RuntimeError("No object matches name: %s" % attr)
+        value = self.attrs[attr]
+        if name in ("translate", "rotate"):
+            # Maya wraps a double3 query in a one-tuple list, and the value
+            # is whatever was SET - not a constant (0,0,0), which is how the
+            # reported camera_positions went unchecked (#799).
+            return [tuple(value)]
+        return value
 
     def renderer(self, *args, **kwargs):
         return list(self._renderers)
@@ -206,51 +339,200 @@ class FakeCmds:
         return None
 
     def undoInfo(self, **kwargs):
-        return True
+        # #799: it used to answer True to everything, edits included, so
+        # "did the render put undo recording back?" - the whole point of the
+        # snapshot in _run_shots - could not be asked here.
+        if kwargs.get("query"):
+            return self.undo_state
+        if "stateWithoutFlush" in kwargs:
+            self.undo_state = bool(kwargs["stateWithoutFlush"])
+        return None
+
+    def nodeType(self, name):
+        resolved = self._require(name)
+        if resolved in self.node_types:
+            return self.node_types[resolved]
+        if resolved in self.arnold_lights:
+            return "aiSkyDomeLight"
+        if resolved in self._lights:
+            return "directionalLight"
+        if resolved in self._geometry:
+            return "mesh"
+        # Every remaining registered node is a transform; a trailing
+        # `return "transform"` for ANYTHING is the fallback #796 was shipped
+        # under, so the unknown case raises instead (#799).
+        if resolved in self._transforms or resolved in {
+            s.rsplit("|", 1)[0] for s in self._lights if s.count("|") > 1
+        }:
+            return "transform"
+        raise RuntimeError("No object matches name: %s" % name)
 
     # --- mutations
+    def _static_write_blocker(self, node, name):
+        """The connection that makes a static write to `node.name` raise.
+
+        Maya refuses in BOTH compound directions: `.rotate` will not take a
+        write while `.rotateY` alone is fed, and `.rotateY` will not take
+        one while the whole `.rotate` compound is. The second direction is
+        the one this module meets - `_orient_rig` writes the CHILD plug
+        `.rotateY` on the tool's own rig lights, and a rig light riding a
+        parentConstraint has the compound fed.
+        """
+        exact = self.driven_plugs.get("%s.%s" % (node, name))
+        if exact:
+            return exact
+        for axis in "XYZ":
+            child = self.driven_plugs.get("%s.%s%s" % (node, name, axis))
+            if child:
+                return child
+        if name[-1:] in ("X", "Y", "Z"):
+            return self.driven_plugs.get("%s.%s" % (node, name[:-1]))
+        return None
+
     def setAttr(self, attr, *values, **kwargs):
+        node, _, name = str(attr).rpartition(".")
+        resolved = self._require(node)
+        # #799 round 2: a connection-fed or locked plug REFUSES a static
+        # write. render.py does not only write temp cameras and DG plugs -
+        # `_orient_rig`/`_restore_rig` write .rotateY on the tool's own
+        # persistent rig lights, nodes a user can key or constrain, and both
+        # writes sit inside a bare `except Exception: pass`.
+        source = self._static_write_blocker(resolved, name)
+        if source:
+            raise RuntimeError(
+                "setAttr: The attribute '%s.%s' is locked or connected and "
+                "cannot be modified (%s feeds it)" % (resolved, name, source))
         self.attrs[attr] = values[0] if len(values) == 1 else list(values)
         if attr.endswith(".rotateY"):
             self.yaw_history.append(values[0])
 
     def camera(self, *args, **kwargs):
-        self.created.append("camera1")
-        return ["camera1", "cameraShape1"]
+        # A real camera comes with a SHAPE, and the film back lives on it.
+        # Handing back a shapeless transform sent apply_framing_fov down its
+        # `or [camera]` fallback and made the #772 lens fix inert here (#799).
+        self._create_seq += 1
+        transform = "camera%d" % self._create_seq
+        shape = "cameraShape%d" % self._create_seq
+        self._make(transform, shape, "camera")
+        self.attrs[shape + ".horizontalFilmAperture"] = \
+            capture.MAYA_HORIZONTAL_APERTURE_IN
+        self.attrs[shape + ".verticalFilmAperture"] = 0.9449
+        self.attrs[shape + ".focalLength"] = 35.0
+        self.attrs[shape + ".filmFit"] = 0
+        self.attrs[transform + ".nearClipPlane"] = 0.1
+        self.created.append(transform)
+        return [transform, shape]
 
     def rename(self, old, new):
+        resolved = self._require(old)
         self.created.append(new)
+        old_shape = self.shape_of.pop(resolved, None)
+        self._made.discard(resolved)
+        self._made.add(new)
+        self.node_types[new] = self.node_types.pop(resolved, "transform")
+        if old_shape:
+            # Maya renames a default-named shape along with its transform.
+            new_shape = new + "Shape"
+            self._made.discard(old_shape)
+            self._made.add(new_shape)
+            self.shape_of[new] = new_shape
+            self.parent_of.pop(old_shape, None)
+            self.parent_of[new_shape] = new
+            self.node_types[new_shape] = self.node_types.pop(old_shape, "camera")
+            # cmds.directionalLight hands back the SHAPE and the tool renames
+            # the TRANSFORM, so the light registry is keyed on the shape's
+            # OLD name. Leaving it there orphaned the fallback light: the
+            # render deleted it and `directionalLightShape1` went on
+            # answering objExists/nodeType/ls(lights=True) forever - the
+            # vanished-node fallback surviving inside the class that claims
+            # to have removed it (#799 round 2).
+            if old_shape in self._lights:
+                self._lights[self._lights.index(old_shape)] = new_shape
+            for plug in list(self.attrs):
+                if plug.startswith(old_shape + "."):
+                    self.attrs[new_shape + plug[len(old_shape):]] = \
+                        self.attrs.pop(plug)
+        for plug in list(self.attrs):
+            if plug.startswith(resolved + "."):
+                self.attrs[new + plug[len(resolved):]] = self.attrs.pop(plug)
+        if resolved in self._lights:
+            self._lights[self._lights.index(resolved)] = new
         return new
 
     def directionalLight(self, **kwargs):
-        name = "mayaMcpTempKeyShape"
-        self.created.append(name)
-        self._lights.append(name)
-        return name
+        # cmds.directionalLight returns the SHAPE, under Maya's own generated
+        # name - not the tool's. The tool renames the transform afterwards,
+        # and pinning the pre-rename name here hid whether it did.
+        self._create_seq += 1
+        transform = "directionalLight%d" % self._create_seq
+        shape = "directionalLightShape%d" % self._create_seq
+        self._make(transform, shape, "directionalLight")
+        self.created.append(shape)
+        self._lights.append(shape)
+        return shape
 
     def listRelatives(self, name, **kwargs):
+        resolved = self._require(name)
         if kwargs.get("parent"):
-            if "Shape" in name and name.startswith("|"):
-                return [name.rsplit("|", 1)[0]]
-            return ["mayaMcpTempKey"]
+            parent = self.parent_of.get(resolved)
+            if parent is None and resolved.startswith("|") and resolved.count("|") > 1:
+                parent = resolved.rsplit("|", 1)[0]
+            return [parent] if parent else None
+        if kwargs.get("shapes"):
+            shape = self.shape_of.get(resolved)
+            return [shape] if shape else None
         if kwargs.get("allDescendents"):
-            return [s for s in self._geometry if s.startswith(name + "|")]
+            return [s for s in self._geometry if s.startswith(resolved + "|")]
         return []
 
     def xform(self, *args, **kwargs):
+        transform = self._require(args[0]) if args else None
         if kwargs.get("query") and kwargs.get("rotation"):
-            return list(self.light_yaw_query.get(args[0], (0.0, 0.0, 0.0)))
+            return list(self.light_yaw_query.get(transform, (0.0, 0.0, 0.0)))
         return None
 
     def hide(self, name):
+        # cmds.hide IS a setAttr on .visibility, so it takes the same
+        # blocker - one rule, not two that can drift apart.
+        resolved = self._require(name)
+        source = self._static_write_blocker(resolved, "visibility")
+        if source:
+            raise RuntimeError(
+                "setAttr: The attribute '%s.visibility' is locked or "
+                "connected and cannot be modified (%s feeds it)"
+                % (resolved, source))
         self.hidden.append(name)
         self.visibility[name] = False
 
     def showHidden(self, name):
+        self._require(name)
         self.visibility[name] = True
 
     def delete(self, name):
+        resolved = self._require(name)
         self.deleted.append(name)
+        # Deleting a transform takes its shape with it - so a later query
+        # about either one raises, which is the whole point of tracking it.
+        # `shape_of` is a LOG, like `attrs`: a test that asks which shape the
+        # temp camera had reads it after the render cleaned up. Existence is
+        # decided by the registries below, so a stale entry answers nothing -
+        # every query goes through `_require` first.
+        shape = self.shape_of.get(resolved)
+        for gone in (resolved, shape):
+            if gone is None:
+                continue
+            self._made.discard(gone)
+            self.node_types.pop(gone, None)
+            self.parent_of.pop(gone, None)
+            self.visibility.pop(gone, None)
+            if gone in self._lights:
+                self._lights.remove(gone)
+            if gone in self._geometry:
+                self._geometry.remove(gone)
+            if gone in self._transforms:
+                self._transforms.remove(gone)
+        if shape:
+            self.deleted.append(shape)
 
 
 def _stub_render_frame(tmp_path, fake):
@@ -282,6 +564,185 @@ def fake_maya(monkeypatch, tmp_path):
     return fake
 
 
+class TestTheFakeRefusesWhatMayaRefuses:
+    """The regression barrier for FakeCmds itself (#799 round 2).
+
+    The hardening above was asserted by nothing: reverting every behavioural
+    change in this fake left the suite fully green, which is the ticket's own
+    complaint - "a green suite proves nothing" - moved up one level. These
+    pin the contract points this fake actually models, so loosening one goes
+    RED here rather than quietly restoring the answers-anything fallbacks.
+
+    A fake that is wrong in the STRICT direction is just as bad, so the
+    lifecycle claims below (a name is reusable after a delete, a bbox
+    resolves a short name) are pinned alongside the refusals.
+    """
+
+    # -- contract 1: existence -------------------------------------------
+    def test_every_query_about_a_node_nobody_made_raises(self):
+        fake = FakeCmds()
+        ghost = "|nobodyMadeThis"
+        for call in (
+            lambda: fake.getAttr(ghost + ".translate"),
+            lambda: fake.nodeType(ghost),
+            lambda: fake.listRelatives(ghost, parent=True),
+            lambda: fake.xform(ghost, query=True, rotation=True),
+            lambda: fake.setAttr(ghost + ".rotateY", 1.0),
+            lambda: fake.hide(ghost),
+            lambda: fake.showHidden(ghost),
+            lambda: fake.rename(ghost, "somethingElse"),
+            lambda: fake.delete(ghost),
+            lambda: fake.exactWorldBoundingBox(ghost),
+        ):
+            with pytest.raises(RuntimeError, match="No object matches name"):
+                call()
+
+    def test_ls_and_objexists_report_rather_than_raise(self):
+        # The two existence queries Maya answers instead of refusing - and
+        # the pair every "is it really there?" test is written on.
+        fake = FakeCmds()
+        assert fake.ls("|nobodyMadeThis", long=True) == []
+        assert fake.objExists("|nobodyMadeThis") is False
+        assert fake.ls("|ball", long=True) == ["|ball"]
+        assert fake.objExists("ballShape") is True
+
+    def test_the_temp_camera_stops_answering_once_the_render_deletes_it(
+        self, fake_maya
+    ):
+        out = render.render_scene({"angles": ["front"]})
+        camera = out["camera_positions"][0]["camera"]
+        assert camera in fake_maya.deleted
+        assert fake_maya.objExists(camera) is False
+        with pytest.raises(RuntimeError, match="No object matches name"):
+            fake_maya.nodeType(camera)
+        with pytest.raises(RuntimeError, match="No object matches name"):
+            fake_maya.getAttr(camera + ".translate")
+
+    def test_the_fallback_light_really_leaves_the_scene(self, monkeypatch, tmp_path):
+        """Round 2, finding 2: `rename` updated the light registry only when
+        the RENAMED node was in it, and it holds the light SHAPE while
+        render.py renames the TRANSFORM - so the shape's pre-rename name was
+        orphaned and went on answering objExists/nodeType/ls(lights=True)
+        forever, the deleted-node fallback surviving inside the class that
+        claims to have removed it."""
+        fake = FakeCmds(lights=[])
+        monkeypatch.setattr(render, "_cmds", lambda: fake)
+        monkeypatch.setattr(render, "_render_frame", _stub_render_frame(tmp_path, fake))
+        render.render_scene({"angles": ["front"]})
+        assert fake.ls(lights=True) == []
+        for stale in ("directionalLightShape1", "mayaMcpTempKeyShape"):
+            assert fake.objExists(stale) is False
+            with pytest.raises(RuntimeError, match="No object matches name"):
+                fake.nodeType(stale)
+
+    def test_a_deleted_name_can_be_used_again(self, monkeypatch, tmp_path):
+        """Round 2, finding 3 - the STRICT-direction half: `deleted` was
+        subtracted from the scene forever, so a second render built its temp
+        camera, renamed it to the name the first render had deleted, and
+        then died inside capture.apply_framing_fov on the node it had just
+        made."""
+        fake = FakeCmds(lights=["|keyLightShape"])
+        monkeypatch.setattr(render, "_cmds", lambda: fake)
+        monkeypatch.setattr(render, "_render_frame", _stub_render_frame(tmp_path, fake))
+        render.render_scene({"angles": ["front"]})
+        second = render.render_scene({"angles": ["front"]})
+        assert second["images"][0]["png_b64"]
+        assert fake.deleted.count("mayaMcpRenderCam") == 2
+
+    # -- contract 2: a fed plug refuses a static write --------------------
+    def test_setattr_refuses_a_connection_fed_plug(self):
+        fake = FakeCmds(lights=["|mcpLight_key|mcpLight_keyShape"])
+        fake.driven_plugs["|mcpLight_key.rotateY"] = "key_rotateY_anim"
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            fake.setAttr("|mcpLight_key.rotateY", 90.0)
+        assert fake.yaw_history == []
+
+    def test_setattr_refuses_a_child_write_when_the_compound_is_fed(self):
+        # The direction render.py meets: _orient_rig writes the CHILD plug
+        # .rotateY, and a rig light riding a parentConstraint has the whole
+        # .rotate compound fed.
+        fake = FakeCmds(lights=["|mcpLight_key|mcpLight_keyShape"])
+        fake.driven_plugs["|mcpLight_key.rotate"] = "mcpLight_key_parentConstraint1"
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            fake.setAttr("|mcpLight_key.rotateY", 90.0)
+
+    def test_setattr_refuses_a_compound_write_when_a_child_is_fed(self):
+        # The other direction, measured on #796: Maya refuses the compound
+        # too. A blocker that models only one of the two is a guard a test
+        # can be written on and pass vacuously.
+        fake = FakeCmds(lights=["|mcpLight_key|mcpLight_keyShape"])
+        fake.driven_plugs["|mcpLight_key.rotateY"] = "key_rotateY_anim"
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            fake.setAttr("|mcpLight_key.rotate", 0.0, 90.0, 0.0)
+
+    def test_a_free_plug_still_takes_its_write(self):
+        # The refusal must not become the answer to everything either.
+        fake = FakeCmds(lights=["|mcpLight_key|mcpLight_keyShape"])
+        fake.setAttr("|mcpLight_key.rotateY", 90.0)
+        assert fake.attrs["|mcpLight_key.rotateY"] == 90.0
+        assert fake.yaw_history == [90.0]
+
+    def test_hide_refuses_a_fed_visibility(self):
+        # cmds.hide IS a setAttr on .visibility - the refusal the
+        # _hide_non_targets xfail is built on.
+        fake = FakeCmds()
+        fake.driven_plugs["|floor|floorShape.visibility"] = "floor_vis_anim"
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            fake.hide("|floor|floorShape")
+        assert fake.visibility["|floor|floorShape"] is True
+
+    # -- the answers-anything fallbacks that were removed ------------------
+    def test_the_bbox_answers_mayas_sentinel_when_nothing_is_visible(self):
+        """Round 2, finding 4: it invented a unit box, so
+        capture._scene_bbox's sentinel fallback - the #640 fix that stops a
+        camera being placed 5.8e20 units out - was unreachable from this
+        file and could have been deleted with the suite green."""
+        fake = FakeCmds()
+        fake.visibility["|ball|ballShape"] = False
+        assert fake.exactWorldBoundingBox("|ball", ignoreInvisible=True) == [
+            1e20, 1e20, 1e20, -1e20, -1e20, -1e20]
+        # ...and the fallback that follows it reports where the ball IS.
+        assert fake.exactWorldBoundingBox("|ball") == [-1.0, -1.0, -1.0, 1.0, 1.0, 1.0]
+
+    def test_the_bbox_takes_the_short_names_ls_hands_out(self):
+        # The strict direction again: cmds.ls(geometry=True) returns SHORT
+        # names and Maya resolves an unambiguous one, so demanding long names
+        # here would refuse the call framable_geometry actually makes.
+        fake = FakeCmds()
+        assert fake.exactWorldBoundingBox("ballShape") == \
+            fake.exactWorldBoundingBox("|ball|ballShape")
+
+    def test_undoinfo_records_the_edit_it_used_to_swallow(self):
+        fake = FakeCmds()
+        assert fake.undoInfo(query=True, state=True) is True
+        fake.undoInfo(stateWithoutFlush=False)
+        assert fake.undoInfo(query=True, state=True) is False
+
+    def test_a_created_camera_comes_with_a_shape_that_holds_the_film_back(self):
+        # The shapeless transform made apply_framing_fov read the film back
+        # off the transform - where this fake answered 0 - and the #772 lens
+        # fix was inert on the render path.
+        fake = FakeCmds()
+        transform, shape = fake.camera()
+        assert fake.listRelatives(transform, shapes=True, fullPath=True) == [shape]
+        assert fake.getAttr(shape + ".horizontalFilmAperture") == \
+            capture.MAYA_HORIZONTAL_APERTURE_IN
+
+    def test_getattr_reports_what_setattr_wrote(self):
+        # It answered a constant [(0,0,0)] for every .translate, so the
+        # camera_positions this tool REPORTS were compared with nothing.
+        fake = FakeCmds()
+        transform, _shape = fake.camera()
+        fake.setAttr(transform + ".translate", 1.0, 2.0, 3.0)
+        assert fake.getAttr(transform + ".translate") == [(1.0, 2.0, 3.0)]
+
+    def test_listrelatives_no_longer_names_the_fallback_light_for_anything(self):
+        # It ended in an unconditional `return ["mayaMcpTempKey"]`.
+        fake = FakeCmds(lights=["|keyLightShape"])
+        assert fake.listRelatives("|ball|ballShape", parent=True) == ["|ball"]
+        assert fake.listRelatives("|ball", parent=True) is None
+
+
 class TestRenderScene:
     def test_returns_one_image_per_angle(self, fake_maya):
         out = render.render_scene({"angles": ["front", "side"]})
@@ -306,6 +767,13 @@ class TestRenderScene:
     def test_temp_camera_is_deleted(self, fake_maya):
         render.render_scene({"angles": ["front"]})
         assert any("mayaMcpRenderCam" in name for name in fake_maya.deleted)
+
+    def test_undo_recording_is_put_back(self, fake_maya):
+        # Perception must not pollute the undo queue, so the render turns
+        # recording off - and has to turn it back on. undoInfo answered True
+        # to edits as well as queries until #799, so this was unaskable.
+        render.render_scene({"angles": ["front"]})
+        assert fake_maya.undo_state is True
 
     def test_isolate_hides_non_targets_and_restores_them(self, fake_maya):
         render.render_scene({"angles": ["front"], "isolate": ["|ball"]})
@@ -529,6 +997,31 @@ class TestRenderScene:
         # ...and 30 is where it ends up, because the rig is the user's scene.
         assert fake.attrs["|mcpLight_key.rotateY"] == 30.0
 
+    @pytest.mark.xfail(strict=True, reason=(
+        "#799: _orient_rig swallows the refusal from a rig light whose "
+        "rotateY is connection-fed - a key the user keyed, or one riding a "
+        "parentConstraint. Maya raises 'The attribute |mcpLight_key.rotateY "
+        "is locked or connected and cannot be modified' and both writes sit "
+        "in a bare `except Exception: pass`. Measured here: relit_lights is "
+        "1 (render.py:990 reports len(rig), a count of lights DISCOVERED, "
+        "not lights moved), warnings is [], and the key never swung - so "
+        "the caller is told the rig followed the camera and gets the "
+        "nearly-black side render #585 exists to prevent. Same silent- "
+        "degradation class as _hide_non_targets twelve lines below"))
+    def test_a_rig_light_it_could_not_swing_is_named(self, monkeypatch, tmp_path):
+        fake = FakeCmds(lights=["|mcpLight_key|mcpLight_keyShape"])
+        fake.light_yaw_query["|mcpLight_key"] = (-35.0, 30.0, 0.0)
+        fake.driven_plugs["|mcpLight_key.rotateY"] = "mcpLight_key_rotateY_anim"
+        monkeypatch.setattr(render, "_cmds", lambda: fake)
+        monkeypatch.setattr(render, "_render_frame", _stub_render_frame(tmp_path, fake))
+        out = render.render_scene({"angles": ["side"]})
+        # The mechanism, and it stays true however the handler is fixed: Maya
+        # will not take that write, so the key sits where the user put it.
+        assert fake.yaw_history == []
+        assert "|mcpLight_key.rotateY" not in fake.attrs
+        # The claim: a rig it could not swing must be named, not counted.
+        assert any("mcpLight_key" in w for w in out["warnings"]), out["warnings"]
+
     def test_a_user_authored_rig_is_never_touched(self, monkeypatch, tmp_path):
         fake = FakeCmds(lights=["|myKeyLight|myKeyLightShape"])
         fake.light_yaw_query["|myKeyLight"] = (-35.0, 30.0, 0.0)
@@ -537,6 +1030,26 @@ class TestRenderScene:
         out = render.render_scene({"angles": ["side"]})
         assert out["relit_lights"] == 0
         assert fake.yaw_history == []
+
+    def test_a_dome_in_our_own_rig_is_never_swung(self, monkeypatch, tmp_path):
+        """_rig_lights excludes aiSkyDomeLight by asking cmds.nodeType, and
+        the fake had no nodeType at all - the AttributeError landed in the
+        bare `except: pass` above the check, so the exclusion never ran and
+        deleting it outright would not have been noticed (#799). Swinging a
+        dome rotates every reflection shot to shot, which is the opposite of
+        what an environment is for."""
+        fake = FakeCmds(lights=["|mcpLight_dome|mcpLight_domeShape",
+                                "|mcpLight_key|mcpLight_keyShape"])
+        fake.arnold_lights = ["|mcpLight_dome|mcpLight_domeShape"]
+        fake.light_yaw_query["|mcpLight_dome"] = (0.0, 10.0, 0.0)
+        fake.light_yaw_query["|mcpLight_key"] = (-35.0, 30.0, 0.0)
+        monkeypatch.setattr(render, "_cmds", lambda: fake)
+        monkeypatch.setattr(render, "_render_frame", _stub_render_frame(tmp_path, fake))
+        out = render.render_scene({"angles": ["side"]})
+        assert out["relit_lights"] == 1  # the key, and only the key
+        assert "|mcpLight_dome.rotateY" not in fake.attrs
+        # side is azimuth 90: the key swings to 120 and comes back to 30.
+        assert fake.yaw_history == [120.0, 30.0]
 
     def test_relight_can_be_declined(self, monkeypatch, tmp_path):
         fake = FakeCmds(lights=["|mcpLight_key|mcpLight_keyShape"])
@@ -556,6 +1069,62 @@ class TestRenderScene:
         out = render.render_scene({"angles": ["front"], "renderer": "hw2"})
         assert out["renderer"] == "hw2"
         assert fake_maya.written[0]["renderer"] == "mayaHardware2"
+
+
+class TestTheRenderCameraReallyHasTheFov:
+    """#772 on the RENDER path, which is where the inert version lived.
+
+    Until #799 the fake handed back a camera with no shape, so
+    apply_framing_fov fell down its shapeless-node fallback, read the film
+    back off the TRANSFORM (answered 0), and set a focal length of 0.0 -
+    and TestFocalLength above only checks that render DELEGATES the lens.
+    Nothing asserted the camera it renders through ends up with the 40 deg
+    the placement math solved for. With no panel there is no viewFit to
+    refine the framing, so here the lens IS the framing.
+    """
+
+    def test_the_lens_matches_the_fov_the_placement_solved_for(self, fake_maya):
+        out = render.render_scene({"angles": ["front"]})
+        shape = fake_maya.shape_of[out["camera_positions"][0]["camera"]]
+        assert fake_maya.attrs[shape + ".focalLength"] == pytest.approx(
+            capture.focal_length_for_fov(
+                capture._FOV_DEG, capture.MAYA_HORIZONTAL_APERTURE_IN))
+
+    def test_film_fit_is_pinned_horizontal(self, fake_maya):
+        # Which aperture governs is a function of filmFit; leaving it at
+        # whatever the scene had makes the lens right only by luck.
+        out = render.render_scene({"angles": ["front"]})
+        shape = fake_maya.shape_of[out["camera_positions"][0]["camera"]]
+        assert fake_maya.attrs[shape + ".filmFit"] == capture._FILM_FIT_HORIZONTAL
+
+    def test_the_lens_reads_this_cameras_own_film_back(self, monkeypatch, tmp_path):
+        """A hardcoded aperture is exactly how #772 happened. Give the
+        camera a wider back and the lens has to follow it."""
+        fake = FakeCmds(lights=["|keyLightShape"])
+        real_camera = fake.camera
+
+        def wide_camera(*a, **kw):
+            transform, shape = real_camera(*a, **kw)
+            fake.attrs[shape + ".horizontalFilmAperture"] = 2.8346
+            return [transform, shape]
+
+        monkeypatch.setattr(fake, "camera", wide_camera)
+        monkeypatch.setattr(render, "_cmds", lambda: fake)
+        monkeypatch.setattr(render, "_render_frame", _stub_render_frame(tmp_path, fake))
+        out = render.render_scene({"angles": ["front"]})
+        shape = fake.shape_of[out["camera_positions"][0]["camera"]]
+        assert fake.attrs[shape + ".focalLength"] == pytest.approx(
+            capture.focal_length_for_fov(capture._FOV_DEG, 2.8346))
+
+    def test_the_reported_position_is_the_one_it_actually_set(self, fake_maya):
+        """getAttr used to answer a constant [(0,0,0)] for every .translate,
+        so camera_positions - the field an LLM reads to reason about what it
+        is looking at - was never compared with anything (#799)."""
+        out = render.render_scene({"angles": ["front"]})
+        camera = out["camera_positions"][0]["camera"]
+        assert out["camera_positions"][0]["position"] == pytest.approx(
+            fake_maya.attrs[camera + ".translate"])
+        assert out["camera_positions"][0]["position"] != [0.0, 0.0, 0.0]
 
 
 class TestRenderSheet:
@@ -625,6 +1194,27 @@ class TestRenderSheet:
 
     def test_a_sheet_does_not_pollute_the_undo_queue(self):
         assert render.render_sheet.no_undo_chunk is True
+
+    @pytest.mark.xfail(strict=True, reason=(
+        "#799: _hide_non_targets swallows the refusal from a shape whose "
+        ".visibility is connection-fed (a keyed or expression-driven "
+        "visibility, common on a rig) - Maya raises 'The attribute "
+        "|floor|floorShape.visibility is locked or connected and cannot be "
+        "modified' and the handler's bare `except: pass` leaves it in frame "
+        "with nothing said. Measured here: the |ball cell renders the floor "
+        "too and out['warnings'] is []. That is the #640 defect the tool "
+        "exists to prevent, and the far milder nesting case gets a "
+        "paragraph of warning while this one is silent"))
+    def test_a_rival_subject_it_could_not_hide_is_named(self, fake_maya):
+        fake_maya.driven_plugs["|floor|floorShape.visibility"] = \
+            "floorShape_visibility_anim"
+        out = render.render_sheet({"subjects": ["|ball", "|floor"]})
+        # The mechanism: the hide was refused, so the ball's cell still
+        # contains the floor.
+        assert "|floor|floorShape" not in fake_maya.hidden
+        assert "|floor|floorShape" in fake_maya.written[0]["visible"]
+        # The claim: a cell that could not be isolated must say so.
+        assert any("floor" in w for w in out["warnings"]), out["warnings"]
 
 
 # A parented rig, as the #601 golem was: the pelvis contains the chest, which

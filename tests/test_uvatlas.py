@@ -32,6 +32,25 @@ class FakeCmds:
         # deliberately NOT 0..1: a raw polyCube's UVs span a bigger range
         self.uvs = list(uvs if uvs is not None else [(-2.0, 3.0), (4.0, 7.0)])
         self.calls = []
+        # #799 contract 1: what stopped existing. uv_atlas deletes nothing
+        # itself, but it is handed shapes by callers that do (assemble packs
+        # each part between a taper bake and a polyUnite), so a query about a
+        # node Maya no longer has must raise here as it does everywhere else.
+        self.deleted = []
+
+    # --- existence ---------------------------------------------------------
+    def _live(self, name):
+        node = name.split(".")[0]      # ".map[*]" / ".f[*]" name their shape
+        known = list(self.objects) + [s for s, _k in self.shapes.values()]
+        if node in known:
+            return True
+        if node.startswith("|"):
+            return False
+        return any(n.split("|")[-1] == node for n in known)
+
+    def _require(self, name):
+        if not self._live(name):
+            raise RuntimeError("No object matches name: %s" % name.split(".")[0])
 
     def ls(self, pattern=None, long=False, **kwargs):
         if pattern is None:
@@ -46,12 +65,17 @@ class FakeCmds:
 
     def listRelatives(self, node, shapes=False, fullPath=False,
                       noIntermediate=False, **kwargs):
+        self._require(node)
         if shapes:
             entry = self.shapes.get(node)
             return [entry[0]] if entry else None
         return None
 
     def nodeType(self, node):
+        # #799 contract 1+3: a node that is gone raises rather than answering
+        # "transform", which _require_mesh would have reported as the far
+        # milder "not a polygon mesh".
+        self._require(node)
         for _t, (shape, kind) in self.shapes.items():
             if shape == node:
                 return kind
@@ -63,6 +87,7 @@ class FakeCmds:
 
     # --- uv operations -----------------------------------------------------
     def polyAutoProjection(self, target, **kwargs):
+        self._require(target)
         self.calls.append("polyAutoProjection:sm=%s" % kwargs.get("scaleMode"))
         if kwargs.get("scaleMode") == 0:
             # World-proportional. Measured on Maya 2027: polyAutoProjection
@@ -78,10 +103,12 @@ class FakeCmds:
             self.uvs = [(0.0, 0.0), (1.0, 1.0)]
 
     def polyProjection(self, target, **kwargs):
+        self._require(target)
         self.calls.append("polyProjection:%s" % kwargs.get("type"))
         self.uvs = [(0.0, 0.0), (1.0, 1.0)]
 
     def polyNormalizeUV(self, target, **kwargs):
+        self._require(target)
         self.calls.append("polyNormalizeUV")
         us = [u for u, _ in self.uvs]
         vs = [v for _, v in self.uvs]
@@ -90,6 +117,7 @@ class FakeCmds:
         self.uvs = [((u - min(us)) / du, (v - min(vs)) / dv) for u, v in self.uvs]
 
     def polyEditUV(self, target=None, **kwargs):
+        self._require(target)
         self.calls.append("polyEditUV")
         su = kwargs.get("scaleU", 1.0)
         sv = kwargs.get("scaleV", 1.0)
@@ -102,6 +130,7 @@ class FakeCmds:
         ]
 
     def polyEvaluate(self, node, **kwargs):
+        self._require(node)
         if kwargs.get("boundingBox2d"):
             us = [u for u, _ in self.uvs]
             vs = [v for _, v in self.uvs]
@@ -115,7 +144,10 @@ class FakeCmds:
             return [[0.0, 0.0], [0.0, 0.0]]
         if kwargs.get("uvcoord") or kwargs.get("uv"):
             return len(self.uvs)
-        return 0
+        # #799 contract 3: no answers-anything fallback. A flag the fixture
+        # never modelled used to come back as 0 - a plausible-looking count
+        # that no test could fail on.
+        raise AssertionError("unmodelled polyEvaluate flags: %r" % (kwargs,))
 
 
 def _run(fake, **params):
@@ -325,3 +357,71 @@ class TestWorldScale:
         with pytest.raises(HandlerError):
             _run(FakeCmds(), names=["|box"], cols=4, rows=4, patch=0,
                  world_scale=bad)
+
+
+class TestTheFakeRefusesWhatMayaRefuses:
+    """The regression barrier for #799's hardening of THIS fake.
+
+    Round 1 taught the fake to refuse what Maya refuses. A round-2 review
+    then measured that forcing `_live` to True - a complete revert to the
+    answers-anything fake - left the suite green, because no assertion read
+    the refusal. Each test below pins one contract point, so loosening the
+    fake goes RED here.
+    """
+
+    def test_a_query_about_a_node_that_never_existed_raises(self):
+        fake = FakeCmds()
+        with pytest.raises(RuntimeError):
+            fake.nodeType("|ghost")
+        with pytest.raises(RuntimeError):
+            fake.polyEvaluate("|ghost", boundingBox2d=True)
+        with pytest.raises(RuntimeError):
+            fake.polyAutoProjection("|ghost", scaleMode=0)
+
+    def test_a_query_about_a_node_that_stopped_existing_raises(self):
+        # uv_atlas deletes nothing itself, but assemble hands it shapes
+        # between a taper bake and a polyUnite that consumes them.
+        fake = FakeCmds()
+        fake.objects.remove("|box")
+        fake.shapes.pop("|box")
+        fake.deleted.append("|box")
+        with pytest.raises(RuntimeError):
+            fake.nodeType("|boxShape")
+        with pytest.raises(RuntimeError):
+            fake.polyEditUV("|boxShape.map[*]", scaleU=0.5, scaleV=0.5)
+
+    def test_a_component_names_its_shape_and_is_answered(self):
+        # The strict direction is a defect too: ".map[*]" and ".f[*]" are
+        # components of a shape that DOES exist, and every call this handler
+        # makes is addressed that way.
+        fake = FakeCmds()
+        fake.polyEditUV("|boxShape.map[*]", scaleU=1.0, scaleV=1.0)
+        assert fake.calls == ["polyEditUV"]
+
+    def test_a_name_freed_by_a_delete_is_live_again_once_recreated(self):
+        fake = FakeCmds()
+        fake.objects.remove("|box")
+        fake.shapes.pop("|box")
+        fake.deleted.append("|box")
+        fake.objects.append("|box")
+        fake.shapes["|box"] = ("|boxShape", "mesh")
+        assert fake.nodeType("|boxShape") == "mesh"
+
+    def test_an_unmodelled_polyevaluate_flag_refuses_rather_than_answering_0(self):
+        # The removed answers-anything tail: a flag this fixture never
+        # modelled used to come back as a plausible-looking 0.
+        fake = FakeCmds()
+        with pytest.raises(AssertionError):
+            fake.polyEvaluate("|boxShape", triangle=True)
+
+    def test_a_shape_that_exists_still_answers_its_own_type(self):
+        # The refusal must not swallow the ordinary case: a node that IS
+        # there answers, and a non-mesh answers non-mesh rather than raising
+        # - which is what keeps _require_mesh's "not a polygon mesh" message
+        # reachable and distinct from "no object matches name".
+        curve = FakeCmds(objects=("|box",),
+                         shapes={"|box": ("|boxShape", "nurbsCurve")})
+        assert curve.nodeType("|boxShape") == "nurbsCurve"
+        with pytest.raises(HandlerError) as exc:
+            _run(curve, names=["|box"], cols=4, rows=4, patch=0)
+        assert "mesh" in str(exc.value).lower()

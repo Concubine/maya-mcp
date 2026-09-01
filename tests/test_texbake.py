@@ -83,6 +83,14 @@ class FakeCmds:
         self.conns = {"bodySG.surfaceShader": ["skin_mat.outColor"],
                       "skin_mat.baseColor": ["mcpTex_noise.outColor"]}
         self.existing_attrs = {"skin_mat.baseColor"}
+        # plug -> value. Real getAttr answers the attribute's value; the
+        # fake used to answer "" for EVERY plug on EVERY name, which is a
+        # method that can never fail a test (#799 contract 3).
+        self.attrs = {}
+        # Plugs a rigger locked by hand: the other half of contract 2's
+        # "locked or connected" refusal, which no path in this module
+        # produces on its own.
+        self.locked = set()
         self.connected = []
         self.deleted = []
         self.checkpoints = []
@@ -95,6 +103,73 @@ class FakeCmds:
         # shapes cannot tell an instance from a mirrored twin, which is
         # where round 2's defect hid.
         self.node_of = {}
+
+    # existence -------------------------------------------------------
+    def _exists(self, node):
+        """Every name this scene holds: mesh transforms, mesh shapes,
+        shading groups, and every DG node in `types` (which `delete` pops
+        from)."""
+        return (node in self.meshes or node in self.meshes.values()
+                or node in self.types or node in self.sg_members)
+
+    def _require(self, node):
+        """Raise the way real Maya does for a node that was deleted or
+        never created - #799 contract 1.
+
+        Every query below funnels through here. The fake used to answer a
+        DEFAULT for an unknown name (nodeType said "transform", getAttr
+        said ""), and that is precisely the shape that let #796 ship a
+        blocking defect: code asking `nodeType` about a node it had just
+        deleted got a plausible answer here and a RuntimeError in Maya.
+        This module rewires and DELETES shading nodes on its commit path,
+        so a query about a consumed node is the live risk in this file.
+
+        Deletion is modelled by `delete` REMOVING the node from the
+        registries `_exists` reads, NOT by a name tombstone: #799 round 2
+        found that consulting `self.deleted` here made a name that was
+        deleted and then re-created (this suite's bake shaders are created
+        and deleted once per mesh) simultaneously present in `types` and
+        absent to every query - a scene Maya cannot have. `self.deleted`
+        is a RECORD for assertions, never an existence oracle.
+        """
+        if not self._exists(node):
+            raise RuntimeError("No object matches name: %s" % node)
+
+    def _compound_parent(self, plug):
+        """`skin_mat.baseColorR` -> `skin_mat.baseColor`, or None."""
+        node, _, attr = plug.rpartition(".")
+        if len(attr) > 1 and attr[-1] in "RGBXYZ":
+            return "%s.%s" % (node, attr[:-1])
+        return None
+
+    def _static_write_blocker(self, plug):
+        """The connection or lock that makes `setAttr(plug, ...)` raise,
+        or None - #799 contract 2. Maya refuses a static write to a plug
+        something feeds, to a COMPOUND whose CHILD is fed, AND to a CHILD
+        whose parent compound is fed. Round 1 modelled only the middle
+        one, which left a write to `skin_mat.baseColorR` permitted while
+        `mcpTex_noise.outColor` feeds `skin_mat.baseColor`.
+        """
+        parent = self._compound_parent(plug)
+        for candidate in (plug, parent):
+            if candidate is None:
+                continue
+            if candidate in self.locked:
+                return candidate
+            if candidate in self.conns:
+                return self.conns[candidate][0]
+        node, _, attr = plug.rpartition(".")
+        for dst, srcs in self.conns.items():
+            dnode, _, dattr = dst.rpartition(".")
+            if dnode == node and dattr[:-1] == attr and dattr[-1:] in tuple(
+                    "RGBXYZ"):
+                return srcs[0]
+        for locked in self.locked:
+            lnode, _, lattr = locked.rpartition(".")
+            if lnode == node and lattr[:-1] == attr and lattr[-1:] in tuple(
+                    "RGBXYZ"):
+                return locked
+        return None
 
     # resolution ------------------------------------------------------
     def ls(self, name=None, long=False, uuid=False, **kw):
@@ -120,27 +195,47 @@ class FakeCmds:
         return ids
 
     def objExists(self, name):
-        return name in self.meshes or name in self.types
+        # The one query #799 exempts: objExists ANSWERS for a vanished
+        # node, it does not raise. Shapes count too - they did not before,
+        # which made objExists disagree with every other method here.
+        return self._exists(name)
 
     def listRelatives(self, node, shapes=False, fullPath=False, **kw):
+        self._require(node)
         return [self.meshes[node]] if shapes and node in self.meshes else None
 
     def nodeType(self, node):
+        self._require(node)
         if node in self.meshes.values():
             return "mesh"
-        return self.types.get(node, "transform")
+        if node in self.types:
+            return self.types[node]
+        if node in self.sg_members:
+            return "shadingEngine"
+        return "transform"   # _require leaves only self.meshes keys here
 
     def polyEvaluate(self, node, uvcoord=False, **kw):
+        self._require(node)
         return self.uv_count if uvcoord else 0
 
     # graph -----------------------------------------------------------
     def listSets(self, object=None, type=None):
+        self._require(object)
         return list(self.shape_sgs.get(object, []))
 
     def sets(self, name, query=False, **kw):
         """Query-mode only - this fake never needs the edit/create forms
         the real bake tool does not use."""
         if query:
+            # An empty list used to be the answer for a set that does not
+            # EXIST, which reads as "worn by nobody" - Maya raises, and
+            # _outside_wearers' own degrade-not-crash guard is what a test
+            # must then be able to exercise (#799 contract 1/3).
+            #
+            # An EMPTY set is a different thing and Maya answers it: round
+            # 1 refused every name absent from `sg_members`, which made
+            # this fake strict where Maya is not. Existence is the test.
+            self._require(name)
             return list(self.sg_members.get(name, []))
         raise NotImplementedError("FakeCmds.sets only supports query=True")
 
@@ -161,6 +256,7 @@ class FakeCmds:
         walk) uses this branch.
         """
         node = plug.split(".")[0]
+        self._require(node)
         has_attr = "." in plug
         if source:
             if has_attr:
@@ -186,10 +282,16 @@ class FakeCmds:
         return dsts if plugs else [d.split(".")[0] for d in dsts]
 
     def attributeQuery(self, attr, node=None, exists=False):
+        self._require(node)
         return ("%s.%s" % (node, attr)) in self.existing_attrs
 
     def getAttr(self, plug):
-        return ""
+        """The plug's value. "" is the modelled answer for an attribute
+        this fake has no value for - Maya answers a string attr's default
+        the same way - but it is reached only AFTER the node is known to
+        exist, which is the half that used to be missing (#799)."""
+        self._require(plug.split(".")[0])
+        return self.attrs.get(plug, "")
 
     # mutation (two-phase bake) ---------------------------------------
     def shadingNode(self, node_type, name=None, asTexture=False,
@@ -199,16 +301,35 @@ class FakeCmds:
         return name
 
     def setAttr(self, plug, *values, **kw):
-        pass
+        self._require(plug.split(".")[0])
+        blocker = self._static_write_blocker(plug)
+        if blocker:
+            raise RuntimeError(
+                "setAttr: The attribute '%s' is locked or connected and "
+                "cannot be modified (%s feeds it)" % (plug, blocker))
+        self.attrs[plug] = values[0] if len(values) == 1 else list(values)
 
     def connectAttr(self, src, dst, force=False):
+        self._require(src.split(".")[0])
+        self._require(dst.split(".")[0])
+        if dst in self.conns and not force:
+            raise RuntimeError(
+                "connectAttr: The destination attribute '%s' cannot be "
+                "connected because it is already connected." % dst)
         self.connected.append((src, dst))
         self.conns[dst] = [src]
 
     def delete(self, *nodes):
         for n in nodes:
             self.deleted.append(n)
+            # Deletion is REGISTRY removal, not a tombstone (#799 round
+            # 2): a name re-created afterwards exists again, exactly as in
+            # Maya, and this module re-creates its bake nodes per mesh.
             self.types.pop(n, None)
+            self.sg_members.pop(n, None)
+            self.shape_sgs.pop(n, None)
+            if n in self.meshes:
+                self.shape_sgs.pop(self.meshes.pop(n), None)
             # Sever every connection touching the deleted node, mirroring
             # real Maya severing edges on delete - without this, a later
             # orphan check on a node that fed the just-deleted one would
@@ -1021,3 +1142,224 @@ class TestFixRound1:
         assert excinfo.value.__cause__ is not None       # chained with `from exc`
         # the scene WAS rewired before the postcondition walk blew up
         assert any(dst == "skin_mat.baseColor" for _src, dst in fake.connected)
+
+
+class TestNormalSlotWithAnIndirectBump:
+    """#799: a normal slot whose bump2d is not the DIRECT source of
+    normalCamera passes every refusal and then has nowhere to land.
+
+    `plan_bakes` gates the normal-slot refusal on `"bump2d" in claim["via"]`
+    - which the WALK fills in from anywhere in the chain - and then asks
+    `_bump_node_for` for the node itself, which looks only at the direct
+    sources of `material.attr`. Wire the chain the walk already accepts,
+    `normalCamera <- reverse <- bump2d <- noise`, and those two disagree:
+    via carries "bump2d" so the refusal passes, and bump_node comes back
+    None. Nothing downstream is written for that combination.
+
+    Found by driving the hardened fake rather than by reading: the fake
+    could always crash on this input, but no fixture had ever built a
+    normal slot the walk reaches through a pass-through node. Both halves
+    are pinned, NOT fixed - which of the three cures is right (refuse in
+    plan_bakes, widen _bump_node_for to walk, or refuse in _rewire) is a
+    call for a ticket with a live Maya behind it.
+    """
+
+    def _indirect_bump(self, fake):
+        fake.existing_attrs = {"skin_mat.normalCamera"}
+        fake.types["mcpTex_bump"] = "bump2d"
+        fake.types["mcpTex_inv"] = "reverse"
+        fake.conns = {
+            "bodySG.surfaceShader": ["skin_mat.outColor"],
+            "skin_mat.normalCamera": ["mcpTex_inv.output"],
+            "mcpTex_inv.input": ["mcpTex_bump.outNormal"],
+            "mcpTex_bump.bumpValue": ["mcpTex_noise.outColorR"],
+        }
+
+    @pytest.mark.xfail(strict=True, reason=(
+        "#799: the bake is planned, the image is committed to disk, and "
+        "then _orphan_candidates hands cmds.listConnections a bump_node of "
+        "None as if it were a node name (start = job['bump_node'] for "
+        "kind=='normal'). The caller is told 'the scene has been modified "
+        "while committing' and pointed at a checkpoint, when in fact this "
+        "job never reached _rewire at all - the diagnosis, the checkpoint "
+        "and the burned checkpoint slot are all wrong. Maya rejects a None "
+        "object name the same way; nothing about this depends on the fake"))
+    def test_a_normal_slot_reached_through_a_reverse_is_diagnosed_not_crashed(
+            self, fake, tmp_path, monkeypatch):
+        self._indirect_bump(fake)
+        monkeypatch.setattr(texbake, "_convert_solid_tx", _fake_bake(fake))
+        monkeypatch.setattr(texbake.pngprobe, "uniformity",
+                            lambda _p: {"pixel_count": 1024,
+                                        "distinct_values": 186,
+                                        "non_uniform": True,
+                                        "unavailable_reason": None})
+
+        # Either refusal is honest - "no bump2d this tool can rewire" at
+        # plan time is the cheap one. What is not honest is baking, then
+        # crashing on an internal None, then blaming the scene.
+        with pytest.raises(HandlerError, match="bump2d"):
+            texbake.bake_textures(_params(tmp_path))
+        assert fake.checkpoints == []      # refused before any mutation
+
+    @pytest.mark.xfail(strict=True, reason=(
+        "#799: _rewire's normal arm is gated on `job['bump_node']` being "
+        "truthy, so a normal job that arrived without one falls through to "
+        "the COLOUR arm and connects file.outColor straight into "
+        "material.normalCamera - the bump2d bypassed, an image baked from "
+        "outColorR (a scalar height) read back as an RGB normal vector, "
+        "and kept_intermediates reported as []. Both plugs are float3, so "
+        "Maya ACCEPTS that connection: there is no error anywhere, the "
+        "render is just wrong. Today the _orphan_candidates crash above "
+        "fires first and hides it"))
+    def test_rewire_never_wires_a_normal_slot_as_if_it_were_colour(
+            self, fake, tmp_path):
+        # Synthetic job, the TestGuardStructure idiom: the crash pinned
+        # above means no real plan_bakes claim can carry this arm its
+        # input today, so it is handed in directly.
+        self._indirect_bump(fake)
+        job = {"material": "skin_mat", "sg": "bodySG", "attr": "normalCamera",
+               "slot": "normal", "kind": "normal", "bump_node": None,
+               "via": ["reverse", "bump2d"], "mesh": "|bodyShape",
+               "meshes": ["|bodyShape"],
+               "terminal_plug": "mcpTex_noise.outColorR",
+               "basename": "skin_mat_normal_baked.png"}
+
+        wiring = texbake._rewire(fake, job, str(tmp_path / "n.png"))
+
+        assert wiring["wired_plug"] != "outColor", (
+            "a normal slot was wired as a colour slot: %s" % (wiring,))
+
+
+class TestTheFakeRefusesWhatMayaRefuses:
+    """#799 round 2: the regression barrier for THIS file's FakeCmds.
+
+    Round 1 hardened four of the five look-group fakes and an adversarial
+    reviewer measured the result: reverting every behavioural change left
+    the suite at 184 passed / 2 xfailed / 0 failed. Not one test put a
+    fake in a state where the new refusals fire, so 562 lines of modelled
+    Maya behaviour carried no barrier at all - the ticket's own premise
+    ("a green suite proves nothing") reproduced one level up.
+
+    Everything below asserts a contract point THIS fake models, so that
+    loosening it back has to go red. Nothing here scaffolds a call the
+    bake handler does not make.
+    """
+
+    # contract 1 - a name the scene does not hold ---------------------
+    def test_a_query_about_a_deleted_node_raises(self):
+        cmds = FakeCmds()
+        cmds.delete("mcpTex_noise")
+        for call in (lambda: cmds.nodeType("mcpTex_noise"),
+                     lambda: cmds.getAttr("mcpTex_noise.outColor"),
+                     lambda: cmds.listConnections("mcpTex_noise.outColor",
+                                                  source=True),
+                     lambda: cmds.attributeQuery("outColor",
+                                                 node="mcpTex_noise",
+                                                 exists=True),
+                     lambda: cmds.listRelatives("mcpTex_noise", shapes=True),
+                     lambda: cmds.polyEvaluate("mcpTex_noise", uvcoord=True),
+                     lambda: cmds.listSets(object="mcpTex_noise")):
+            with pytest.raises(RuntimeError, match="No object matches name"):
+                call()
+
+    def test_a_query_about_a_node_that_never_existed_raises(self):
+        cmds = FakeCmds()
+        with pytest.raises(RuntimeError, match="No object matches name"):
+            cmds.nodeType("never_made")
+        with pytest.raises(RuntimeError, match="No object matches name"):
+            cmds.getAttr("never_made.outColor")
+
+    def test_objExists_answers_for_a_vanished_node_instead_of_raising(self):
+        cmds = FakeCmds()
+        assert cmds.objExists("mcpTex_noise") is True
+        cmds.delete("mcpTex_noise")
+        assert cmds.objExists("mcpTex_noise") is False
+        assert cmds.objExists("never_made") is False
+
+    def test_a_deleted_name_re_created_exists_again(self):
+        """The round-2 BLOCKING defect: `self.deleted` was a permanent
+        tombstone, so a name deleted and then re-created was present in
+        `types` and absent to every query at once - a scene Maya cannot
+        have, on a path this module walks every time it bakes a second
+        mesh."""
+        cmds = FakeCmds()
+        cmds.delete("mcpTex_noise")
+        cmds.shadingNode("noise", name="mcpTex_noise", asTexture=True)
+        assert cmds.objExists("mcpTex_noise") is True
+        assert cmds.nodeType("mcpTex_noise") == "noise"
+        cmds.setAttr("mcpTex_noise.threshold", 0.5)   # must not raise
+        assert cmds.deleted == ["mcpTex_noise"]       # still a RECORD
+
+    # contract 1, strict direction ------------------------------------
+    def test_an_existing_but_empty_shading_group_answers_rather_than_raises(
+            self):
+        """A set that does not EXIST raises; a set that exists and holds
+        nothing answers []. Round 1 refused both, which is the
+        strict-direction defect the round-2 brief names: a fake that is
+        wrong toward strictness produces spurious failures the next agent
+        'fixes' by weakening it back."""
+        cmds = FakeCmds()
+        # An SG that EXISTS but has no members: registered as a node,
+        # absent from the membership registry. Round 1 keyed the
+        # refusal on membership, so this - a real, empty set - raised.
+        cmds.types["emptySG"] = "shadingEngine"
+        assert cmds.objExists("emptySG") is True
+        assert cmds.sets("emptySG", query=True) == []
+        assert cmds.sets("bodySG", query=True) == ["|bodyShape"]
+        with pytest.raises(RuntimeError, match="No object matches name"):
+            cmds.sets("noSuchSG", query=True)
+
+    # contract 2 - locked or connected --------------------------------
+    def test_setAttr_refuses_a_plug_a_connection_feeds(self):
+        cmds = FakeCmds()      # mcpTex_noise.outColor -> skin_mat.baseColor
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            cmds.setAttr("skin_mat.baseColor", 1.0, 1.0, 1.0)
+
+    def test_setAttr_refuses_a_child_of_a_fed_compound(self):
+        """Both compound directions. Round 1 modelled only the
+        compound-with-a-fed-child arm; Maya refuses the mirror too."""
+        cmds = FakeCmds()      # the COMPOUND skin_mat.baseColor is fed
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            cmds.setAttr("skin_mat.baseColorR", 1.0)
+
+    def test_setAttr_refuses_a_compound_whose_child_is_fed(self):
+        cmds = FakeCmds()
+        cmds.conns["skin_mat.emissionColorG"] = ["mcpTex_noise.outAlpha"]
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            cmds.setAttr("skin_mat.emissionColor", 0.0, 0.0, 0.0)
+
+    def test_setAttr_refuses_a_locked_plug_in_both_compound_directions(self):
+        cmds = FakeCmds()
+        cmds.locked.add("skin_mat.specularRoughness")
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            cmds.setAttr("skin_mat.specularRoughness", 0.4)
+        cmds.locked.add("skin_mat.coatColor")
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            cmds.setAttr("skin_mat.coatColorB", 0.4)     # child of a lock
+        cmds.locked.add("skin_mat.subsurfaceColorR")
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            cmds.setAttr("skin_mat.subsurfaceColor", 1.0, 1.0, 1.0)
+
+    def test_setAttr_to_a_free_plug_is_what_getAttr_reads_back(self):
+        """getAttr used to answer "" for every plug on every name - a
+        method that can never fail a test. It is a stored value now."""
+        cmds = FakeCmds()
+        cmds.setAttr("skin_mat.specularRoughness", 0.25)
+        assert cmds.getAttr("skin_mat.specularRoughness") == 0.25
+        assert cmds.getAttr("skin_mat.metalness") == ""   # modelled default
+
+    def test_connectAttr_refuses_an_occupied_destination_unless_forced(self):
+        cmds = FakeCmds()
+        cmds.types["mcpTex_other"] = "noise"
+        with pytest.raises(RuntimeError, match="already connected"):
+            cmds.connectAttr("mcpTex_other.outColor", "skin_mat.baseColor")
+        cmds.connectAttr("mcpTex_other.outColor", "skin_mat.baseColor",
+                         force=True)
+        assert cmds.conns["skin_mat.baseColor"] == ["mcpTex_other.outColor"]
+
+    def test_connectAttr_refuses_a_node_that_is_not_in_the_scene(self):
+        cmds = FakeCmds()
+        with pytest.raises(RuntimeError, match="No object matches name"):
+            cmds.connectAttr("ghost.outColor", "skin_mat.emissionColor")
+        with pytest.raises(RuntimeError, match="No object matches name"):
+            cmds.connectAttr("mcpTex_noise.outColor", "ghost.baseColor")

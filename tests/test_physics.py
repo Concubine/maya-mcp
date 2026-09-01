@@ -44,19 +44,44 @@ class FakeCmds:
         self.shapes = {}       # transform long -> shape long
         self.node_types = {}   # long name -> nodeType override (e.g. "joint")
 
+    # #799 contract point 1. There is no `deleted` list here on purpose:
+    # author_physics is READ-ONLY (TestReadOnly pins that the module never
+    # imports session and that this fake carries no mutators at all), so
+    # nothing can vanish mid-call - but a node that was NEVER CREATED is
+    # the same query for Maya, and it answers it by raising.
+    def _live(self):
+        return list(self.objects) + list(self.shapes.values())
+
+    def _require(self, node):
+        if node not in self._live():
+            raise RuntimeError("No object matches name: %s" % node)
+
     def ls(self, pattern=None, long=False, type=None, **kw):
+        if type is not None:
+            # #799: `type` was accepted and silently ignored, so a handler
+            # asking `ls(..., type="mesh")` would get an unfiltered answer
+            # here and a filtered one in Maya. Nothing calls it that way
+            # today; when something does, model it rather than inherit a
+            # wrong answer.
+            raise AssertionError(
+                "FakeCmds.ls does not model the `type` filter (#799)")
         if pattern is None:
-            return list(self.objects)
+            return self._live()
         names = pattern if isinstance(pattern, list) else [pattern]
         out = []
         for n in names:
-            out.extend(o for o in self.objects
+            # ROUND 2 (#799): resolve against `_live()`, not `objects`
+            # alone. A SHAPE typed "mesh" by nodeType that `ls` answered
+            # nothing for is a fake wrong in the STRICT direction - Maya
+            # resolves a shape name like any other.
+            out.extend(o for o in self._live()
                        if o == n or o.split("|")[-1] == n)
         return out
 
     def listRelatives(self, node, parent=False, allDescendents=False,
                       shapes=False, fullPath=False, type=None,
                       noIntermediate=False, **kw):
+        self._require(node)
         if parent:
             p = self.parents.get(node)
             return [p] if p else None
@@ -75,6 +100,11 @@ class FakeCmds:
         return kids or None
 
     def nodeType(self, node):
+        # #799 contract point 3: the naming convention below is a fine
+        # model for a node the fixture BUILT, and an answers-anything
+        # fallback for one it did not - "|nope" used to come back
+        # "transform" instead of raising.
+        self._require(node)
         if node in self.node_types:
             return self.node_types[node]
         return "mesh" if node.endswith("Shape") else "transform"
@@ -457,3 +487,69 @@ class TestUndeliverableOverrideRefuses:
         tracer = [b for b in out["bodies"] if b["chunk"] == "|golem|tracer"][0]
         assert tracer["parent"] == "|golem|pelvis"
         assert tracer["joint"]["source"] == "override"
+
+
+class TestTheFakeRefusesWhatMayaRefuses:
+    """#799 round 2: the regression barrier for THIS file's FakeCmds.
+
+    Round 1 hardened the fake and nothing asserted the hardening - a
+    reviewer measured that reverting every behavioural change left the
+    suite fully green, which is this ticket's own "a green suite proves
+    nothing" moved up one level. These assertions go red the day someone
+    loosens the fake back toward answering anything.
+
+    author_physics is READ-ONLY, so half the contract has no surface here:
+    there is no setAttr, no xform, no setKeyframe and no delete to refuse
+    with - and the absence is itself pinned below, because a mutator
+    appearing in this fake would mean the module had grown a write.
+    """
+
+    _GONE = "No object matches name"
+
+    def test_a_node_no_fixture_built_raises(self, fake):
+        _scene(fake)
+        for call in (lambda: fake.nodeType("|ghost"),
+                     lambda: fake.listRelatives("|ghost", shapes=True),
+                     lambda: fake.listRelatives("|ghost", parent=True),
+                     lambda: fake.listRelatives("|ghost",
+                                                allDescendents=True)):
+            with pytest.raises(RuntimeError, match=self._GONE):
+                call()
+        assert fake.ls("|ghost") == []
+        assert fake.ls(["|ghost"]) == []
+
+    def test_a_shape_is_a_mesh_and_a_group_is_not(self, fake):
+        _scene(fake)
+        assert fake.nodeType("|golem|pelvis|pelvisShape") == "mesh"
+        assert fake.nodeType("|golem") == "transform"
+        # and an explicit override wins, which is how the joint scenes type
+        # their skeleton
+        fake.node_types["|golem"] = "joint"
+        assert fake.nodeType("|golem") == "joint"
+
+    def test_ls_refuses_the_type_filter_it_does_not_model(self, fake):
+        _scene(fake)
+        with pytest.raises(AssertionError, match="type"):
+            fake.ls("|golem", type="mesh")
+        with pytest.raises(AssertionError, match="type"):
+            fake.ls(type="transform")
+
+    def test_ls_answers_for_a_shape_as_well_as_a_transform(self, fake):
+        _scene(fake)
+        shape = "|golem|pelvis|pelvisShape"
+        assert shape in fake.ls()
+        # ROUND 2: the pattern form searched `objects` alone, so a shape
+        # nodeType calls a mesh resolved to nothing here - a fake wrong in
+        # the STRICT direction, which is the kind the next person "fixes"
+        # by weakening it back.
+        assert fake.ls(shape) == [shape]
+        assert fake.ls("pelvisShape") == [shape]
+
+    def test_the_fake_carries_no_mutator_to_refuse_with(self, fake):
+        # TestReadOnly proves author_physics is deterministic; this proves
+        # WHY that is worth anything - there is nothing here to write with,
+        # so a handler that grew a write would AttributeError rather than
+        # succeed silently against a permissive fake.
+        for mutator in ("setAttr", "delete", "xform", "createNode",
+                        "setKeyframe", "parent", "rename"):
+            assert not hasattr(fake, mutator)

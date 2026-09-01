@@ -34,11 +34,27 @@ class FakeCmds:
         self.conns = {}
         self.attr_values = {}
         self.string_attrs = set()
+        # #799: names this fake once held and no longer does. EVERY query
+        # below consults it, because real Maya answers "No object matches
+        # name" for a node that was deleted or never created - and a fake
+        # that hands back a default instead is exactly how #796 shipped a
+        # nodeType-after-delete crash that no headless test could see.
+        self.deleted = []
 
     # -- naming / resolution ------------------------------------------------
     def _all(self):
+        # ROUND 2 (#799): `delete` PRUNES these registries rather than
+        # keeping a tombstone list this filtered against. A permanent
+        # tombstone is a fake wrong in the STRICT direction - a name
+        # registered again would stay invisible forever, and Maya has no
+        # such memory of a deleted node.
         return (list(self.meshes) + list(self.meshes.values())
                 + list(self.types))
+
+    def _require(self, node):
+        """Real Maya's answer to a query about a node that is not there."""
+        if node not in self._all():
+            raise RuntimeError("No object matches name: %s" % node)
 
     def ls(self, *args, **kw):
         if args:
@@ -61,29 +77,50 @@ class FakeCmds:
         return name in self._all()
 
     def nodeType(self, node):
+        self._require(node)
         if node in self.meshes.values():
             return "mesh"
-        return self.types.get(node, "transform")
+        if node in self.types:
+            return self.types[node]
+        # Reachable only for a name `self.meshes` registered - i.e. a real
+        # mesh transform. Not a catch-all: an unknown name raised above
+        # (#799 contract point 3).
+        return "transform"
 
     def listRelatives(self, node, shapes=False, fullPath=False,
                       noIntermediate=False, **kw):
+        self._require(node)
         if shapes and node in self.meshes:
             return [self.meshes[node]]
         return None
 
     def listHistory(self, node, pruneDagObjects=False, **kw):
+        self._require(node)
         return list(self.history.get(node, []))
 
     def listAttr(self, plug, multi=False, **kw):
         node = plug.split(".")[0]
+        self._require(node)
         if plug.endswith(".w"):
-            return list(self.aliases.get(node, []))
-        return []
+            # None, not [], for a blendShape with no targets: that is what
+            # Maya answers for an empty multi, and `or []` at the call
+            # sites is what covers it (#799).
+            return list(self.aliases.get(node, [])) or None
+        raise AssertionError(
+            "FakeCmds.listAttr models only '<blendShape>.w' - it used to "
+            "answer [] for every other plug, which is a fallback no test "
+            "can fail (#799)")
 
     def listConnections(self, plug, source=False, destination=True,
                         plugs=False, type=None, **kw):
+        self._require(plug.split(".")[0])
         if not source:
-            return None
+            # #799: nothing in #771's handlers walks DOWNSTREAM from a
+            # plug. Answering None unconditionally would let an unmodelled
+            # destination query read as "nothing connected".
+            raise AssertionError(
+                "FakeCmds.listConnections models source queries only "
+                "(#799)")
         srcs = list(self.conns.get(plug) or [])
         if type is not None:
             srcs = [s for s in srcs
@@ -96,12 +133,39 @@ class FakeCmds:
         return srcs if plugs else [s.split(".")[0] for s in srcs]
 
     def attributeQuery(self, attr, node=None, exists=False):
+        self._require(node)
         return ("%s.%s" % (node, attr)) in self.string_attrs
 
     def getAttr(self, plug, lock=False, **kw):
+        node = plug.split(".")[0]
+        self._require(node)
         if lock:
             return plug in getattr(self, "locked_plugs", set())
-        return self.attr_values.get(plug)
+        if plug in self.attr_values:
+            return self.attr_values[plug]
+        if plug in self.string_attrs:
+            return ""            # declared by addAttr, never written
+        # #799: `self.attr_values.get(plug)` handed back None for any
+        # unset attribute, so a handler reading a plug the fixture never
+        # set up read as "empty" instead of raising the way Maya does.
+        raise RuntimeError("No object matches name: %s" % plug)
+
+    def delete(self, *names):
+        # #799: deletion has to be VISIBLE to every query, or the contract
+        # point that found #796's blocking defects (a vanished node raises)
+        # has nothing to consult. ROUND 2: take the node OUT of the
+        # registries `_all` reads - and the shape and history Maya deletes
+        # with a mesh transform - instead of tombstoning the name forever.
+        for name in names:
+            self.deleted.append(name)     # the call record tests read
+            shape = self.meshes.pop(name, None)
+            for gone in [name] + ([shape] if shape else []):
+                self.types.pop(gone, None)
+                self.history.pop(gone, None)
+                self.aliases.pop(gone, None)
+                for plug in [k for k in self.conns
+                             if k.split(".")[0] == gone]:
+                    self.conns.pop(plug)
 
     def pluginInfo(self, name, query=False, loaded=False):
         return name not in getattr(self, "missing_plugins", set())
@@ -323,3 +387,112 @@ class TestAddCorrectiveValidate:
         assert plan["joint_long"] == "|arm_01|arm_02"
         assert plan["rotation"] == [0.0, 0.0, -90.0]
         assert plan["blend_node"] == "arm_shapes"
+
+
+class TestTheFakeRefusesWhatMayaRefuses:
+    """#799 round 2: the regression barrier for THIS file's FakeCmds.
+
+    Round 1 hardened the fake and nothing asserted the hardening - a
+    reviewer measured that reverting every behavioural change left the
+    suite fully green, which is this ticket's own "a green suite proves
+    nothing" moved up one level. These assertions go red the day someone
+    loosens the fake back toward answering anything.
+
+    Only what this fake models is pinned: it has no setAttr and no
+    setKeyframe (the #771 handlers reach neither headlessly), so the
+    write-refusal contract lives in tests/test_blendshape.py and the
+    driven-weight contract is pinned here through the queries the guard
+    actually makes - getAttr(lock) and listConnections.
+    """
+
+    _GONE = "No object matches name"
+
+    def test_a_node_no_fixture_created_raises_from_every_query(self):
+        f = FakeCmds()
+        calls = [
+            lambda: f.nodeType("|ghost"),
+            lambda: f.listRelatives("|ghost", shapes=True),
+            lambda: f.listHistory("|ghost"),
+            lambda: f.listAttr("|ghost.w"),
+            lambda: f.listConnections("|ghost.tx", source=True),
+            lambda: f.attributeQuery("mcp_corrective", node="|ghost",
+                                     exists=True),
+            lambda: f.getAttr("|ghost.tx"),
+        ]
+        for call in calls:
+            with pytest.raises(RuntimeError, match=self._GONE):
+                call()
+        assert f.ls("|ghost") == []
+        assert f.objExists("|ghost") is False
+
+    def test_a_deleted_node_stops_answering(self):
+        f = FakeCmds()
+        assert f.nodeType("|arm") == "transform"
+        assert f.listRelatives("|arm", shapes=True) == ["|arm|armShape"]
+        f.delete("|arm")
+        for call in (lambda: f.nodeType("|arm"),
+                     lambda: f.nodeType("|arm|armShape"),
+                     lambda: f.listRelatives("|arm", shapes=True),
+                     lambda: f.listHistory("|arm|armShape")):
+            with pytest.raises(RuntimeError, match=self._GONE):
+                call()
+        assert f.ls("|arm") == []
+        assert f.objExists("|arm") is False
+
+    def test_a_name_registered_again_answers_again(self):
+        # The other direction: a PERMANENT tombstone is a fake wrong in the
+        # strict direction. `delete` prunes the registries instead, so a
+        # fixture that re-registers the name gets a node Maya would answer
+        # for - which is why `_all` no longer filters against `deleted`.
+        f = FakeCmds()
+        f.delete("|arm_01")
+        with pytest.raises(RuntimeError, match=self._GONE):
+            f.nodeType("|arm_01")
+        f.types["|arm_01"] = "joint"
+        assert f.nodeType("|arm_01") == "joint"
+
+    def test_getAttr_answers_only_what_a_fixture_declared(self):
+        f = FakeCmds()
+        f.attr_values["arm_shapes.envelope"] = 1.0
+        assert f.getAttr("arm_shapes.envelope") == 1.0
+        # An attribute nothing declared is not an empty None the handler can
+        # read past - it is a refusal, the way Maya answers.
+        with pytest.raises(RuntimeError, match=self._GONE):
+            f.getAttr("arm_shapes.weightList")
+
+    def test_getAttr_lock_reports_only_locked_plugs(self):
+        f = FakeCmds()
+        f.locked_plugs = {"|arm_01.rotateX"}
+        assert f.getAttr("|arm_01.rotateX", lock=True) is True
+        assert f.getAttr("|arm_01.rotateY", lock=True) is False
+
+    def test_listAttr_models_only_the_weight_multi(self):
+        f = FakeCmds()
+        assert f.listAttr("arm_shapes.w") == ["elbow_fix", "bulge"]
+        # An empty multi answers None, not [] - and every other plug is
+        # refused rather than answered with the [] this used to invent.
+        f.aliases["arm_shapes"] = []
+        assert f.listAttr("arm_shapes.w") is None
+        with pytest.raises(AssertionError, match="models only"):
+            f.listAttr("arm_shapes.envelope")
+
+    def test_listConnections_models_sources_and_derived_types(self):
+        f = FakeCmds()
+        f.types["curve1"] = "animCurveTU"
+        f.conns["arm_shapes.elbow_fix"] = ["curve1.output"]
+        assert f.listConnections("arm_shapes.elbow_fix", source=True,
+                                 plugs=True) == ["curve1.output"]
+        # Maya's type filter matches DERIVED types (the #796 defect-1 trap)
+        assert f.listConnections("arm_shapes.elbow_fix", source=True,
+                                 type="animCurve") == ["curve1"]
+        assert f.listConnections("arm_shapes.elbow_fix", source=True,
+                                 type="poseInterpolator") is None
+        with pytest.raises(AssertionError, match="source queries only"):
+            f.listConnections("arm_shapes.elbow_fix", destination=True)
+
+    def test_attributeQuery_answers_only_declared_attributes(self):
+        f = FakeCmds()
+        f.string_attrs.add("|arm.mcp_corrective")
+        assert f.attributeQuery("mcp_corrective", node="|arm",
+                                exists=True) is True
+        assert f.attributeQuery("nope", node="|arm", exists=True) is False

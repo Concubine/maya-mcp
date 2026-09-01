@@ -14,6 +14,30 @@ from maya_plugin.handlers import material, pbr
 
 
 class FakeCmds:
+    """Two mesh transforms, plus the whole shading network assign_pbr builds.
+
+    #799, the three rules, applied wherever this fake models the call at all:
+
+      1. a query - OR A WRITE - aimed at a node this scene does not hold
+         RAISES the way Maya does; `objExists` is the one exception. This
+         file deletes nodes on every orphan-sweep path, so the deleted list
+         is what those queries consult, and a name used again afterwards is
+         a NEW node rather than a permanent tombstone.
+      2. `setAttr` refuses a plug a connection feeds, and a compound whose
+         CHILD is fed refuses too. This is the whole point here: assign_pbr
+         connects file nodes INTO the shader's own attributes and then hands
+         the caller's scalar params to assign_material, which writes them
+         straight onto those same attributes.
+      3. nothing answers unconditionally. `nodeType` answered "mesh" for
+         every node it had never heard of - which is also the answer
+         require_mesh is looking for, so its shape check could not fail here
+         - and `sets` answered [] to a membership QUERY, which left
+         ensure_object_shading's healthy branch dead in this file: every call
+         re-forced an assignment it had just made.
+    """
+
+    _CHILD_SUFFIXES = ("R", "G", "B", "X", "Y", "Z")
+
     def __init__(self):
         self.objects = {"|torso", "|arm"}
         self.shapes = {"|torso": ("|torso|torsoShape", "mesh"),
@@ -26,67 +50,167 @@ class FakeCmds:
         self.sg_members = {}
         self.shader_to_sg = {}
         self.fail_on = None
+        self.locked = set()
+
+    # ---- resolution
+    def _live(self):
+        names = set(self.objects) | {s for s, _ in self.shapes.values()}
+        return names - set(self.deleted)
+
+    def _matches(self, name):
+        return sorted(n for n in self._live()
+                      if n == name or n.split("|")[-1] == name)
+
+    def _require(self, name):
+        if not self._matches(name):
+            raise RuntimeError("No object matches name: %s" % name)
 
     # ---- reads
     def ls(self, name=None, long=False, **kw):
-        return [o for o in self.objects if o == name or o.split("|")[-1] == name]
+        return self._matches(name)
 
     def objExists(self, name):
-        return name in self.objects
+        return bool(self._matches(name))
 
     def listRelatives(self, node, shapes=False, fullPath=False, noIntermediate=False):
+        self._require(node)
         entry = self.shapes.get(node)
-        return [entry[0]] if entry else None
+        if not entry or entry[0] in self.deleted:
+            return None
+        return [entry[0]]
 
     def nodeType(self, node):
-        return self.node_types.get(node, "mesh")
+        self._require(node)
+        recorded = self.node_types.get(node)
+        if recorded:
+            return recorded
+        for shape, ntype in self.shapes.values():
+            if shape == node:
+                return ntype
+        return "transform"
 
     def listConnections(self, node, type=None, **kw):
+        self._require(node.split(".")[0])
         if type == "shadingEngine" and node.endswith(".outColor"):
             sg = self.shader_to_sg.get(node[: -len(".outColor")])
-            return [sg] if sg else []
-        return []
+            return [sg] if sg and sg not in self.deleted else []
+        if type == "shadingEngine" and "." not in node:
+            # meshcheck.first_sg asks a SHAPE which shading groups it is in.
+            # This used to answer [] for every shape however wired - a fake
+            # certifying "this mesh has no shading group" unconditionally.
+            return [sg for sg, members in self.sg_members.items()
+                    if node in members]
+        raise AssertionError(
+            "unmodelled listConnections(%r, type=%r)" % (node, type))
 
     def listSets(self, object=None, type=None):
+        self._require(object)
         return [sg for sg, members in self.sg_members.items() if object in members]
 
     # ---- writes
+    def _born(self, name):
+        """Register a node. A name that was deleted and is now used again is
+        a NEW node, not a resurrection - so it stops counting as deleted."""
+        self.objects.add(name)
+        self.deleted = [d for d in self.deleted if d != name]
+
     def shadingNode(self, node_type, name=None, **kw):
         if self.fail_on == node_type:
             raise RuntimeError("forced failure creating %s" % node_type)
         self.created.append(name)
-        self.objects.add(name)
+        self._born(name)
         self.node_types[name] = node_type
         return name
 
     def sets(self, *args, **kw):
         if kw.get("renderable"):
             name = kw.get("name")
-            self.objects.add(name)
+            self._born(name)
             self.node_types[name] = "shadingEngine"
             self.sg_members.setdefault(name, [])
             return name
+        if kw.get("query"):
+            self._require(args[0])
+            return list(self.sg_members.get(args[0], []))
         if kw.get("edit") and kw.get("forceElement"):
             shape, target = args[0], kw["forceElement"]
+            self._require(shape)
+            self._require(target)
             for members in self.sg_members.values():
                 if shape in members:
                     members.remove(shape)
             self.sg_members.setdefault(target, []).append(shape)
             return []
-        return []
+        # #799 round 2: the trailing `return []` that used to sit here
+        # answered ANY other flag combination blind - `sets(node, edit=True,
+        # remove=...)` on a DELETED node included.
+        raise AssertionError(
+            "unmodelled sets(%r, %r): teach the fake what Maya answers "
+            "before a handler relies on it" % (args, sorted(kw)))
 
     def connectAttr(self, src, dst, force=False):
+        # #799 round 2: contract point 1 stopped at the read/write boundary -
+        # a connectAttr aimed at a name that stopped answering was RECORDED
+        # as a success. Maya raises "No object matches name" for both ends.
+        self._require(src.split(".")[0])
+        self._require(dst.split(".")[0])
+        # A destination plug takes ONE source: -force replaces whatever was
+        # already there rather than stacking a second connection on it, which
+        # is how re-texturing a shared material strands the old file node.
+        if force:
+            self.connections = [(s, d) for s, d in self.connections if d != dst]
         self.connections.append((src, dst))
         if dst.endswith(".surfaceShader") and src.endswith(".outColor"):
             self.shader_to_sg[src[: -len(".outColor")]] = dst[: -len(".surfaceShader")]
 
+    def _blocker(self, plug):
+        """The connection or lock that makes `plug` unwritable, or None.
+
+        Maya's compound/child asymmetry, both directions: baseColor refuses
+        when baseColorG alone is driven, and baseColorG refuses when the
+        whole compound is.
+        """
+        fed = {dst for _, dst in self.connections} | self.locked
+        if plug in fed:
+            return plug
+        node, _, attr = plug.rpartition(".")
+        for suffix in self._CHILD_SUFFIXES:
+            if "%s.%s%s" % (node, attr, suffix) in fed:
+                return "%s.%s%s" % (node, attr, suffix)
+        if attr[-1:] in self._CHILD_SUFFIXES:
+            parent = "%s.%s" % (node, attr[:-1])
+            if parent in fed:
+                return parent
+        return None
+
     def setAttr(self, attr, *value, **kw):
+        # #799 round 2: a write to a node the scene does not hold raises "No
+        # object matches name" in Maya, exactly as a read does - the half of
+        # contract point 1 the first pass left out.
+        self._require(attr.split(".")[0])
+        blocker = self._blocker(attr)
+        if blocker:
+            raise RuntimeError(
+                "setAttr: The attribute '%s' is locked or connected and "
+                "cannot be modified." % blocker
+            )
         self.attrs[attr] = value[0] if len(value) == 1 else value
 
     def delete(self, *names, **kw):
         for n in names:
-            self.deleted.append(n)
-            self.objects.discard(n)
+            self._require(n)
+            resolved = self._matches(n)[0]
+            self.deleted.append(resolved)
+            self.objects.discard(resolved)
+            # Maya's delete takes the whole subtree: a transform's shape goes
+            # with it (#799 round 2, copied from test_naming.py).
+            entry = self.shapes.get(resolved)
+            if entry:
+                self.deleted.append(entry[0])
+            # Deleting a node takes its connections with it, both ways.
+            self.connections = [(s, d) for s, d in self.connections
+                                if s.split(".")[0] != resolved
+                                and d.split(".")[0] != resolved]
 
 
 @pytest.fixture
@@ -349,3 +473,190 @@ def test_the_handler_never_touches_the_filesystem_for_relative_paths():
     assert pbr.missing_files(
         [{"path": os.path.join(os.sep, "definitely", "absent.png")}]
     ) != []
+
+
+class TestReuseMeetsTheNetworkItAlreadyBuilt:
+    """#799. Every refusal in TestRefusals is derived from THIS call's maps.
+    A material reached by `name` carries the maps of every call before it, and
+    nothing here looks at them - which the fake could not show while its
+    setAttr accepted a connected plug and its connectAttr stacked sources.
+    """
+
+    @pytest.mark.xfail(strict=True, reason=(
+        "#799: the param-vs-map clash guard only inspects THIS call's maps, so "
+        "a scalar aimed at a slot an EARLIER call mapped reaches "
+        "assign_material's setAttr on a plug the file node already drives. "
+        "Maya raises 'locked or connected and cannot be modified' - and that "
+        "raise happens before assign_pbr's try block, so nothing is swept and "
+        "the second mesh is left wearing the material"))
+    def test_a_param_fighting_a_map_from_an_earlier_call_is_refused(self, fake, atlas):
+        pbr.assign_pbr({"mesh": "|torso", "name": "kit",
+                        "maps": {"color": atlas["albedo"]}})
+        with pytest.raises(HandlerError) as exc:
+            pbr.assign_pbr({"mesh": "|arm", "name": "kit",
+                            "maps": {"normal": atlas["normal"]},
+                            "params": {"baseColor": [1.0, 0.0, 0.0]}})
+        assert "baseColor" in str(exc.value)
+
+    @pytest.mark.xfail(strict=True, reason=(
+        "#799: re-texturing a slot force-replaces the connection and leaves "
+        "the previous file node and its place2dTexture in the scene with "
+        "nothing referencing them. Maya never reaps a disconnected shading "
+        "node, so a look-dev loop - the usage material.py's own docstring "
+        "describes - accumulates two dead nodes per re-texture"))
+    def test_re_texturing_a_slot_does_not_strand_the_old_file_node(self, fake, atlas):
+        pbr.assign_pbr({"mesh": "|torso", "name": "kit",
+                        "maps": {"color": atlas["albedo"]}})
+        pbr.assign_pbr({"mesh": "|torso", "name": "kit",
+                        "maps": {"color": atlas["mask"]}})
+        files = sorted(n for n in fake.objects
+                       if fake.node_types.get(n) in ("file", "place2dTexture"))
+        assert files == ["kit_color_p2d", "kit_color_tex"], files
+
+
+class TestTheFakeRefusesWhatMayaRefuses:
+    """#799 round 2: the hardening in FakeCmds has to be ASSERTED somewhere.
+
+    Reverting every behavioural change in the fake left this suite fully
+    green, because not one test exercised the new refusals - "a green suite
+    proves nothing", one level up. These pin the contract points this fake
+    actually models, so loosening it goes red here first.
+    """
+
+    def _wired(self):
+        """A shader with a file texture driving its base colour, the way
+        assign_pbr leaves one."""
+        fake = FakeCmds()
+        fake.shadingNode("standardSurface", name="kit")
+        fake.shadingNode("file", name="kit_color_tex")
+        fake.connectAttr("kit_color_tex.outColor", "kit.baseColor", force=True)
+        return fake
+
+    # -- point 1: a name that stopped answering ---------------------------
+    def test_every_query_about_a_node_that_never_existed_raises(self):
+        fake = FakeCmds()
+        for call in (lambda: fake.nodeType("ghost"),
+                     lambda: fake.listRelatives("ghost", shapes=True,
+                                                fullPath=True,
+                                                noIntermediate=True),
+                     lambda: fake.listConnections("ghost.outColor",
+                                                  type="shadingEngine"),
+                     lambda: fake.listSets(object="ghost", type="shadingEngine"),
+                     lambda: fake.sets("ghost", query=True),
+                     lambda: fake.delete("ghost")):
+            with pytest.raises(RuntimeError, match="No object matches name"):
+                call()
+        assert fake.objExists("ghost") is False  # the one question that answers
+
+    def test_a_query_about_a_deleted_node_raises(self):
+        fake = FakeCmds()
+        fake.shadingNode("file", name="kit_color_tex")
+        fake.delete("kit_color_tex")
+        assert fake.objExists("kit_color_tex") is False
+        with pytest.raises(RuntimeError, match="No object matches name"):
+            fake.nodeType("kit_color_tex")
+
+    def test_a_write_to_a_node_that_is_gone_raises_too(self):
+        # The half contract point 1 was missing: setAttr and connectAttr
+        # recorded a success against any name at all - including the orphan
+        # file node the sweep has just deleted.
+        fake = self._wired()
+        fake.delete("kit_color_tex")
+        with pytest.raises(RuntimeError, match="No object matches name"):
+            fake.setAttr("kit_color_tex.fileTextureName", "x.png", type="string")
+        with pytest.raises(RuntimeError, match="No object matches name"):
+            fake.connectAttr("kit_color_tex.outColor", "kit.baseColor",
+                             force=True)
+
+    def test_deleting_a_transform_takes_its_shape_with_it(self):
+        fake = FakeCmds()
+        fake.delete("|torso")
+        assert fake.objExists("|torso|torsoShape") is False
+
+    def test_a_name_used_again_after_a_delete_is_a_new_node_not_a_ghost(self):
+        # Strictness has a failure mode of its own: a permanent tombstone
+        # makes a rebuilt node invisible forever, which manufactures failures.
+        fake = FakeCmds()
+        fake.shadingNode("file", name="kit_color_tex")
+        fake.delete("kit_color_tex")
+        fake.shadingNode("file", name="kit_color_tex")
+        assert fake.objExists("kit_color_tex") is True
+        fake.setAttr("kit_color_tex.fileTextureName", "x.png", type="string")
+
+    # -- point 2: a plug something already drives -------------------------
+    def test_setAttr_refuses_a_connected_plug(self):
+        fake = self._wired()
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            fake.setAttr("kit.baseColor", 1.0, 0.0, 0.0, type="double3")
+
+    def test_setAttr_refuses_in_both_compound_directions(self):
+        # A compound write when a CHILD is fed...
+        fake = FakeCmds()
+        fake.shadingNode("standardSurface", name="kit")
+        fake.shadingNode("file", name="tex")
+        fake.connectAttr("tex.outAlpha", "kit.baseColorG")
+        with pytest.raises(RuntimeError, match="kit.baseColorG"):
+            fake.setAttr("kit.baseColor", 1.0, 0.0, 0.0, type="double3")
+        # ...and a CHILD write when the compound is fed.
+        other = self._wired()
+        with pytest.raises(RuntimeError, match="kit.baseColor'"):
+            other.setAttr("kit.baseColorG", 0.5)
+
+    def test_setAttr_refuses_a_locked_plug_with_nothing_connected(self):
+        fake = FakeCmds()
+        fake.shadingNode("standardSurface", name="kit")
+        fake.locked.add("kit.metalness")
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            fake.setAttr("kit.metalness", 1.0)
+
+    def test_a_free_plug_still_writes(self):
+        fake = self._wired()
+        fake.setAttr("kit.metalness", 1.0)
+        assert fake.attrs["kit.metalness"] == 1.0
+
+    def test_deleting_the_source_frees_the_plug_again(self):
+        # The refusal has to CLEAR: in Maya the destination is writable the
+        # instant its source node dies.
+        fake = self._wired()
+        fake.delete("kit_color_tex")
+        fake.setAttr("kit.baseColor", 1.0, 0.0, 0.0, type="double3")
+        assert fake.attrs["kit.baseColor"] == (1.0, 0.0, 0.0)
+
+    def test_force_replaces_a_connection_instead_of_stacking_one(self):
+        fake = self._wired()
+        fake.shadingNode("file", name="second_tex")
+        fake.connectAttr("second_tex.outColor", "kit.baseColor", force=True)
+        assert [s for s, d in fake.connections
+                if d == "kit.baseColor"] == ["second_tex.outColor"]
+
+    # -- point 3: nothing answers unconditionally -------------------------
+    def test_sets_refuses_a_flag_combination_it_does_not_model(self):
+        fake = FakeCmds()
+        with pytest.raises(AssertionError, match="unmodelled sets"):
+            fake.sets("|torso|torsoShape", edit=True, remove="someSG")
+
+    def test_listConnections_reports_a_shapes_real_shading_groups(self):
+        # It used to answer [] for every shape however wired - the exact call
+        # meshcheck.first_sg makes, certifying "no shading group" blind.
+        fake = FakeCmds()
+        fake.sets(renderable=True, noSurfaceShader=True, empty=True, name="kitSG")
+        fake.sets("|torso|torsoShape", edit=True, forceElement="kitSG")
+        assert fake.listConnections("|torso|torsoShape",
+                                    type="shadingEngine") == ["kitSG"]
+        with pytest.raises(AssertionError, match="unmodelled listConnections"):
+            fake.listConnections("|torso|torsoShape", type="displayLayer")
+
+    def test_sets_query_answers_the_membership_it_was_given(self):
+        # The other blind answer: a membership query used to return [], so
+        # ensure_object_shading's healthy branch was dead in this file.
+        fake = FakeCmds()
+        fake.sets(renderable=True, noSurfaceShader=True, empty=True, name="kitSG")
+        fake.sets("|torso|torsoShape", edit=True, forceElement="kitSG")
+        assert fake.sets("kitSG", query=True) == ["|torso|torsoShape"]
+
+    def test_nodeType_does_not_call_every_stranger_a_mesh(self):
+        fake = FakeCmds()
+        fake.shadingNode("file", name="kit_color_tex")
+        assert fake.nodeType("kit_color_tex") == "file"
+        assert fake.nodeType("|torso") == "transform"
+        assert fake.nodeType("|torso|torsoShape") == "mesh"
