@@ -25,6 +25,7 @@ Three guarantees, all headless:
 from __future__ import annotations
 
 import ast
+import re
 import sys
 from pathlib import Path
 
@@ -193,6 +194,63 @@ def _literal_dict_keys(node: ast.Dict):
             return None
         keys.append(key.value)
     return keys
+
+
+PROTOCOL_MD = Path(__file__).resolve().parents[1] / "docs" / "protocol.md"
+
+# `{ mesh, shader?, params? }` in the params column of a command table row.
+_ROW = re.compile(r"^\|\s*`(\w+)`\s*\|\s*`\{(.*?)\}`\s*\|", re.M)
+
+
+def _documented_params():
+    """command -> set of param names its protocol.md table row lists.
+
+    Only the outermost brace group is read; a row whose params column is not
+    a plain brace list (a few carry prose or nested result shapes) is skipped
+    rather than guessed at.
+    """
+    out = {}
+    for match in _ROW.finditer(PROTOCOL_MD.read_text(encoding="utf-8")):
+        command, body = match.group(1), match.group(2)
+        if command not in HANDLERS or "{" in body:
+            continue
+        # Drop bracketed value shapes first - `rotation: [rx,ry,rz]` would
+        # otherwise contribute rx/ry/rz as if they were params.
+        body = re.sub(r"\[[^\]]*\]", "", body)
+        names = set()
+        for part in body.split(","):
+            name = part.split(":")[0].split("=")[0].strip()
+            name = name.strip("`?* ").replace("\\", "").strip()
+            # `divisions? \| subdivisions?` - a row offering alternatives.
+            for piece in name.split("|"):
+                piece = piece.strip().strip("?").strip()
+                if piece.isidentifier():
+                    names.add(piece)
+        out.setdefault(command, set()).update(names)
+    return out
+
+
+def test_documented_params_are_accepted():
+    """A stale table row is now a runtime REFUSAL, not a documentation nit.
+
+    Before #767 an unknown key was ignored, so a doc listing a param the
+    handler never read cost nothing. Now a caller who copies that row gets
+    their call refused - which is how protocol.md's `timeout_s=120` inside
+    author_clip's params would have behaved.
+    """
+    documented = _documented_params()
+    assert len(documented) > 30, (
+        "only %d command rows parsed - the table format changed and this "
+        "check went blind" % len(documented)
+    )
+    problems = []
+    for command, params in sorted(documented.items()):
+        allowed, _module = _keys_constant(command)
+        extra = sorted(params - set(allowed))
+        if extra:
+            problems.append("%s: protocol.md documents %s, which the handler "
+                            "refuses" % (command, extra))
+    assert not problems, "; ".join(problems)
 
 
 def test_wrapper_keys_accepted():

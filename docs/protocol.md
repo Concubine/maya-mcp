@@ -55,6 +55,41 @@ Failure — tracebacks are sacred, never truncated:
   recording (`stateWithoutFlush`) so their internal churn never lands on the
   undo queue — undo after a capture reverts the last real edit.
 
+### The unknown-key contract
+
+**Every command refuses a top-level `params` key it does not read** (#764,
+swept across the whole surface by #767), with a `HandlerError` naming the
+offending key and listing the valid ones. The refusal is the first thing each
+handler does, before any Maya call, so a typo costs nothing and needs no live
+Maya to be reported.
+
+This exists because an unread key is worse than a wrong value. A wrong value
+fails; an unread key **succeeds and does something else**. Measured: `assign_material`
+reads its explicit-name param as `name`, eleven tests in this repo passed
+`material=` instead, and every one of them created a differently-named material
+than it believed it was creating — passing, silently, for months.
+
+Where a wrong word is a plausible *synonym* rather than a typo, the error says
+which key was meant (`'material' is called 'name' here`). Those are recorded
+per command rather than guessed at, because the realistic mistake is reaching
+for a neighbouring tool's vocabulary or for a field name out of the *result* —
+and no string-similarity test relates `material` to `name`, which share not one
+letter in position. Ordinary typos fall back to prefix matching.
+
+Two notes for direct wire callers, who are the ones this protects (the MCP tool
+wrappers type their parameters, so an MCP consumer cannot send an unknown key
+in the first place):
+
+- `timeout_s` is a **frame-level** field, a sibling of `cmd` and `params` — not
+  a param. Putting it inside `params` is ignored by every command except
+  `execute_python`, which accepts the key for wrapper compatibility and still
+  reads its real timeout from the frame. Measured in this repo's own evals:
+  calls that asked for 180 s inside `params` silently got the 60 s default.
+- The tables below list the params each command reads. A key absent from a
+  table is refused, so a stale table row is a runtime refusal rather than a
+  documentation nit — they are checked against the handlers by
+  `tests/test_param_contract.py`.
+
 ## Error types
 
 | type | meaning |
@@ -75,7 +110,7 @@ Failure — tracebacks are sacred, never truncated:
 | `execute_python` | `{ code, timeout_s?, risky? }` | `{ stdout, stderr, result_repr, traceback, namespace_keys, checkpoint? }` |
 | `reset_namespace` | `{}` | `{ reset: true }` |
 | `get_scene_graph` | `{ filter?, max_objects?, cursor? }` | `{ objects: [...], total, cursor }` |
-| `capture_viewport` | `{ angles?, shading?, wireframe_overlay?, buffer?, isolate?, target?, frame_all?, resolution? }` | `{ images: [{angle, png_b64, blank}], camera_positions: [...], warnings }` |
+| `capture_viewport` | `{ angles?, shading?, wireframe_overlay?, buffer?, lighting?, shadows?, isolate?, target?, frame_all?, resolution? }` | `{ images: [{angle, png_b64, blank}], camera_positions: [...], warnings }` |
 
 `ping` answers two questions a caller cannot answer for itself: `plugin` says
 which *code* is live (feed it to `version.compare`), `process` says which
@@ -126,7 +161,7 @@ Scene ops:
 |---|---|---|
 | `create_primitive` | `{ kind, name, translate?, rotate?, scale?, divisions? \| subdivisions? }` | `{ name, subdivisions, faces, warnings }` |
 | `duplicate` | `{ name, new_name, translate?, rotate?, scale? }` | `{ name, warnings }` |
-| `transform` | `{ names, translate?, rotate?, scale?, relative? }` | `{ objects: [...], warnings }` |
+| `transform` | `{ names, translate?, rotate?, scale?, relative?, pivot? }` | `{ objects: [...], warnings }` |
 | `group` | `{ names, group_name }` | `{ name, warnings }` |
 | `parent` | `{ child, parent }` | `{ name, warnings }` |
 | `rename` | `{ name, new_name }` | `{ name, warnings }` |
@@ -206,10 +241,11 @@ Lighting and materials:
 |---|---|---|
 | `setup_lighting` | `{ preset, intensity?, hdri_path?, replace_existing? }` | `{ preset, lights: [...], removed: [...], checkpoint_id?, warnings }` |
 | `assign_material` | `{ mesh, shader?, params?, name? }` | `{ mesh, material, shading_group, shader, warnings }` |
+| `assign_pbr` | `{ mesh, maps, params?, name? }` | `{ mesh, material, shading_group, shader, maps, warnings }` |
 
 `assign_material` **refuses a top-level param it does not read** (#764), naming the key that was meant: `material` is called `name` here. It is the result field that gets called `material`, which is exactly why callers reached for it as the input key — and it was silently ignored, so the material quietly got the mesh-derived default name instead. Eleven tests in this repo passed `material=`; every one created a differently-named material than it believed it was creating, and every one passed, because they read the name back out of the result rather than pinning it. An unread key does not fail — it succeeds and does something else.
 
-Note that this is currently the **only** command that checks its top-level keys; the MCP tool wrappers type their parameters, so an MCP consumer cannot send an unknown one, but a direct TCP caller (an eval, an art script) can. See the follow-up ticket for the general sweep.
+Since #767 this is not a special case: **every command refuses a top-level param it does not read**, and does so before touching Maya at all. See "The unknown-key contract" below.
 | `apply_texture_recipe` | `{ mesh, recipe, params?, slot? }` | `{ mesh, recipe, slot, nodes: [...], warnings }` |
 
 ## Commands (M2.2)
@@ -251,7 +287,7 @@ Two details worth knowing before calling it:
 
 | cmd | params | result |
 |---|---|---|
-| `render_sheet` | `{ subjects, angle?, renderer?, resolution?, isolate?, samples? }` | `{ images: [{angle, label, png_b64}], camera_positions: [...], renderer, samples, fallback_light, warnings }` |
+| `render_sheet` | `{ subjects, angle?, renderer?, resolution?, isolate?, samples?, zoom?, relight?, fallback_light? }` | `{ images: [{angle, label, png_b64}], camera_positions: [...], renderer, samples, fallback_light, warnings }` |
 
 `render_sheet` is one frame per subject sharing one renderer, camera and set of
 render globals; the server composites the cells into a single sheet image. It is
@@ -362,7 +398,7 @@ match — reconcile them by the two lists here, not by assuming a 1:1 tool-to-co
 
 | cmd | params | result |
 |---|---|---|
-| `uv_atlas` | `{ names, patch?, cols?, rows?, margin?, mode?, projection?, world_scale? }` | `{ meshes: [{name, uv_bounds, inside_patch}], atlas, patch, patch_rect, margin, projection, normalized, world_scale, all_inside, warnings }` |
+| `uv_atlas` | `{ names, patch?, cols?, rows?, margin?, project?, normalize?, world_scale?, uv_per_metre? }` | `{ meshes: [{name, uv_bounds, inside_patch}], atlas, patch, patch_rect, margin, projection, normalized, world_scale, all_inside, warnings }` |
 
 **`patch` is an integer index or an explicit `[col, row]`** — index 0 is the
 top-left patch and the index counts along the row first, the way the atlas image
@@ -658,7 +694,7 @@ curves ride as tolerated extras.
 
 | cmd | params | result |
 |---|---|---|
-| `author_clip` | `{ root, name, fps=30, keys: [{time_s, rotations?, blend_weights?, root_position?}], interpolation, loop, timeout_s=120 }` | `{ root, clip, fps, duration_s, frames, keyed_joints, keyed_weight_channels, root_position_keyed, interpolation, loop, start_frame, end_frame, clips, padded_channels, held_channels, back_filled, replaced, per_key, warnings }` |
+| `author_clip` | `{ root, name, fps=30, keys: [{time_s, rotations?, blend_weights?, root_position?}], interpolation, loop }` | `{ root, clip, fps, duration_s, frames, keyed_joints, keyed_weight_channels, root_position_keyed, interpolation, loop, start_frame, end_frame, clips, padded_channels, held_channels, back_filled, replaced, per_key, warnings }` |
 | `preview_clip` | `{ root, name, angle?, every_nth?, resolution?, renderer?, zoom? }` | `{ clip, fps, start_frame, end_frame, frames, images, warnings, ... }` |
 | `measure_clip` | `{ root, name?, joints?, contact_joints? }` | `{ name, fps, frames_sampled, loop, rig_height, thresholds, joints: {kinematics...}, contacts: {runs, max_slide}, symmetry, warnings }` |
 
