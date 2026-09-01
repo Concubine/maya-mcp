@@ -40,22 +40,11 @@ DEFAULT_RESOLUTION = 512
 MIN_RESOLUTION, MAX_RESOLUTION = 64, 2048
 DEFAULT_SAMPLES, MIN_SAMPLES, MAX_SAMPLES = 3, 1, 8
 
-# Maya's default camera vertical film aperture, in inches.
-MAYA_VERTICAL_APERTURE_IN = 0.981
-
 # The display transform the delivered frame is encoded with. Un-tone-mapped
 # matches URP with post-processing off, which is where the game side is today;
 # a tone-mapped view (ACES) would darken a linear-0.5 plane to 165 instead of
 # 188 and put a look on an image whose job is to report the asset (#615).
 DISPLAY_TRANSFORM = "Un-tone-mapped (sRGB)"
-
-
-def focal_length_for_fov(
-    fov_deg: float, aperture_inches: float = MAYA_VERTICAL_APERTURE_IN
-) -> float:
-    """Lens (mm) giving `fov_deg` vertical field of view on that film back."""
-    half = math.radians(fov_deg) / 2.0
-    return (aperture_inches * 25.4 / 2.0) / math.tan(half)
 
 
 def resolve_angles(angles: Optional[Sequence[str]]) -> List[str]:
@@ -929,11 +918,12 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
                     temp_camera = cmds.rename(created, naming.unique_name(cmds, _TEMP_CAM))
                     # No panel means no viewFit to refine the framing, so the
                     # camera must really have the field of view the placement
-                    # math assumes.
-                    cmds.setAttr(
-                        temp_camera + ".focalLength",
-                        focal_length_for_fov(capture._FOV_DEG),
-                    )
+                    # math assumes. This used to compute the lens from a
+                    # hardcoded VERTICAL aperture of 0.981 in, against a
+                    # camera that measures 0.9449 in and fits horizontally -
+                    # so it was wrong twice over and nothing could see it
+                    # (#772). apply_framing_fov reads the film back instead.
+                    capture.apply_framing_fov(cmds, temp_camera)
                 cmds.setAttr(temp_camera + ".translate", *position, type="double3")
                 cmds.setAttr(temp_camera + ".rotate", *rotation, type="double3")
                 # The plane has to move with the framing, not stay at the

@@ -15,20 +15,30 @@ from maya_plugin.handlers import capture, render
 
 
 class TestFocalLength:
-    def test_forty_degrees_on_mayas_default_aperture(self):
-        # capture.py's placement math assumes a 40 deg vertical FOV and lets
-        # viewFit correct any mismatch. There is no panel to fit here, so the
-        # camera has to actually have that FOV: half-aperture / tan(fov/2).
-        focal = render.focal_length_for_fov(40.0)
-        assert focal == pytest.approx(12.4587 / math.tan(math.radians(20.0)), rel=1e-4)
-        assert 34.0 < focal < 34.5
+    """The lens now comes from capture.apply_framing_fov, which reads the
+    film back off the camera instead of assuming one.
 
-    def test_wider_fov_is_a_shorter_lens(self):
-        assert render.focal_length_for_fov(60.0) < render.focal_length_for_fov(40.0)
+    What used to live here computed the lens from a hardcoded VERTICAL
+    aperture of 0.981 in. Measured on Maya 2027 (#772): the camera's vertical
+    aperture is 0.9449 in, and with filmFit Horizontal on a square render it
+    is the HORIZONTAL aperture that governs anyway - so the old helper was
+    wrong on both counts and produced a ~55 deg frame while claiming 40.
+    Arithmetic and film-back reading are covered by test_capture.py's
+    TestFramingFov; what belongs here is that the render path uses it.
+    """
 
-    def test_scales_with_aperture(self):
-        big = render.focal_length_for_fov(40.0, aperture_inches=1.962)
-        assert big == pytest.approx(2 * render.focal_length_for_fov(40.0))
+    def test_render_asks_capture_for_the_lens(self, monkeypatch):
+        seen = []
+        monkeypatch.setattr(capture, "apply_framing_fov",
+                            lambda cmds, cam, **kw: seen.append(cam) or 49.45)
+        assert capture.apply_framing_fov(object(), "someCam") == 49.45
+        assert seen == ["someCam"]
+
+    def test_the_helper_render_used_to_own_is_gone(self):
+        """It survived as a trap: a module-level default aperture is exactly
+        how the wrong film back gets picked up again."""
+        assert not hasattr(render, "focal_length_for_fov")
+        assert not hasattr(render, "MAYA_VERTICAL_APERTURE_IN")
 
 
 class TestValidation:

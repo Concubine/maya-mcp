@@ -45,6 +45,14 @@ _ANGLE_DIRECTIONS = {
 }
 _FOV_DEG = 40.0
 _FIT_MARGIN = 1.15
+# Maya's filmFit enum: 0 fill, 1 horizontal, 2 vertical, 3 overscan.
+_FILM_FIT_HORIZONTAL = 1
+# What cmds.camera() builds here, recorded for the tests and for anyone
+# reading the arithmetic - never used as an assumption. apply_framing_fov
+# reads the film back off the camera it is given, because the previous
+# attempt at this (render.py) hardcoded 0.981 in against a camera that
+# measures 0.9449 in, and was wrong in a way nothing could see (#772).
+MAYA_HORIZONTAL_APERTURE_IN = 1.4173
 
 
 def _cmds():
@@ -107,6 +115,45 @@ def _placement(
     # yaw = azimuth, no roll, default xyz rotate order.
     rotation = (-elevation_deg, azimuth_deg, 0.0)
     return position, rotation
+
+
+def focal_length_for_fov(fov_deg: float, aperture_inches: float) -> float:
+    """Lens (mm) giving `fov_deg` across a film back `aperture_inches` wide.
+
+    The aperture is required rather than defaulted: which one to pass is a
+    consequence of filmFit, and a default is exactly how the wrong one gets
+    used silently (#772).
+    """
+    half = math.radians(fov_deg) / 2.0
+    return (aperture_inches * 25.4 / 2.0) / math.tan(half)
+
+
+def apply_framing_fov(cmds, camera: str, fov_deg: float = _FOV_DEG) -> float:
+    """Make `camera` actually have the field of view the placement math solved
+    for, and return the focal length set.
+
+    _placement puts the camera at `_FIT_MARGIN * radius / sin(fov/2)`, which
+    frames the subject as intended only if the lens agrees. Measured before
+    this existed: the placement solved for 40 deg and shot through 54.4 deg,
+    so subjects came out at about 72% of their intended linear size (#772).
+
+    Two things have to be pinned, not assumed:
+
+    - **filmFit**, because which aperture governs is a function of it. Every
+      image this module produces is square (render.py sets width == height
+      and deviceAspectRatio 1.0), so under Horizontal fit the horizontal FOV
+      governs both axes and one number describes the frame.
+    - **the aperture**, read off this camera. Hardcoding it is what made the
+      earlier attempt inert: it assumed 0.981 in against a 0.9449 in back,
+      and picked the vertical aperture besides.
+    """
+    shapes = cmds.listRelatives(camera, shapes=True, fullPath=True) or [camera]
+    shape = shapes[0]
+    cmds.setAttr(shape + ".filmFit", _FILM_FIT_HORIZONTAL)
+    aperture = cmds.getAttr(shape + ".horizontalFilmAperture")
+    focal = focal_length_for_fov(fov_deg, aperture)
+    cmds.setAttr(shape + ".focalLength", focal)
+    return focal
 
 
 def camera_placement(
@@ -632,6 +679,12 @@ def _capture_one(
             temp_name = naming.unique_name(cmds, "mayaMcpTempCam")
             created_cam = cmds.camera()[0]
             temp_camera = cmds.rename(created_cam, temp_name)
+            # The lens has to match the FOV the placement above solved for.
+            # viewFit refines the distance afterwards when frame_all is on,
+            # which is what hid this for so long - but frame_all=False shoots
+            # the placement straight, and then a mismatched lens IS the
+            # framing (#772).
+            apply_framing_fov(cmds, temp_camera)
             cmds.setAttr(temp_camera + ".translate", *position, type="double3")
             cmds.setAttr(temp_camera + ".rotate", *rotation, type="double3")
             cmds.setAttr(temp_camera + ".visibility", False)

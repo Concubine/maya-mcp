@@ -16,6 +16,95 @@ from maya_plugin.handlers import capture
 CENTER_BBOX = ([-2.0, 0.0, -1.0], [2.0, 4.0, 1.0])  # center (0, 2, 0)
 
 
+class FakeLensCmds:
+    """A camera whose apertures are whatever the test says they are.
+
+    The point of apply_framing_fov is that it READS the film back rather
+    than assuming one, so the fake has to be able to disagree with Maya's
+    defaults - that is the whole assertion.
+    """
+
+    def __init__(self, h_aperture=1.4173, v_aperture=0.9449):
+        self.attrs = {
+            "camShape.horizontalFilmAperture": h_aperture,
+            "camShape.verticalFilmAperture": v_aperture,
+            "camShape.focalLength": 35.0,
+            "camShape.filmFit": 0,
+        }
+        self.sets = []
+
+    def listRelatives(self, node, shapes=False, fullPath=False, **kw):
+        return ["camShape"] if shapes else None
+
+    def getAttr(self, plug):
+        return self.attrs[plug]
+
+    def setAttr(self, plug, *values, **kw):
+        self.attrs[plug] = values[0]
+        self.sets.append((plug, values[0]))
+
+
+class TestFramingFov:
+    """#772: the placement math solves for _FOV_DEG, so the camera it shoots
+    through has to actually HAVE that field of view.
+
+    Measured on Maya 2027: cmds.camera() builds a 35 mm lens on a 1.4173 in
+    x 0.9449 in back with filmFit=1 (Horizontal), and every render here is
+    square (deviceAspectRatio 1.0), so the HORIZONTAL aperture governs both
+    axes. A subject was measured filling 61% of the frame where 84% was
+    intended - about 72% of its intended linear size.
+    """
+
+    def test_focal_length_puts_the_horizontal_fov_on_the_constant(self):
+        focal = capture.focal_length_for_fov(
+            capture._FOV_DEG, capture.MAYA_HORIZONTAL_APERTURE_IN)
+        back_out = 2 * math.degrees(math.atan(
+            (capture.MAYA_HORIZONTAL_APERTURE_IN * 25.4 / 2) / focal))
+        assert back_out == pytest.approx(capture._FOV_DEG, rel=1e-9)
+
+    def test_a_wider_fov_is_a_shorter_lens(self):
+        assert (capture.focal_length_for_fov(60.0, 1.4173)
+                < capture.focal_length_for_fov(40.0, 1.4173))
+
+    def test_focal_scales_with_the_film_back(self):
+        assert (capture.focal_length_for_fov(40.0, 2.8346)
+                == pytest.approx(2 * capture.focal_length_for_fov(40.0, 1.4173)))
+
+    def test_it_reads_the_aperture_off_the_camera(self):
+        """A hardcoded aperture is what made the previous attempt at this
+        miss: render.py assumed 0.981 in when the camera measures 0.9449."""
+        odd = FakeLensCmds(h_aperture=2.0)
+        capture.apply_framing_fov(odd, "cam")
+        assert odd.attrs["camShape.focalLength"] == pytest.approx(
+            capture.focal_length_for_fov(capture._FOV_DEG, 2.0))
+        assert odd.attrs["camShape.focalLength"] != pytest.approx(
+            capture.focal_length_for_fov(capture._FOV_DEG,
+                                         capture.MAYA_HORIZONTAL_APERTURE_IN))
+
+    def test_it_pins_film_fit_to_horizontal(self):
+        """Which aperture governs is a FUNCTION of filmFit, so leaving it at
+        whatever the scene had would make the lens correct only by luck."""
+        fake = FakeLensCmds()
+        capture.apply_framing_fov(fake, "cam")
+        assert fake.attrs["camShape.filmFit"] == capture._FILM_FIT_HORIZONTAL
+
+    def test_the_framed_subject_reaches_the_margin_it_asks_for(self):
+        """The whole point, stated as the picture rather than the lens: at
+        the distance the placement math chooses, the bounding sphere must
+        fill 1/_FIT_MARGIN of the frame."""
+        bbox_min, bbox_max = (-1.0, -1.0, -1.0), (1.0, 1.0, 1.0)
+        radius = math.dist(bbox_min, bbox_max) / 2.0
+        position, _rot = capture.camera_placement("front", bbox_min, bbox_max)
+        distance = math.dist(position, (0.0, 0.0, 0.0))
+        half_fov = math.radians(capture._FOV_DEG) / 2.0
+        # Perspective, not angles: the frame's half-width is tan(half_fov).
+        fill = math.tan(math.asin(radius / distance)) / math.tan(half_fov)
+        assert fill == pytest.approx(
+            math.tan(math.asin(math.sin(half_fov) / capture._FIT_MARGIN))
+            / math.tan(half_fov), rel=1e-9)
+        assert 0.80 < fill < 0.90
+
+
 class TestCameraPlacement:
     def test_front_sits_on_positive_z_looking_straight(self):
         pos, rot = capture.camera_placement("front", *CENTER_BBOX)
@@ -211,7 +300,12 @@ def _panel_state_stub(fake_isolate_cmds):
                     return False
             return fake_isolate_cmds.modelEditor(panel, **kw)
 
+        def listRelatives(self, node, shapes=False, fullPath=False, **kw):
+            return ["%sShape" % node] if shapes else None
+
         def getAttr(self, attr):
+            if attr.endswith(".horizontalFilmAperture"):
+                return capture.MAYA_HORIZONTAL_APERTURE_IN
             return 0
 
         def setAttr(self, *a, **kw):
@@ -395,9 +489,15 @@ class FakeCaptureCmds:
     def undoInfo(self, **kw):
         return True if kw.get("query") else None
 
+    def listRelatives(self, node, shapes=False, fullPath=False, **kw):
+        # apply_framing_fov (#772) sets the lens on the camera SHAPE.
+        return ["%sShape" % node] if shapes else None
+
     def getAttr(self, attr):
         if attr == "hardwareRenderingGlobals.ssaoEnable":
             return self.ssao
+        if attr.endswith(".horizontalFilmAperture"):
+            return capture.MAYA_HORIZONTAL_APERTURE_IN
         return [(0.0, 0.0, 0.0)]  # .translate / .rotate
 
     def setAttr(self, attr, *args, **kw):
