@@ -13,7 +13,7 @@ import math
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..dispatcher import HandlerError, require_known_keys
-from . import naming
+from . import naming, orphans
 
 PRESETS = ("three_point", "single_sun", "hdri", "environment")
 
@@ -228,6 +228,14 @@ def _replace_existing_lights(cmds, transforms: List[str]) -> Tuple[List[str], Li
     """
     removed: List[str] = []
     warnings: List[str] = []
+    # What fed each light's colour, captured BEFORE the light goes: a dome's
+    # ramp or hdri file node (and the place2dTexture behind a file) is a DG
+    # node with no parent, so deleting the shape and its transform leaves it
+    # in the scene wired to nothing - MEASURED (#804 probe): after both
+    # deletes the ramp's one remaining output is defaultTextureList1, and
+    # Maya never reaps it. Swept after, so a network some OTHER node still
+    # uses is kept and named.
+    feeds: List[str] = []
     for transform in transforms:
         if not cmds.objExists(transform):
             continue
@@ -239,6 +247,16 @@ def _replace_existing_lights(cmds, transforms: List[str]) -> Tuple[List[str], Li
         under = cmds.listRelatives(transform, shapes=True, fullPath=True) or []
         for shape in [s for s in under if s in lit]:
             if cmds.objExists(shape):
+                try:
+                    fed_by = orphans.upstream_network(cmds, shape + ".color")
+                except Exception as exc:  # noqa: BLE001 - a light type with no .color (unmeasured: aiLightPortal)
+                    fed_by = []
+                    warnings.append(
+                        "could not read what fed %s.color (%s); anything "
+                        "feeding it was left in the scene" % (shape.split("|")[-1], exc))
+                for node in fed_by:
+                    if node not in feeds:
+                        feeds.append(node)
                 cmds.delete(shape)
         remaining = cmds.listRelatives(transform, children=True, fullPath=True) or []
         if remaining:
@@ -250,6 +268,10 @@ def _replace_existing_lights(cmds, transforms: List[str]) -> Tuple[List[str], Li
             continue
         cmds.delete(transform)
         removed.append(short)
+    swept, survivors = orphans.sweep(cmds, feeds)
+    removed.extend(n.split("|")[-1] for n in swept)
+    warnings.extend(orphans.survivor_warnings(
+        survivors, "replacing the lights that used it"))
     return removed, warnings
 
 

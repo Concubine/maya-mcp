@@ -1,0 +1,158 @@
+{
+ "1a_src_plugs_before": [
+  "kit_color_tex.outColor"
+ ],
+ "1a_src_nodes_before": [
+  "kit_color_tex"
+ ],
+ "1b_f1_outputs_before": [
+  "materialInfo1",
+  "defaultTextureList1",
+  "kit"
+ ],
+ "1b_f1_outputs_before_plugs": [
+  "materialInfo1.texture[0]",
+  "defaultTextureList1.textures[0]",
+  "kit.baseColor"
+ ],
+ "1b_p1_outputs_before": [
+  "defaultRenderUtilityList1",
+  "kit_color_tex",
+  "kit_color_tex"
+ ],
+ "1c_src_plugs_after_force": [
+  "kit_color_tex2.outColor"
+ ],
+ "1c_f1_exists_after": true,
+ "1c_f1_outputs_after": [
+  "defaultTextureList1"
+ ],
+ "1c_f1_outputs_after_plugs": [
+  "defaultTextureList1.textures[0]"
+ ],
+ "1c_f1_inputs_after": [
+  "defaultColorMgtGlobals",
+  "defaultColorMgtGlobals",
+  "defaultColorMgtGlobals",
+  "defaultColorMgtGlobals",
+  "kit_color_p2d",
+  "kit_color_p2d"
+ ],
+ "1c_p1_outputs_after": [
+  "defaultRenderUtilityList1",
+  "kit_color_tex",
+  "kit_color_tex"
+ ],
+ "1c_scene_files": [
+  "kit_color_tex",
+  "kit_color_tex2"
+ ],
+ "1c_scene_p2d": [
+  "kit_color_p2d",
+  "kit_color_p2d2"
+ ],
+ "1d_after_delete_f1_p2d_exists": true,
+ "1d_p1_outputs_after_f1_deleted": [
+  "defaultRenderUtilityList1"
+ ],
+ "1d_p1_outputs_plugs": [
+  "defaultRenderUtilityList1.utilities[0]"
+ ],
+ "1e_rough_src_plugs": [
+  "kit_rough_inv.outputX"
+ ],
+ "1e_inv_inputs": [
+  "kit_rough_tex"
+ ],
+ "1e_inv_outputs": [
+  "defaultRenderUtilityList1",
+  "kit"
+ ],
+ "2a_setAttr_compound_fed": {
+  "raised": "RuntimeError: setAttr: The attribute 'kit.baseColor' is locked or connected and cannot be modified.\n"
+ },
+ "2b_setAttr_child_of_fed_compound": {
+  "raised": "RuntimeError: setAttr: The attribute 'kit.baseColorR' is locked or connected and cannot be modified.\n"
+ },
+ "2c_getAttr_lock_compound": {
+  "repr": "False"
+ },
+ "2d_getAttr_lock_child": {
+  "repr": "False"
+ },
+ "2e_setAttr_scalar_fed_via_reverse": {
+  "raised": "RuntimeError: setAttr: The attribute 'kit.specularRoughness' is locked or connected and cannot be modified.\n"
+ },
+ "2f_setAttr_compound_with_child_fed": {
+  "raised": "RuntimeError: setAttr: A child attribute of 'kit.emissionColor' is locked or connected and cannot be modified.\n"
+ },
+ "2g_setAttr_sibling_of_fed_child": {
+  "repr": "None"
+ },
+ "2h_emission_src_plugs_compound_query": [],
+ "2i_emission_src_plugs_child_query": [
+  "kit_color_tex2.outColorR"
+ ],
+ "2j_setAttr_unfed": {
+  "repr": "None"
+ },
+ "3a_color_src_before": [
+  "mcpLight_domeRamp"
+ ],
+ "3a_color_src_before_plugs": [
+  "mcpLight_domeRamp.outColor"
+ ],
+ "3a_ramp_outputs_before": [
+  "defaultTextureList1",
+  "mcpLight_dome"
+ ],
+ "3a_ramp_inputs": [],
+ "3b_after_delete_shape_transform_exists": true,
+ "3b_after_delete_shape_ramp_exists": true,
+ "3c_after_delete_transform_ramp_exists": true,
+ "3c_ramp_outputs_after": [
+  "defaultTextureList1"
+ ],
+ "3c_ramp_outputs_after_plugs": [
+  "defaultTextureList1.textures[0]"
+ ],
+ "3c_scene_ramps": [
+  "mcpLight_domeRamp"
+ ],
+ "3d_hdri_color_src": [
+  "mcpLight_domeTex"
+ ],
+ "3d_tex_inputs": [
+  "defaultColorMgtGlobals",
+  "defaultColorMgtGlobals",
+  "defaultColorMgtGlobals",
+  "defaultColorMgtGlobals"
+ ],
+ "3e_after_delete_transform_tex_exists": true,
+ "3e_tex_outputs_after": [
+  "defaultTextureList1"
+ ],
+ "3f_fresh_dome_outputs": [
+  "lightList1"
+ ],
+ "3f_fresh_dome_inputs": [],
+ "4a_listConnections_None": {
+  "repr": "None"
+ },
+ "4b_listConnections_missing_node": {
+  "raised": "ValueError: No object matches name: no_such_node"
+ },
+ "5a_normal_direct_sources": [
+  "mcpTex_inv"
+ ],
+ "5b_connect_file_outColor_to_normalCamera": {
+  "repr": "'Connected baked.outColor to skin_mat.normalCamera.'"
+ },
+ "5b_normal_sources_after": [
+  "baked.outColor"
+ ],
+ "5c_inv_outputs_after_force": [
+  "defaultRenderUtilityList1"
+ ],
+ "maya_version": "2027"
+}

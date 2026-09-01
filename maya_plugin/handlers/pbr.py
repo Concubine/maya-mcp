@@ -27,7 +27,7 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..dispatcher import HandlerError, require_known_keys
-from . import material, naming
+from . import material, naming, orphans, plugwrite
 
 SHADER = "standardSurface"
 
@@ -199,11 +199,21 @@ def missing_files(specs: List[Dict[str, Any]]) -> List[str]:
     return absent
 
 
-def _file_node(cmds, tracker, base: str, spec: Dict[str, Any]) -> str:
+def _file_node(cmds, tracker, base: str, spec: Dict[str, Any],
+               claims: List[Tuple[str, str]]) -> str:
+    """The file node (with its place2dTexture) for one map.
+
+    `claims` collects (node, the name it was meant to have): when this call
+    is re-texturing a slot, the OLD network still holds `<mat>_<slot>_tex`
+    at creation time and unique_name steps around it. Once the old nodes are
+    swept the caller renames the new ones back (#804) - a look-dev loop
+    should not leave `kit_color_tex_004` behind after four re-textures.
+    """
+    wanted = "%s_%s_tex" % (base, spec["slot"])
     node = tracker(cmds.shadingNode(
-        "file", asTexture=True,
-        name=naming.unique_name(cmds, "%s_%s_tex" % (base, spec["slot"])),
+        "file", asTexture=True, name=naming.unique_name(cmds, wanted),
     ))
+    claims.append((node, wanted))
     cmds.setAttr(node + ".fileTextureName", spec["path"], type="string")
     # Explicit either way: inheriting the user's filter preference makes the
     # same call produce different pixels in two sessions. 0 = Off, which is what
@@ -215,10 +225,12 @@ def _file_node(cmds, tracker, base: str, spec: Dict[str, Any]) -> str:
         # open and quietly undo the line above.
         cmds.setAttr(node + ".ignoreColorSpaceFileRules", True)
 
+    wanted_place = "%s_%s_p2d" % (base, spec["slot"])
     place = tracker(cmds.shadingNode(
         "place2dTexture", asUtility=True,
-        name=naming.unique_name(cmds, "%s_%s_p2d" % (base, spec["slot"])),
+        name=naming.unique_name(cmds, wanted_place),
     ))
+    claims.append((place, wanted_place))
     for src, dst in _PLACE2D_LINKS:
         try:
             cmds.connectAttr("%s.%s" % (place, src), "%s.%s" % (node, dst), force=True)
@@ -227,42 +239,52 @@ def _file_node(cmds, tracker, base: str, spec: Dict[str, Any]) -> str:
     return node
 
 
-def _wire(cmds, tracker, shader: str, base: str, spec: Dict[str, Any], node: str) -> None:
+def _wire(cmds, tracker, shader: str, base: str, spec: Dict[str, Any],
+          node: str, claims: List[Tuple[str, str]]) -> List[str]:
+    """Connect `node` into the slot. Returns the nodes the OLD wiring of that
+    slot reached (captured before the force-connect replaces the edge), so
+    the caller can sweep whatever nothing else uses any more (#804). The
+    bump2d / reverse it makes join `claims` like the file nodes do."""
     target = "%s.%s" % (shader, spec["attr"])
+    stale = orphans.upstream_network(cmds, target)
     if spec["kind"] == "normal":
+        wanted = "%s_bump" % base
         bump = tracker(cmds.shadingNode(
-            "bump2d", asUtility=True,
-            name=naming.unique_name(cmds, "%s_bump" % base),
+            "bump2d", asUtility=True, name=naming.unique_name(cmds, wanted),
         ))
+        claims.append((bump, wanted))
         cmds.setAttr(bump + ".bumpInterp", 1)  # 1 = tangent-space normal map
         # outAlpha, NOT outColor: bumpValue is a single float and refuses RGB.
         # bumpInterp=1 makes Maya follow this connection back to the file's
         # colour, so the alpha plug is how a normal map is delivered.
         cmds.connectAttr(node + ".outAlpha", bump + ".bumpValue", force=True)
         cmds.connectAttr(bump + ".outNormal", target, force=True)
-        return
+        return stale
 
     if spec["kind"] == "scalar":
         source = "%s.%s" % (node, _CHANNEL_PLUG[spec["channel"]])
         if spec["invert"]:
+            wanted = "%s_%s_inv" % (base, spec["slot"])
             inv = tracker(cmds.shadingNode(
-                "reverse", asUtility=True,
-                name=naming.unique_name(cmds, "%s_%s_inv" % (base, spec["slot"])),
+                "reverse", asUtility=True, name=naming.unique_name(cmds, wanted),
             ))
+            claims.append((inv, wanted))
             cmds.connectAttr(source, inv + ".inputX", force=True)
             source = inv + ".outputX"
         cmds.connectAttr(source, target, force=True)
-        return
+        return stale
 
     source = node + ".outColor"
     if spec["invert"]:
+        wanted = "%s_%s_inv" % (base, spec["slot"])
         inv = tracker(cmds.shadingNode(
-            "reverse", asUtility=True,
-            name=naming.unique_name(cmds, "%s_%s_inv" % (base, spec["slot"])),
+            "reverse", asUtility=True, name=naming.unique_name(cmds, wanted),
         ))
+        claims.append((inv, wanted))
         cmds.connectAttr(source, inv + ".input", force=True)
         source = inv + ".output"
     cmds.connectAttr(source, target, force=True)
+    return stale
 
 
 # Every top-level key assign_pbr reads. Anything else is refused rather than
@@ -304,8 +326,35 @@ def assign_pbr(params: Dict[str, Any]) -> Dict[str, Any]:
             "MACHINE RUNNING MAYA.",
         )
 
+    # Every mesh resolved BEFORE anything is built: the second mesh used to
+    # be resolved inside assign_material after the maps were wired, and a
+    # typo there now reaches the failure sweep with the OLD network already
+    # swept (review catch) - the one path on which a refused call could
+    # leave the material bare.
+    for mesh in meshes:
+        naming.require_mesh(cmds, mesh)
+
     requested_name: Optional[str] = params.get("name")
     minted_material = not (requested_name and cmds.objExists(str(requested_name)))
+
+    if not minted_material and values and cmds.nodeType(str(requested_name)) == SHADER:
+        # #804: the clash check above sees THIS call's maps only. A material
+        # reached by name carries the maps of every call before it, and a
+        # scalar aimed at one of those slots would reach assign_material's
+        # setAttr on a plug a file node drives - MEASURED: Maya raises
+        # "locked or connected", and before this it did so AFTER the mesh had
+        # been moved. Ask the scene first, with the package's one guard; a
+        # slot this call is about to re-map is refused too (the map wins
+        # over a constant either way, and saying so beats a raw raise).
+        attr_of = material._ATTR[SHADER]  # noqa: SLF001 - the one table, next door
+        # A key the whitelist does not know is assign_material's refusal to
+        # make (it names the valid params); only known keys are asked about.
+        plugwrite.guard(
+            cmds, ["%s.%s" % (requested_name, attr_of[key])
+                   for key in values if key in attr_of],
+            "assign_pbr",
+            consequence="nothing was written and no mesh was moved - a mapped "
+                        "attribute cannot carry a constant too")
 
     first = material.assign_material({
         "mesh": meshes[0], "shader": SHADER, "params": values,
@@ -315,6 +364,8 @@ def assign_pbr(params: Dict[str, Any]) -> Dict[str, Any]:
     warnings: List[str] = list(first["warnings"])
 
     created: List[str] = []
+    claims: List[Tuple[str, str]] = []
+    stale_by_slot: Dict[str, List[str]] = {}
 
     def tracker(node: str) -> str:
         created.append(node)
@@ -330,17 +381,44 @@ def assign_pbr(params: Dict[str, Any]) -> Dict[str, Any]:
             key = (spec["path"], spec["raw"], spec["mip_filter"])
             node = by_source.get(key)
             if node is None:
-                node = _file_node(cmds, tracker, mat, spec)
+                node = _file_node(cmds, tracker, mat, spec, claims)
                 by_source[key] = node
             else:
                 warnings.append(
                     "%s shares file node %s (same image)" % (spec["slot"], node)
                 )
-            _wire(cmds, tracker, mat, mat, spec, node)
+            stale_by_slot[spec["slot"]] = _wire(cmds, tracker, mat, mat, spec,
+                                                node, claims)
             wired[spec["slot"]] = {
                 "file": node, "attr": spec["attr"], "channel": spec["channel"],
                 "inverted": spec["invert"], "raw": spec["raw"],
+                "replaced": [],
             }
+
+        # Re-texturing a slot: the old file node, its place2dTexture and any
+        # reverse/bump2d in front of it have just lost their only consumer.
+        # MEASURED (#804 probe): Maya never reaps them - the old file's one
+        # remaining output is defaultTextureList1. Sweep what nothing real
+        # uses any more, AFTER every slot is wired (one file node can serve
+        # two slots; sweeping per slot could take it from the other), and
+        # never anything this call built.
+        stale = [n for old in stale_by_slot.values() for n in old
+                 if n not in created]
+        swept, survivors = orphans.sweep(cmds, stale)
+        for slot, old in stale_by_slot.items():
+            wired[slot]["replaced"] = [n for n in old if n in swept]
+        warnings.extend(orphans.survivor_warnings(
+            survivors, "re-texturing %s" % mat))
+        # The swept nodes held the names the new ones were meant to have.
+        renames: Dict[str, str] = {}
+        for node, wanted in claims:
+            if node.split("|")[-1] != wanted and not cmds.objExists(wanted):
+                renames[node] = cmds.rename(node, wanted)
+                # `created` follows each rename at once: a raise on the next
+                # one must still let the failure sweep find this node.
+                created[:] = [renames[node] if n == node else n for n in created]
+        for entry in wired.values():
+            entry["file"] = renames.get(entry["file"], entry["file"])
 
         assigned = [first["mesh"]]
         for extra in meshes[1:]:

@@ -416,7 +416,18 @@ class FakeCmds:
             )
         self.calls.append(("setAttr", attr, value))
 
-    def listConnections(self, node, type=None, **kw):
+    def _pairs(self):
+        return [(src, dst) for dst, src in self.connections.items()]
+
+    def getAttr(self, attr, lock=False, **kw):
+        # plugwrite's lock question (#802/#804). Nothing else is modelled.
+        self._require(attr.split(".")[0])
+        if lock and not kw:
+            return attr in self.locked
+        raise AssertionError("unmodelled getAttr(%r, %r)" % (attr, kw))
+
+    def listConnections(self, node, type=None, source=False, destination=True,
+                        plugs=False, **kw):
         self._require(node.split(".")[0])
         if type == "shadingEngine" and node.endswith(".outColor"):
             sg = self.shader_to_sg.get(node[: -len(".outColor")])
@@ -427,6 +438,27 @@ class FakeCmds:
             # certifying "this mesh has no shading group" unconditionally.
             return [sg for sg, members in self.sg_members.items()
                     if node in members]
+        if type is None and source and not destination:
+            # #804: what feeds an exact plug, or (bare node) any plug on it -
+            # the walk plugwrite.blocker and orphans.upstream_network make.
+            # None when nothing does, as Maya answers.
+            if "." in node:
+                srcs = [s for s, d in self._pairs() if d == node]
+            else:
+                srcs = [s for s, d in self._pairs()
+                        if d.split(".")[0] == node]
+            srcs = [s for s in srcs if s.split(".")[0] not in self.deleted]
+            return (srcs if plugs else
+                    list(dict.fromkeys(s.split(".")[0] for s in srcs))) or None
+        if type is None and destination and not source:
+            # ...and what a node feeds, downstream: orphans.real_outputs.
+            if "." in node:
+                dsts = [d for s, d in self._pairs() if s == node]
+            else:
+                dsts = [d for s, d in self._pairs()
+                        if s.split(".")[0] == node]
+            return (dsts if plugs else
+                    list(dict.fromkeys(d.split(".")[0] for d in dsts))) or None
         raise AssertionError(
             "unmodelled listConnections(%r, type=%r)" % (node, type))
 
@@ -483,13 +515,10 @@ def test_reusing_a_shader_that_was_built_without_an_sg_gives_it_one(monkeypatch)
     assert "|torso|torsoShape" in fake.sg_members["hand_builtSG"]
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "#799: the reuse path writes params straight onto the existing shader "
-    "without asking whether anything already drives them. In Maya "
-    "setAttr on a texture-driven baseColor raises 'locked or connected and "
-    "cannot be modified' - AFTER cmds.sets has already moved the mesh into "
-    "the shared shading group, so the refused call leaves the scene changed"))
 def test_reusing_a_mapped_shader_is_refused_before_the_mesh_is_moved(monkeypatch):
+    # #804: the reuse path asks plugwrite about every param's plug BEFORE
+    # the mesh is moved. MEASURED: Maya refuses the write on the compound,
+    # on a child of a fed compound, and on a compound with one fed child.
     fake = FakeCmds()
     monkeypatch.setattr(material, "_cmds", lambda: fake)
     material.assign_material({
@@ -513,7 +542,49 @@ def test_reusing_a_mapped_shader_is_refused_before_the_mesh_is_moved(monkeypatch
             "params": {"baseColor": [1, 0, 0]}, "name": "kit",
         })
     assert "baseColor" in str(exc.value)
+    assert "kit_color_tex" in str(exc.value)
+    assert "assign_pbr" in (exc.value.hint or "")
     assert fake.sg_members == sg_before, "the mesh was moved by a failed call"
+    assert not any(c[0] == "setAttr" for c in fake.calls[-1:]
+                   if c[1] == "kit.baseColor")
+
+
+def test_reusing_a_shader_mapped_on_one_channel_is_refused_for_the_compound(monkeypatch):
+    # MEASURED (#804 probe): a file on kit.emissionColorR alone makes
+    # setAttr(kit.emissionColor, ...) raise "A child attribute ... is locked
+    # or connected", while listConnections on the compound answers []. The
+    # guard walks the family, so the child is found.
+    fake = FakeCmds()
+    monkeypatch.setattr(material, "_cmds", lambda: fake)
+    material.assign_material({"mesh": "|torso", "shader": "standardSurface",
+                              "params": {}, "name": "kit"})
+    fake.objects.add("kit_mask_tex")
+    fake.node_types["kit_mask_tex"] = "file"
+    fake.connectAttr("kit_mask_tex.outColorR", "kit.emissionColorR", force=True)
+    with pytest.raises(HandlerError) as exc:
+        material.assign_material({"mesh": "|torso", "shader": "standardSurface",
+                                  "params": {"emissionColor": [1, 1, 1]},
+                                  "name": "kit"})
+    assert "emissionColorR" in str(exc.value)
+
+
+def test_reusing_a_mapped_shader_with_params_on_free_plugs_still_lands(monkeypatch):
+    # The guard is per plug: a mapped baseColor does not stop a roughness
+    # constant on the same shader, and the mesh moves as before.
+    fake = FakeCmds()
+    monkeypatch.setattr(material, "_cmds", lambda: fake)
+    material.assign_material({"mesh": "|torso", "shader": "standardSurface",
+                              "params": {}, "name": "kit"})
+    fake.objects.add("kit_color_tex")
+    fake.node_types["kit_color_tex"] = "file"
+    fake.connectAttr("kit_color_tex.outColor", "kit.baseColor", force=True)
+    fake.objects.add("|arm")
+    fake.shapes["|arm"] = ("|arm|armShape", "mesh")
+    out = material.assign_material({"mesh": "|arm", "shader": "standardSurface",
+                                    "params": {"roughness": 0.4}, "name": "kit"})
+    assert out["material"] == "kit"
+    assert ("setAttr", "kit.specularRoughness", (0.4,)) in fake.calls
+    assert "|arm|armShape" in fake.sg_members[out["shading_group"]]
 
 
 class TestTheFakeRefusesWhatMayaRefuses:

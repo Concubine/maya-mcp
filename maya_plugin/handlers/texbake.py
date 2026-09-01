@@ -23,7 +23,7 @@ import os
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..dispatcher import HandlerError, require_known_keys
-from . import naming, pbr, pngprobe, session, texclaim
+from . import naming, orphans, pbr, pngprobe, session, texclaim
 
 RESOLUTIONS = (256, 512, 1024, 2048, 4096)
 DEFAULT_RESOLUTION = 1024
@@ -212,6 +212,30 @@ def plan_bakes(cmds, shapes: List[str],
                          "recipe does), or bake the other slots and leave "
                          "this one")
             bump_node = _bump_node_for(cmds, claim)
+            if bump_node is None:
+                # `via` records TYPES from anywhere in the chain; the rewire
+                # needs the bump2d that DIRECTLY feeds the slot, because it
+                # keeps that node and replaces what feeds its bumpValue. A
+                # bump2d behind a reverse (or any other pass-through) is not
+                # that node. Before #804 this job shipped with bump_node=None:
+                # the bake was written and committed, and live (MEASURED:
+                # listConnections(None) answers None, it does not raise) the
+                # rewire fell through to the colour arm and connected a
+                # scalar height bake straight into normalCamera - both plugs
+                # are float3, so Maya accepted it and the render was silently
+                # wrong. Refuse here, before anything is baked or checkpointed.
+                between = [t for t in claim["via"] if t != "bump2d"]
+                raise HandlerError(
+                    "%s.%s is fed through %s, not directly by its bump2d - "
+                    "this tool rewires the bump2d that feeds the slot, and "
+                    "cannot carry a %s across a normal bake"
+                    % (claim["material"], claim["attr"],
+                       " and ".join(between) or "another node",
+                       between[0] if len(between) == 1 else "pass-through"),
+                    hint="connect the bump2d's outNormal straight to %s.%s "
+                         "(a bump2d has its own bumpDepth sign for inverting), "
+                         "or bake the other slots with slots=[...] and leave "
+                         "this one" % (claim["material"], claim["attr"]))
 
         if any(t["type"] == "unresolved(depth)" for t in terminals):
             raise HandlerError(
@@ -601,7 +625,16 @@ def _rewire(cmds, job: Dict[str, Any], final_path: str) -> Dict[str, Any]:
         except Exception:  # noqa: BLE001 - attribute sets differ by version
             pass
 
-    if job["kind"] == "normal" and job["bump_node"]:
+    if job["kind"] == "normal":
+        if not job.get("bump_node"):
+            # plan_bakes refuses this job; reaching here is a planning bug.
+            # Falling through to the colour arm was #804's silent wrong
+            # render (file.outColor into normalCamera is a legal connection).
+            raise HandlerError(
+                "%s.%s: a normal bake needs the bump2d that feeds the slot, "
+                "and this job carries none - refusing to wire a height bake "
+                "as a colour" % (job["material"], job["attr"]),
+                hint="plan_bakes should have refused this slot; report it")
         cmds.connectAttr(node + ".outColorR",
                          job["bump_node"] + ".bumpValue", force=True)
         wired_plug = "outColorR"
@@ -651,6 +684,14 @@ def _orphan_candidates(cmds, job: Dict[str, Any]) -> List[str]:
     if job["via"]:
         start = (job["bump_node"] if job["kind"] == "normal"
                 else "%s.%s" % (job["material"], job["attr"]))
+        if start is None:
+            # Never hand listConnections a None: live it answers None (and
+            # the walk silently finds nothing); the fake raises. Either way
+            # a normal job without its bump2d is one plan_bakes refuses.
+            raise HandlerError(
+                "%s.%s: a normal bake without its bump2d cannot be walked "
+                "for orphans" % (job["material"], job["attr"]),
+                hint="plan_bakes should have refused this slot; report it")
         current = start
         seen = set()
         for _ in range(len(job["via"]) + 1):
@@ -709,14 +750,16 @@ def _orphan_candidates(cmds, job: Dict[str, Any]) -> List[str]:
 # found with a differently-named or duplicated bookkeeping node, that is a
 # new measurement this constant must grow to name, not a reason to widen
 # the match to a type.
-_MAYA_BOOKKEEPING_NODES = ("defaultTextureList1", "defaultRenderUtilityList1")
+# The constant itself lives in orphans.py since #804, where pbr and lighting
+# sweep with it too; the name here is kept for the tests and modules that
+# read it from this module.
+_MAYA_BOOKKEEPING_NODES = orphans.BOOKKEEPING_NODES
 
 
 def _real_outputs(cmds, node: str) -> List[str]:
     """`node`'s outgoing connections with Maya's own bookkeeping singletons
     excluded - see _MAYA_BOOKKEEPING_NODES."""
-    outputs = cmds.listConnections(node, source=False, destination=True) or []
-    return [out for out in outputs if out not in _MAYA_BOOKKEEPING_NODES]
+    return orphans.real_outputs(cmds, node)
 
 
 def _sweep_orphans(cmds, candidates: List[str],
@@ -739,24 +782,7 @@ def _sweep_orphans(cmds, candidates: List[str],
     silent keep would hide exactly the case fix round 1 was about: a
     shared terminal must not be destroyed for a slot that was not baked.
     """
-    remaining = list(dict.fromkeys(candidates))
-    deleted: List[str] = []
-    survivors: List[Tuple[str, List[str]]] = []
-    changed = True
-    while changed and remaining:
-        changed = False
-        survivors = []
-        for node in remaining:
-            if not cmds.objExists(node):
-                continue
-            outputs = _real_outputs(cmds, node)
-            if outputs:
-                survivors.append((node, outputs))
-                continue
-            cmds.delete(node)
-            deleted.append(node)
-            changed = True
-        remaining = [n for n, _ in survivors]
+    deleted, survivors = orphans.sweep(cmds, candidates)   # shared since #804
     warnings = [
         "%s was not deleted after baking %s.%s - still used by %s"
         % (node, job["material"], job["attr"], ", ".join(sorted(set(outs))))

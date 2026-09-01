@@ -174,6 +174,7 @@ def driven_weight_source(cmds, plug: str):
     every guard that must answer "who owns this weight" - three sites
     classifying independently is how the wrong hint ships (#771 review).
     """
+    from . import orphans  # noqa: PLC0415 - keep this module's import list flat
     srcs = cmds.listConnections(plug, source=True, destination=False,
                                 plugs=True) or []
     if not srcs:
@@ -186,6 +187,22 @@ def driven_weight_source(cmds, plug: str):
         return src, "clip"
     if src_type == "poseInterpolator":
         return src, "corrective"
+    if src_type in orphans.TEXTURE_TYPES:
+        # #804: a file/ramp/noise/bump2d feeding a shader slot. The one
+        # classifier grows a kind rather than material.py telling the
+        # caller a texture is "a constraint, expression or blend node".
+        return src, "texture"
+    if src_type in orphans.SWEEPABLE_TYPES:
+        # A reverse (or a place2dTexture) is a texture's front end ONLY when
+        # it feeds a shader: the same node type drives joint channels in an
+        # IK/FK switch, and that rig must keep the generic diagnosis (review
+        # catch - the wrong-hint class this classifier exists to end).
+        from . import material  # noqa: PLC0415 - material imports plugwrite imports clip
+        try:
+            if cmds.nodeType(plug.split(".")[0]) in material.SHADERS:
+                return src, "texture"
+        except Exception:  # noqa: BLE001 - an owner that cannot answer is not a shader
+            pass
     return src, "other"
 
 

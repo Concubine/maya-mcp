@@ -210,6 +210,27 @@ class FakeCmds:
         self.created.append((node_type, name))
         return path
 
+    def listConnections(self, node, source=False, destination=True,
+                        plugs=False, type=None, **kw):
+        """#804: what feeds a plug (or any plug on a bare node), and what a
+        node feeds - the two questions orphans.upstream_network and
+        orphans.real_outputs ask. Answered from the same dst -> src map
+        connectAttr writes and delete clears; None when nothing, as Maya."""
+        self._require(node.split(".")[0])
+        assert type is None, "typed listConnections is not modelled here"
+        bare = "." not in node
+        if source and not destination:
+            srcs = [src for dst, src in self.connections.items()
+                    if (dst.split(".")[0] == node if bare else dst == node)]
+            return (srcs if plugs else
+                    list(dict.fromkeys(s.split(".")[0] for s in srcs))) or None
+        if destination and not source:
+            dsts = [dst for dst, src in self.connections.items()
+                    if (src.split(".")[0] == node if bare else src == node)]
+            return (dsts if plugs else
+                    list(dict.fromkeys(d.split(".")[0] for d in dsts))) or None
+        raise AssertionError("unmodelled listConnections direction")
+
     def nodeType(self, node):
         self._require(node)
         # A node the fixture built without a recorded type is a plain
@@ -637,18 +658,32 @@ class TestEnvironmentDome:
         assert fake.attrs["|mcpLight_dome|mcpLight_domeShape.intensity"] == (1.0,)
         assert [c for c in fake.as_light if c[0] == "aiSkyDomeLight"]
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "#799: replace_existing removes light TRANSFORMS only. The ramp that "
-        "fed the old dome's colour (and the file node an hdri dome uses) is "
-        "left in the scene wired to nothing, and Maya never reaps a "
-        "disconnected shading node - so each re-light adds one more dead ramp, "
-        "which naming.unique_name then has to number around"))
     def test_replacing_a_dome_takes_its_ramp_with_it(self, monkeypatch):
+        # #804 MEASURED: deleting the dome's shape and transform leaves its
+        # ramp with defaultTextureList1 as its one consumer, and Maya never
+        # reaps it. replace_existing captures what fed each light's colour
+        # before the delete and sweeps it after.
         fake = self._fake(monkeypatch)
         lighting.setup_lighting({"preset": "environment"})
-        lighting.setup_lighting({"preset": "environment"})
+        result = lighting.setup_lighting({"preset": "environment"})
         ramps = sorted(n for n, t in fake.node_type.items() if t == "ramp")
         assert ramps == ["|mcpLight_domeRamp"], ramps
+        assert "mcpLight_domeRamp" in result["removed"]
+        assert fake.connections.get("|mcpLight_dome|mcpLight_domeShape.color") \
+            == "|mcpLight_domeRamp.outColor"
+
+    def test_a_ramp_something_else_still_uses_survives_the_relight(self, monkeypatch):
+        # The sweep is about consumers, not authorship: a ramp the user also
+        # wired somewhere else is kept, and named.
+        fake = self._fake(monkeypatch)
+        lighting.setup_lighting({"preset": "environment"})
+        keeper = fake.shadingNode("lambert", asShader=True, name="keeper")
+        fake.connectAttr("|mcpLight_domeRamp.outColor", keeper + ".color")
+        result = lighting.setup_lighting({"preset": "environment"})
+        assert "|mcpLight_domeRamp" in fake.objects
+        assert "mcpLight_domeRamp" not in result["removed"]
+        assert any("mcpLight_domeRamp" in w and "still used" in w
+                   for w in result["warnings"])
 
 
 class TestFullyLitUnit:

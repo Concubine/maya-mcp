@@ -89,7 +89,18 @@ class FakeCmds:
                 return ntype
         return "transform"
 
-    def listConnections(self, node, type=None, **kw):
+    def _pairs(self):
+        return list(self.connections)
+
+    def getAttr(self, attr, lock=False, **kw):
+        # plugwrite's lock question (#802/#804). Nothing else is modelled.
+        self._require(attr.split(".")[0])
+        if lock and not kw:
+            return attr in self.locked
+        raise AssertionError("unmodelled getAttr(%r, %r)" % (attr, kw))
+
+    def listConnections(self, node, type=None, source=False, destination=True,
+                        plugs=False, **kw):
         self._require(node.split(".")[0])
         if type == "shadingEngine" and node.endswith(".outColor"):
             sg = self.shader_to_sg.get(node[: -len(".outColor")])
@@ -100,6 +111,27 @@ class FakeCmds:
             # certifying "this mesh has no shading group" unconditionally.
             return [sg for sg, members in self.sg_members.items()
                     if node in members]
+        if type is None and source and not destination:
+            # #804: what feeds an exact plug, or (bare node) any plug on it -
+            # the walk plugwrite.blocker and orphans.upstream_network make.
+            # None when nothing does, as Maya answers.
+            if "." in node:
+                srcs = [s for s, d in self._pairs() if d == node]
+            else:
+                srcs = [s for s, d in self._pairs()
+                        if d.split(".")[0] == node]
+            srcs = [s for s in srcs if s.split(".")[0] not in self.deleted]
+            return (srcs if plugs else
+                    list(dict.fromkeys(s.split(".")[0] for s in srcs))) or None
+        if type is None and destination and not source:
+            # ...and what a node feeds, downstream: orphans.real_outputs.
+            if "." in node:
+                dsts = [d for s, d in self._pairs() if s == node]
+            else:
+                dsts = [d for s, d in self._pairs()
+                        if s.split(".")[0] == node]
+            return (dsts if plugs else
+                    list(dict.fromkeys(d.split(".")[0] for d in dsts))) or None
         raise AssertionError(
             "unmodelled listConnections(%r, type=%r)" % (node, type))
 
@@ -195,6 +227,25 @@ class FakeCmds:
                 "cannot be modified." % blocker
             )
         self.attrs[attr] = value[0] if len(value) == 1 else value
+
+    def rename(self, node, new):
+        # Maya suffixes on collision rather than refusing; modelled so the
+        # #804 name claim is caught by the name it gets back.
+        self._require(node)
+        resolved = self._matches(node)[0]
+        if new in self.objects and new != resolved:
+            new = new + "1"
+        self.objects.discard(resolved)
+        self._born(new)
+        self.node_types[new] = self.node_types.pop(resolved, "transform")
+        self.created = [new if c == resolved else c for c in self.created]
+        self.connections = [
+            (s.replace(resolved + ".", new + ".", 1) if s.split(".")[0] == resolved else s,
+             d.replace(resolved + ".", new + ".", 1) if d.split(".")[0] == resolved else d)
+            for s, d in self.connections]
+        for key in [k for k in self.attrs if k.split(".")[0] == resolved]:
+            self.attrs[new + key[len(resolved):]] = self.attrs.pop(key)
+        return new
 
     def delete(self, *names, **kw):
         for n in names:
@@ -482,36 +533,114 @@ class TestReuseMeetsTheNetworkItAlreadyBuilt:
     setAttr accepted a connected plug and its connectAttr stacked sources.
     """
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "#799: the param-vs-map clash guard only inspects THIS call's maps, so "
-        "a scalar aimed at a slot an EARLIER call mapped reaches "
-        "assign_material's setAttr on a plug the file node already drives. "
-        "Maya raises 'locked or connected and cannot be modified' - and that "
-        "raise happens before assign_pbr's try block, so nothing is swept and "
-        "the second mesh is left wearing the material"))
     def test_a_param_fighting_a_map_from_an_earlier_call_is_refused(self, fake, atlas):
+        # #804: the clash guard sees this call's maps; the scene is asked
+        # about the rest, before anything is built or moved. MEASURED: Maya
+        # raises "locked or connected" for the write this used to make.
         pbr.assign_pbr({"mesh": "|torso", "name": "kit",
                         "maps": {"color": atlas["albedo"]}})
+        objects_before = set(fake._live())
+        sg_before = {k: list(v) for k, v in fake.sg_members.items()}
         with pytest.raises(HandlerError) as exc:
             pbr.assign_pbr({"mesh": "|arm", "name": "kit",
                             "maps": {"normal": atlas["normal"]},
                             "params": {"baseColor": [1.0, 0.0, 0.0]}})
         assert "baseColor" in str(exc.value)
+        assert "kit_color_tex" in str(exc.value)
+        assert "assign_pbr" in (exc.value.hint or "")
+        assert set(fake._live()) == objects_before, "a refused call built nodes"
+        assert fake.sg_members == sg_before, "a refused call moved the mesh"
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "#799: re-texturing a slot force-replaces the connection and leaves "
-        "the previous file node and its place2dTexture in the scene with "
-        "nothing referencing them. Maya never reaps a disconnected shading "
-        "node, so a look-dev loop - the usage material.py's own docstring "
-        "describes - accumulates two dead nodes per re-texture"))
-    def test_re_texturing_a_slot_does_not_strand_the_old_file_node(self, fake, atlas):
+    def test_an_unknown_param_on_a_shared_material_is_still_the_whitelist_refusal(self, fake, atlas):
+        # Review catch: the early guard indexed the attr table before the
+        # whitelist check and turned a typo into a KeyError.
         pbr.assign_pbr({"mesh": "|torso", "name": "kit",
                         "maps": {"color": atlas["albedo"]}})
+        with pytest.raises(HandlerError) as exc:
+            pbr.assign_pbr({"mesh": "|arm", "name": "kit",
+                            "maps": {"normal": atlas["normal"]},
+                            "params": {"rougness": 0.4}})
+        assert "rougness" in str(exc.value)
+
+    def test_a_bad_second_mesh_is_refused_before_the_old_map_is_swept(self, fake, atlas):
+        # Review catch: the stale sweep ran before the extra meshes were
+        # resolved, so a typo in mesh two deleted the OLD map and then the
+        # failure sweep deleted the new one - a bare material from a
+        # refused call.
         pbr.assign_pbr({"mesh": "|torso", "name": "kit",
-                        "maps": {"color": atlas["mask"]}})
+                        "maps": {"color": atlas["albedo"]}})
+        with pytest.raises(HandlerError):
+            pbr.assign_pbr({"mesh": ["|torso", "|nosuch"], "name": "kit",
+                            "maps": {"color": atlas["mask"]}})
+        assert ("kit_color_tex.outColor", "kit.baseColor") in fake.connections
+        assert fake.attrs["kit_color_tex.fileTextureName"] == atlas["albedo"]
+
+    def test_re_texturing_a_normal_slot_reclaims_the_bump_name(self, fake, atlas):
+        # Review catch: only file/p2d names were claimed; a bump2d or reverse
+        # kept its suffix and accumulated across the look-dev loop.
+        pbr.assign_pbr({"mesh": "|torso", "name": "kit",
+                        "maps": {"normal": atlas["normal"],
+                                 "roughness": {"path": atlas["mask"], "channel": "g",
+                                               "invert": True}}})
+        pbr.assign_pbr({"mesh": "|torso", "name": "kit",
+                        "maps": {"normal": atlas["albedo"],
+                                 "roughness": {"path": atlas["mask"], "channel": "r",
+                                               "invert": True}}})
+        assert sorted(n for n in fake.objects if fake.node_types.get(n) == "bump2d") == ["kit_bump"]
+        assert sorted(n for n in fake.objects if fake.node_types.get(n) == "reverse") == ["kit_roughness_inv"]
+
+    def test_a_scalar_on_an_unmapped_slot_of_a_shared_material_still_lands(self, fake, atlas):
+        # The guard asks about the params' own plugs, not the material: an
+        # earlier colour map does not stop a later metalness constant.
+        pbr.assign_pbr({"mesh": "|torso", "name": "kit",
+                        "maps": {"color": atlas["albedo"]}})
+        out = pbr.assign_pbr({"mesh": "|arm", "name": "kit",
+                              "maps": {"normal": atlas["normal"]},
+                              "params": {"metalness": 1.0}})
+        assert out["material"] == "kit"
+        assert fake.attrs["kit.metalness"] == 1.0
+
+    def test_re_texturing_a_slot_does_not_strand_the_old_file_node(self, fake, atlas):
+        # #804 MEASURED: after the force-connect the old file node's only
+        # output is defaultTextureList1 and Maya never reaps it. The sweep
+        # takes it and its place2dTexture, and the new nodes take back the
+        # names the old ones held.
+        pbr.assign_pbr({"mesh": "|torso", "name": "kit",
+                        "maps": {"color": atlas["albedo"]}})
+        out = pbr.assign_pbr({"mesh": "|torso", "name": "kit",
+                              "maps": {"color": atlas["mask"]}})
         files = sorted(n for n in fake.objects
                        if fake.node_types.get(n) in ("file", "place2dTexture"))
         assert files == ["kit_color_p2d", "kit_color_tex"], files
+        assert fake.attrs["kit_color_tex.fileTextureName"] == atlas["mask"]
+        assert ("kit_color_tex.outColor", "kit.baseColor") in fake.connections
+        assert out["maps"]["color"]["file"] == "kit_color_tex"
+        assert out["maps"]["color"]["replaced"] == ["kit_color_tex", "kit_color_p2d"]
+        assert "kit_color_tex" in out["nodes"] and "kit_color_p2d" in out["nodes"]
+
+    def test_a_file_node_another_slot_still_uses_survives_a_re_texture(self, fake, atlas):
+        # The sweep deletes what nothing REAL uses. One mask image driving
+        # metalness and roughness (both raw, so ONE file node) keeps that
+        # node when only metalness is re-mapped, and the caller is told
+        # what still uses it.
+        first = pbr.assign_pbr({"mesh": "|torso", "name": "kit",
+                                "maps": {"metalness": {"path": atlas["mask"], "channel": "r"},
+                                         "roughness": {"path": atlas["mask"], "channel": "g"}}})
+        shared = first["maps"]["metalness"]["file"]
+        assert first["maps"]["roughness"]["file"] == shared
+        out = pbr.assign_pbr({"mesh": "|torso", "name": "kit",
+                              "maps": {"metalness": {"path": atlas["albedo"], "channel": "r"}}})
+        files = sorted(n for n in fake.objects if fake.node_types.get(n) == "file")
+        assert shared in files and len(files) == 2, files
+        assert out["maps"]["metalness"]["replaced"] == []
+        assert any(shared in w and "still used by" in w for w in out["warnings"])
+        assert ("%s.outColorG" % shared, "kit.specularRoughness") in fake.connections
+
+    def test_the_first_texture_of_a_slot_replaces_nothing(self, fake, atlas):
+        out = pbr.assign_pbr({"mesh": "|torso", "name": "kit",
+                              "maps": {"color": atlas["albedo"]}})
+        assert out["maps"]["color"]["replaced"] == []
+        assert not any("still used" in w for w in out["warnings"])
 
 
 class TestTheFakeRefusesWhatMayaRefuses:

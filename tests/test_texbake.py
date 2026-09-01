@@ -1175,17 +1175,13 @@ class TestNormalSlotWithAnIndirectBump:
             "mcpTex_bump.bumpValue": ["mcpTex_noise.outColorR"],
         }
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "#799: the bake is planned, the image is committed to disk, and "
-        "then _orphan_candidates hands cmds.listConnections a bump_node of "
-        "None as if it were a node name (start = job['bump_node'] for "
-        "kind=='normal'). The caller is told 'the scene has been modified "
-        "while committing' and pointed at a checkpoint, when in fact this "
-        "job never reached _rewire at all - the diagnosis, the checkpoint "
-        "and the burned checkpoint slot are all wrong. Maya rejects a None "
-        "object name the same way; nothing about this depends on the fake"))
     def test_a_normal_slot_reached_through_a_reverse_is_diagnosed_not_crashed(
             self, fake, tmp_path, monkeypatch):
+        # #804: plan_bakes refuses a normal slot whose bump2d does not feed
+        # it DIRECTLY, before any bake, checkpoint or commit. MEASURED live:
+        # listConnections(None) answers None rather than raising, so the
+        # pre-fix failure in Maya was not this fake's crash but a silent
+        # colour-arm rewire of a height bake into normalCamera.
         self._indirect_bump(fake)
         monkeypatch.setattr(texbake, "_convert_solid_tx", _fake_bake(fake))
         monkeypatch.setattr(texbake.pngprobe, "uniformity",
@@ -1197,25 +1193,22 @@ class TestNormalSlotWithAnIndirectBump:
         # Either refusal is honest - "no bump2d this tool can rewire" at
         # plan time is the cheap one. What is not honest is baking, then
         # crashing on an internal None, then blaming the scene.
-        with pytest.raises(HandlerError, match="bump2d"):
+        with pytest.raises(HandlerError, match="bump2d") as exc:
             texbake.bake_textures(_params(tmp_path))
         assert fake.checkpoints == []      # refused before any mutation
+        assert fake.baked_calls == []      # and before any bake
+        assert not list(tmp_path.glob("*.png"))
+        assert "reverse" in str(exc.value)
+        assert "outNormal" in (exc.value.hint or "")
+        assert fake.conns["skin_mat.normalCamera"] == ["mcpTex_inv.output"]
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "#799: _rewire's normal arm is gated on `job['bump_node']` being "
-        "truthy, so a normal job that arrived without one falls through to "
-        "the COLOUR arm and connects file.outColor straight into "
-        "material.normalCamera - the bump2d bypassed, an image baked from "
-        "outColorR (a scalar height) read back as an RGB normal vector, "
-        "and kept_intermediates reported as []. Both plugs are float3, so "
-        "Maya ACCEPTS that connection: there is no error anywhere, the "
-        "render is just wrong. Today the _orphan_candidates crash above "
-        "fires first and hides it"))
     def test_rewire_never_wires_a_normal_slot_as_if_it_were_colour(
             self, fake, tmp_path):
-        # Synthetic job, the TestGuardStructure idiom: the crash pinned
-        # above means no real plan_bakes claim can carry this arm its
-        # input today, so it is handed in directly.
+        # #804: a normal job without its bump2d is one plan_bakes refuses;
+        # handed in directly (the TestGuardStructure idiom), _rewire refuses
+        # too rather than falling through to the colour arm. MEASURED:
+        # file.outColor -> normalCamera is a connection Maya ACCEPTS, so
+        # the fall-through was a silently wrong render, never an error.
         self._indirect_bump(fake)
         job = {"material": "skin_mat", "sg": "bodySG", "attr": "normalCamera",
                "slot": "normal", "kind": "normal", "bump_node": None,
@@ -1224,10 +1217,10 @@ class TestNormalSlotWithAnIndirectBump:
                "terminal_plug": "mcpTex_noise.outColorR",
                "basename": "skin_mat_normal_baked.png"}
 
-        wiring = texbake._rewire(fake, job, str(tmp_path / "n.png"))
-
-        assert wiring["wired_plug"] != "outColor", (
-            "a normal slot was wired as a colour slot: %s" % (wiring,))
+        with pytest.raises(HandlerError, match="bump2d"):
+            texbake._rewire(fake, job, str(tmp_path / "n.png"))
+        assert not any(dst == "skin_mat.normalCamera" for _, dst in fake.connected), (
+            "a normal slot was wired as a colour slot: %s" % (fake.connected,))
 
 
 class TestTheFakeRefusesWhatMayaRefuses:

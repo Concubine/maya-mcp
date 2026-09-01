@@ -94,6 +94,18 @@ class TestFamily:
     def test_a_scalar_plug_stands_alone(self):
         assert plugwrite.family("|a|b.focalLength") == ["|a|b.focalLength"]
 
+    def test_a_colour_compound_pulls_in_its_rgb_children(self):
+        # #804 MEASURED: a file on kit.emissionColorR alone refuses a write
+        # to kit.emissionColor ("A child attribute of ... is locked or
+        # connected") while listConnections on the compound answers [] -
+        # the transform asymmetry, on a shader.
+        assert plugwrite.family("kit.baseColor") == [
+            "kit.baseColor", "kit.baseColorR", "kit.baseColorG", "kit.baseColorB"]
+
+    def test_a_colour_child_pulls_in_its_compound(self):
+        assert plugwrite.family("kit.emissionColorG") == [
+            "kit.emissionColorG", "kit.emissionColor"]
+
     def test_shear_is_a_compound_whose_children_are_not_xyz(self):
         assert plugwrite.family("|a.shear")[1:] == [
             "|a.shearXY", "|a.shearXZ", "|a.shearYZ"]
@@ -174,6 +186,35 @@ class TestBlocker:
         fake.driven = {"|a.rotateX": "|interp1.output[0]"}
         fake.types = {"|interp1": "poseInterpolator"}
         assert plugwrite.blocker(fake, "|a.rotate")[0].kind == "corrective"
+
+    def test_a_reverse_on_a_joint_is_not_a_texture(self, fake):
+        # Review catch: the IK/FK switch drives joint channels through a
+        # reverse. That rig keeps the generic diagnosis, never an assign_pbr
+        # hint - the wrong-hint class the single classifier exists to end.
+        fake.types["ikfk_rev"] = "reverse"
+        fake.driven["|a.rotateX"] = "ikfk_rev.outputX"
+        found = plugwrite.blocker(fake, "|a.rotate")
+        assert [(b.at, b.kind) for b in found] == [("|a.rotateX", "other")]
+        with pytest.raises(HandlerError) as exc:
+            plugwrite.guard(fake, ["|a.rotate"], "pose_skeleton")
+        assert "texture" not in str(exc.value)
+        assert "assign_pbr" not in (exc.value.hint or "")
+
+    def test_a_reverse_feeding_a_shader_is_a_textures_front_end(self, fake):
+        fake.types["kit"] = "standardSurface"
+        fake.types["kit_roughness_inv"] = "reverse"
+        fake.driven["kit.specularRoughness"] = "kit_roughness_inv.outputX"
+        found = plugwrite.blocker(fake, "kit.specularRoughness")
+        assert [(b.at, b.kind) for b in found] == [("kit.specularRoughness", "texture")]
+
+    def test_a_texture_map_is_classified_as_a_texture(self, fake):
+        # #804: the one classifier grows a kind, so material/pbr never
+        # tell a caller a file node is "a constraint, expression or blend".
+        fake.nodes.add("kit")
+        fake.types["kit_color_tex"] = "file"
+        fake.driven["kit.baseColorR"] = "kit_color_tex.outColorR"
+        found = plugwrite.blocker(fake, "kit.baseColor")
+        assert [(b.at, b.kind) for b in found] == [("kit.baseColorR", "texture")]
 
     def test_lock_is_reported_before_a_connection_on_the_same_plug(self, fake):
         """Both are true of a plug Maya refuses; the lock is the one the

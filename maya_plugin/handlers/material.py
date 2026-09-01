@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from ..dispatcher import HandlerError, require_known_keys
-from . import meshcheck, naming
+from . import meshcheck, naming, plugwrite
 
 SHADERS = ("standardSurface", "lambert", "blinn")
 
@@ -232,6 +232,20 @@ def assign_material(params: Dict[str, Any]) -> Dict[str, Any]:
     # once it succeeds is it safe to create/reuse nodes or touch the mesh's
     # shading.
     validated = _validate_param_values(shader, values)
+
+    # The reuse path writes params onto a shader that was already there, and
+    # a texture may already drive the very plug (that is what assign_pbr does
+    # next door). Maya refuses that write - MEASURED (#804 probe): "locked or
+    # connected" on the compound, on a child of a fed compound, and on a
+    # compound with one fed child - and the refusal used to land AFTER the
+    # mesh had been moved into the shading group. Ask first, before any
+    # mutation, with the one guard every static write in this package uses.
+    if reuse_target is not None and validated:
+        plugwrite.guard(
+            cmds, ["%s.%s" % (reuse_target, attr) for attr in validated],
+            "assign_material",
+            consequence="nothing was written and the mesh was not moved - "
+                        "this command refuses before it touches the scene")
 
     warnings: List[str] = []
     if reuse_target is not None:

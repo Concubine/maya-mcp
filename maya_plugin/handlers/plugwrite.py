@@ -50,8 +50,14 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from ..dispatcher import HandlerError
 
-# The compounds a transform write reaches, and nothing else. `shear`'s
-# children are not XYZ, which is why this is a table rather than a rule.
+# The compounds a transform write reaches - `shear`'s children are not XYZ,
+# which is why this is a table rather than a rule - plus, since #804, the
+# colour compounds a shader write reaches. MEASURED (evals/
+# look_orphans_probe_804.py): with a file node on kit.emissionColorR alone,
+# `setAttr(kit.emissionColor, ...)` raises "A child attribute of
+# 'kit.emissionColor' is locked or connected", `listConnections` on the
+# compound answers [], and the sibling emissionColorG still takes a write -
+# exactly the transform asymmetry, so the same family rule applies.
 _CHILDREN: Dict[str, Sequence[str]] = {
     "translate": ("translateX", "translateY", "translateZ"),
     "rotate": ("rotateX", "rotateY", "rotateZ"),
@@ -64,6 +70,14 @@ _CHILDREN: Dict[str, Sequence[str]] = {
     "scalePivot": ("scalePivotX", "scalePivotY", "scalePivotZ"),
     "shear": ("shearXY", "shearXZ", "shearYZ"),
 }
+# Shader colour compounds (material.py's _COLOR_ATTRS and the slots pbr maps),
+# spelled here rather than imported: material imports this module.
+_COLOR_COMPOUNDS = ("baseColor", "color", "emissionColor", "specularColor",
+                    "incandescence", "transparency", "transmissionColor",
+                    "subsurfaceColor", "coatColor", "sheenColor")
+for _attr in _COLOR_COMPOUNDS:
+    _CHILDREN[_attr] = tuple("%s%s" % (_attr, c) for c in "RGB")
+_CHILDREN["normalCamera"] = ("normalCameraX", "normalCameraY", "normalCameraZ")
 COMPOUND_OF: Dict[str, str] = {
     child: parent for parent, kids in _CHILDREN.items() for child in kids}
 
@@ -180,7 +194,8 @@ def _because(block: Blocked) -> str:
         return "%s is locked" % block.at
     kind = {"clip": "an animation curve",
             "driven_key": "a set-driven key",
-            "corrective": "a corrective (poseInterpolator)"}.get(
+            "corrective": "a corrective (poseInterpolator)",
+            "texture": "a texture map"}.get(
                 block.kind, "a connection")
     return "%s is driven by %s (%s)" % (block.at, block.source, kind)
 
@@ -232,6 +247,13 @@ def _hint(block: Blocked) -> str:
         return ("pose the driver joint instead (that IS the corrective's "
                 "control), or delete_objects the interpolator to return the "
                 "channel to static control")
+    if block.kind == "texture":
+        # A mapped slot cannot carry a constant too (#804). The map is the
+        # authored look; the constant is the mistake nine times in ten.
+        return ("%s is mapped by %s - drop the param and keep the map, or "
+                "re-map it (assign_pbr, for a standardSurface slot it knows, "
+                "replaces the old map) instead of writing a constant over it"
+                % (block.at, block.source.split(".")[0]))
     return ("a constraint, expression or blend node owns %s; disconnect it, "
             "or aim this command at a channel the rig leaves free"
             % block.at)
