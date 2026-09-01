@@ -441,12 +441,118 @@ def _teardown_hik(cmds, mel, characters: Sequence[Optional[str]], ns: str,
 # ---------------------------------------------------------------------------
 
 
+def not_self_contained_note(kept: Sequence[Dict[str, Any]]) -> str:
+    """The warning EVERY retargeted take owes its caller.
+
+    Not conditional on neighbours (#796 review round 6 B). Returning None
+    for an empty `kept` covered only the ordering where clips already
+    exist, and the ordering that actually needs the warning is the normal
+    mocap workflow: retarget FIRST, author around it. The record this tool
+    registers declares `joints: []`, so a LATER author_clip pads nothing
+    against this take and its own boundary pins never cover it - the
+    neighbour's pose bleeds straight into the retargeted range, with the
+    take that has no neighbours yet being exactly the one nobody was told
+    about.
+
+    #796 review round 5, ASSESSED AND NOT FIXED (see the ticket): this tool
+    runs no #718 self-contained pad/back-fill pass. `bakeResults` writes the
+    15 HIK slot joints over this clip's own frames and nothing else, so a
+    channel some OTHER clip declares - a blendShape weight, a finger, a jaw
+    - keeps whatever that neighbour's curve holds there, forwards from its
+    last key or backwards from its first. author_clip pins exactly those
+    channels at rest at its own boundary frames; this tool does not, and
+    the record it writes declares no channel of its own either, so the NEXT
+    author_clip does not pin against it.
+
+    The fix is the whole padding pass, whose pieces are closures inside
+    author_clip - too large to lift safely on a code round that ends at a
+    live gate. Naming it costs nothing and is the difference between a take
+    that is wrong and a take that is wrong AND silent.
+    """
+    neighbours = (
+        "any channel %s declare(s) and this bake does not cover - a blend "
+        "weight, a finger, a jaw - holds whatever that clip's curve leaves "
+        "on it across this range, and this clip's own baked channels hold "
+        "their first value backwards across theirs; "
+        % ", ".join(repr(r["name"]) for r in kept)) if kept else ""
+    return (
+        "this take is NOT self-contained (#718's rule, which this tool "
+        "does not implement): it bakes the HIK slot joints over its own "
+        "frames only, and the clip record it registers declares no channel "
+        "of its own, so %sany clip authored AFTER this one pins nothing "
+        "against it and leaves its own pose showing through this range. "
+        "author_clip pins both boundaries; check the exported takes for a "
+        "neighbour's pose bleeding through" % neighbours)
+
+
+# The three channel groups with a COMPOUND: a connection can land on
+# `.rotate`/`.translate`/`.scale` itself (a rotation anim layer does), where
+# it covers all three children and a query on a child reports nothing.
+_TRIPLES = ((clip.ROTATE_ATTRS, "rotate"),
+            (clip.TRANSLATE_ATTRS, "translate"),
+            (clip.SCALE_ATTRS, "scale"))
+_TRIPLE_ATTRS = frozenset(
+    [a for attrs, _ in _TRIPLES for a in attrs]
+    + [compound for _, compound in _TRIPLES])
+
+
+def _baked_channel_groups(cmds, joints: List[str], warnings: List[str]
+                          ) -> List[Tuple[str, Tuple[str, ...],
+                                          Optional[str]]]:
+    """[(node, attrs, compound)] for every channel `bakeResults` writes on
+    `joints` - ASKED, not assumed (#796 review round 6 D).
+
+    With no `-attribute` flag `bakeResults` bakes every KEYABLE channel of
+    each node it is aimed at. The guard used to ask about ROTATE and
+    TRANSLATE while its own comment claimed that was everything the bake
+    writes, so a squash-and-stretch set-driven key on a slot joint's
+    `.scaleY` - or on any keyable attribute a rigger added - was baked over
+    with nothing named. Maya is asked for the list rather than a hardcoded
+    guess, because a guess is exactly how the claim outgrew the guard the
+    first time.
+
+    The triples keep their compound fallback; everything else is a scalar
+    plug with no parent to ask about, which `_connected_channels` takes as
+    `compound=None`. A joint that cannot answer `listAttr` costs the
+    WIDENING and says so - the triples are still asked, the way the
+    write-side guards degrade rather than crash.
+    """
+    groups: List[Tuple[str, Tuple[str, ...], Optional[str]]] = []
+    for joint in sorted(set(joints)):
+        for attrs, compound in _TRIPLES:
+            groups.append((joint, attrs, compound))
+        try:
+            keyable = cmds.listAttr(joint, keyable=True) or []
+        except Exception as exc:  # noqa: BLE001 - one joint, not the guard
+            warnings.append(
+                "cannot list %s's keyable channels (%s) - retarget_clip "
+                "checked its rotate, translate and scale channels only, so "
+                "a user-defined keyable attribute this bake writes is "
+                "unchecked; check it after the call" % (joint, exc))
+            continue
+        extra = tuple(a for a in keyable if a not in _TRIPLE_ATTRS)
+        if extra:
+            groups.append((joint, extra, None))
+    return groups
+
+
 def _apply_shared_guards(cmds, root_long: str, target_joints: List[str],
-                         bake_fps: int, warnings: List[str]) -> List[Dict[str, Any]]:
+                         slot_joints: Dict[str, str], bake_fps: int,
+                         warnings: List[str]) -> List[Dict[str, Any]]:
     """The author_clip guard rails a second clip-producer must not skip:
-    one-fps-per-rig, refuse clobbering hand-authored curves, warn about
+    one-fps-per-rig, refuse clobbering hand-authored curves, name the
+    channels this bake writes that something already drives, warn about
     another rig on the same scene carrying clips. Returns the rig's
-    existing clip records (needed by the caller for next_start_frame)."""
+    existing clip records (needed by the caller for next_start_frame).
+
+    What is deliberately NOT here (#796 review round 4 C):
+    `refuse_driven_weight` and the boundary-pin skip, because this tool
+    declares no `blend_weights` channel and pins no boundaries - it bakes
+    the HIK slot joints and nothing else; and `guard_static_pose`, which
+    is the guard for tools that write a STATIC pose, the opposite of this
+    one. Everything author_clip refuses about the channels it is about to
+    write, this now asks too.
+    """
     records = clip.clip_meta(cmds, root_long)
     conflict = clipmath.fps_conflict(records, bake_fps)
     if conflict:
@@ -455,7 +561,17 @@ def _apply_shared_guards(cmds, root_long: str, target_joints: List[str],
             hint="delete_clip the clips at the other rate, or retarget this "
                  "one at theirs")
 
-    existing = clip._anim_curves(cmds, clip._joint_plugs(target_joints))
+    # #796 review round 4 C: the CLIP partition, exactly as author_clip
+    # counts it. The raw query's type="animCurve" filter matches the
+    # DERIVED U-typed set-driven-key nodes, so a rig carrying rig setup was
+    # refused here as "hand-authored animation", the hint sent the caller
+    # to delete_clip, and delete_clip refuses that rig with "no clip
+    # exists" and a note that it never removes set-driven keys: a closed
+    # loop, and a target rig carrying a driven key could never be
+    # retargeted onto. The hint stays true because what it counts is
+    # exactly what delete_clip deletes.
+    existing = clip.clip_curve_plugs(
+        cmds, clip._anim_curves(cmds, clip._joint_plugs(target_joints)))
     if existing and not records:
         raise HandlerError(
             "this skeleton carries %d hand-authored animation curve "
@@ -463,6 +579,27 @@ def _apply_shared_guards(cmds, root_long: str, target_joints: List[str],
             % (len(existing), sorted(existing)[0]),
             hint="replacing hand-authored animation silently would destroy "
                  "work; delete_clip removes it if that is intended")
+
+    # author_clip's per-channel treatment, on the channels this tool
+    # actually writes: `bakeResults` is aimed at the HIK SLOT joints (both
+    # routes bake `target_slot_joints.values()`), and with no `-at` flag it
+    # writes every KEYABLE channel of each - which is what
+    # `_baked_channel_groups` asks Maya for, rather than the rotate and
+    # translate this comment used to claim was all of it (#796 review round
+    # 6 D). A driven key elsewhere on the rig is rig setup and none of this
+    # call's business, exactly as on the author side.
+    #
+    # WARNED, never refused, and that is the one deliberate difference from
+    # author_clip: #771's "the write returns 0 and creates nothing" is a
+    # `setKeyframe` measurement, and nothing in this repo has measured what
+    # `bakeResults` does to a connection-fed plug (it may bake through it,
+    # replace the connection, or skip it). Refusing on a measurement about
+    # a different mechanism would stop a rig that retargets today - the
+    # round-4 defect B mistake, one tool over. The live gate settles it.
+    warnings.extend(clip.guard_declared_channels(
+        cmds, "retarget_clip",
+        _baked_channel_groups(cmds, list(slot_joints.values()), warnings),
+        refuse_unkeyable=False))
 
     elsewhere = clip._clips_elsewhere(cmds, root_long)
     if elsewhere:
@@ -641,8 +778,8 @@ def _retarget_bvh(path: str, root_param: str, name: str,
             "on every scene mutation and can wedge a keyframe call for "
             "minutes (#721)")
 
-    records = _apply_shared_guards(cmds, root_long, target_joints, bake_fps,
-                                   warnings)
+    records = _apply_shared_guards(cmds, root_long, target_joints,
+                                   target_slot_joints, bake_fps, warnings)
     # #774 review IMPORTANT 3: re-retargeting an EXISTING clip name must cut
     # its old range first, mirroring author_clip's own re-author path
     # (clip.cut_replaced_range, extracted from there) - otherwise the old
@@ -652,11 +789,16 @@ def _retarget_bvh(path: str, root_param: str, name: str,
     # freed range is not reused, the new bake goes to the tail of every
     # OTHER clip.
     replaced, kept = clipmath.drop_record(records, name)
+    warnings.append(not_self_contained_note(kept))
 
     session.auto_checkpoint("retarget_clip")
     _set_bake_unit(cmds, bake_fps, warnings)
     if replaced is not None:
-        clip.cut_replaced_range(cmds, target_joints, replaced)
+        # #796 review round 5 A: the cut is partitioned now (a driven-key
+        # curve is indexed by driver VALUE, so a frame range would eat rig
+        # setup) and NAMES every plug it stepped around.
+        warnings.extend(clip.cut_replaced_range(cmds, target_joints,
+                                                replaced))
         warnings.append(
             "re-retargeted clip %r: cleared its old frames %d-%d before "
             "baking the new range - no other clip's motion changed"
@@ -884,17 +1026,22 @@ def _retarget_fbx(path: str, root_param: str, name: str,
         # whole `ns` namespace on any refusal from this point, so a refused
         # call still leaves nothing behind.
         records = _apply_shared_guards(cmds, root_long, target_joints,
-                                       bake_fps, warnings)
+                                       target_slot_joints, bake_fps,
+                                       warnings)
         # #774 review IMPORTANT 3: same replace-cut author_clip does on a
         # re-authored name (clip.cut_replaced_range) - see the BVH route's
         # identical block for the full rationale. `kept` (not `records`)
         # is what the new bake's start frame is computed from below.
         replaced, kept = clipmath.drop_record(records, name)
+        warnings.append(not_self_contained_note(kept))
 
         session.auto_checkpoint("retarget_clip")
         _set_bake_unit(cmds, bake_fps, warnings)
         if replaced is not None:
-            clip.cut_replaced_range(cmds, target_joints, replaced)
+            # #796 review round 5 A: same partitioned cut as the BVH route
+            # above - see that block.
+            warnings.extend(clip.cut_replaced_range(cmds, target_joints,
+                                                    replaced))
             warnings.append(
                 "re-retargeted clip %r: cleared its old frames %d-%d before "
                 "baking the new range - no other clip's motion changed"

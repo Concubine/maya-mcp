@@ -25,6 +25,51 @@ def _fake_bake(fake):
     return _bake
 
 
+def _resolve_dag(known, name, node_of=None):
+    """Maya's own name resolution - the half of #796 a short-name-only fake
+    could not see.
+
+    `cmds.sets(sg, query=True)` answers with the SHORTEST UNIQUE name. For
+    the two mirrored shapes this ticket is about that is NEITHER the bare
+    short name NOR the full path: it is a PARTIAL path, 'right|limbShape'.
+    Maya matches a partial path as a SUFFIX of a full path, anchored at a
+    '|' component boundary; a LEADING '|' makes the name absolute, so it
+    means one full path or nothing.
+
+    The fake used to match `n.split('|')[-1] == name`, which resolves the
+    partial form to [] - so the member was SKIPPED and the fake reproduced
+    the exact silent miss #796 fixes, while the new tests read as passing.
+
+    ONE PATH PER NODE (#796 round 4). `cmds.ls(name, long=True)` matches
+    NODES: an ambiguous name answers with one path for each node it hits,
+    but an INSTANCED node - several paths, ONE node - answers with one of
+    its paths and no more. Enumerating the rest is what `allPaths=True` is
+    for, and this guard does not ask for it. Modelling ls as an all-paths
+    expansion made the instance tests assert a resolution Maya never
+    performs - the round-2 defect class exactly: a fake feeding an answer
+    Maya does not give.
+    """
+    if not name:
+        return []
+    if name.startswith("|"):
+        matched = [n for n in known if n == name]  # absolute: that path
+    else:
+        wanted = name.split("|")
+        matched = []
+        for n in known:
+            comps = n.split("|")  # '|a|b' -> ['', 'a', 'b']
+            if len(wanted) <= len(comps) and comps[-len(wanted):] == wanted:
+                matched.append(n)
+    out, seen = [], set()
+    for n in matched:
+        node = (node_of or {}).get(n, n)
+        if node in seen:  # another path of a node already named
+            continue
+        seen.add(node)
+        out.append(n)
+    return out
+
+
 class FakeCmds:
     """|body (shape |bodyShape) wears bodySG -> skin_mat; a noise drives
     baseColor. UV count and shading graph are per-test knobs."""
@@ -43,12 +88,36 @@ class FakeCmds:
         self.checkpoints = []
         self.baked_calls = []
         self.created = []
+        # #796 round 3: NODE identity, the thing a DAG path is not. An
+        # INSTANCED mesh is ONE shape node hanging under several paths -
+        # those paths share an entry here; everything else gets its own
+        # node by default. A fake that models instancing as two separate
+        # shapes cannot tell an instance from a mirrored twin, which is
+        # where round 2's defect hid.
+        self.node_of = {}
 
     # resolution ------------------------------------------------------
-    def ls(self, name=None, long=False, **kw):
-        if name in self.meshes:
-            return [name]
-        return [n for n in self.meshes if n.split("|")[-1] == name] or []
+    def ls(self, name=None, long=False, uuid=False, **kw):
+        """Resolves transforms AND shapes: a shading group's members are
+        SHAPES, and #796's canonicalisation sends every one of them
+        through here. Partial paths resolve the way Maya resolves them
+        (_resolve_dag) - that is the form cmds.sets actually answers with
+        on the mirrored rig this ticket is about.
+
+        `uuid=True` answers with the NODE instead of its paths, which is
+        what the guard compares now: the two paths of an instanced shape
+        are one node and must come back as one identity, while a mirrored
+        pair is two nodes and must not."""
+        paths = _resolve_dag(list(self.meshes) + list(self.meshes.values()),
+                             name, self.node_of)
+        if not uuid:
+            return paths
+        ids = []
+        for path in paths:
+            node = self.node_of.get(path, "uuid:" + path)
+            if node not in ids:
+                ids.append(node)
+        return ids
 
     def objExists(self, name):
         return name in self.meshes or name in self.types
@@ -313,6 +382,327 @@ class TestOutsideWearerWarning:
 
         assert len(jobs) == 1
         assert not any("also worn by" in w for w in warnings)
+
+
+class TestOutsideWearerIdentityIsTheNode:
+    """#796 defect 3: Maya enforces name uniqueness per PARENT only, so a
+    mirrored rig routinely carries |left|limb and |right|limb. The guard
+    used to fall back to comparing SHORT names, which made those two
+    mirrors indistinguishable - baking one limb silently skipped the
+    warning that the OTHER limb's look had just been changed by the same
+    material-level rewire. A guard that exists to warn about an unnamed
+    mesh stopped warning about exactly the meshes a mirrored rig has.
+
+    Identity is the NODE now, on both sides of the comparison. Round 2
+    canonicalised to the full DAG path instead, which is still a path
+    string: an INSTANCED shape is one node under several paths, so the
+    guard reported a path of the very shape the caller had named - and
+    only when Maya happened to answer with a name that resolved to more
+    than one path, which is Maya's choice and not ours.
+
+    Round 3 then asked the node question per MEMBER instead of per SHAPE,
+    which is only the same question while a member name means one node -
+    and nothing here has measured that `cmds.sets` never answers with an
+    ambiguous name. Every name form Maya can pick is therefore pinned
+    below, on both fixtures: absolute, partial, and short-and-ambiguous.
+    """
+
+    def _mirrored(self, fake, members=None):
+        """|left|limb and |right|limb, both wearing bodySG: TWO shape
+        nodes that share a short name, which must BOTH be reported.
+
+        The members default to PARTIAL paths: cmds.sets(query=True)
+        answers with the shortest UNIQUE name, and for these two shapes
+        that is neither 'limbShape' (ambiguous) nor the full path - it is
+        'left|limbShape'. Which form arrives is Maya's call, and this repo
+        has never measured whether an AMBIGUOUS one can arrive, so all
+        three are pinned: partial, absolute, and 'limbShape' meaning both
+        nodes at once (#796 round 4).
+        """
+        fake.meshes = {"|left|limb": "|left|limbShape",
+                       "|right|limb": "|right|limbShape"}
+        fake.shape_sgs = {"|left|limbShape": ["bodySG"],
+                          "|right|limbShape": ["bodySG"]}
+        fake.sg_members["bodySG"] = list(
+            members or ["left|limbShape", "right|limbShape"])
+
+    def test_the_mirrored_twin_of_the_requested_mesh_is_named(self, fake,
+                                                              tmp_path):
+        self._mirrored(fake)
+        params = texbake.validate(_params(tmp_path, meshes=["|left|limb"]),
+                                  fake)
+        _jobs, warnings = texbake.plan_bakes(fake, params["meshes"],
+                                             params["slots"])
+
+        assert any("also worn by" in w and "|right|limbShape" in w
+                   for w in warnings)
+
+    def test_the_mirrored_twin_is_named_when_the_member_is_absolute(
+            self, fake):
+        """The other half of node identity, and what keeps the instance
+        skip below honest: a mirrored pair is TWO shape nodes, so no name
+        form may collapse them into one."""
+        self._mirrored(fake, ["|left|limbShape", "|right|limbShape"])
+
+        assert texbake._outside_wearers(
+            fake, "bodySG", ["|left|limbShape"]) == ["|right|limbShape"]
+
+    def test_an_ambiguous_member_still_names_the_twin_it_is_not(self, fake):
+        """#796 round 4, defect A: the decision is per SHAPE, never per
+        MEMBER.
+
+        The skip used to drop the whole member as soon as ONE node it
+        resolved to was the caller's own mesh - the instance rationale,
+        applied one level too high. `_node_ids` is exactly what tells an
+        instance's second PATH from a second NODE, and `any(...)` threw
+        that answer away: on a mirrored rig an ambiguous member name
+        resolves to BOTH limbs, the left one is requested, and the right
+        one - a different node, whose look this rewire changes too - went
+        unreported. Whether `cmds.sets` ever answers with an ambiguous
+        name is Maya's choice and unmeasured, so the guard must not rest
+        on it.
+        """
+        self._mirrored(fake, ["limbShape"])
+
+        assert texbake._outside_wearers(
+            fake, "bodySG", ["|left|limbShape"]) == ["|right|limbShape"]
+
+    def test_a_short_member_name_that_is_the_requested_shape_is_not_outside(
+            self, fake):
+        """The regression the deleted short-name arm was protecting
+        against, kept alive by canonicalising instead: cmds.sets(query=
+        True) can answer with a name that is not a full DAG path, and a
+        raw long-vs-short comparison would report the caller's OWN mesh."""
+        fake.sg_members["bodySG"] = ["bodyShape"]
+
+        assert texbake._outside_wearers(fake, "bodySG", ["|bodyShape"]) == []
+
+    def test_a_transform_member_still_resolves_through_to_its_shape(self,
+                                                                    fake):
+        fake.meshes["|other"] = "|otherShape"
+        fake.sg_members["bodySG"] = ["|body", "|other"]
+
+        assert texbake._outside_wearers(
+            fake, "bodySG", ["|bodyShape"]) == ["|otherShape"]
+
+    def test_a_component_suffix_on_a_member_is_still_stripped(self, fake):
+        fake.meshes["|other"] = "|otherShape"
+        fake.sg_members["bodySG"] = ["|bodyShape.f[0:3]",
+                                     "|otherShape.f[4:7]"]
+
+        assert texbake._outside_wearers(
+            fake, "bodySG", ["|bodyShape"]) == ["|otherShape"]
+
+    def _instanced(self, fake, members=None):
+        """ONE shape node under TWO DAG paths - the instance case.
+
+        Instancing is two distinct TRANSFORMS sharing one shape node, so
+        both paths name the same node (fake.node_of) and the shape-level
+        material assignment makes both of them wear the SG. `members` is
+        what cmds.sets answers with: the node's own name, or one absolute
+        path per instance - Maya picks the shortest UNIQUE form and the
+        guard has to be right under either.
+
+        Resolving the node's own name lands on ONE of its paths, not on
+        every one of them: `cmds.ls(name, long=True)` matches NODES, and
+        enumerating an instance's other paths needs `allPaths=True`, which
+        nothing here asks for (#796 round 4). So the two member forms give
+        the guard genuinely different material - one path, or two - and
+        node identity is what has to make them agree.
+        """
+        fake.meshes = {"|grpA|cube": "|grpA|cube|cubeShape",
+                       "|grpB|cube": "|grpB|cube|cubeShape"}
+        fake.node_of = {"|grpA|cube|cubeShape": "uuid:cubeShape",
+                        "|grpB|cube|cubeShape": "uuid:cubeShape"}
+        fake.shape_sgs = {"|grpA|cube|cubeShape": ["bodySG"],
+                          "|grpB|cube|cubeShape": ["bodySG"]}
+        fake.sg_members["bodySG"] = list(members or ["cubeShape"])
+
+    def test_a_member_resolving_onto_a_requested_shape_skips_that_shape_only(
+            self, fake):
+        """#796 round 4: a resolved shape that IS one the caller asked for
+        is skipped - that SHAPE, and nothing else the member reached.
+
+        The skip itself is round 2's and still stands. Naming a mesh the
+        caller already named costs a reviewer one extra look HERE, where
+        the answer becomes a warning; at meshmaps.refuse_outside_wearer it
+        RAISES, so an instanced mesh had its own second path reported as
+        an outside wearer and a legitimate bake was refused, with a hint
+        the caller could not follow.
+
+        What round 4 deleted is that skip's REACH. Round 3 dropped the
+        whole MEMBER as soon as one shape it resolved to was the caller's,
+        which is the same decision only while a member name means one
+        node. Below it does not: the requested cube is instanced AND
+        shares its short name with an unrelated shape, so the one member
+        resolves to two NODES - and `any(...)` threw the second one away,
+        leaving a mesh whose look this material-level rewire changes just
+        as much unreported. Asked per shape, the instance still skips
+        itself and the outsider is still named, whichever name form
+        `cmds.sets` chose - a thing this repo has never measured.
+        """
+        self._instanced(fake)
+        # The instance alone. Its member name resolves onto the very path
+        # the caller asked for, so there is no outside wearer at all -
+        # both rules agree here, which is why this case alone pins
+        # neither. It is kept because it is the form round 2 fixed: the
+        # skip must not depend on Maya having handed back the path the
+        # caller happened to name (the other resolution is
+        # test_an_instance_maya_named_by_its_other_path_is_still_the_caller).
+        assert texbake._outside_wearers(
+            fake, "bodySG", ["|grpA|cube|cubeShape"]) == []
+
+        # Now the same member name also reaches a shape that is NOT the
+        # caller's: Maya enforces name uniqueness per PARENT, so
+        # |grpA|cube|cubeShape and |deco|cubeShape coexist and 'cubeShape'
+        # names both nodes. This is the case that separates the two rules
+        # - per member the outsider vanishes along with the instance, per
+        # shape it is reported.
+        fake.meshes["|deco"] = "|deco|cubeShape"
+        fake.shape_sgs["|deco|cubeShape"] = ["bodySG"]
+
+        assert texbake._outside_wearers(
+            fake, "bodySG", ["|grpA|cube|cubeShape"]) == ["|deco|cubeShape"]
+
+    def test_an_instance_named_by_its_absolute_path_is_the_same_node(
+            self, fake):
+        """#796 fix round 3, and the reason identity is the NODE rather
+        than the canonical path: round 2 skipped a member only when one of
+        its RESOLVED PATHS was a requested path, which needs Maya to have
+        answered with a name that resolves to several. Answer with one
+        absolute path per instance instead - equally legal, and the form
+        cmds.sets picks whenever anything else in the scene makes the
+        short name ambiguous - and the caller's own shape node came back
+        as an outside wearer under its other path. Two paths of one node
+        can never diverge in look, so this can only ever be wrong.
+        """
+        self._instanced(fake, ["|grpA|cube|cubeShape",
+                               "|grpB|cube|cubeShape"])
+
+        assert texbake._outside_wearers(
+            fake, "bodySG", ["|grpA|cube|cubeShape"]) == []
+
+    def test_an_instanced_mesh_does_not_warn_about_its_own_other_path(
+            self, fake, tmp_path):
+        """The same case at THIS call site, where it only ever warned."""
+        self._instanced(fake)
+        params = texbake.validate(_params(tmp_path, meshes=["|grpA|cube"]),
+                                  fake)
+        _jobs, warnings = texbake.plan_bakes(fake, params["meshes"],
+                                             params["slots"])
+
+        assert not any("also worn by" in w for w in warnings)
+
+    def test_the_absolute_instance_does_not_warn_at_this_call_site_either(
+            self, fake, tmp_path):
+        """Round 3's case through plan_bakes: a spurious warning here is
+        the same defect that REFUSES the bake one module over."""
+        self._instanced(fake, ["|grpA|cube|cubeShape",
+                               "|grpB|cube|cubeShape"])
+        params = texbake.validate(_params(tmp_path, meshes=["|grpA|cube"]),
+                                  fake)
+        _jobs, warnings = texbake.plan_bakes(fake, params["meshes"],
+                                             params["slots"])
+
+        assert not any("also worn by" in w for w in warnings)
+
+    def test_an_unrequested_instance_is_named_once_not_once_per_path(
+            self, fake):
+        """#796 round 4, defect B: an instanced node is ONE wearer on the
+        outside of the request too, not only on the inside.
+
+        Its paths cannot diverge in look, and both remedies the callers
+        are offered - name it in the request, give it its own material -
+        are moves on the NODE. Naming it twice reads as two meshes to fix,
+        and which name form `cmds.sets` answered with is not the caller's
+        business, so the answer must be the same under both. Here Maya
+        answered with one absolute path per instance.
+        """
+        self._instanced(fake, ["|grpA|cube|cubeShape",
+                               "|grpB|cube|cubeShape"])
+
+        assert texbake._outside_wearers(
+            fake, "bodySG", ["|bodyShape"]) == ["|grpA|cube|cubeShape"]
+
+    def test_the_ambiguous_form_names_that_one_instance_once_too(self, fake):
+        """The same node, named by `cmds.sets` with the node's own name.
+
+        `cmds.ls(name, long=True)` answers with one path per NODE - the
+        several paths of one INSTANCED node need `allPaths=True`, which
+        this guard deliberately does not ask for (see _resolve_long) - so
+        here the single name arrives by resolution rather than by
+        de-duplication. Both routes are pinned because Maya picks between
+        them, not us.
+        """
+        self._instanced(fake)
+
+        assert texbake._outside_wearers(
+            fake, "bodySG", ["|bodyShape"]) == ["|grpA|cube|cubeShape"]
+
+    def test_an_instance_maya_named_by_its_other_path_is_still_the_caller(
+            self, fake):
+        """The UUID arm, isolated. `cmds.ls` hands back one path per node
+        and which one is Maya's business, so a member naming the instanced
+        node can resolve to the path the caller did NOT name. The path
+        comparison misses it; node identity is what keeps a legitimate
+        bake of |grpB|cube from being refused one module over."""
+        self._instanced(fake)
+
+        assert texbake._outside_wearers(
+            fake, "bodySG", ["|grpB|cube|cubeShape"]) == []
+
+    def test_a_member_that_no_longer_resolves_is_skipped_not_fatal(self,
+                                                                   fake):
+        fake.sg_members["bodySG"] = ["|bodyShape", "|ghostShape"]
+
+        assert texbake._outside_wearers(fake, "bodySG", ["|bodyShape"]) == []
+
+    def test_a_member_whose_resolution_raises_is_skipped_not_fatal(
+            self, fake, monkeypatch):
+        """One bad member must not cost the warning about the others."""
+        real_ls = fake.ls
+
+        def flaky(name=None, long=False, **kw):
+            if name == "|brokenShape":
+                raise RuntimeError("kFailure: no such node")
+            return real_ls(name, long=long, **kw)
+
+        monkeypatch.setattr(fake, "ls", flaky)
+        fake.meshes["|other"] = "|otherShape"
+        fake.sg_members["bodySG"] = ["|brokenShape", "|otherShape"]
+
+        assert texbake._outside_wearers(
+            fake, "bodySG", ["|bodyShape"]) == ["|otherShape"]
+
+    def test_identity_degrades_to_the_path_when_maya_will_not_answer(
+            self, fake, monkeypatch):
+        """The degradation the guard promises, measured rather than
+        assumed: a Maya that will not give a node identity leaves this
+        exactly where round 2 left it - matching by resolved path, still
+        reporting the genuine outsider - and never crashes the bake it is
+        guarding."""
+        real_ls = fake.ls
+
+        def no_identity(name=None, long=False, uuid=False, **kw):
+            if uuid:
+                raise RuntimeError("kFailure: no identity for that node")
+            return real_ls(name, long=long, **kw)
+
+        monkeypatch.setattr(fake, "ls", no_identity)
+        fake.meshes["|other"] = "|otherShape"
+        fake.sg_members["bodySG"] = ["bodyShape", "|otherShape"]
+
+        assert texbake._outside_wearers(
+            fake, "bodySG", ["|bodyShape"]) == ["|otherShape"]
+
+    def test_an_unqueryable_sg_returns_nothing_rather_than_raising(
+            self, fake, monkeypatch):
+        def boom(name, query=False, **kw):
+            raise RuntimeError("kMFnSet: object does not exist")
+
+        monkeypatch.setattr(fake, "sets", boom)
+
+        assert texbake._outside_wearers(fake, "bodySG", ["|bodyShape"]) == []
 
 
 class TestGuardStructure:

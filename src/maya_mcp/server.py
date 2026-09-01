@@ -2815,14 +2815,19 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         root: Annotated[str, Field(description="Skeleton root joint.")],
         name: Annotated[Optional[str], Field(description=(
             "Delete just this clip, leaving the rig's other clips "
-            "untouched. Omit to delete every clip and return the skeleton "
-            "to static posing. Gaps left behind are not re-packed - a "
-            "take is an explicit frame range."
+            "untouched. Omit to delete every clip; the skeleton returns to "
+            "static posing EXCEPT for channels a set-driven key feeds - "
+            "those are rig setup rather than clip motion, this tool never "
+            "removes them, and they stay driven (warnings name them). "
+            "Gaps left behind are not re-packed - a take is an explicit "
+            "frame range."
         ))] = None,
     ) -> DeleteClipResult:
         """Remove one clip's curves, or every clip's - the skeleton returns
-        to static posing when the last one goes. Reports the measured
-        displacement of the return and the clips left."""
+        to static posing when the last one goes, except for channels a
+        set-driven key still feeds (#796: those are rig setup, are kept, and
+        are named in warnings). Reports the measured displacement of the
+        return and the clips left."""
         return DeleteClipResult.model_validate(
             maya.request("delete_clip", {"root": root, "name": name},
                          timeout_s=BOOL_TIMEOUT_S)

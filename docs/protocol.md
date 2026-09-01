@@ -680,6 +680,108 @@ connection — instead of misdiagnosing anim-layer/expression sources):
   the corrective follows it. Boundary pins for OTHER clips' channels
   that became driven out-of-band are skipped with a warning rather than
   claimed as pinned.
+- `author_clip` refuses a JOINT channel a **set-driven key or a
+  corrective** drives, for the same measured reason and **per channel,
+  never per rig** (#796). The channels asked are exactly the ones this call
+  DECLARES: every rotate channel of every joint named in
+  `keys[].rotations`, plus the root's three translate channels when any key
+  carries `root_position`. A driven key anywhere ELSE on the skeleton does
+  not block the call — that rig setup is none of this clip's business, and
+  blocking on it made a rig carrying a driven key unable to author a first
+  clip. The refusal names the channel and its source; for a driven key the
+  hint says to pose the DRIVER (`delete_clip` does not remove one — see
+  below), not to delete the clip.
+- **Only those two kinds refuse.** Any OTHER connection on a declared
+  channel — a pairBlend (which Maya inserts the moment a plug is both keyed
+  AND constrained), an anim layer, a unitConversion — is keyed exactly as
+  it was before #796 and NAMED in `warnings`, with the curve behind the
+  intermediary spelled the way `guard_static_pose` spells it (`<curve>
+  behind <node>`), so one scene gets one diagnosis. Nothing has measured
+  that a key fails to land through such a node, and refusing on that
+  guess would stop a keyed-and-constrained rig that authors clips today.
+  A connection landing on the `.rotate`/`.translate` COMPOUND (where a
+  rotation anim layer lands) covers all three children and is reported
+  once, at the compound; the children are asked first, so a driven key on
+  one axis is never blamed on a free sibling.
+- **Boundary pins are skipped, not refused**, on a JOINT or root-translate
+  channel a driven key or a corrective owns — the treatment the weight pins
+  have had since #771, extended to the other two pad loops (#796). A pad
+  channel belongs to some OTHER clip, so refusing it would block this call
+  over rig setup it never asked to touch; instead the pin is skipped, the
+  channel is named in `warnings`, and the free channels on the same joint
+  are still pinned. A channel whose whole triple is skipped never appears
+  in `padded_channels`/`held_channels`.
+- A pad channel an INTERMEDIARY feeds is still pinned (same reason as the
+  declared case above) and gets **the same note the declared path gives**,
+  from the same helper — one scene, one diagnosis, whether or not the clip
+  happens to declare the channel. Before this it was pinned, counted, and
+  reported “pinned … at rest” with nothing said about the connection.
+  A pad channel driven by another clip's own curve — which is every normal
+  pad channel — stays silent.
+- **The replace-cut is partitioned too.** Re-authoring an existing name
+  clears that clip's old frame range across the whole hierarchy, and a
+  set-driven key's curve is indexed by DRIVER VALUE: `time=(0, 30)` on one
+  is the driver interval 0..30, so the cut would destroy driver keys whose
+  NUMBERS fall in the replaced clip's frame range. Those plugs are stepped
+  around and named in `warnings`; plugs with a clip curve, and plugs with
+  no curve at all, are cut exactly as before. The skip attributes to the
+  channel that is actually connected: a driven key behind a pairBlend on
+  `tip.rotateX` does not spread the skip — or the warning — onto the free
+  `tip.rotateY`/`.rotateZ`, which are still cut. A connection landing on
+  the `.rotate` COMPOUND does cover all three, because there it really
+  does. `retarget_clip`'s re-retarget of an existing name shares the
+  function and the behaviour.
+- **What the result says is what the writes REPORTED** (#796).
+  `cmds.setKeyframe` returns the number of keys it set, and #771 measured 0
+  as the tell on a connection-fed plug — no curve, no key, no error. Every
+  call site used to discard that number, so the handler guessed which
+  writes landed. Now `keyed_joints`, `keyed_weight_channels`,
+  `root_position_keyed` and the `mcp_clip` record itself count only
+  channels whose key actually exists; a channel whose every write vanished
+  is named in `warnings` (with the note saying what drives it) and is
+  absent from all of them, and a clip that keyed NOTHING says so in one
+  loud warning rather than registering as a normal take. A pin that did not
+  land is likewise never counted in `padded_channels`, `held_channels` or
+  `back_filled`. `root_position` loses its keys one step earlier than the
+  others and reports them the same way: placing the root is a STATIC
+  `xform` write, which a connection-fed plug refuses outright, so on a
+  keyed-and-constrained root the three translate channels are reported as
+  writes that did not land instead of raising a traceback after the
+  auto-checkpoint. Every other channel of that same key — the rotations,
+  the blend weights — still lands and is still declared. Still a warning and not a refusal: what a key does through
+  an intermediary is unmeasured, and the report just has to be true under
+  both outcomes.
+- `retarget_clip` shares the same rules for the channels IT writes (#796):
+  the "hand-authored curves" refusal counts clip curves only (a driven key
+  on the target no longer masquerades as hand-authored animation and sends
+  the caller to a `delete_clip` that refuses the rig), and the HIK slot
+  joints it bakes are asked the same per-channel question. **The channels
+  asked are the ones `bakeResults` actually writes**: with no `-attribute`
+  flag it bakes every KEYABLE channel of each slot joint, so the question
+  is asked of the rotate, translate AND scale triples (each with its
+  compound, where an anim layer lands) plus every other keyable attribute
+  Maya reports for that joint — `visibility`, and any keyable attribute a
+  rigger added, a squash-and-stretch driver among them. That list is asked
+  of Maya (`listAttr -keyable`), never guessed; a joint that cannot answer
+  costs the widening and says so in `warnings`, with the three triples
+  still checked. It WARNS where `author_clip` refuses: the measured no-op
+  is a `setKeyframe` measurement, and what `bakeResults` does to a
+  connection-fed plug is not measured here, so refusing on it would refuse
+  on the wrong measurement.
+- **A retargeted take is NOT self-contained** (#718's rule, which
+  `retarget_clip` does not implement — assessed, named, not fixed). The
+  bake writes the 15 HIK slot joints over this clip's own frames and
+  nothing else, and the record it registers declares no channel of its own,
+  so: a channel some OTHER clip declares and the bake does not cover (a
+  blendShape weight, a finger, a jaw) holds that neighbour's value straight
+  through the retargeted range; the baked channels hold their first value
+  BACKWARDS across every earlier clip's range; and a LATER `author_clip`
+  does not pin against this clip either, because its record names nothing
+  to pin. **Every** retargeted take says so in `warnings`, naming the
+  neighbours when there are any — including the take that has none yet,
+  which is the normal mocap ordering (retarget first, author around it) and
+  the one the un-pinnable record hurts most. Check the exported takes for a
+  neighbour's pose bleeding through.
 
 Export facts (measured, `evals/correctives_probe/`): a live deltaMush is
 DROPPED by FBX export with byte-identical output — `export_fbx` warns,
@@ -818,15 +920,52 @@ passed:
   was removed.
 * **none remain** — whether `name` was omitted (delete everything) or it
   named the LAST clip still on the rig, the effect is the same full
-  teardown as before #718: every curve deleted, every keyed weight channel
-  zeroed, the bind pose restored. `clips` in the result is then always
-  `[]`. When `name` was omitted and several clips existed before the call,
-  every one of them was torn down, but `clip` in the result names only the
-  FIRST of them (the pre-delete list, index 0) — it does not enumerate the
-  delete. Read `clips` (now empty) and `warnings` for the full story; treat
-  `clip` here as naming one clip, not the scope of what was removed.
+  teardown as before #718: every **clip** curve deleted, every keyed weight
+  channel zeroed, the bind pose restored. `clips` in the result is then
+  always `[]`. When `name` was omitted and several clips existed before the
+  call, every one of them was torn down, but `clip` in the result names
+  only the FIRST of them (the pre-delete list, index 0) — it does not
+  enumerate the delete. Read `clips` (now empty) and `warnings` for the
+  full story; treat `clip` here as naming one clip, not the scope of what
+  was removed.
 
-Both report the measured displacement of the return.
+**The teardown leaves set-driven keys standing (#796), so "returns the
+skeleton to static posing" is CONDITIONAL.** A U-typed animCurve
+(`animCurveUU/UL/UA/UT`) reads a driver attribute rather than time: it is
+rig setup, not clip motion, and `delete_clip` never removes one — even
+though `listConnections(type="animCurve")` returns it alongside the clip
+curves, which is how the teardown used to eat it. What follows from that:
+
+* Channels a driven key feeds **stay driven** after a full teardown. A
+  `warnings` entry names every curve that was kept and says so; a rig
+  carrying nothing but driven keys is refused with `no clip exists` rather
+  than torn down.
+* A partial delete never `cutKey`s a driven-key plug (that curve is indexed
+  by DRIVER VALUE, not time, so a time range means nothing on it), and the
+  #730 reap never removes one. `reaped_channels` reports what was actually
+  FOUND to delete, not what the doomed record declared — an orphaned
+  channel that turns out to be a driven key is absent from it.
+* Where a joint short name and a blendShape weight alias collide (a `jaw`
+  joint and a `jaw` shape), `reaped_channels` qualifies both — `jaw
+  (joint)`, `jaw (blend weight)`. Names that do not collide are unqualified.
+* The no-bind-pose fallback (an unbound rig: no skinCluster, so no bind
+  pose to restore) zeroes rotations, but `setAttr` on a connection-fed plug
+  RAISES — so a rotate channel some connection still feeds is left as it
+  is and named in `warnings`, along with why. The free channels on the same
+  joint are still zeroed.
+* The BOUND branch — any rig with a skinCluster has a bind pose, so this is
+  the common one — restores that pose with `dagPose -restore`, which writes
+  the same connection-fed plugs. `warnings` names every joint and axis the
+  restore could not return to bind, in the same words the fallback above
+  uses, and it names TRANSLATE channels too (a `dagPose` restores a whole
+  transform, so a connection on `.translateY` defeats it exactly as one on
+  `.rotateX` does). If the restore itself raises, the teardown does **not**
+  die half-done: the raise is reported in `warnings` and the clip metadata
+  is still removed, so the rig never keeps reporting a clip it no longer
+  has. That catch is narrow — with nothing driving the skeleton, a failing
+  restore has no #796 explanation and still propagates as an error.
+
+Both directions report the measured displacement of the return.
 
 **`deleted_curves` on a NAMED, partial delete counts two things.** Cutting
 the doomed clip's own frame range essentially never empties a shared curve

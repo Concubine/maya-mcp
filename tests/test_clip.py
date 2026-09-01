@@ -12,6 +12,7 @@ of several - and full).
 """
 
 import json
+import re
 
 import pytest
 
@@ -44,9 +45,32 @@ class FakeCmds:
         self.time_unit = "film"
         self.playback = {}
         self.deleted = []
+        self.cut_plugs = []       # every plug cutKey was aimed at (#796)
+        self.connection_queries = []   # every listConnections plug, in order
         self.checkpoints = []
         self.blend_aliases = ["blink"] if bound else []
         self.time_unit_calls = []   # every currentUnit(time=...) issued
+        # #796 review round 3 M2. EMPTY by default: dagPose(query=True,
+        # bindPose=True) answering [] is the no-bind-pose teardown path,
+        # which is the only one any test before this round exercised - so
+        # delete_clip's BOUND branch, the common one in a real scene (any
+        # skinCluster gives the rig a bind pose), was never executed here
+        # at all. Tests set this to reach it.
+        self.bind_poses = []
+        self.dag_pose_restores = []      # every dagPose(restore=True) target
+        self.dag_pose_restored = []      # joints the restore actually moved
+        # Which of #796's two unmeasured outcomes the restore takes when it
+        # meets a connection-fed plug: True = (a) it raises, False = (b) it
+        # silently skips that joint. delete_clip must be right under both.
+        self.dag_pose_restore_raises = False
+        # The OTHER unmeasured outcome (#796 review round 4 B): whether a
+        # setKeyframe aimed at a plug an INTERMEDIARY feeds (a pairBlend, a
+        # unitConversion, an anim-layer blend node) lands on the curve
+        # behind that node or is swallowed the way a driven key's is.
+        # Default False - the behaviour author_clip had before #796, which
+        # a fix must not regress; the tests that care flip it and assert
+        # the handler is honest under both.
+        self.blend_swallows_keys = False
 
     # --- resolution ------------------------------------------------------
     def ls(self, pattern=None, long=False, type=None, **kw):
@@ -69,6 +93,12 @@ class FakeCmds:
                 or name in self.rigid_chunks.values())
 
     def nodeType(self, node):
+        # #796 review: real Maya raises "No object matches name" for a node
+        # that no longer exists. The fake used to fall through to
+        # "transform" for anything unknown, which is precisely why a
+        # classify-after-delete regression was invisible here.
+        if node in self.deleted:
+            raise RuntimeError("No object matches name: %s" % node)
         if node in self.joints:
             return "joint"
         if node == "body_shapes":
@@ -106,9 +136,23 @@ class FakeCmds:
             return ["body_shapes", "body_skin"]
         return []
 
-    def listAttr(self, plug, multi=False):
+    def listAttr(self, plug, multi=False, keyable=False):
         if plug.startswith("body_shapes"):
             return list(self.blend_aliases) or None
+        if keyable:
+            # #796 review round 6 D: what `bakeResults` writes when it is
+            # given no `-attribute` flag - every KEYABLE channel, which is
+            # wider than the rotate/translate the retarget guard used to
+            # ask about. A joint's real answer, plus whatever a rigger
+            # added: `keyable_extras` is how a test hands this fake a
+            # user-defined keyable attribute.
+            if plug not in self.joints:
+                return None
+            return (["visibility"]
+                    + ["translate" + ax for ax in "XYZ"]
+                    + ["rotate" + ax for ax in "XYZ"]
+                    + ["scale" + ax for ax in "XYZ"]
+                    + list(getattr(self, "keyable_extras", {}).get(plug, [])))
         return None
 
     def skinCluster(self, name, query=False, influence=False, geometry=False):
@@ -150,11 +194,36 @@ class FakeCmds:
                 return keys[lo] + frac * (keys[hi] - keys[lo])
         return keys[times[-1]]   # unreachable given the bounds above
 
+    def _connected_child(self, plug):
+        """The plug a connection feeds that would make `plug` unwritable,
+        or None. #796 review: Maya refuses setAttr on a connected plug AND
+        on a compound whose child is connected, and the fake never modelled
+        that - so a teardown that leaves a curve standing and then writes
+        the plug it feeds looked fine here and raises in Maya."""
+        fed = set(self.curves) | set(getattr(self, "driven_plugs", {}))
+        if plug in fed:
+            return plug
+        node, _, attr = plug.rpartition(".")
+        if attr in ("rotate", "translate"):
+            for child in ("%s.%s%s" % (node, attr, ax) for ax in "XYZ"):
+                if child in fed:
+                    return child
+        elif attr[:-1] in ("rotate", "translate") and attr[-1] in "XYZ":
+            if "%s.%s" % (node, attr[:-1]) in fed:
+                return "%s.%s" % (node, attr[:-1])
+        return None
+
     def setAttr(self, key, *values, **kw):
         if kw.get("type") == "string":
             node, attr = key.rsplit(".", 1)
             self.string_attrs.setdefault(node, {})[attr] = values[0]
-        elif len(values) == 3:
+            return
+        blocker = self._connected_child(key)
+        if blocker:
+            raise RuntimeError(
+                "setAttr: The attribute '%s' is locked or connected and "
+                "cannot be modified." % blocker)
+        if len(values) == 3:
             self.attrs[key] = tuple(values)
         else:
             self.attrs[key] = values[0]
@@ -169,23 +238,114 @@ class FakeCmds:
         node, attr = plug.rsplit(".", 1)
         self.string_attrs.get(node, {}).pop(attr, None)
 
+    def _static_write_blocker(self, node):
+        """The connection that makes a worldSpace `xform` TRANSLATION write
+        on `node` raise, or None.
+
+        A plug's OWN time-based animCurve is NOT one: author_clip keys the
+        root on one key and xforms it again on the next, and that is the
+        path every root-motion clip in this repo takes today - modelling a
+        keyed plug as unwritable here would assert a failure real Maya does
+        not have. A pairBlend, an anim layer or a driven key IS one: those
+        are exactly the connections `setAttr` refuses above, and an
+        `xform -translation` is a static write to the same plugs.
+        """
+        driven = getattr(self, "driven_plugs", {})
+        for plug in ([node + ".translate"]
+                     + [node + ".translate" + ax for ax in "XYZ"]):
+            if plug in driven:
+                return driven[plug]
+            curve = self.curves.get(plug)
+            if curve and self._recorded_type(curve).startswith("animCurveU"):
+                return curve
+        return None
+
     def xform(self, node, query=False, worldSpace=False, translation=None,
               **kw):
         if query:
             return [self.attrs.get(node + ".translateX", 0.0),
                     self.attrs.get(node + ".translateY", 0.0),
                     self.attrs.get(node + ".translateZ", 0.0)]
+        # #796 review round 6 A: the refusal `setAttr` has always modelled,
+        # on the OTHER static write this module makes. author_clip's
+        # root_position path calls xform on the very translate plugs
+        # `guard_declared_channels` decided only to WARN about, and the
+        # fake answering happily is the only reason a traceback on a
+        # keyed-and-constrained root was invisible in this file.
+        blocker = self._static_write_blocker(node)
+        if blocker:
+            raise RuntimeError(
+                "xform: The attribute '%s.translate' is locked or connected "
+                "and cannot be modified (%s feeds it)" % (node, blocker))
         for axis, v in zip("XYZ", translation):
             self.attrs[node + ".translate" + axis] = float(v)
 
     # --- animation -------------------------------------------------------
+    def _keyframe_blocker(self, plug):
+        """The connection that makes setKeyframe on `plug` a SILENT no-op,
+        or None.
+
+        MEASURED in #771 (evals/correctives_probe/): setKeyframe on a plug
+        a poseInterpolator feeds returns 0 and creates nothing - no curve,
+        no key, no error - and a U-typed driven-key curve feeds a plug
+        through the same connection shape. The fake did not model that,
+        which is exactly why round 3 found author_clip keying straight
+        through a set-driven key and still writing mcp_clip declaring that
+        joint keyed: the fake could not represent the failure, so no test
+        could see it (#796 review round 3 M1).
+
+        A plug's own TIME-based curve is NOT a blocker - re-keying that is
+        author_clip's normal append/replace path. A U-typed one is: it is
+        a driven key reading a driver attribute.
+
+        An INTERMEDIARY (pairBlend, unitConversion, anim-layer blend node)
+        is not a blocker by default: nobody has measured one, Maya inserts
+        a pairBlend the moment a plug is both keyed AND constrained, and
+        author_clip re-authored exactly that rig normally before #796 - so
+        modelling it as a silent no-op made the fake assert an unmeasured
+        failure, and a guard built on that assertion refused a rig that
+        works (#796 review round 4 B). `blend_swallows_keys` flips the
+        fake to the other outcome.
+        """
+        driven = getattr(self, "driven_plugs", {})
+        source = driven.get(plug)
+        if source is None:
+            node, _, attr = plug.rpartition(".")
+            # An anim layer lands on the COMPOUND and reaches all three
+            # children - the same asymmetry _connected_child models for
+            # setAttr.
+            if attr[:-1] in ("rotate", "translate") and attr[-1] in "XYZ":
+                source = driven.get("%s.%s" % (node, attr[:-1]))
+        if source is None:
+            curve = self.curves.get(plug)
+            if curve and self._recorded_type(curve).startswith("animCurveU"):
+                return curve
+            return None
+        kind = self._recorded_type(source.split(".")[0])
+        if kind.startswith("animCurveU") or kind == "poseInterpolator":
+            return source
+        return source if self.blend_swallows_keys else None
+
+    def _recorded_type(self, node):
+        """`nodeType` without its "was deleted" raise. A cutKey can empty
+        and delete a curve, and the next setKeyframe re-creates one under
+        the same generated name - which is a NEW node, not a resurrection,
+        so asking nodeType here would raise on a perfectly live curve."""
+        override = getattr(self, "node_types", {}).get(node)
+        if override:
+            return override
+        return "animCurveTU" if node in self.curves.values() else ""
+
     def setKeyframe(self, node, attribute=None, time=None, value=None):
         plug = "%s.%s" % (node, attribute)
+        if self._keyframe_blocker(plug):
+            return 0        # measured: no curve, no key, and no error
         # No dot in the generated name: real Maya node names cannot carry
         # one, and the #771 classifier splits "node.attr" sources on it.
         self.curves.setdefault(
             plug, plug.replace("|", "_").replace(".", "_") + "_crv")
         self.keys.setdefault(plug, {})[float(time)] = float(value)
+        return 1
 
     def keyTangent(self, node, attribute=None, edit=False, time=None,
                    inTangentType=None, outTangentType=None):
@@ -196,6 +356,7 @@ class FakeCmds:
         return sorted(self.keys.get(plug, {})) or None
 
     def cutKey(self, plug, time=None, clear=False, **kw):
+        self.cut_plugs.append(plug)
         keys = self.keys.get(plug)
         if not keys:
             return 0
@@ -212,6 +373,16 @@ class FakeCmds:
 
     def listConnections(self, plug, source=False, destination=True,
                         type=None, plugs=False):
+        # Every query, in order. The cycle test asserts on the COUNT per
+        # node: a depth bound alone terminates the walk, so only "this node
+        # was never queried twice" distinguishes a live cycle guard from a
+        # deleted one (#796 review).
+        self.connection_queries.append(plug)
+        # #796: a node a real scene can hold but not answer for (a broken
+        # reference, a node deleted mid-query). A guard must degrade, not
+        # crash, on one of these.
+        if plug.split(".")[0] in getattr(self, "unqueryable", ()):
+            raise RuntimeError("no such node: %s" % plug)
         # #771: a corrective-driven plug - a non-animCurve source that the
         # driven-channel refusal must classify by nodeType.
         driven = getattr(self, "driven_plugs", {})
@@ -220,10 +391,33 @@ class FakeCmds:
                 src = driven[plug]
                 return [src] if plugs else [src.split(".")[0]]
             return None
+        # #796: the upstream side of an intermediary node. A curve reaching
+        # a plug THROUGH a pairBlend answers HERE and never from the direct
+        # type="animCurve" query on the plug itself - which is the whole
+        # defect.
+        sources = getattr(self, "node_sources", {})
+        if source and plug in sources:
+            ups = [u for u in sources[plug]
+                   if type is None or self.nodeType(u).startswith(type)]
+            return ups or None
         curve = self.curves.get(plug)
-        if not curve:
-            return None
-        return [curve + ".output"] if plugs else [curve]
+        if curve:
+            return [curve + ".output"] if plugs else [curve]
+        # Maya's compound/child asymmetry, BOTH directions (#796 review
+        # defect 4): a query on a CHILD plug does not report a connection
+        # made on its PARENT compound - which is where a rotation anim
+        # layer lands - while a query on the compound DOES report its
+        # children's connections. The fake used to answer nothing in either
+        # direction, so a guard blind to compound wiring looked fine here.
+        node, _, attr = plug.rpartition(".")
+        if source and attr in ("rotate", "translate"):
+            found = []
+            for child in ("%s.%s%s" % (node, attr, ax) for ax in "XYZ"):
+                found.extend(self.listConnections(
+                    child, source=source, destination=destination,
+                    type=type, plugs=plugs) or [])
+            return found or None
+        return None
 
     def delete(self, *names):
         for n in names:
@@ -265,7 +459,31 @@ class FakeCmds:
         self.playback.update(kw)
 
     def dagPose(self, *args, **kw):
-        return []   # nothing bound via dagPose in the fake: zero-rotation path
+        """query -> `bind_poses`; restore -> one of #796's two outcomes.
+
+        `dag_pose_restore_raises` picks between them: (a) the restore
+        RAISES, or (b) it silently skips the connection-fed joints and
+        restores the rest. Nobody has measured which real Maya does, so
+        the fake models both and delete_clip has to survive either. In
+        (a) nothing is restored - the worst case for a caller, and the
+        one that used to kill the teardown after the curves were already
+        deleted.
+        """
+        if kw.get("query"):
+            return list(self.bind_poses)
+        if kw.get("restore"):
+            self.dag_pose_restores.append(args[0] if args else None)
+            if self.dag_pose_restore_raises:
+                raise RuntimeError(
+                    "dagPose: cannot restore - a destination plug is "
+                    "locked or connected and cannot be modified")
+            for j in self.joints:
+                if self._connected_child(j + ".rotate") or \
+                        self._connected_child(j + ".translate"):
+                    continue    # outcome (b): skipped, silently
+                self.attrs[j + ".rotate"] = (0.0, 0.0, 0.0)
+                self.dag_pose_restored.append(j)
+        return []
 
 
 def _install(fake, monkeypatch):
@@ -291,6 +509,33 @@ def _install(fake, monkeypatch):
 @pytest.fixture
 def fake(monkeypatch):
     return _install(FakeCmds(), monkeypatch)
+
+
+def _plant_sdk_curve(fake, plug="|root|mid|tip.rotateX",
+                     curve="tip_rotX_driven", node_type="animCurveUA"):
+    """A set-driven key on a joint plug: a curve node of a U-typed type,
+    which reads a DRIVER attribute rather than time. listConnections
+    type="animCurve" returns it exactly like a clip curve (the filter
+    matches DERIVED types), which is the #796 defect-1 trap."""
+    fake.curves[plug] = curve
+    fake.node_types = dict(getattr(fake, "node_types", {}),
+                           **{curve: node_type})
+    return curve
+
+
+def _plant_blend_curve(fake, plug, blend="mid_pairBlend",
+                       curve="mid_rotX_crv", blend_type="pairBlend",
+                       curve_type="animCurveTA"):
+    """A curve that reaches `plug` THROUGH an intermediary node (#796
+    defect 2): the plug's DIRECT animCurve query sees nothing at all, its
+    only source is the blend node, and the curve hangs off that."""
+    fake.driven_plugs = dict(getattr(fake, "driven_plugs", {}),
+                             **{plug: blend + ".output"})
+    fake.node_types = dict(getattr(fake, "node_types", {}),
+                           **{blend: blend_type, curve: curve_type})
+    fake.node_sources = dict(getattr(fake, "node_sources", {}),
+                             **{blend: [curve]})
+    return curve
 
 
 def _author(fake, name="idle", fps=30, keys=None, **kw):
@@ -332,6 +577,175 @@ class TestAuthorValidation:
         fake.curves["|root|mid.rotateZ"] = "hand_authored_crv"
         with pytest.raises(HandlerError, match="hand-authored"):
             _author(fake)
+
+    def test_a_set_driven_key_is_not_a_foreign_clip_curve(self, fake):
+        # #796 review defect 3: this refusal counted the U-typed SDK curves
+        # as "hand-authored animation this tool did not author" and pointed
+        # at delete_clip, which now refuses the same rig with "no clip
+        # exists" and a hint saying it never removes them. A rig carrying a
+        # driven key and no clip could author no first clip, and each tool
+        # named the other as the fix - a closed loop.
+        sdk = _plant_sdk_curve(fake)
+        out = _author(fake)
+        assert out["clip"] == "idle"
+        assert sdk in fake.curves.values()   # rig setup untouched
+
+    def test_the_foreign_curve_hint_stays_true_of_delete_clip(self, fake):
+        # The hint sends the caller to delete_clip, so the curves it counts
+        # have to be curves delete_clip actually removes.
+        fake.curves["|root|mid.rotateZ"] = "hand_authored_crv"
+        _plant_sdk_curve(fake)
+        with pytest.raises(HandlerError) as exc:
+            _author(fake)
+        assert "1 hand-authored" in str(exc.value)
+        assert "tip_rotX_driven" not in str(exc.value)
+
+    def test_a_declared_joint_channel_with_a_driven_key_refuses(self, fake):
+        # #796 review round 3 M1. Round 2 narrowed the foreign-curve check
+        # to the CLIP partition, which was right - a driven key SOMEWHERE
+        # on the rig must not block a first clip - but it left the joint
+        # side with no per-channel guard at all, and the weight side is the
+        # only one that had one. author_clip then keyed a plug a driven key
+        # feeds: the write returns 0 and creates nothing, and the handler
+        # still wrote mcp_clip declaring that joint keyed.
+        sdk = _plant_sdk_curve(fake, plug="|root|mid.rotateZ",
+                               curve="mid_rotZ_driven")
+        with pytest.raises(HandlerError) as exc:
+            _author(fake)               # the default keys declare 'mid'
+        message, hint = str(exc.value), exc.value.hint
+        assert "|root|mid.rotateZ" in message      # the CHANNEL, by name
+        assert sdk in message                      # and the curve
+        assert "set-driven key" in message
+        # The hint has to be true of the tools it names: since #796
+        # delete_clip explicitly does NOT remove a driven key, so pointing
+        # there would be the closed loop round 2 just opened.
+        assert "delete_clip does NOT remove a driven key" in hint
+        assert "pose the DRIVER attribute" in hint
+        assert fake.checkpoints == []              # refused before mutating
+
+    def test_the_clip_never_ships_declaring_a_channel_the_key_missed(
+            self, fake):
+        # What makes that a refusal rather than a warning, MEASURED in #771
+        # and modelled by the fake only as of this round: the write does
+        # not land and does not complain.
+        _plant_sdk_curve(fake, plug="|root|mid.rotateZ",
+                         curve="mid_rotZ_driven")
+        with pytest.raises(HandlerError):
+            _author(fake)
+        assert fake.setKeyframe("|root|mid", attribute="rotateZ",
+                                time=0.0, value=45.0) == 0
+        assert "|root|mid.rotateZ" not in fake.keys
+
+    def test_a_driven_key_on_an_undeclared_channel_never_blocks(self, fake):
+        # The other half: the loop round 2 fixed stays fixed. The refusal
+        # is PER CHANNEL, so rig setup on a channel this clip never touches
+        # is none of author_clip's business.
+        sdk = _plant_sdk_curve(fake)               # |root|mid|tip.rotateX
+        out = _author(fake)                        # declares 'mid' only
+        assert out["clip"] == "idle"
+        assert fake.keys["|root|mid.rotateZ"]      # the declared key landed
+        assert sdk in fake.curves.values()         # rig setup untouched
+
+    def test_an_anim_layer_on_the_compound_is_reported_not_refused(
+            self, fake):
+        # #796 review defect 4's asymmetry, now on the author side: a
+        # rotation anim layer lands on `.rotate`, and a query on `.rotateX`
+        # reports nothing - so a child-only guard never sees this shape at
+        # all. What it DOES about it changed in round 4 (defect B): an
+        # anim-layer blend node classifies as "other", nobody has MEASURED
+        # that setKeyframe fails to land through one, and before #796
+        # author_clip re-authored this rig normally. Refusing it was a
+        # regression; the channel is keyed and the layer is NAMED.
+        fake.driven_plugs = {"|root|mid.rotate": "layer_blend.output"}
+        fake.node_types = {"layer_blend": "animBlendNodeAdditiveRotation"}
+        out = _author(fake)
+        assert out["clip"] == "idle"
+        assert fake.keys["|root|mid.rotateZ"]          # today's behaviour
+        notes = [w for w in out["warnings"]
+                 if "|root|mid.rotate is driven by layer_blend.output" in w]
+        assert len(notes) == 1        # the compound names ONE channel, once
+
+    def test_a_pair_blend_on_a_declared_channel_does_not_refuse(self, fake):
+        # #796 review round 4 B. Maya inserts a pairBlend the moment a plug
+        # is both keyed AND constrained (this module's own
+        # `_curve_behind_a_blend` says so), setKeyframe lands on the
+        # animCurve behind it, and author_clip re-authored such a rig
+        # normally before this ticket. Refusing it with "disconnect that
+        # source" is a REGRESSION, not a fix.
+        curve = _plant_blend_curve(fake, "|root|mid.rotateZ",
+                                   curve="mid_rotZ_crv")
+        out = _author(fake)
+        assert out["clip"] == "idle"
+        assert fake.keys["|root|mid.rotateZ"]
+        assert any("%s behind mid_pairBlend" % curve in w
+                   for w in out["warnings"])
+
+    def test_the_blend_diagnosis_is_the_one_guard_static_pose_gives(
+            self, fake):
+        # ONE scene, ONE diagnosis: author_clip used to name the
+        # intermediary and say "disconnect that source" while
+        # guard_static_pose walked it and named the CURVE - the
+        # wrong-diagnosis class refuse_driven_weight's docstring exists to
+        # prevent.
+        curve = _plant_blend_curve(fake, "|root|mid.rotateZ",
+                                   curve="mid_rotZ_crv")
+        notes = _author(fake)["warnings"]
+        with pytest.raises(HandlerError) as exc:
+            clip.guard_static_pose(fake, "|root", TestGuards.JOINTS,
+                                   "pose_skeleton")
+        phrase = "%s behind mid_pairBlend" % curve
+        assert phrase in str(exc.value)
+        assert any(phrase in w for w in notes)
+
+    def test_the_unmeasured_swallowed_key_still_reaches_the_caller(
+            self, fake):
+        # The other outcome of the live question: IF a key does not land
+        # through a pairBlend, the clip ships declaring a channel it never
+        # keyed. Not refusing is the choice that cannot regress a working
+        # rig - which is exactly why the warning is not optional.
+        fake.blend_swallows_keys = True
+        _plant_blend_curve(fake, "|root|mid.rotateZ", curve="mid_rotZ_crv")
+        out = _author(fake)
+        assert "|root|mid.rotateZ" not in fake.keys
+        assert any("mid_pairBlend" in w for w in out["warnings"])
+
+    def test_a_sibling_axis_driven_key_is_named_as_itself(self, fake):
+        # The compound is asked ONLY when no child answered. Asking it
+        # first would report a free axis as blocked and name the wrong
+        # channel in the refusal - the compound reports its children's
+        # connections too.
+        _plant_sdk_curve(fake, plug="|root|mid.rotateZ",
+                         curve="mid_rotZ_driven")
+        with pytest.raises(HandlerError) as exc:
+            _author(fake)
+        assert "|root|mid.rotate is" not in str(exc.value)
+        assert "|root|mid.rotateZ is" in str(exc.value)
+
+    def test_a_driven_root_translation_refuses_only_when_the_clip_moves_it(
+            self, fake):
+        # root_position keys the root's TRANSLATE channels, so those are
+        # declared channels too - and a clip that leaves the root alone
+        # never declares them.
+        _plant_sdk_curve(fake, plug="|root.translateY",
+                         curve="root_ty_driven")
+        with pytest.raises(HandlerError) as exc:
+            _author(fake)               # the default keys move the root
+        assert "|root.translateY" in str(exc.value)
+        out = _author(fake, keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [0, 0, 45]}}])
+        assert out["clip"] == "idle"
+
+    def test_a_joint_that_cannot_answer_refuses_instead_of_keying_blind(
+            self, fake):
+        # The write-side guards degrade to "assume blocked"; the author
+        # side cannot - a plug it fails to classify might be the very
+        # connection-fed one whose key silently vanishes. Refusing costs
+        # only the call: nothing has been mutated yet.
+        fake.unqueryable = {"|root|mid"}
+        with pytest.raises(HandlerError, match="cannot tell what drives"):
+            _author(fake)
+        assert fake.checkpoints == []
 
     def test_corrective_driven_weight_channel_refuses(self, fake):
         # #771, MEASURED (evals/correctives_probe/): setKeyframe on a
@@ -914,6 +1328,454 @@ class TestSelfContainedTakes:
                 (plug, times)
 
 
+class TestReplaceCutOnDrivenChannels:
+    """#796 review round 5 A: `cut_replaced_range` is the ONE site in this
+    module that runs a DESTRUCTIVE time-range `cutKey` over every plug of
+    the whole hierarchy, and it was the one site the clip/driven partition
+    was never applied to. An SDK curve is indexed by DRIVER VALUE, so a
+    time range is a numeric range on the driver: a re-author whose frames
+    span 0-30 destroys every driver key between 0 and 30.
+
+    Round 2's own change is what made this reachable: before #796
+    author_clip REFUSED a rig carrying a driven key outright, so this cut
+    never ran on one. It runs now.
+    """
+
+    def _idle(self):
+        return [{"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+                {"time_s": 1.0, "rotations": {"mid": [0, 0, 45]}}]
+
+    def _plant(self, fake):
+        """The reviewer's reproduction: a set-driven key on the UNDECLARED
+        channel |root|mid|tip.rotateX whose driver keys sit at driver
+        VALUES 0, 15 and 90 - numbers that look exactly like frames."""
+        _plant_sdk_curve(fake)                  # |root|mid|tip.rotateX
+        fake.keys["|root|mid|tip.rotateX"] = {0.0: 0.0, 15.0: 3.0,
+                                              90.0: 9.0}
+
+    def test_a_re_author_never_cuts_a_driven_key_plug(self, fake):
+        _author(fake, name="idle", keys=self._idle())   # frames 0-30
+        self._plant(fake)
+        _author(fake, name="idle", keys=self._idle())   # re-author: cuts
+        assert "|root|mid|tip.rotateX" not in fake.cut_plugs
+        assert sorted(fake.keys["|root|mid|tip.rotateX"]) == [0.0, 15.0,
+                                                              90.0]
+
+    def test_the_replace_cut_still_clears_every_clip_plug(self, fake):
+        # The guard must narrow the cut by exactly one kind and nothing
+        # else: a plug with a clip curve, and a plug with no curve at all,
+        # are both still cut.
+        _author(fake, name="idle", keys=self._idle())
+        self._plant(fake)
+        _author(fake, name="idle", keys=self._idle())
+        assert "|root|mid.rotateZ" in fake.cut_plugs      # clip curve
+        assert "|root|mid|tip.rotateY" in fake.cut_plugs  # no curve at all
+
+    def test_a_driven_key_behind_a_blend_node_is_stepped_around_too(
+            self, fake):
+        # #796 review defect 7's shape, on the destructive side: the direct
+        # curve query sees NOTHING when a pairBlend sits in the way, so the
+        # partition alone would still aim a time-range cutKey at a curve
+        # indexed by driver value. Skipping is right under both unmeasured
+        # answers - if cutKey does not follow the connection, the cut it
+        # skipped was a no-op anyway.
+        _author(fake, name="idle", keys=self._idle())
+        _plant_blend_curve(fake, "|root|mid|tip.rotateX",
+                           blend="tip_pairBlend", curve="tip_sdk",
+                           curve_type="animCurveUL")
+        out = _author(fake, name="idle", keys=self._idle())
+        assert "|root|mid|tip.rotateX" not in fake.cut_plugs
+        assert any("tip_sdk behind tip_pairBlend" in w
+                   for w in out["warnings"])
+
+    def test_a_clip_curve_behind_a_blend_node_is_still_cut(self, fake):
+        # The narrowing is one KIND wide, not "anything behind a blend
+        # node": a time-based curve reached through a pairBlend is this
+        # module's own currency and its replaced range must still go.
+        _author(fake, name="idle", keys=self._idle())
+        _plant_blend_curve(fake, "|root|mid|tip.rotateX",
+                           blend="tip_pairBlend", curve="tip_crv")
+        _author(fake, name="idle", keys=self._idle())
+        assert "|root|mid|tip.rotateX" in fake.cut_plugs
+
+    def test_a_free_sibling_axis_is_still_cut_and_never_named(self, fake):
+        # #796 review round 6 C: the indirect check reached the PARENT
+        # COMPOUND, and a compound reports any SIBLING's source - so ONE
+        # driven key behind a pairBlend on tip.rotateX made the skip
+        # contagious across tip.rotateY and tip.rotateZ, and `_skip_cut_note`
+        # blamed them BY NAME. Two of those three warnings were about
+        # channels with no source and no keys at all, which is exactly what
+        # protocol.md promises does not happen ("the children are asked
+        # first, so a driven key on one axis is never blamed on a free
+        # sibling").
+        _author(fake, name="idle", keys=self._idle())
+        _plant_blend_curve(fake, "|root|mid|tip.rotateX",
+                           blend="tip_pairBlend", curve="tip_sdk",
+                           curve_type="animCurveUL")
+        out = _author(fake, name="idle", keys=self._idle())
+        assert "|root|mid|tip.rotateX" not in fake.cut_plugs     # the real one
+        assert "|root|mid|tip.rotateY" in fake.cut_plugs
+        assert "|root|mid|tip.rotateZ" in fake.cut_plugs
+        assert not any("|root|mid|tip.rotateY" in w
+                       or "|root|mid|tip.rotateZ" in w
+                       for w in out["warnings"])
+
+    def test_a_compound_borne_driven_key_still_covers_all_three(self, fake):
+        # The narrowing is "ask the children first", not "never ask the
+        # compound": an anim layer lands on `.rotate` itself, where all
+        # three children really are behind it and a cut on any of them
+        # would aim a time range at a driver-indexed curve.
+        _author(fake, name="idle", keys=self._idle())
+        _plant_blend_curve(fake, "|root|mid|tip.rotate",
+                           blend="tip_layer", curve="tip_sdk",
+                           blend_type="animBlendNodeAdditiveRotation",
+                           curve_type="animCurveUL")
+        out = _author(fake, name="idle", keys=self._idle())
+        for axis in "XYZ":
+            assert "|root|mid|tip.rotate%s" % axis not in fake.cut_plugs
+        assert len([w for w in out["warnings"]
+                    if "did NOT clear" in w]) == 3
+
+    def test_the_skipped_cut_is_named(self, fake):
+        # Silently not cutting is the same sin as silently cutting: the
+        # caller is told which plug the replace-cut stepped around.
+        _author(fake, name="idle", keys=self._idle())
+        self._plant(fake)
+        out = _author(fake, name="idle", keys=self._idle())
+        assert any("|root|mid|tip.rotateX" in w and "tip_rotX_driven" in w
+                   for w in out["warnings"])
+
+
+class TestPadPinsOnDrivenChannels:
+    """#796 review round 4 A: the boundary-pin pass calls setKeyframe on
+    channels OTHER clips declared, which the per-channel refusal above
+    never asks about (it asks only what THIS call declares). The weight pad
+    loop has skipped a driven channel since #771; the joint and
+    root-translate loops claimed pins that measurably never landed."""
+
+    def _idle(self):
+        return [{"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+                {"time_s": 1.0, "rotations": {"mid": [0, 0, 45]}}]
+
+    def _walk(self):
+        return [{"time_s": 0.0, "rotations": {"tip": [0, 0, 0]}},
+                {"time_s": 1.0, "rotations": {"tip": [0, 0, 20]}}]
+
+    def test_a_pad_joint_channel_driven_out_of_band_is_skipped(self, fake):
+        # The reviewer's reproduction: 'wave' declares tip, then out of
+        # band tip.rotateX's clip curve is deleted and a set-driven key is
+        # wired onto it, then 'idle' declares mid only. The pad pass pinned
+        # tip and REPORTED it pinned; the key returned 0 and created
+        # nothing.
+        _author(fake, name="wave", keys=self._walk())
+        fake.keys.pop("|root|mid|tip.rotateX", None)
+        _plant_sdk_curve(fake)                      # |root|mid|tip.rotateX
+        out = _author(fake, name="idle", keys=self._idle())
+        assert any("|root|mid|tip.rotateX" in w and "SKIPPED" in w
+                   for w in out["warnings"])
+        assert "|root|mid|tip.rotateX" not in fake.keys     # never landed
+        # the FREE channels on the same joint are still pinned
+        assert fake.keys["|root|mid|tip.rotateY"][
+            float(out["start_frame"])] == 0.0
+
+    def test_a_pad_root_translate_driven_out_of_band_is_skipped(self, fake):
+        # The same hole on the root_position loop, which has no guard of
+        # any kind.
+        _author(fake, name="walk")            # default keys move the root
+        fake.keys.pop("|root.translateY", None)
+        _plant_sdk_curve(fake, plug="|root.translateY",
+                         curve="root_ty_driven")
+        out = _author(fake, name="idle", keys=self._idle())
+        assert any("|root.translateY" in w and "SKIPPED" in w
+                   for w in out["warnings"])
+        assert "|root.translateY" not in fake.keys
+        assert fake.keys["|root.translateX"][float(out["start_frame"])] == 0.0
+
+    def test_a_pad_channel_behind_a_blend_node_is_still_pinned(self, fake):
+        # Skipping is limited to the kinds MEASURED to swallow a key. A
+        # pairBlend is not one of them, and skipping its pin would lose a
+        # boundary that a rig which works today gets - the same
+        # over-refusal as defect B, one loop over.
+        _author(fake, name="wave", keys=self._walk())
+        _plant_blend_curve(fake, "|root|mid|tip.rotateX",
+                           blend="tip_pairBlend", curve="tip_rotX_crv")
+        out = _author(fake, name="idle", keys=self._idle())
+        assert not any("SKIPPED" in w for w in out["warnings"])
+        assert fake.keys["|root|mid|tip.rotateX"][
+            float(out["start_frame"])] == 0.0
+
+    def test_a_skipped_pad_channel_is_never_counted_as_pinned(self, fake):
+        # A joint whose WHOLE rotate triple is driven contributes nothing
+        # to padded_channels - the weight loop's precedent exactly.
+        _author(fake, name="wave", keys=self._walk())
+        for axis in "XYZ":
+            plug = "|root|mid|tip.rotate%s" % axis
+            fake.keys.pop(plug, None)
+            _plant_sdk_curve(fake, plug=plug, curve="tip_rot%s_driven" % axis)
+        out = _author(fake, name="idle", keys=self._idle())
+        assert "tip" not in out["padded_channels"]
+        assert "tip" not in out["held_channels"]
+        assert len([w for w in out["warnings"] if "SKIPPED" in w]) == 3
+
+
+class TestPadNotesMatchTheDeclaredPath:
+    """#796 review round 5 B: one scene, one diagnosis - in the PAD loops.
+
+    Round 4 A narrowed the joint and root pad loops to the kinds in
+    UNKEYABLE_KINDS and discarded every entry outside them. A pad channel an INTERMEDIARY feeds was then pinned,
+    counted, and reported "pinned ... at rest" with no note at all - while
+    the IDENTICAL connection on a DECLARED channel produced
+    `_driven_channel_note`. That asymmetry is what round 4 B was filed to
+    end, one loop over.
+    """
+
+    def _idle(self):
+        return [{"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+                {"time_s": 1.0, "rotations": {"mid": [0, 0, 45]}}]
+
+    def _wave(self):
+        return [{"time_s": 0.0, "rotations": {"tip": [0, 0, 0]}},
+                {"time_s": 1.0, "rotations": {"tip": [0, 0, 20]}}]
+
+    def test_a_pad_joint_channel_behind_a_blend_is_named(self, fake):
+        _author(fake, name="wave", keys=self._wave())
+        _plant_blend_curve(fake, "|root|mid|tip.rotateX",
+                           blend="tip_pairBlend", curve="tip_rotX_crv")
+        out = _author(fake, name="idle", keys=self._idle())
+        assert any("|root|mid|tip.rotateX" in w and "tip_pairBlend" in w
+                   and "tip_rotX_crv" in w for w in out["warnings"])
+        # still PINNED, and still counted - round 4 B's rule holds here too
+        assert "tip" in out["padded_channels"]
+
+    def test_the_pad_note_is_the_one_the_declared_path_gives(self, fake,
+                                                             monkeypatch):
+        # Two scenes, one connection, one sentence. The declared path's
+        # note is built by `_driven_channel_note`; the pad path must reach
+        # the SAME helper rather than growing a second wording (or, as it
+        # did, none at all).
+        declared = _install(FakeCmds(), monkeypatch)
+        _plant_blend_curve(declared, "|root|mid|tip.rotateX",
+                           blend="tip_pairBlend", curve="tip_rotX_crv")
+        spoken = [w for w in _author(declared, name="idle",
+                                     keys=self._wave())["warnings"]
+                  if "|root|mid|tip.rotateX" in w]
+        assert len(spoken) == 1
+
+        _author(fake, name="wave", keys=self._wave())
+        _plant_blend_curve(fake, "|root|mid|tip.rotateX",
+                           blend="tip_pairBlend", curve="tip_rotX_crv")
+        padded = _author(fake, name="idle", keys=self._idle())["warnings"]
+        assert spoken[0] in padded
+
+    def test_a_pad_root_translation_behind_a_blend_is_named(self, fake):
+        # The root loop has the same shape and the same hole.
+        _author(fake, name="walk")            # default keys move the root
+        _plant_blend_curve(fake, "|root.translateY", blend="root_pairBlend",
+                           curve="root_tY_crv")
+        out = _author(fake, name="idle", keys=self._idle())
+        assert any("|root.translateY" in w and "root_pairBlend" in w
+                   for w in out["warnings"])
+        assert fake.keys["|root.translateY"][float(out["start_frame"])] \
+            == pytest.approx(1.0)
+
+    def test_a_clip_driven_pad_channel_stays_silent(self, fake):
+        # The normal case must not acquire a note: every pad channel is by
+        # definition driven by ANOTHER CLIP's curve, and saying so about
+        # each one would bury the notes that matter.
+        _author(fake, name="wave", keys=self._wave())
+        out = _author(fake, name="idle", keys=self._idle())
+        assert not any("is driven by" in w for w in out["warnings"])
+
+
+class TestObservedWrites:
+    """#796 review round 5 C: `setKeyframe` returns the NUMBER of keys it
+    set, and #771 measured 0 as the tell that the write vanished. Every
+    call site discarded it, so the handler GUESSED which writes landed and
+    could ship `mcp_clip` declaring a channel it never keyed.
+
+    Both unmeasured outcomes are pinned here: with `blend_swallows_keys`
+    False (today's behaviour, which a fix must not regress) the report is
+    unchanged; with it True the report follows what actually happened.
+    """
+
+    def _mid(self):
+        return [{"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+                {"time_s": 1.0, "rotations": {"mid": [0, 0, 45]}}]
+
+    def _swallow_mid(self, fake):
+        fake.blend_swallows_keys = True
+        return _plant_blend_curve(fake, "|root|mid.rotate",
+                                  blend="mid_pairBlend", curve="mid_crv",
+                                  blend_type="pairBlend")
+
+    def test_a_swallowed_joint_is_not_counted_or_declared(self, fake):
+        self._swallow_mid(fake)
+        out = _author(fake, keys=self._mid())
+        assert out["keyed_joints"] == 0
+        assert clip.clip_meta(fake, "|root")[0]["joints"] == []
+        assert any("|root|mid.rotateZ" in w and "did not land" in w.lower()
+                   for w in out["warnings"])
+
+    def test_the_same_scene_that_lands_reports_exactly_as_before(self, fake):
+        # Outcome (a): the key DOES land through the pairBlend. Nothing
+        # about the report may change - this is the rig that works today.
+        _plant_blend_curve(fake, "|root|mid.rotate", blend="mid_pairBlend",
+                           curve="mid_crv", blend_type="pairBlend")
+        out = _author(fake, keys=self._mid())
+        assert out["keyed_joints"] == 1
+        assert clip.clip_meta(fake, "|root")[0]["joints"] == ["mid"]
+        assert not any("did not land" in w.lower() for w in out["warnings"])
+
+    def test_a_partly_swallowed_joint_is_still_declared(self, fake):
+        # Only rotateZ is swallowed; the other two axes carry real keys, so
+        # the clip really does own this joint. The truth is per CHANNEL.
+        fake.blend_swallows_keys = True
+        _plant_blend_curve(fake, "|root|mid.rotateZ", blend="mid_pairBlend",
+                           curve="mid_rotZ_crv")
+        out = _author(fake, keys=self._mid())
+        assert out["keyed_joints"] == 1
+        assert clip.clip_meta(fake, "|root")[0]["joints"] == ["mid"]
+        assert any("|root|mid.rotateZ" in w and "did not land" in w.lower()
+                   for w in out["warnings"])
+
+    def test_a_swallowed_root_translation_is_not_declared(self, fake):
+        # #796 review round 6 A: on THIS scene the verdict is now reached
+        # one write earlier - the pose write in front of the keys refuses
+        # on a connection-fed root, so the three translate channels are
+        # lost there rather than in setKeyframe. Same fact, same sentence,
+        # same absence from the record; see TestRefusedRootPoseWrite.
+        fake.blend_swallows_keys = True
+        _plant_blend_curve(fake, "|root.translate", blend="root_pairBlend",
+                           curve="root_crv")
+        out = _author(fake)                   # default keys move the root
+        assert out["root_position_keyed"] is False
+        assert clip.clip_meta(fake, "|root")[0]["root_position_used"] is False
+        assert any("|root.translateY" in w and "did not land" in w.lower()
+                   for w in out["warnings"])
+
+    def test_a_clip_that_keyed_nothing_says_so_loudly(self, fake):
+        self._swallow_mid(fake)
+        out = _author(fake, keys=self._mid())
+        assert any("keyed NOTHING" in w for w in out["warnings"])
+
+    def test_a_lost_boundary_pin_is_never_counted_as_pinned(self, fake):
+        # `_pin` discarded the same return. A pad channel behind an
+        # intermediary is pinned (round 4 B) - but if that pin does not
+        # land, `padded_channels` must not claim it did.
+        _author(fake, name="wave", keys=[
+            {"time_s": 0.0, "rotations": {"tip": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"tip": [0, 0, 20]}}])
+        for axis in "XYZ":
+            plug = "|root|mid|tip.rotate%s" % axis
+            fake.keys.pop(plug, None)
+            fake.curves.pop(plug, None)
+        fake.blend_swallows_keys = True
+        _plant_blend_curve(fake, "|root|mid|tip.rotate",
+                           blend="tip_pairBlend", curve="tip_crv",
+                           blend_type="pairBlend")
+        out = _author(fake, name="idle", keys=self._mid())
+        assert "tip" not in out["padded_channels"]
+        assert "tip" not in out["held_channels"]
+        assert any("|root|mid|tip.rotateX" in w and "did not land" in w.lower()
+                   for w in out["warnings"])
+
+    def test_a_back_fill_is_never_claimed_for_a_channel_that_never_keyed(
+            self, fake):
+        # The back-fill runs over the channels THIS clip introduces. A
+        # channel whose every write vanished is not one of them.
+        _author(fake, name="wave", keys=self._mid())
+        fake.blend_swallows_keys = True
+        _plant_blend_curve(fake, "|root|mid|tip.rotate",
+                           blend="tip_pairBlend", curve="tip_crv",
+                           blend_type="pairBlend")
+        out = _author(fake, name="idle", keys=[
+            {"time_s": 0.0, "rotations": {"tip": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"tip": [0, 0, 20]}}])
+        assert out["back_filled"]["channels"] == []
+        assert clip.clip_meta(fake, "|root")[1]["joints"] == []
+
+
+class TestRefusedRootPoseWrite:
+    """#796 review round 6 A: the honest-report path for ROOT TRANSLATION
+    was unreachable on a real rig.
+
+    `guard_declared_channels` decides only to WARN about an "other"
+    connection on the declared translate channels (round 4 B: a pairBlend
+    is what Maya inserts the moment a plug is both keyed AND constrained,
+    and such a rig authors clips today). The keying loop then called
+    `cmds.xform(root, worldSpace=True, translation=...)` - a STATIC write
+    to those very plugs, which a connection-fed plug refuses - so the call
+    raised a traceback after `auto_checkpoint` had run and key 0's
+    rotations were already in the scene. The round-5 test that pinned the
+    report passed only because `FakeCmds.xform` did not model the refusal
+    `FakeCmds.setAttr` already modelled.
+    """
+
+    def _keys(self):
+        return [{"time_s": 0.0, "rotations": {"mid": [0, 0, 0]},
+                 "root_position": [0.0, 1.0, 0.0]},
+                {"time_s": 1.0, "rotations": {"mid": [0, 0, 45]},
+                 "root_position": [0.0, 1.4, 0.0]}]
+
+    def _constrained_root(self, fake):
+        # Keyed AND constrained: Maya's pairBlend, per child, on the root's
+        # translate compound. NOT `blend_swallows_keys` - the key itself is
+        # unmeasured through a blend node and irrelevant here, because the
+        # POSE write in front of it is what refuses.
+        return _plant_blend_curve(fake, "|root.translate",
+                                  blend="root_pairBlend", curve="root_crv")
+
+    def test_a_refused_pose_write_is_reported_not_raised(self, fake):
+        self._constrained_root(fake)
+        out = _author(fake, keys=self._keys())
+        assert out["root_position_keyed"] is False
+        assert clip.clip_meta(fake, "|root")[0]["root_position_used"] is False
+        for axis in "XYZ":
+            assert any("|root.translate%s" % axis in w
+                       and "did NOT land" in w for w in out["warnings"])
+
+    def test_the_rotations_of_the_same_call_still_land(self, fake):
+        # The clip is not lost, only the channel that could not be written.
+        self._constrained_root(fake)
+        out = _author(fake, keys=self._keys())
+        assert out["keyed_joints"] == 1
+        assert clip.clip_meta(fake, "|root")[0]["joints"] == ["mid"]
+        assert not any("keyed NOTHING" in w for w in out["warnings"])
+
+    def test_nothing_is_keyed_behind_the_caller_on_the_refused_plugs(
+            self, fake):
+        # A value keyed from a pose write that never happened would be this
+        # clip's own guess at where the root is - the guessing class round
+        # 5 C removed, one write earlier.
+        self._constrained_root(fake)
+        _author(fake, keys=self._keys())
+        for axis in "XYZ":
+            assert "|root.translate%s" % axis not in fake.keys
+
+    def test_the_other_channels_of_the_same_KEY_still_land(self, fake):
+        # The refused pose write costs the root's translate channels and
+        # NOTHING else: the blend weight named on the very same key is
+        # written after it and has no connection to those plugs.
+        self._constrained_root(fake)
+        out = _author(fake, keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]},
+             "blend_weights": {"blink": 0.0},
+             "root_position": [0.0, 1.0, 0.0]},
+            {"time_s": 1.0, "rotations": {"mid": [0, 0, 45]},
+             "blend_weights": {"blink": 1.0},
+             "root_position": [0.0, 1.4, 0.0]}])
+        assert out["keyed_weight_channels"] == ["blink"]
+        assert fake.keys["body_shapes.blink"][
+            float(out["end_frame"])] == 1.0
+
+    def test_a_free_root_still_moves_and_declares_itself(self, fake):
+        # The same call on a rig with nothing on the root: unchanged.
+        out = _author(fake, keys=self._keys())
+        assert out["root_position_keyed"] is True
+        assert not any("did NOT land" in w for w in out["warnings"])
+        assert fake.keys["|root.translateY"]
+
+
 class TestBindPoseRest:
     def test_rest_captures_the_bind_rotation_when_known(self, fake, monkeypatch):
         # an "imported rig" whose bind pose carries rotation: current pose
@@ -1134,6 +1996,176 @@ class TestDelete:
         assert dict(fake.keys.get("|root|mid.rotateZ", {})) == mid_keys_before
         assert any("no surviving clip declares" in w for w in out["warnings"])
 
+    def test_a_plain_clip_still_tears_down_whole(self, fake):
+        # Regression pin for #796: with no driven keys anywhere, the full
+        # teardown deletes every clip curve and says nothing about rig setup.
+        _author(fake)
+        expected = set(fake.curves.values())
+        out = clip.delete_clip({"root": "root"})
+        assert set(fake.deleted) == expected
+        assert out["deleted_curves"] == len(expected)
+        assert not any("set-driven" in w for w in out["warnings"])
+
+    def test_the_full_teardown_leaves_set_driven_keys_standing(self, fake):
+        # #796 defect 1: _anim_curves' type="animCurve" filter matches the
+        # U-typed SDK curves too, so the old teardown deleted the caller's
+        # rig setup as a side effect of "remove my clip".
+        _author(fake)
+        sdk = _plant_sdk_curve(fake)
+        clip_curves = {c for c in fake.curves.values() if c != sdk}
+        out = clip.delete_clip({"root": "root"})
+        assert sdk not in fake.deleted
+        assert set(fake.deleted) == clip_curves
+        assert out["deleted_curves"] == len(clip_curves)
+        assert fake.curves.get("|root|mid|tip.rotateX") == sdk
+        assert any(sdk in w and "set-driven" in w for w in out["warnings"])
+
+    def test_the_teardown_leaves_a_driven_rotate_alone_and_says_so(
+            self, fake):
+        # #796 review defect 2: with a curve left standing, the no-bind-pose
+        # fallback's `setAttr(joint + '.rotate', 0, 0, 0)` writes a plug a
+        # connection feeds, and Maya raises rather than writing it. The
+        # blocked channels must be skipped AND named; the free ones on the
+        # same joint still go back to rest.
+        _author(fake)
+        _plant_sdk_curve(fake)          # |root|mid|tip.rotateX
+        out = clip.delete_clip({"root": "root"})
+        assert any("left 1 joint rotation(s)" in w and "tip (rotateX)" in w
+                   for w in out["warnings"])
+        # and the sibling warning stops claiming it zeroed all of them
+        assert any("the free rotations were zeroed" in w
+                   for w in out["warnings"])
+        assert fake.attrs["|root|mid|tip.rotateY"] == 0.0
+        assert fake.attrs["|root|mid|tip.rotateZ"] == 0.0
+        # a joint nothing feeds is still zeroed as one compound write
+        assert fake.attrs["|root|mid.rotate"] == (0.0, 0.0, 0.0)
+
+    def test_a_compound_rotate_connection_blocks_all_three_children(
+            self, fake):
+        # An anim layer connects animBlendNodeAdditiveRotation.output to the
+        # joint's .rotate COMPOUND. Writing any child of a connected
+        # compound raises, so all three are off limits, not just one.
+        _author(fake)
+        fake.driven_plugs = {"|root|mid|tip.rotate": "layer_blend.output"}
+        fake.node_types = {"layer_blend": "animBlendNodeAdditiveRotation"}
+        out = clip.delete_clip({"root": "root"})
+        assert any("tip (rotateX, rotateY, rotateZ)" in w
+                   for w in out["warnings"])
+
+    def test_a_joint_that_cannot_answer_is_treated_as_fully_blocked(
+            self, fake):
+        # A node a broken reference leaves unqueryable must cost a skipped
+        # write, never a traceback halfway through a mutation. (delete_clip
+        # as a whole still needs a queryable rig - its own up-front
+        # _anim_curves sweep asks first; this pins the write-side guard.)
+        fake.unqueryable = {"|root|mid|tip"}
+        assert clip._blocked_rotate_attrs(fake, "|root|mid|tip") == [
+            "rotateX", "rotateY", "rotateZ"]
+
+    def test_a_partial_delete_never_cuts_a_driven_key_plug(self, fake):
+        # An SDK curve is indexed by DRIVER VALUE, not time: a time-range
+        # cutKey against one is meaningless at best and destroys driver keys
+        # that happen to fall in the numeric range at worst.
+        _author(fake, name="idle")
+        _author(fake, name="walk")
+        _plant_sdk_curve(fake)
+        out = clip.delete_clip({"root": "root", "name": "idle"})
+        assert "|root|mid|tip.rotateX" not in fake.cut_plugs
+        assert "|root|mid.rotateZ" in fake.cut_plugs   # the clip plugs still cut
+        assert out["clips"] == ["walk"]
+
+    def test_the_orphan_reap_leaves_a_driven_key_curve_standing(self, fake):
+        # #730's reap re-queries type="animCurve" on the orphaned channels
+        # and deletes the WHOLE curve - the same flaw at a third site.
+        _author(fake, name="idle", keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [0, 0, 30]}}])
+        _author(fake, name="wave", keys=[
+            {"time_s": 0.0, "rotations": {"tip": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"tip": [0, 0, 45]}}])
+        _author(fake, name="step", keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [0, 0, -30]}}])
+        # tip is the orphaned channel; one of its plugs is now owned by a
+        # driven key rather than by the clip.
+        sdk = _plant_sdk_curve(fake, plug="|root|mid|tip.rotateY",
+                               curve="tip_rotY_driven", node_type="animCurveUL")
+        out = clip.delete_clip({"root": "root", "name": "wave"})
+        assert sdk not in fake.deleted
+        assert out["reaped_channels"] == ["tip"]
+        assert any("no surviving clip declares" in w for w in out["warnings"])
+        assert any(sdk in w and "set-driven" in w for w in out["warnings"])
+
+    def test_a_joint_and_a_weight_alias_of_the_same_name_are_both_reaped(
+            self, fake):
+        # #796 review defect 5: the reap's plug map went from a flat list to
+        # a dict keyed by CHANNEL NAME, and joint short names, blendShape
+        # weight aliases and the literal 'root_position' all share that key
+        # space. A 'tip' joint and a 'tip' shape overwrote each other, so
+        # only one was reaped - and reaped_channels named it once, so
+        # nothing in the result revealed the loss.
+        fake.blend_aliases = ["blink", "tip"]
+        _author(fake, name="idle", keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [0, 0, 30]}}])
+        _author(fake, name="wave", keys=[
+            {"time_s": 0.0, "rotations": {"tip": [0, 0, 0]},
+             "blend_weights": {"tip": 0.0}},
+            {"time_s": 1.0, "rotations": {"tip": [0, 0, 45]},
+             "blend_weights": {"tip": 1.0}}])
+        _author(fake, name="step", keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [0, 0, -30]}}])
+        out = clip.delete_clip({"root": "root", "name": "wave"})
+        assert out["reaped_channels"] == ["tip (joint)", "tip (blend weight)"]
+        assert "body_shapes_tip_crv" in fake.deleted        # the shape
+        assert "_root_mid_tip_rotateZ_crv" in fake.deleted  # the joint
+
+    def test_an_orphan_channel_that_is_only_a_driven_key_is_not_reaped(
+            self, fake):
+        # Nothing was removed for that channel, so nothing may claim it was:
+        # reaped_channels reports what the reap FOUND, not what the doomed
+        # record declared (#796).
+        _author(fake, name="idle", keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [0, 0, 30]}}])
+        _author(fake, name="wave", keys=[
+            {"time_s": 0.0, "rotations": {"tip": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"tip": [0, 0, 45]}}])
+        _author(fake, name="step", keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [0, 0, -30]}}])
+        sdk = [_plant_sdk_curve(fake, plug="|root|mid|tip.rotate" + axis,
+                                curve="tip_rot%s_driven" % axis)
+               for axis in "XYZ"]
+        out = clip.delete_clip({"root": "root", "name": "wave"})
+        assert out["reaped_channels"] == []
+        assert not any(c in fake.deleted for c in sdk)
+        assert not any("no surviving clip declares" in w
+                       for w in out["warnings"])
+
+    def test_a_rig_with_only_driven_keys_and_no_clip_refuses(self, fake):
+        # Nothing here is clip motion, so there is nothing for this tool to
+        # remove - and it must not "fix" that by eating the rig setup.
+        sdk = _plant_sdk_curve(fake)
+        with pytest.raises(HandlerError, match="no clip") as exc:
+            clip.delete_clip({"root": "root"})
+        assert sdk in (exc.value.hint or "")
+        assert sdk not in fake.deleted
+
+    def test_the_unknown_name_hint_does_not_promise_a_static_skeleton(
+            self, fake):
+        # The 'omit `name`' hint claims a full delete returns the skeleton
+        # to static posing. With driven keys standing that is false.
+        _author(fake, name="idle")
+        sdk = _plant_sdk_curve(fake)
+        with pytest.raises(HandlerError, match="no clip named") as exc:
+            clip.delete_clip({"root": "root", "name": "nope"})
+        hint = exc.value.hint
+        assert sdk in hint
+        assert "kept" in hint
+        assert "and return the skeleton to static posing" not in hint
+
     def test_a_named_delete_of_a_declared_shared_channel_reaps_nothing(
             self, fake):
         # mid is declared by the survivor too - nothing may be reaped.
@@ -1148,16 +2180,171 @@ class TestDelete:
         assert "|root|mid.rotateZ" in fake.keys
 
 
+class TestBoundTeardown:
+    """delete_clip's BIND-POSE branch (#796 review round 3 M2).
+
+    Nothing exercised it before this round: FakeCmds.dagPose answered []
+    unconditionally, so every teardown test above took the unbound
+    zero-rotation fallback - while in a real scene any rig with a
+    skinCluster has a bind pose and takes THIS branch. Which is where
+    `dagPose -restore` meets the rotate and translate plugs a surviving
+    set-driven key feeds, and nobody has measured what it does about them:
+    both outcomes are modelled here.
+    """
+
+    def test_a_bound_rig_gets_exactly_the_restore_it_always_got(self, fake):
+        fake.bind_poses = ["bindPose1"]
+        _author(fake)
+        out = clip.delete_clip({"root": "root"})
+        assert fake.dag_pose_restores == ["bindPose1"]
+        assert fake.dag_pose_restored == fake.joints
+        assert not any("as they are" in w for w in out["warnings"])
+        assert not fake.attributeQuery("mcp_clip", node="|root", exists=True)
+
+    def test_outcome_b_reports_what_the_restore_silently_skipped(self, fake):
+        # (b) dagPose skips the connection-fed channels: no crash, but a
+        # result claiming "bind pose restored" while part of the skeleton
+        # never moved is exactly the reporting dishonesty #796 is about.
+        fake.bind_poses = ["bindPose1"]
+        _author(fake)
+        _plant_sdk_curve(fake)                     # |root|mid|tip.rotateX
+        out = clip.delete_clip({"root": "root"})
+        assert any("tip (rotateX)" in w and "still driven" in w
+                   for w in out["warnings"])
+        assert "|root|mid|tip" not in fake.dag_pose_restored
+        assert not fake.attributeQuery("mcp_clip", node="|root", exists=True)
+
+    def test_outcome_a_never_kills_a_teardown_mid_mutation(self, fake):
+        # (a) dagPose raises. The clip curves are already deleted by then,
+        # so a traceback here leaves a rig that still REPORTS clips it no
+        # longer has - the metadata attrs are removed after the restore.
+        fake.bind_poses = ["bindPose1"]
+        _author(fake)
+        _plant_sdk_curve(fake)
+        fake.dag_pose_restore_raises = True
+        out = clip.delete_clip({"root": "root"})
+        assert any("bind-pose restore RAISED" in w for w in out["warnings"])
+        assert any("tip (rotateX)" in w for w in out["warnings"])
+        assert out["clips"] == []
+        assert not fake.attributeQuery("mcp_clip", node="|root", exists=True)
+        assert not fake.attributeQuery("mcp_clip_rest", node="|root",
+                                       exists=True)
+        assert clip.clip_meta(fake, "|root") == []
+
+    def test_an_unexplained_restore_failure_still_propagates(self, fake):
+        # The catch is not a blanket one. With nothing driving the rig
+        # there is no #796 story to tell, so a failing restore is a real
+        # failure and stays one - today's behaviour, unchanged.
+        fake.bind_poses = ["bindPose1"]
+        _author(fake)
+        fake.dag_pose_restore_raises = True
+        with pytest.raises(RuntimeError, match="cannot restore"):
+            clip.delete_clip({"root": "root"})
+
+    def test_a_driven_root_translation_is_stuck_here_too(self, fake):
+        # dagPose restores a whole TRANSFORM, so a connection on
+        # `.translateY` defeats it exactly the way one on `.rotateX` does.
+        # (The no-bind-pose fallback stays rotate-only: zeroing rotations
+        # is all it ever writes.)
+        fake.bind_poses = ["bindPose1"]
+        _author(fake)
+        _plant_sdk_curve(fake, plug="|root.translateY",
+                         curve="root_ty_driven")
+        out = clip.delete_clip({"root": "root"})
+        assert any("root (translateY)" in w for w in out["warnings"])
+        assert "|root" not in fake.dag_pose_restored
+
+    def test_both_branches_name_a_stuck_channel_the_same_way(self,
+                                                             monkeypatch):
+        # One vocabulary for one fact: the bound restore and the unbound
+        # zeroing report the same channels with the same words, differing
+        # only in HOW the return failed.
+        def _teardown(bind):
+            f = _install(FakeCmds(), monkeypatch)
+            f.bind_poses = bind
+            _author(f)
+            _plant_sdk_curve(f)
+            return clip.delete_clip({"root": "root"})["warnings"]
+
+        bound = _teardown(["bindPose1"])
+        unbound = _teardown([])
+        shared = ("as they are - tip (rotateX): a connection still feeds "
+                  "those channels (a surviving set-driven key, an anim "
+                  "layer, a constraint),")
+        assert any(shared in w for w in bound)
+        assert any(shared in w for w in unbound)
+
+
+class TestStuckChannelReporting:
+    """#796 review round 4 D and E: two warnings that contradict what they
+    sit next to."""
+
+    _NOTE = re.compile(r"left (\d+) joint \S+ as they are - (.*?): a "
+                       r"connection")
+
+    def _counted_and_listed(self, warnings):
+        notes = [w for w in warnings if "as they are" in w]
+        assert len(notes) == 1, notes
+        found = self._NOTE.match(notes[0])
+        assert found, notes[0]
+        listed = sum(len(group.split("(")[1].rstrip(")").split(", "))
+                     for group in found.group(2).split("; "))
+        return int(found.group(1)), listed
+
+    def _teardown(self, monkeypatch, bind_poses):
+        f = _install(FakeCmds(), monkeypatch)
+        f.bind_poses = list(bind_poses)
+        _author(f)
+        _plant_sdk_curve(f)                            # tip.rotateX
+        _plant_sdk_curve(f, plug="|root|mid|tip.rotateY",
+                         curve="tip_rotY_driven")
+        _plant_sdk_curve(f, plug="|root.translateZ",
+                         curve="root_tz_driven")
+        return clip.delete_clip({"root": "root"})["warnings"]
+
+    def test_the_bound_count_agrees_with_the_list(self, monkeypatch):
+        # MEASURED before the fix: "left 2 joint channel(s) as they are -
+        # root (translateZ); tip (rotateX, rotateY)" - 2 is the JOINT
+        # count and the list names 3 channels.
+        count, listed = self._counted_and_listed(
+            self._teardown(monkeypatch, ["bindPose1"]))
+        assert count == listed
+
+    def test_the_unbound_count_agrees_with_the_list(self, monkeypatch):
+        # The fallback branch names rotations only, and counted joints too:
+        # one joint, two stuck rotations.
+        count, listed = self._counted_and_listed(
+            self._teardown(monkeypatch, []))
+        assert count == listed
+
+    def test_no_bind_pose_restore_is_claimed_when_it_raised(self, fake):
+        # #796 review round 4 E: the "N bind poses exist; restored X" line
+        # was appended unconditionally, including on the path where dagPose
+        # had just RAISED and restored nothing at all.
+        fake.bind_poses = ["bindPose1", "bindPose2"]
+        _author(fake)
+        _plant_sdk_curve(fake)
+        fake.dag_pose_restore_raises = True
+        out = clip.delete_clip({"root": "root"})
+        assert any("bind-pose restore RAISED" in w for w in out["warnings"])
+        assert not any("restored bindPose1" in w for w in out["warnings"])
+
+    def test_the_extra_bind_pose_is_still_named_when_the_restore_lands(
+            self, fake):
+        # The other half: when the restore really happens, the caller still
+        # learns which of the several bind poses was used.
+        fake.bind_poses = ["bindPose1", "bindPose2"]
+        _author(fake)
+        out = clip.delete_clip({"root": "root"})
+        assert any("2 bind poses exist; restored bindPose1" in w
+                   for w in out["warnings"])
+
+
 class TestGuards:
     JOINTS = ["|root", "|root|mid", "|root|mid|tip"]
 
-    def _plant_sdk_curve(self, fake, plug="|root|mid|tip.rotateX",
-                         curve="tip_rotX_driven", node_type="animCurveUA"):
-        """A set-driven key on a joint rotate plug: a curve node of a U-typed
-        type, which reads a DRIVER attribute rather than time."""
-        fake.curves[plug] = curve
-        fake.node_types = dict(getattr(fake, "node_types", {}),
-                               **{curve: node_type})
+    def _plant_sdk_curve(self, fake, **kw):
+        return _plant_sdk_curve(fake, **kw)
 
     def test_static_pose_guard_names_the_clip(self, fake):
         _author(fake)
@@ -1208,15 +2395,15 @@ class TestGuards:
         assert "delete_clip removes the curves" in hint
         assert "remove the driven key" in hint
 
-    def test_the_mixed_hint_warns_that_delete_clip_reaps_the_driven_keys(
-            self, fake):
-        """The clip fix really does destroy the SDK curves as well.
+    def test_the_mixed_hint_says_delete_clip_keeps_the_driven_keys(self, fake):
+        """#796 defect 1 inverted this paragraph.
 
-        delete_clip dooms whatever _anim_curves returned, and that query
-        asks for type "animCurve", which matches the derived U-typed nodes -
-        which is why guard_static_weights has to filter them back out. A
-        hint that called them untouched would send a caller to delete rig
-        setup this same refusal had just told them was a separate concern.
+        delete_clip's teardown used to reap whatever _anim_curves returned,
+        U-typed nodes included, so the hint had to warn that the clip fix
+        would cost the caller their rig setup. It no longer does: the SDK
+        curves are left standing and reported, so a hint that still promised
+        their destruction would be the wrong diagnosis in the other
+        direction.
         """
         _author(fake)
         self._plant_sdk_curve(fake)
@@ -1224,8 +2411,159 @@ class TestGuards:
             clip.guard_static_pose(fake, "|root", self.JOINTS,
                                    "pose_skeleton")
         hint = exc.value.hint
-        assert "delete_clip's teardown would delete those" in hint
-        assert "does not touch" not in str(exc.value)
+        assert "delete_clip's teardown would delete those" not in hint
+        assert "leaves those driven-key curves standing" in hint
+
+    def test_static_pose_guard_sees_a_curve_behind_a_pair_blend(self, fake):
+        # #796 defect 2: Maya inserts a pairBlend the moment a plug is both
+        # keyed and constrained. The direct query sees nothing, the guard
+        # used to pass, and the curve overrode the static write on the next
+        # evaluation - the exact wrongness this guard exists to prevent.
+        curve = _plant_blend_curve(fake, "|root|mid.rotateX")
+        with pytest.raises(HandlerError) as exc:
+            clip.guard_static_pose(fake, "|root", self.JOINTS,
+                                   "pose_skeleton")
+        message, hint = str(exc.value), exc.value.hint
+        assert curve in message
+        assert "mid_pairBlend" in message      # the caller can act on it
+        # delete_clip's own query is direct-only, so it cannot be the fix
+        assert "delete_clip removes the curves" not in message + hint
+        assert "mid_pairBlend" in hint
+
+    def test_the_blend_walk_reaches_through_an_anim_layer_node(self, fake):
+        # #796 review defect 4. Maya's ROTATION anim layers insert an
+        # animBlendNodeAdditiveRotation whose `output` compound connects to
+        # the joint's `.rotate` COMPOUND - and listConnections on a child
+        # plug does not report a connection made on its parent. The walk
+        # starts from the per-axis plugs _joint_plugs builds, so unless it
+        # also asks the parent compound it never starts at all: the guard
+        # passes and the layered curve overrides the static write. The
+        # earlier version of this test planted a per-axis source the fake
+        # was free to invent, so it proved the prefix match and nothing
+        # about reachability. (animBlendNodeBase is abstract - nodeType
+        # reports the derived name, so the match is still a prefix one.)
+        curve = _plant_blend_curve(
+            fake, "|root|mid.rotate", blend="layer_blend",
+            curve="layered_crv",
+            blend_type="animBlendNodeAdditiveRotation")
+        assert fake.listConnections("|root|mid.rotateX", source=True,
+                                    destination=False, plugs=True) is None
+        with pytest.raises(HandlerError) as exc:
+            clip.guard_static_pose(fake, "|root", self.JOINTS,
+                                   "pose_skeleton")
+        assert curve in str(exc.value) and "layer_blend" in str(exc.value)
+
+    def test_a_layered_translate_compound_is_seen_too(self, fake):
+        # The same asymmetry on the other compound _joint_plugs walks.
+        curve = _plant_blend_curve(
+            fake, "|root.translate", blend="root_layer_blend",
+            curve="root_layered_crv",
+            blend_type="animBlendNodeAdditiveDL")
+        with pytest.raises(HandlerError) as exc:
+            clip.guard_static_pose(fake, "|root", self.JOINTS,
+                                   "pose_skeleton")
+        assert curve in str(exc.value)
+
+    def test_a_clip_and_a_hidden_curve_are_both_named(self, fake):
+        # delete_clip is a real fix for the clip curves and NOT a fix for
+        # the one behind the blend node - the hint has to say both.
+        _author(fake)
+        curve = _plant_blend_curve(fake, "|root|mid|tip.rotateX",
+                                   blend="tip_pairBlend", curve="tip_crv")
+        with pytest.raises(HandlerError) as exc:
+            clip.guard_static_pose(fake, "|root", self.JOINTS,
+                                   "pose_skeleton")
+        message, hint = str(exc.value), exc.value.hint
+        assert "clip 'idle'" in message
+        assert "%s behind tip_pairBlend" % curve in message
+        assert "delete_clip removes the curves" in hint
+        assert "will NOT remove a curve hiding behind" in hint
+
+    def test_an_indirect_driven_key_names_the_intermediary(self, fake):
+        # #796 review defect 7: an indirect U-typed curve was merged into
+        # sdk_curves and handed the DIRECT driven-key exit, whose hint is
+        # "remove the driven key (delete its curve node)". That is false of
+        # an indirect one and never names the intermediary: following it
+        # destroys rig setup AND the guard still refuses, now with no curve
+        # left to name. This is the dead-end hint refuse_driven_weight's
+        # own docstring exists to prevent.
+        _plant_blend_curve(fake, "|root|mid.rotateX", curve="mid_sdk",
+                           curve_type="animCurveUL")
+        with pytest.raises(HandlerError) as exc:
+            clip.guard_static_pose(fake, "|root", self.JOINTS,
+                                   "pose_skeleton")
+        message, hint = str(exc.value), exc.value.hint
+        assert "set-driven key" in message
+        assert "mid_sdk behind mid_pairBlend" in message
+        assert "mid_pairBlend" in hint
+
+    def test_a_direct_and_an_indirect_driven_key_get_their_own_hints(
+            self, fake):
+        # Two different fixes, so two different hints - the direct one is
+        # "delete the curve", the indirect one cannot be.
+        _plant_sdk_curve(fake)                       # tip.rotateX, direct
+        _plant_blend_curve(fake, "|root|mid.rotateX", curve="mid_sdk",
+                           curve_type="animCurveUL")
+        with pytest.raises(HandlerError) as exc:
+            clip.guard_static_pose(fake, "|root", self.JOINTS,
+                                   "pose_skeleton")
+        message, hint = str(exc.value), exc.value.hint
+        assert "tip_rotX_driven" in message and "mid_sdk" in message
+        assert "remove the driven key" in hint      # for the direct one
+        assert "mid_pairBlend" in hint              # for the indirect one
+
+    def test_a_source_that_is_not_an_intermediary_stays_out_of_this(
+            self, fake):
+        # A constraint or an expression owning the plug is not a curve, and
+        # this guard has never claimed those. The walk must not invent one.
+        fake.driven_plugs = {"|root|mid.rotateX": "mid_expr.output"}
+        fake.node_types = {"mid_expr": "expression"}
+        clip.guard_static_pose(fake, "|root", self.JOINTS, "pose_skeleton")
+
+    def test_the_blend_walk_never_revisits_a_node_in_a_cycle(self, fake):
+        # #796 review defect 6: "it returned" proves nothing here - the
+        # depth bound alone terminates the walk, so the old version of this
+        # test passed with the cycle guard entirely deleted. Counting the
+        # queries per node is what distinguishes them: blendA -> blendB ->
+        # blendA revisits on the third hop unless the seen set stops it.
+        # Asked of ONE plug, because the guard walks every plug on the
+        # skeleton and a whole-guard count would not isolate the loop.
+        _plant_blend_curve(fake, "|root|mid.rotateX", blend="blendA",
+                           curve="blendB", curve_type="blendWeighted")
+        fake.node_sources["blendB"] = ["blendA"]
+        fake.connection_queries.clear()
+        assert clip._curve_behind_a_blend(
+            fake, "|root|mid.rotateX") == (None, None)
+        assert fake.connection_queries.count("blendA") == 1
+        assert fake.connection_queries.count("blendB") == 1
+        # and the guard as a whole still comes back rather than hanging
+        clip.guard_static_pose(fake, "|root", self.JOINTS, "pose_skeleton")
+
+    def test_a_node_that_cannot_answer_degrades_instead_of_crashing(
+            self, fake):
+        # The _outside_wearers idiom: a query that raises must not take a
+        # guard down with it.
+        _plant_blend_curve(fake, "|root|mid.rotateX")
+        fake.unqueryable = {"mid_pairBlend"}
+        clip.guard_static_pose(fake, "|root", self.JOINTS, "pose_skeleton")
+
+    def test_the_declared_channel_guard_has_two_faces(self, fake):
+        # #796 review round 4 C: ONE implementation for both clip
+        # producers, differing in the flag. author_clip REFUSES a joint it
+        # cannot classify - it would otherwise key a plug that might
+        # swallow the key silently, and nothing is mutated yet.
+        # retarget_clip has no refusal of its own to fall back on there
+        # (it writes with bakeResults, which #771 never measured), so it
+        # says so and carries on.
+        fake.unqueryable = {"|root|mid"}
+        group = [("|root|mid", clip.ROTATE_ATTRS, "rotate")]
+        notes = clip.guard_declared_channels(fake, "retarget_clip", group,
+                                             refuse_unkeyable=False)
+        assert len(notes) == 1
+        assert "cannot tell what drives mid's rotate channels" in notes[0]
+        assert "retarget_clip writes them blind" in notes[0]
+        with pytest.raises(HandlerError, match="cannot tell what drives"):
+            clip.guard_declared_channels(fake, "author_clip", group)
 
     def test_static_weight_guard(self, fake):
         _author(fake, keys=[

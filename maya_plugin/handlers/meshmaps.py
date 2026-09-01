@@ -270,6 +270,42 @@ def resolve_wearers(cmds, meshes: List[Tuple[str, str]]) -> Dict[
     return by_material
 
 
+def _transform_short_name(cmds, shape: str) -> str:
+    """The name validate()'s #770 collision guard actually compares: the
+    TRANSFORM's short name, reached from the shape - which is all this
+    guard is handed. A shape that cannot answer stands for itself, which
+    can only ever make the hint MORE permissive, never wrong-and-dead-end.
+    """
+    try:
+        parents = cmds.listRelatives(shape, parent=True, fullPath=True) or []
+    except Exception:  # noqa: BLE001 - the _outside_wearers idiom: no crash
+        parents = []
+    node = parents[0] if parents else shape
+    return node.split("|")[-1]
+
+
+def _colliding_short_name(cmds, requested: List[str],
+                          outside: List[str]) -> Optional[str]:
+    """The short name that makes "name every wearer" a dead end, or None.
+
+    #796: the outside-wearer guard only started firing on MIRRORED rigs
+    once identity became the full DAG path, and mirrored transforms share
+    their short name BY DEFINITION. validate() above refuses exactly that
+    (#770: baked files are named by the short name, and Arnold renames
+    colliding outputs by a rule this tool will not guess) - so on the very
+    rig this guard now catches, its own first suggestion was refused by
+    another guard one step later. The hint has to know that, and a test
+    pins both refusals so the two cannot drift apart again.
+    """
+    seen: Dict[str, str] = {}
+    for shape in list(requested) + list(outside):
+        short = _transform_short_name(cmds, shape)
+        if seen.get(short, shape) != shape:
+            return short
+        seen[short] = shape
+    return None
+
+
 def refuse_outside_wearer(cmds, shader: str, sg: str, shapes: List[str],
                           edit: str = DEFAULT_EDIT) -> None:
     """Refuse when a mesh the call did not name wears this material too.
@@ -280,12 +316,20 @@ def refuse_outside_wearer(cmds, shader: str, sg: str, shapes: List[str],
     outside = texbake._outside_wearers(cmds, sg, shapes)
     if not outside:
         return
+    names = ", ".join(sorted(outside))
+    collision = _colliding_short_name(cmds, shapes, outside)
+    if collision:
+        hint = ("give %s its own material first - naming every wearer "
+                "instead dead-ends: they share the transform short name "
+                "%r, which this tool refuses to bake (baked files are "
+                "named by it), so that route needs a maya_rename first"
+                % (names, collision))
+    else:
+        hint = "name every wearer, or give %s its own material first" % names
     raise HandlerError(
         "%s is also worn by %s, which this call did not name - %s would "
-        "change that mesh's look too"
-        % (shader, ", ".join(sorted(outside)), edit),
-        hint="name every wearer, or give %s its own material first"
-             % ", ".join(sorted(outside)))
+        "change that mesh's look too" % (shader, names, edit),
+        hint=hint)
 
 
 def require_sole_wearers(cmds, meshes: List[Tuple[str, str]],

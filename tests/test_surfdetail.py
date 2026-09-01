@@ -38,12 +38,16 @@ class FakeCmds:
         self.selection = ["|limb"]
 
     def ls(self, *args, **kw):
+        """Resolves transforms AND shapes: a shading group's members are
+        SHAPES, and #796's canonicalisation sends every one of them
+        through here (this fake reaches it via meshmaps.plan_apply)."""
         if kw.get("selection"):
             return list(self.selection)
         name = args[0] if args else kw.get("name")
-        if name in self.meshes:
+        known = list(self.meshes) + list(self.meshes.values())
+        if name in known:
             return [name]
-        return [n for n in self.meshes if n.split("|")[-1] == name] or []
+        return [n for n in known if n.split("|")[-1] == name]
 
     def objExists(self, name):
         return (name in self.meshes or name in self.types

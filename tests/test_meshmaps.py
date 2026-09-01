@@ -53,6 +53,51 @@ def _rich_rgba_rows(size=4, alpha=255):
             for y in range(size)]
 
 
+def _resolve_dag(known, name, node_of=None):
+    """Maya's own name resolution - the half of #796 a short-name-only fake
+    could not see.
+
+    `cmds.sets(sg, query=True)` answers with the SHORTEST UNIQUE name. For
+    the two mirrored shapes this ticket is about that is NEITHER the bare
+    short name NOR the full path: it is a PARTIAL path, 'right|limbShape'.
+    Maya matches a partial path as a SUFFIX of a full path, anchored at a
+    '|' component boundary; a LEADING '|' makes the name absolute, so it
+    means one full path or nothing.
+
+    The fake used to match `n.split('|')[-1] == name`, which resolves the
+    partial form to [] - so the member was SKIPPED and the fake reproduced
+    the exact silent miss #796 fixes, while the new tests read as passing.
+
+    ONE PATH PER NODE (#796 round 4). `cmds.ls(name, long=True)` matches
+    NODES: an ambiguous name answers with one path for each node it hits,
+    but an INSTANCED node - several paths, ONE node - answers with one of
+    its paths and no more. Enumerating the rest is what `allPaths=True` is
+    for, and this guard does not ask for it. Modelling ls as an all-paths
+    expansion made the instance tests assert a resolution Maya never
+    performs - the round-2 defect class exactly: a fake feeding an answer
+    Maya does not give.
+    """
+    if not name:
+        return []
+    if name.startswith("|"):
+        matched = [n for n in known if n == name]  # absolute: that path
+    else:
+        wanted = name.split("|")
+        matched = []
+        for n in known:
+            comps = n.split("|")  # '|a|b' -> ['', 'a', 'b']
+            if len(wanted) <= len(comps) and comps[-len(wanted):] == wanted:
+                matched.append(n)
+    out, seen = [], set()
+    for n in matched:
+        node = (node_of or {}).get(n, n)
+        if node in seen:  # another path of a node already named
+            continue
+        seen.add(node)
+        out.append(n)
+    return out
+
+
 class FakeCmds:
     """|limb (shape |limbShape) wears limbSG -> limb_mat (standardSurface),
     baseColor unconnected (a plain value). Per-test knobs mirror
@@ -73,21 +118,54 @@ class FakeCmds:
         self.checkpoints = []
         self.selection = ["|limb"]
         self.plugins_loaded = ["mtoa"]
+        # #796 round 3: NODE identity, the thing a DAG path is not. An
+        # INSTANCED mesh is ONE shape node hanging under several paths -
+        # those paths share an entry here; everything else gets its own
+        # node by default. A fake that models instancing as two separate
+        # shapes cannot tell an instance from a mirrored twin, which is
+        # where round 2's defect hid.
+        self.node_of = {}
 
     # resolution ------------------------------------------------------
     def ls(self, *args, **kw):
+        """Resolves transforms AND shapes: a shading group's members are
+        SHAPES, and #796's canonicalisation sends every one of them
+        through here. Partial paths resolve the way Maya resolves them
+        (_resolve_dag) - that is the form cmds.sets actually answers with
+        on the mirrored rig this ticket is about.
+
+        `uuid=True` answers with the NODE instead of its paths, which is
+        what the guard compares now: the two paths of an instanced shape
+        are one node and must come back as one identity, while a mirrored
+        pair is two nodes and must not."""
         if kw.get("selection"):
             return list(self.selection)
         name = args[0] if args else kw.get("name")
-        if name in self.meshes:
-            return [name]
-        return [n for n in self.meshes if n.split("|")[-1] == name] or []
+        paths = _resolve_dag(list(self.meshes) + list(self.meshes.values()),
+                             name, self.node_of)
+        if not kw.get("uuid"):
+            return paths
+        ids = []
+        for path in paths:
+            node = self.node_of.get(path, "uuid:" + path)
+            if node not in ids:
+                ids.append(node)
+        return ids
 
     def objExists(self, name):
         return (name in self.meshes or name in self.types
                 or name in self.meshes.values())
 
-    def listRelatives(self, node, shapes=False, fullPath=False, **kw):
+    def listRelatives(self, node, shapes=False, fullPath=False,
+                      parent=False, **kw):
+        """Both directions. The shape -> transform one is what #796's hint
+        needs: whether naming every wearer would walk into validate()'s
+        short-name collision refusal, which compares TRANSFORM names."""
+        if parent:
+            for transform, shape in self.meshes.items():
+                if shape == node:
+                    return [transform]
+            return None
         return [self.meshes[node]] if shapes and node in self.meshes else None
 
     def nodeType(self, node):
@@ -316,6 +394,157 @@ class TestRequireSoleWearers:
         fake.sg_members["limbSG"] = ["|limbShape", "|otherShape"]
         with pytest.raises(HandlerError, match="otherShape"):
             meshmaps.require_sole_wearers(fake, [("|limb", "|limbShape")])
+
+    def _mirrored(self, fake):
+        """|left|limb and |right|limb, two shape nodes, one material."""
+        fake.meshes = {"|left|limb": "|left|limbShape",
+                       "|right|limb": "|right|limbShape"}
+        fake.uv_counts = {"|left|limbShape": 64, "|right|limbShape": 64}
+        fake.shape_sgs = {"|left|limbShape": ["limbSG"],
+                          "|right|limbShape": ["limbSG"]}
+        # PARTIAL paths: cmds.sets(query=True) answers with the shortest
+        # UNIQUE name, which for these two mirrors is 'left|limbShape' -
+        # not the bare short name and not the full path.
+        fake.sg_members["limbSG"] = ["left|limbShape", "right|limbShape"]
+
+    def _instanced(self, fake, members=None):
+        """ONE shape node under TWO DAG paths, wearing one material.
+
+        Two distinct TRANSFORMS share one shape node (fake.node_of), and
+        the assignment sits on that node, so both paths wear the SG.
+        `members` is what cmds.sets answers with: the node's own name -
+        which `cmds.ls(long=True)` resolves to ONE of its paths, since
+        enumerating the rest needs `allPaths=True` and nothing asks for it
+        (#796 round 4) - or one absolute path per instance. Maya picks the
+        shortest UNIQUE form, and at THIS call site guessing wrong is a
+        hard refusal, not a warning.
+        """
+        fake.meshes = {"|grpA|cube": "|grpA|cube|cubeShape",
+                       "|grpB|cube": "|grpB|cube|cubeShape"}
+        fake.node_of = {"|grpA|cube|cubeShape": "uuid:cubeShape",
+                        "|grpB|cube|cubeShape": "uuid:cubeShape"}
+        fake.uv_counts = {"|grpA|cube|cubeShape": 64,
+                          "|grpB|cube|cubeShape": 64}
+        fake.shape_sgs = {"|grpA|cube|cubeShape": ["limbSG"],
+                          "|grpB|cube|cubeShape": ["limbSG"]}
+        fake.sg_members["limbSG"] = list(members or ["cubeShape"])
+
+    def test_the_mirrored_twin_of_the_requested_mesh_refuses(self, fake,
+                                                             tmp_path):
+        """#796 defect 3 at this call site: |left|limb and |right|limb
+        share a short name (uniqueness is per PARENT), so the guard's old
+        short-name arm let the unnamed mirror through - the exact mesh a
+        mirrored rig has, and its look changes too."""
+        self._mirrored(fake)
+
+        with pytest.raises(HandlerError, match=r"\|right\|limbShape"):
+            meshmaps.require_sole_wearers(
+                fake, [("|left|limb", "|left|limbShape")])
+
+    def test_an_instanced_mesh_is_not_an_outside_wearer_of_itself(
+            self, fake, tmp_path):
+        """#796 fix round 2 at the call site that RAISES: reporting an
+        ambiguous member under every path it resolves to refused a
+        legitimate bake, because an instance's other path is the very
+        shape node the caller named. This is the case the warning-only
+        call site in texbake could not make visible."""
+        self._instanced(fake)
+
+        wearers = meshmaps.require_sole_wearers(
+            fake, [("|grpA|cube", "|grpA|cube|cubeShape")])
+
+        assert list(wearers) == ["limb_mat"]
+
+    def test_an_instance_named_by_absolute_path_still_bakes(self, fake,
+                                                            tmp_path):
+        """#796 fix round 3 at the raising site. Round 2 skipped a member
+        only when one of its RESOLVED PATHS was a requested path, so the
+        refusal survived whenever cmds.sets answered with one absolute
+        path per instance instead of the ambiguous node name - and then a
+        legitimate bake was refused, naming a path of the very shape node
+        the caller had asked for, with a hint (rename it, or give it its
+        own material) that cannot be followed because there is only one
+        node to rename. Identity is the node now, so neither name form
+        can produce this.
+        """
+        self._instanced(fake, ["|grpA|cube|cubeShape",
+                               "|grpB|cube|cubeShape"])
+
+        wearers = meshmaps.require_sole_wearers(
+            fake, [("|grpA|cube", "|grpA|cube|cubeShape")])
+
+        assert list(wearers) == ["limb_mat"]
+
+    def test_the_mirrored_twin_is_refused_when_the_member_is_ambiguous(
+            self, fake, tmp_path):
+        """#796 round 4, defect A, at the call site that RAISES.
+
+        The member skip used to drop every node a member name resolved to
+        as soon as ONE of them was the caller's own mesh. An ambiguous
+        member name on a mirrored rig resolves to BOTH limbs, so the right
+        limb - a different NODE, about to have its look changed by a
+        material-level edit nobody asked for on its behalf - stopped being
+        refused. Which name form `cmds.sets` answers with is Maya's choice
+        and unmeasured; the refusal must not depend on it.
+        """
+        self._mirrored(fake)
+        fake.sg_members["limbSG"] = ["limbShape"]
+
+        with pytest.raises(HandlerError, match=r"\|right\|limbShape"):
+            meshmaps.require_sole_wearers(
+                fake, [("|left|limb", "|left|limbShape")])
+
+    def test_the_mirrored_twin_is_still_refused_when_the_member_is_absolute(
+            self, fake, tmp_path):
+        """The other half: a mirrored pair is TWO shape nodes, so the
+        absolute name form must not buy an instance's skip. Without this
+        the round-3 fix could 'pass' by never refusing anything."""
+        self._mirrored(fake)
+        fake.sg_members["limbSG"] = ["|left|limbShape", "|right|limbShape"]
+
+        with pytest.raises(HandlerError, match=r"\|right\|limbShape"):
+            meshmaps.require_sole_wearers(
+                fake, [("|left|limb", "|left|limbShape")])
+
+    def test_the_mirrored_refusal_hint_is_followable(self, fake, tmp_path):
+        """#796 fix round 2, D4. This refusal only started firing on
+        MIRRORED rigs with the canonicalisation fix - and mirrored
+        transforms share their short name BY DEFINITION, which validate()
+        refuses outright (#770: Arnold renames colliding outputs by a rule
+        this tool will not guess). So the hint's "name every wearer"
+        branch was a dead end on exactly the rig that makes the guard
+        fire. BOTH refusals are measured here, so the two guards cannot
+        drift back into contradiction.
+        """
+        self._mirrored(fake)
+
+        with pytest.raises(HandlerError) as outside:
+            meshmaps.require_sole_wearers(
+                fake, [("|left|limb", "|left|limbShape")])
+        hint = outside.value.hint or ""
+
+        # The dead end, measured rather than assumed: taking the advice
+        # this hint used to give runs straight into the #770 guard.
+        with pytest.raises(HandlerError, match="share the short name"):
+            meshmaps.validate({"meshes": ["|left|limb", "|right|limb"],
+                               "out_dir": str(tmp_path)}, fake)
+
+        assert "name every wearer" not in hint
+        assert "maya_rename" in hint
+        assert "own material" in hint
+
+    def test_the_hint_still_offers_both_routes_when_the_names_do_not_collide(
+            self, fake, tmp_path):
+        """The unfollowable branch is dropped only where it IS
+        unfollowable - naming every wearer is the cheaper fix otherwise."""
+        fake.meshes["|other"] = "|otherShape"
+        fake.uv_counts["|otherShape"] = 8
+        fake.sg_members["limbSG"] = ["|limbShape", "|otherShape"]
+
+        with pytest.raises(HandlerError) as exc:
+            meshmaps.require_sole_wearers(fake, [("|limb", "|limbShape")])
+
+        assert "name every wearer" in (exc.value.hint or "")
 
     def test_the_refusal_names_the_edit_the_caller_actually_asked_for(
             self, fake, tmp_path):

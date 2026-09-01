@@ -9,7 +9,19 @@ existing name cuts that clip's old range and re-appends it at the tail - no
 other clip's motion moves, only its position in take order. Every clip on a
 rig shares one fps; a second rate refuses (one file is one timeline). export
 bakes each clip as its own named take, and delete_clip returns the skeleton
-to static land. While a clip exists, static pose mutators REFUSE (the guards
+to static land - except for set-driven keys, which are rig setup rather than
+clip motion, so they are left standing and reported (#796). The other side
+of that: author_clip refuses a channel IT DECLARES that a set-driven key
+or a corrective feeds (setKeyframe on one returns 0 and creates nothing -
+MEASURED - so the clip would ship declaring a channel it never keyed), and
+ignores one it does not declare. Any OTHER connection (a pairBlend, an
+anim layer) is named in `warnings` and keyed anyway: nothing has measured
+that a key fails to land through one, and refusing there would stop a
+keyed-and-constrained rig that authors clips today (#796). What such a
+write DID is then observed rather than assumed - setKeyframe returns the
+number of keys it set, so a channel whose key never appeared is named,
+uncounted, and absent from `mcp_clip` (#796 round 5).
+While a clip exists, static pose mutators REFUSE (the guards
 below): curves own the channels, and a static write a curve overrides on the
 next frame change is the quietest way to lie about a pose.
 
@@ -33,7 +45,20 @@ REST_ATTR = "mcp_clip_rest"
 NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 INTERPOLATIONS = {"linear": "linear", "smooth": "auto"}
 ROTATE_ATTRS = ("rotateX", "rotateY", "rotateZ")
+# How the #730 reap names a channel whose name belongs to two kinds at once
+# (a 'jaw' joint and a 'jaw' blendShape alias) - see the reap in delete_clip.
+_KIND_LABEL = {"joint": "joint", "weight": "blend weight",
+               "root": "root translation"}
 TRANSLATE_ATTRS = ("translateX", "translateY", "translateZ")
+# #796 review round 6 D: `bakeResults` with no `-attribute` flag writes
+# every KEYABLE channel of the nodes it is aimed at, scale among them - so
+# retarget_clip's guard has to be able to ask about the scale triple the
+# same way it asks about the other two, compound included: whatever the
+# rotate triple's parent arm is worth, the scale triple's is worth the
+# same (see _connected_channels on what #796's live gate measured there).
+# Nothing on the author side writes scale, and this widens nothing
+# author_clip asks.
+SCALE_ATTRS = ("scaleX", "scaleY", "scaleZ")
 # Perception caps for preview_clip (Task 4). 16 matches the turntable's
 # frame cap: past that a sheet is unreadable at message resolution.
 MAX_PREVIEW_FRAMES = 16
@@ -96,6 +121,49 @@ _DRIVEN_KEY_TYPES = ("animCurveUU", "animCurveUL", "animCurveUA",
                      "animCurveUT")
 
 
+def partition_driven_keys(cmds, curves) -> Tuple[List[str], List[str]]:
+    """(clip curves, set-driven-key curves), deduplicated and sorted.
+
+    Takes either a flat iterable of curve nodes or the plug -> curves map
+    _anim_curves returns.
+
+    listConnections(type="animCurve") matches DERIVED types, so the U-typed
+    driven-key nodes come back from that query alongside the time-based clip
+    curves - which is how delete_clip's teardown came to delete the caller's
+    rig setup as a side effect of "remove my clip" (#796). Every site that
+    acts on that query's result has to split it again, and three sites
+    splitting independently is how the wrong one ships (#771 review), so
+    they all split HERE.
+    """
+    flat = ([c for cs in curves.values() for c in cs]
+            if isinstance(curves, dict) else list(curves))
+    clip_curves, sdk_curves = set(), set()
+    for curve in flat:
+        bucket = (sdk_curves if cmds.nodeType(curve) in _DRIVEN_KEY_TYPES
+                  else clip_curves)
+        bucket.add(curve)
+    return sorted(clip_curves), sorted(sdk_curves)
+
+
+def clip_curve_plugs(cmds, driven: Dict[str, List[str]]
+                     ) -> Dict[str, List[str]]:
+    """`driven` (an _anim_curves map) with the driven-key curves filtered
+    out and the plugs left with nothing dropped.
+
+    The plug-level face of partition_driven_keys, for the sites that act on
+    a PLUG rather than on a curve node: an SDK curve is indexed by DRIVER
+    VALUE, not time, so a time-range cutKey against one is meaningless at
+    best and silently destroys driver keys that fall in the numeric range at
+    worst, and a setAttr on such a plug raises (it is connection-fed).
+    """
+    out: Dict[str, List[str]] = {}
+    for plug, curves in driven.items():
+        kept, _ = partition_driven_keys(cmds, curves)
+        if kept:
+            out[plug] = kept
+    return out
+
+
 def driven_weight_source(cmds, plug: str):
     """(source plug, kind) for the connection feeding `plug`, or (None, None).
 
@@ -151,9 +219,522 @@ def refuse_driven_weight(what: str, alias: str, src: str, kind: str) -> None:
              "value the connection would immediately override")
 
 
+# The connection kinds a key MEASURABLY cannot land on: #771 measured the
+# poseInterpolator case (setKeyframe returns 0 and creates no curve) and the
+# U-typed driven-key curves feed a plug through the same connection shape.
+#
+# "other" is deliberately NOT here (#796 review round 4 B). A pairBlend is
+# what Maya inserts the moment a plug is both keyed AND constrained - this
+# module's own `_curve_behind_a_blend` documents that - and setKeyframe then
+# lands on the animCurve behind it, which is how author_clip re-authored
+# such a rig before #796. Refusing "other" turned a working keyed+
+# constrained rig into one that can author no clip at all: a REGRESSION
+# dressed as a fix. Whether the key really lands through a pairBlend is a
+# live question; until it is measured, the choice that cannot break a
+# working rig is to key it and NAME what sits in the way.
+UNKEYABLE_KINDS = ("driven_key", "corrective")
+
+
+def refuse_driven_channel(what: str, plug: str, src: str, kind: str) -> None:
+    """The kind-specific refusal for a JOINT channel some connection owns.
+
+    The skeleton-side face of `refuse_driven_weight`, sharing its one
+    classifier (`driven_weight_source`) and differing only in what it can
+    truthfully say: a weight's fix is "delete_objects the interpolator",
+    while a joint channel's is "pose the driver" - and, since #796,
+    delete_clip explicitly does NOT remove a driven key, so a hint that
+    named it would send the caller to a tool that refuses them with "no
+    clip exists".
+
+    Only the kinds in UNKEYABLE_KINDS refuse. Any other kind RETURNS
+    without raising, so every caller can hand this function whatever it
+    classified and no second site can quietly widen the refusal - see that
+    constant for why "other" must not.
+    """
+    if kind == "driven_key":
+        raise HandlerError(
+            "joint channel %s is driven by a set-driven key (%s) - %s "
+            "cannot key a connection-fed plug (measured: setKeyframe on "
+            "one returns 0 and creates no curve), so the clip would ship "
+            "declaring a channel it never keyed" % (plug, src, what),
+            hint="delete_clip does NOT remove a driven key (#796: it is "
+                 "rig setup, not clip motion) - pose the DRIVER attribute "
+                 "instead, which is what actually controls this channel, "
+                 "or delete that curve node deliberately if the channel "
+                 "must carry clip motion; a driven key on a channel this "
+                 "clip does not declare does not block anything")
+    if kind == "corrective":
+        raise HandlerError(
+            "joint channel %s is driven by a corrective interpolator (%s) "
+            "- %s cannot key a connection-fed plug (measured: setKeyframe "
+            "on one returns 0 and creates no curve)" % (plug, src, what),
+            hint="delete_objects the interpolator to return this channel "
+                 "to keyable control, or key a channel it does not drive")
+    # Every other kind: no refusal, deliberately (UNKEYABLE_KINDS). The
+    # caller warns instead, through `_driven_channel_note`.
+
+
 def _joint_plugs(joints: List[str]) -> List[str]:
     return ["%s.%s" % (j, a) for j in joints
             for a in ROTATE_ATTRS + TRANSLATE_ATTRS]
+
+
+# rotateX -> rotate, translateY -> translate. A connection made on the
+# COMPOUND is invisible to a query on its child: listConnections('j.rotateX')
+# reports nothing when the source landed on 'j.rotate'. Maya's rotation anim
+# layers connect exactly that way (animBlendNodeAdditiveRotation.output ->
+# .rotate), while pairBlend connects per-child - so any code that asks "who
+# owns this child plug" has to ask about the parent too (#796 review
+# defect 4).
+_COMPOUND_OF = dict([(a, "rotate") for a in ROTATE_ATTRS]
+                    + [(a, "translate") for a in TRANSLATE_ATTRS]
+                    + [(a, "scale") for a in SCALE_ATTRS])
+
+
+def _parent_plug(plug: str) -> Optional[str]:
+    node, _, attr = plug.rpartition(".")
+    parent = _COMPOUND_OF.get(attr)
+    return "%s.%s" % (node, parent) if parent else None
+
+
+def _connected_channels(cmds, node: str, attrs: Tuple[str, ...],
+                        compound: Optional[str]
+                        ) -> List[Tuple[str, str, str, str]]:
+    """[(attr, plug, source, kind)] for the channels of `node` a
+    connection feeds. `attr` is the channel that cannot be written; `plug`
+    is where the connection actually LANDS - the child itself, or the
+    compound when that is what carries it.
+
+    Child-first, always. Maya reports a child's connection at the compound
+    too, so asking the compound first would blame a sibling's driven key
+    for a channel that is perfectly free. The compound is asked SECOND, and
+    only when no child answered - a defensive arm, not a described
+    mechanism: #796's live gate measured a rotation anim layer on Maya 2027
+    connecting the CHILD (`<layer>.outputY` -> `.rotateY`) with the
+    `.rotate` compound query returning nothing, so the layered case this
+    arm was added for (#796 review defect 4) did not reproduce here. It
+    stays because a compound-borne connection costs one query to rule out
+    and is invisible to a child-only walk if some rig or Maya version does
+    make one. ONE primitive for both faces of the question - author_clip's
+    per-channel refusal and delete_clip's write guard - because two copies
+    of this rule is how the wrong one ships (#771 review).
+
+    `compound` may be None, for a group of channels that HAS no compound:
+    a joint's user-defined keyable attributes, which `bakeResults` writes
+    alongside the triples (#796 review round 6 D). Each is then asked on
+    its own and no parent is asked about, which is the whole truth for a
+    scalar plug.
+    """
+    found: List[Tuple[str, str, str, str]] = []
+    for attr in attrs:
+        plug = "%s.%s" % (node, attr)
+        src, kind = driven_weight_source(cmds, plug)
+        if kind is not None:
+            found.append((attr, plug, src, kind))
+    if found or compound is None:
+        return found
+    plug = "%s.%s" % (node, compound)
+    src, kind = driven_weight_source(cmds, plug)
+    if kind is None:
+        return []
+    return [(a, plug, src, kind) for a in attrs]
+
+
+# Nodes a curve can hide behind. pairBlend is what Maya inserts the moment a
+# plug is both keyed and constrained; animBlendNodeBase is ABSTRACT, so
+# nodeType reports a derived name (animBlendNodeAdditiveDL, ...) and the
+# match below has to be a prefix one.
+_INTERMEDIARY_TYPES = ("pairBlend", "blendWeighted", "unitConversion")
+_INTERMEDIARY_PREFIX = "animBlendNode"
+# A depth of 4 covers a stacked anim-layer chain with a unitConversion at
+# each end; past that this is not a shape a static-pose guard can diagnose.
+_BLEND_WALK_DEPTH = 4
+
+
+def _is_intermediary(node_type: str) -> bool:
+    return (node_type in _INTERMEDIARY_TYPES
+            or node_type.startswith(_INTERMEDIARY_PREFIX))
+
+
+def _curve_behind_a_blend(cmds, plug: str) -> Tuple[Optional[str],
+                                                    Optional[str]]:
+    """(animCurve, the node it hides behind) for a curve that reaches `plug`
+    THROUGH an intermediary node, or (None, None).
+
+    Maya inserts a pairBlend when a plug is both keyed and constrained, and
+    anim layers insert an animBlendNode*; the curve then reaches the plug
+    through that node and _anim_curves' direct query returns NOTHING. The
+    guard passes, the static write lands, and the curve overrides it on the
+    next evaluation - precisely the silent wrongness the guard exists to
+    prevent (#796 defect 2).
+
+    The PARENT COMPOUND is asked when the child plug has no source of its
+    own (#796 review defect 4). Both wirings this walk knows about were
+    MEASURED on Maya 2027 by #796's live gate, and both start from the
+    child: a pairBlend connects per child (outRotateX -> rotateX), and so
+    does a rotation anim layer (`<layer>.outputY` -> `.rotateY`, with the
+    `.rotate` compound query answering nothing). The compound arm was
+    written for a layered wiring that did not reproduce, and is kept as
+    cheap insurance rather than as a claim: a query on a child plug does
+    not report a connection made on its parent, so if any rig does carry
+    one, a child-only walk would never start.
+
+    Deliberately NOT folded into _anim_curves: that query is the TEARDOWN's
+    blast radius. If it started returning curves reached through a blend
+    node, delete_clip would delete a curve feeding a node it does not
+    understand and leave that node behind. Teardown stays direct-only; only
+    the guard looks wider.
+
+    Bounded, cycle-guarded, and a node that cannot answer degrades to "no
+    curve found" rather than crashing a guard (the _outside_wearers idiom).
+    """
+    curve, via, had_source = _walk_to_a_curve(cmds, plug)
+    if curve is not None or had_source:
+        # The child's own source is the story, curve or no curve. Maya
+        # reports a child's connection at the compound as well, so retrying
+        # the parent here would only re-walk the same subgraph.
+        return curve, via
+    parent = _parent_plug(plug)
+    if parent is None:
+        return None, None
+    # The compound is asked ONLY when the connection really lands on it -
+    # `_connected_channels` is the one place that rule lives, and asking it
+    # here is what keeps this function from spreading a SIBLING's source
+    # onto a free axis (#796 review round 6 C). A compound reports its
+    # children's connections too, so a pairBlend on tip.rotateX made this
+    # walk answer "driven" for tip.rotateY and tip.rotateZ as well: the
+    # replace-cut then stepped around two channels with no source and no
+    # keys at all, and `_skip_cut_note` blamed them by name - the exact
+    # wrong-channel report protocol.md promises cannot happen.
+    node, _, attr = plug.rpartition(".")
+    group = [a for a, c in _COMPOUND_OF.items() if c == _COMPOUND_OF[attr]]
+    try:
+        landing = _connected_channels(cmds, node, tuple(sorted(group)),
+                                      _COMPOUND_OF[attr])
+    except Exception:  # noqa: BLE001 - cannot tell: nothing found
+        return None, None
+    if not any(at == parent for _a, at, _s, _k in landing):
+        return None, None
+    curve, via, _ = _walk_to_a_curve(cmds, parent)
+    return curve, via
+
+
+def _walk_to_a_curve(cmds, plug: str) -> Tuple[Optional[str],
+                                               Optional[str], bool]:
+    """_curve_behind_a_blend for ONE plug, child or compound.
+
+    Third element: whether `plug` had a source at all - which is what tells
+    the caller there is nothing to gain by asking the parent compound.
+    """
+    try:
+        src, kind = driven_weight_source(cmds, plug)
+        if not src:
+            return None, None, False
+        if kind != "other":
+            return None, None, True
+        entry = src.split(".")[0]
+        # The cycle guard, not the depth bound, is what keeps this from
+        # re-walking a loop: the bound alone terminates, so only "never
+        # queried twice" tells the two apart (#796 review defect 6).
+        seen: set = set()
+        frontier = [entry]
+        for _ in range(_BLEND_WALK_DEPTH):
+            nxt: List[str] = []
+            for node in frontier:
+                if node in seen:
+                    continue
+                seen.add(node)
+                if not _is_intermediary(cmds.nodeType(node)):
+                    continue
+                for up in cmds.listConnections(node, source=True,
+                                               destination=False) or []:
+                    if cmds.nodeType(up).startswith("animCurve"):
+                        return up, entry, True
+                    nxt.append(up)
+            frontier = nxt
+        return None, None, True
+    except Exception:  # noqa: BLE001 - a node that cannot answer finds nothing
+        return None, None, False
+
+
+def pad_pin_verdicts(cmds, what: str, node: str, attrs: Tuple[str, ...],
+                     compound: str, label: str
+                     ) -> Tuple[List[str], List[str]]:
+    """(the plugs a padding pass may pin, the notes it must report).
+
+    What the PADDING passes ask, where `guard_declared_channels` is the
+    wrong tool: a pad channel belongs to another clip, not to this call's
+    request, so a driven one is skipped and reported rather than refused
+    (#796 review round 4 A - refusing a pad would resurrect the closed
+    loop round 2 opened, where a rig carrying rig setup could author no
+    clip at all).
+
+    Three verdicts, and the middle one is what round 5 B added:
+
+    * a "clip" kind, or no connection at all, pins silently - EVERY pad
+      channel is by definition some other clip's curve, so a note about
+      each would bury the notes that matter;
+    * an UNKEYABLE_KINDS channel is SKIPPED and named (`_skip_pin_note`) -
+      a key on one measurably does not land, so pinning it and counting
+      the pin would be false-green;
+    * any OTHER connection - a pairBlend, an anim layer, a unitConversion
+      - is pinned (round 4 B: skipping it would lose a boundary a rig that
+      works today gets) and named with `_driven_channel_note`, the SAME
+      sentence the DECLARED path gives for the identical connection.
+
+    That last one is the round 4 B asymmetry, one loop over: round 4 A
+    narrowed these loops to the unkeyable kinds and then discarded every
+    other entry, so an intermediary-fed pad channel was pinned, counted,
+    and reported "pinned ... at rest" with no note at all - one scene, two
+    diagnoses, depending only on whether the clip happened to declare the
+    channel (#796 review round 5 B).
+    """
+    landing = {attr: (plug, src, kind) for attr, plug, src, kind
+               in _connected_channels(cmds, node, attrs, compound)}
+    free: List[str] = []
+    notes: List[str] = []
+    for attr in attrs:
+        plug = "%s.%s" % (node, attr)
+        entry = landing.get(attr)
+        if entry is None or entry[2] == "clip":
+            free.append(plug)
+            continue
+        at, src, kind = entry
+        if kind in UNKEYABLE_KINDS:
+            notes.append(_skip_pin_note("%s %s" % (label, plug), src))
+            continue
+        free.append(plug)
+        # `at`, not `plug`: the note names where the connection LANDS (the
+        # child, or the compound that carries it), exactly as the declared
+        # path does - a compound-borne anim layer is ONE fact about one
+        # plug, and author_clip's final de-duplication collapses the three
+        # identical notes into it.
+        notes.append(_driven_channel_note(cmds, what, at, src, kind))
+    return free, notes
+
+
+def _driven_channel_note(cmds, what: str, plug: str, src: str,
+                         kind: str) -> str:
+    """The ONE sentence this module uses for a channel a clip producer is
+    about to write that something other than a clip curve already feeds,
+    when it does NOT refuse.
+
+    Where a curve hides behind an intermediary the note names it the way
+    `guard_static_pose` does - "<curve> behind <node>" - because a caller
+    who meets both must not be told they are looking at two different
+    problems. author_clip naming the intermediary while guard_static_pose
+    named the curve behind it was the wrong-diagnosis class
+    `refuse_driven_weight`'s docstring exists to prevent (#796 review
+    round 4 B).
+    """
+    curve, via = _curve_behind_a_blend(cmds, plug)
+    behind = " (%s behind %s)" % (curve, via) if curve else ""
+    measured = (" - a key on a connection-fed plug measurably does not "
+                "land (#771)" if kind in UNKEYABLE_KINDS else "")
+    return ("%s is driven by %s%s%s - %s writes that channel anyway; what "
+            "the take holds there is the connection's output rather than "
+            "this clip's value, and whether the write lands at all through "
+            "this shape is NOT measured (#796)"
+            % (plug, src, behind, measured, what))
+
+
+def guard_declared_channels(cmds, what: str,
+                            groups: List[Tuple[str, Tuple[str, ...], str]],
+                            refuse_unkeyable: bool = True) -> List[str]:
+    """Classify every channel `what` is about to write; refuse the ones a
+    key measurably cannot land on, and return the warnings for the rest.
+
+    `groups` is [(node, attrs, compound)] - exactly the channels the call
+    DECLARES, never the whole rig: a driven key elsewhere is rig setup and
+    none of this clip's business (#796 review defect 3).
+
+    ONE implementation for both of this repo's clip producers, because two
+    sites classifying independently is how the wrong one ships (#771
+    review). They differ in one thing, and it is the flag: author_clip
+    writes with `setKeyframe`, which #771 MEASURED to return 0 and create
+    nothing on a plug a driven key or a corrective feeds, so it refuses
+    those rather than shipping metadata declaring a channel it never
+    keyed. retarget_clip writes with `bakeResults` - a different mechanism
+    nobody here has measured against a connection-fed plug - so it passes
+    False and warns: refusing there would refuse on a measurement that is
+    not about it, and would stop a rig that retargets today (#796 review
+    round 4 C).
+
+    Kinds outside UNKEYABLE_KINDS never refuse for EITHER caller; see that
+    constant.
+    """
+    notes: List[str] = []
+    for node, attrs, compound in groups:
+        # A compound-less group (round 6 D) has no one word for what it
+        # asked about, so it says what it IS: keyable channels.
+        label = compound or "keyable"
+        try:
+            connected = _connected_channels(cmds, node, attrs, compound)
+        except Exception as exc:   # noqa: BLE001
+            # The write-side guards degrade to "assume blocked" (see
+            # _blocked_rotate_attrs); a REFUSING caller cannot, because the
+            # alternative is keying a plug it cannot classify - and if that
+            # plug turns out to be connection-fed the key does not land and
+            # says nothing. Nothing has been mutated yet, so the refusal
+            # costs the caller only the call. A warning-only caller says so
+            # and carries on: it has no refusal to fall back on.
+            if not refuse_unkeyable:
+                notes.append(
+                    "cannot tell what drives %s's %s channels (%s) - %s "
+                    "writes them blind; check them after the call"
+                    % (_short(node), label, exc, what))
+                continue
+            raise HandlerError(
+                "cannot tell what drives %s's %s channels (%s)"
+                % (_short(node), label, exc),
+                hint="a node that cannot answer a connection query is "
+                     "usually a broken reference; repair or remove it, or "
+                     "author this clip without that joint - %s refuses "
+                     "rather than keying a plug it cannot classify"
+                     % what) from exc
+        for _, plug, src, kind in connected:
+            if kind == "clip":
+                continue
+            if refuse_unkeyable:
+                # Raises for UNKEYABLE_KINDS; returns for every other kind,
+                # which is warned about below rather than refused.
+                refuse_driven_channel(what, plug, src, kind)
+            notes.append(_driven_channel_note(cmds, what, plug, src, kind))
+    # A connection on the COMPOUND is reported once per child, and it is
+    # ONE fact about one plug: three copies of it read as three problems.
+    return list(dict.fromkeys(notes))
+
+
+def _skip_pin_note(what: str, src: str) -> str:
+    """The ONE way the padding pass says a boundary pin was skipped.
+
+    #771 gave the weight loop this sentence; #796 review round 4 A gave
+    the joint and root-translation loops the same guard, and a second
+    wording for one fact is how a reader concludes they are two different
+    problems (the `_stuck_note` rule, one pass over).
+    """
+    return ("%s is driven by %s - its boundary pin was SKIPPED (a key on a "
+            "connection-fed plug silently no-ops); the clip declaring it "
+            "can no longer export that channel" % (what, src))
+
+
+def key_landed(result: Any) -> bool:
+    """Whether a `cmds.setKeyframe` call actually created what it was asked
+    for.
+
+    `setKeyframe` returns the NUMBER of keys it set, and #771 MEASURED 0 as
+    the tell on a connection-fed plug: no curve, no key, and no error.
+    Every call site in this module discarded that number, so the handler
+    GUESSED which writes landed and could ship `mcp_clip` declaring a
+    channel it never keyed - the whole guessing class, turned into an
+    observation (#796 review round 5 C).
+
+    A NON-numeric return is treated as landed. A Maya build (or a seam)
+    that answers None tells us nothing, and assuming failure there would
+    strip a perfectly keyed channel out of the clip's own metadata - the
+    expensive direction of this mistake.
+    """
+    if isinstance(result, (int, float)) and not isinstance(result, bool):
+        return result != 0
+    return True
+
+
+def _lost_write_note(what: str, plug: str, frames: int) -> str:
+    """The ONE way this module says a key it ASKED for was not created.
+
+    Distinct from `_skip_pin_note` on purpose: that one is a write this
+    module DECIDED not to attempt, and this one is a write it attempted and
+    did not get. Collapsing the two would tell a caller their rig refused a
+    channel the tool never even tried (#796 review round 5 C).
+
+    TWO mechanisms lose a write, and this sentence covers both because the
+    caller's fix is the same for either and a second wording for one fact
+    is how a reader concludes they are two problems (`_stuck_note`'s rule).
+    A `setKeyframe` that reports 0 keys is one; the other, on ROOT
+    TRANSLATION only, is the `xform` pose write that has to land first
+    being refused outright by the same connection - a connection-fed plug
+    takes no static write (#796 review round 6 A).
+    """
+    return ("%s's key on %s did NOT land at %d frame(s) (setKeyframe "
+            "reported 0 keys, or - on root translation - the pose write it "
+            "depends on was refused) - something on that plug swallowed "
+            "the write, so this clip neither counts nor declares that "
+            "channel; see the note naming what drives it"
+            % (what, plug, frames))
+
+
+def _lost_pin_note(plug: str, frames: List[float]) -> str:
+    """The same fact about a BOUNDARY PIN rather than an authored key."""
+    return ("the boundary pin on %s did NOT land at frame(s) %s "
+            "(setKeyframe reported 0 keys) - something on that plug "
+            "swallowed the write, so a take that does not declare that "
+            "channel may inherit a neighbour's value there (#796)"
+            % (plug, ", ".join("%g" % f for f in frames)))
+
+
+def _blocked_rotate_attrs(cmds, joint: str) -> List[str]:
+    """Which of `joint`'s rotate children a connection still feeds.
+
+    setAttr on a connection-fed plug raises ("locked or connected and
+    cannot be modified"), and connecting the COMPOUND blocks all three
+    children - so a source on `.rotate` blocks the lot (#796 review defect
+    2). The child-first order and the compound fallback both live in
+    `_connected_channels`, which author_clip's per-channel refusal asks the
+    same question of. A node that cannot answer is reported as fully
+    blocked: skipping a write and saying so beats crashing a teardown
+    mid-mutation.
+    """
+    try:
+        return [a for a, _, _, _ in
+                _connected_channels(cmds, joint, ROTATE_ATTRS, "rotate")]
+    except Exception:  # noqa: BLE001 - cannot tell: do not risk the write
+        return list(ROTATE_ATTRS)
+
+
+def _blocked_transform_attrs(cmds, joint: str) -> List[str]:
+    """`_blocked_rotate_attrs` widened to TRANSLATE, for the bind-pose
+    restore.
+
+    `dagPose -restore` returns a whole transform, so a connection on
+    `.translateY` defeats it exactly the way one on `.rotateX` does - and
+    delete_clip's own sweep already covers translate plugs, so a surviving
+    driven key there is a shape this rig can really carry. The no-bind-pose
+    fallback stays rotate-only because zeroing rotations is all it ever
+    writes. Same degrade rule: a joint that cannot answer is reported as
+    fully stuck rather than crashing a teardown mid-mutation.
+    """
+    try:
+        return [a for a, _, _, _ in
+                (_connected_channels(cmds, joint, ROTATE_ATTRS, "rotate")
+                 + _connected_channels(cmds, joint, TRANSLATE_ATTRS,
+                                       "translate"))]
+    except Exception:  # noqa: BLE001 - cannot tell: report it as stuck
+        return list(ROTATE_ATTRS + TRANSLATE_ATTRS)
+
+
+def _stuck_note(stuck: List[Tuple[str, List[str]]], noun: str,
+                tail: str) -> str:
+    """The ONE way this module names channels a teardown could not return
+    to rest. `stuck` is [(joint short name, blocked attrs)].
+
+    Both of delete_clip's teardown branches - the bind-pose restore and the
+    no-bind-pose zeroing - report the same fact about the same channels and
+    differ only in HOW the return failed, so they say it the same way and
+    differ only in `tail`. Two vocabularies for one fact is how a reader
+    concludes they are two different problems (#796 review round 3 M2).
+
+    The count is the number of CHANNELS the list names, not the number of
+    joints it groups them under: "left 2 joint channel(s) as they are -
+    root (translateZ); tip (rotateX, rotateY)" was MEASURED, and 2 is the
+    joint count while three channels are stuck (#796 review round 4 D).
+    Both call sites now count exactly what they list.
+    """
+    total = sum(len(attrs) for _, attrs in stuck)
+    named = "; ".join("%s (%s)" % (short, ", ".join(attrs))
+                      for short, attrs in stuck)
+    return ("left %d joint %s as they are - %s: a connection still feeds "
+            "those channels (a surviving set-driven key, an anim layer, a "
+            "constraint), %s" % (total, noun, named, tail))
 
 
 def guard_static_pose(cmds, root_long: str, joints: List[str],
@@ -163,55 +744,102 @@ def guard_static_pose(cmds, root_long: str, joints: List[str],
     Structural, not metadata: a hand-keyed channel fights a static write the
     same way a clip does. The clip name is named when metadata exists.
 
-    Two kinds of curve reach these plugs and each needs its own exit. A
-    time-based curve is this module's currency, so delete_clip is a real
-    fix; a driven-key (U-typed) curve is a connection reading a DRIVER
-    attribute, and "the clip owns these channels; delete_clip" is a wrong
-    diagnosis for it (#767 M2 - the same reason guard_static_weights leaves
-    those curves to the driven_weight_source classifier).
+    FOUR kinds of curve reach these plugs and each needs its own exit,
+    because each has a different fix. A time-based curve is this module's
+    currency, so delete_clip is a real fix; a driven-key (U-typed) curve is
+    a connection reading a DRIVER attribute, and "the clip owns these
+    channels; delete_clip" is a wrong diagnosis for it (#767 M2 - the same
+    reason guard_static_weights leaves those curves to the
+    driven_weight_source classifier); a curve reaching a plug THROUGH a
+    pairBlend or an anim-layer blend node is invisible to delete_clip's
+    direct query, so naming delete_clip for THAT one is a dead-end hint of
+    a third kind (#796 defect 2); and a driven key reached through such a
+    node is a fourth, because deleting its curve leaves the blend node
+    owning the plug and the guard refusing with nothing left to name (#796
+    review defect 7).
 
-    When both drive the skeleton the caller is told about both AND warned
-    what delete_clip would cost, because delete_clip's teardown reaps
-    whatever _anim_curves returned - and that query asks for type
-    "animCurve", which matches the derived U-typed nodes too. So the clip
-    fix really does destroy the driven keys as well: saying otherwise would
-    send a caller to delete rig setup this refusal had just told them was a
-    separate concern."""
-    driven = _anim_curves(cmds, _joint_plugs(joints))
-    if not driven:
+    delete_clip now leaves the driven-key curves standing and reports them
+    (#796 defect 1), so when both drive the skeleton the caller is told
+    about both and told plainly that the clip fix will not cost them their
+    rig setup - and will not silently return those channels to static
+    either. This paragraph used to say the opposite, correctly, back when
+    the teardown reaped whatever _anim_curves returned."""
+    plugs = _joint_plugs(joints)
+    driven = _anim_curves(cmds, plugs)
+    clip_curves, sdk_curves = partition_driven_keys(cmds, driven)
+    # Ordered by first sighting so the message reads the way the rig does.
+    hidden: Dict[Tuple[str, str], None] = {}
+    # #796 review defect 7: an INDIRECT driven key is kept apart from the
+    # direct ones rather than merged into them. "Remove the driven key
+    # (delete its curve node)" is false of one behind a blend node and
+    # never names the intermediary, so a caller who follows it destroys rig
+    # setup, is refused again, and now has no curve left to name.
+    hidden_sdk: Dict[Tuple[str, str], None] = {}
+    for plug in plugs:
+        if plug in driven:
+            continue
+        curve, via = _curve_behind_a_blend(cmds, plug)
+        if curve is None:
+            continue
+        _, indirect_sdk = partition_driven_keys(cmds, [curve])
+        bucket = hidden_sdk if indirect_sdk else hidden
+        bucket.setdefault((curve, via), None)
+    if not (clip_curves or sdk_curves or hidden or hidden_sdk):
         return
-    clip_curves: List[str] = []
-    sdk_curves: List[str] = []
-    for curves in driven.values():
-        for curve in curves:
-            bucket = (sdk_curves if cmds.nodeType(curve) in _DRIVEN_KEY_TYPES
-                      else clip_curves)
-            if curve not in bucket:
-                bucket.append(curve)
-    sdk_named = ", ".join(sorted(sdk_curves))
+    sdk_named = ", ".join(sdk_curves)
     sdk_hint = ("remove the driven key (delete its curve node) to return "
                 "those channels to static posing")
-    if not clip_curves:
+    hidden_named = ", ".join("%s behind %s" % pair for pair in hidden)
+    hidden_hint = ("delete_clip's teardown queries DIRECT curve connections "
+                   "only, so it will NOT remove a curve hiding behind a "
+                   "blend node; delete or disconnect %s, then the curve "
+                   "behind it, to return those channels to static posing"
+                   % ", ".join(sorted({via for _, via in hidden})))
+    hidden_sdk_named = ", ".join("%s behind %s" % pair for pair in hidden_sdk)
+    hidden_sdk_hint = ("a driven-key curve reached THROUGH a blend node is "
+                       "not freed by deleting the curve alone - %s still "
+                       "owns the plug and this guard would refuse again; "
+                       "delete or disconnect that node as well to return "
+                       "those channels to static posing"
+                       % ", ".join(sorted({via for _, via in hidden_sdk})))
+    rig_setup_named = "; ".join(x for x in (sdk_named, hidden_sdk_named) if x)
+    rig_setup_hint = "; ".join(
+        h for h, present in ((sdk_hint, sdk_curves),
+                             (hidden_sdk_hint, hidden_sdk)) if present)
+    if not clip_curves and not hidden:
         raise HandlerError(
             "%s refuses while set-driven keys drive this skeleton (%s) - a "
             "static write here would be overridden the next time the driver "
-            "attribute moves" % (what, sdk_named),
-            hint=sdk_hint)
-    records = clip_meta(cmds, root_long)
-    label = ((" (clip%s %s)" % ("s" if len(records) > 1 else "",
-                                ", ".join(repr(r["name"]) for r in records)))
-             if records else "")
-    message = ("%s refuses while animation curves drive this skeleton%s - a "
-               "static write here would be overridden on the next frame "
-               "change" % (what, label))
-    hint = ("author_clip re-authors the motion; delete_clip removes the "
-            "curves and returns the skeleton to static posing")
-    if sdk_curves:
+            "attribute moves" % (what, rig_setup_named),
+            hint=rig_setup_hint)
+    if clip_curves:
+        records = clip_meta(cmds, root_long)
+        label = ((" (clip%s %s)"
+                  % ("s" if len(records) > 1 else "",
+                     ", ".join(repr(r["name"]) for r in records)))
+                 if records else "")
+        message = ("%s refuses while animation curves drive this skeleton%s "
+                   "- a static write here would be overridden on the next "
+                   "frame change" % (what, label))
+        hint = ("author_clip re-authors the motion; delete_clip removes the "
+                "curves and returns the skeleton to static posing")
+    else:
+        message = ("%s refuses while an animation curve drives this skeleton "
+                   "through a blend node (%s) - a static write here would be "
+                   "overridden on the next frame change"
+                   % (what, hidden_named))
+        hint = hidden_hint
+    if sdk_curves or hidden_sdk:
         message += ("; set-driven keys drive it as well (%s), which is rig "
-                    "setup rather than clip motion" % sdk_named)
-        hint += ("; note that delete_clip's teardown would delete those "
-                 "driven-key curves too, so re-create them afterwards or "
-                 "%s instead" % sdk_hint)
+                    "setup rather than clip motion" % rig_setup_named)
+        hint += ("; delete_clip leaves those driven-key curves standing (rig "
+                 "setup is not clip motion), so %s if those channels must be "
+                 "static too" % rig_setup_hint)
+    if clip_curves and hidden:
+        message += ("; an animation curve also reaches it through a blend "
+                    "node (%s), which delete_clip's direct query cannot see"
+                    % hidden_named)
+        hint += "; " + hidden_hint
     raise HandlerError(message, hint=hint)
 
 
@@ -224,10 +852,8 @@ def guard_static_weights(cmds, node: str, aliases: List[str],
     owns these channels; delete_clip" would be a wrong diagnosis with a
     dead-end hint. They fall through to the per-request
     driven_weight_source classifier, which names them (#771)."""
-    driven = _anim_curves(cmds, ["%s.%s" % (node, a) for a in aliases])
-    driven = {plug: kept for plug, curves in driven.items()
-              if (kept := [c for c in curves
-                          if cmds.nodeType(c) not in _DRIVEN_KEY_TYPES])}
+    driven = clip_curve_plugs(
+        cmds, _anim_curves(cmds, ["%s.%s" % (node, a) for a in aliases]))
     if driven:
         raise HandlerError(
             "%s refuses while animation curves drive %d weight channel(s) "
@@ -404,9 +1030,31 @@ def _rest_value(cmds, plug: str, rest: Dict[str, float],
     return value
 
 
+def _skip_cut_note(plug: str, curves: List[str],
+                   via: Optional[str] = None) -> str:
+    """The ONE way this module says a destructive range-cut stepped around
+    a plug (#796 review round 5 A).
+
+    Not cutting silently is the same sin as cutting silently: the caller
+    has to know which channel kept its keys, or a stale value it never sees
+    named becomes "the tool is flaky". `via` names the intermediary when
+    the curve reaches the plug through one, spelled the way
+    `guard_static_pose` spells it - one scene, one diagnosis."""
+    named = ", ".join(curves)
+    return ("did NOT clear the replaced clip's frame range on %s: %s is a "
+            "set-driven key, indexed by DRIVER VALUE rather than by time, "
+            "so that frame range is a numeric range on the driver and a "
+            "cutKey against it would destroy rig setup (#796) - the "
+            "channel keeps every key it had"
+            % (plug, "%s behind %s" % (named, via) if via else named))
+
+
 def cut_replaced_range(cmds, joints: List[str], replaced: Dict[str, Any],
-                       weight_plugs: Optional[List[str]] = None) -> None:
+                       weight_plugs: Optional[List[str]] = None) -> List[str]:
     """Clear a REPLACED clip's old keys on every channel it might have used.
+
+    Returns the notes naming any plug it stepped around; every caller
+    appends them to its own `warnings`.
 
     Widened past `end_frame` by GAP_FRAMES (#718 final review Fix 2):
     `end_frame` is `int(round(measured_end))` (#636), which rounds DOWN
@@ -427,11 +1075,61 @@ def cut_replaced_range(cmds, joints: List[str], replaced: Dict[str, Any],
     `_hierarchy_joints(root_long)`, retarget_clip's `target_joints`), not
     just the channels the replaced record happened to declare - the same
     over-inclusive plug set author_clip has always cut against.
+
+    PARTITIONED, and this is the only site in this module that mutates a
+    time RANGE over that over-inclusive plug set (#796 review round 5 A).
+    `clip_curve_plugs`' docstring names this exact hazard: a set-driven
+    key's curve is indexed by DRIVER VALUE, so `time=(0, 30)` here is the
+    driver interval 0..30 and a `cutKey` silently destroys every driver key
+    whose NUMBER falls in the replaced clip's frame range. The four
+    read-only sites had the partition; the one destructive site did not.
+    Round 2 is what made it reachable: before #796 author_clip refused a
+    rig carrying a driven key outright, so this cut never ran on one.
+
+    Narrowed by exactly ONE kind and nothing else - a plug with a clip
+    curve is cut, and so is a plug with no curve at all (cutKey on it is a
+    no-op, and skipping those would be a second, silent behaviour change).
     """
+    notes: List[str] = []
     for plug in sorted(set(_joint_plugs(joints) + list(weight_plugs or []))):
+        # Per plug, not one sweep: a node that cannot answer (a broken
+        # reference) must cost one skipped cut, never a traceback halfway
+        # through a mutation the caller has already checkpointed - the
+        # `_blocked_rotate_attrs` degrade rule, on the side where "cannot
+        # tell" means "do not destroy".
+        via: Optional[str] = None
+        try:
+            driven = _anim_curves(cmds, [plug])
+            sdk: List[str] = []
+            if plug in driven:
+                if plug not in clip_curve_plugs(cmds, driven):
+                    sdk = driven[plug]
+            else:
+                # #796 review defect 7's shape, on the destructive side: a
+                # driven key can reach a plug THROUGH a pairBlend or an
+                # anim layer, where the direct query above sees NOTHING.
+                # Whether `cutKey` follows a connection to the curve behind
+                # it is not measured here - and skipping is right under
+                # both answers, because if it does not follow, the cut it
+                # skipped was a no-op anyway. A CLIP curve behind a blend
+                # node is still cut, exactly as before.
+                curve, via = _curve_behind_a_blend(cmds, plug)
+                if curve is not None:
+                    _, sdk = partition_driven_keys(cmds, [curve])
+        except Exception as exc:  # noqa: BLE001 - cannot tell: do not cut
+            notes.append(
+                "did NOT clear the replaced clip's frame range on %s: "
+                "nothing could tell what drives it (%s), and a time-range "
+                "cutKey on a set-driven key destroys rig setup - the "
+                "channel keeps every key it had" % (plug, exc))
+            continue
+        if sdk:
+            notes.append(_skip_cut_note(plug, sdk, via))
+            continue
         cmds.cutKey(plug, time=(replaced["start_frame"],
                                replaced["end_frame"] + clipmath.GAP_FRAMES),
                     clear=True)
+    return notes
 
 
 def register_clip(cmds, root_long: str, name: str, fps: int, start: int,
@@ -563,6 +1261,29 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
         if kind is not None and kind != "clip":
             refuse_driven_weight("author_clip", alias, src, kind)
 
+    # #796 review round 3 M1: the SAME refusal on the joint side, and for
+    # the same measured reason - the two loops read alike deliberately.
+    # The foreign-curve check below counts the CLIP partition only (a
+    # driven key elsewhere on the rig must not block a first clip, #796
+    # review defect 3), which left the joints with no per-channel guard at
+    # all: setKeyframe on the connection-fed plug returns 0, creates
+    # nothing, and the handler still wrote mcp_clip declaring that joint
+    # keyed. PER CHANNEL, never per rig: only the channels THIS clip
+    # declares are asked, so a driven key on any other channel stays out
+    # of the way.
+    #
+    # `warnings` starts HERE rather than below, because that guard also
+    # NAMES the channels it does not refuse (#796 review round 4 B): a
+    # pairBlend or an anim layer on a declared channel is keyed as it
+    # always was, and reported.
+    declared_groups = [(j, ROTATE_ATTRS, "rotate") for j in
+                       sorted({j for key in resolved_keys
+                               for j in key["rotations"]})]
+    if any(k["root_position"] is not None for k in resolved_keys):
+        declared_groups.append((root_long, TRANSLATE_ATTRS, "translate"))
+    warnings: List[str] = guard_declared_channels(
+        cmds, "author_clip", declared_groups)
+
     if loop:
         violations = clipmath.loop_violations(resolved_keys[0],
                                               resolved_keys[-1])
@@ -584,7 +1305,15 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
 
     weight_plugs = ["%s.%s" % (alias_map[a], a) for a in alias_map
                     if not isinstance(alias_map[a], HandlerError)]
-    existing = _anim_curves(cmds, _joint_plugs(joints) + weight_plugs)
+    # #796 review defect 3: the CLIP partition only. A U-typed set-driven
+    # key is rig setup, not hand-authored clip motion, and this refusal's
+    # hint names delete_clip - which no longer removes those curves and
+    # refuses the same rig with "no clip exists". Counting them here made a
+    # rig carrying a driven key and no clip unable to author a first clip,
+    # with each tool naming the other as the fix. The hint stays true
+    # because what it counts is exactly what delete_clip deletes.
+    existing = clip_curve_plugs(
+        cmds, _anim_curves(cmds, _joint_plugs(joints) + weight_plugs))
     if existing and not records:
         raise HandlerError(
             "this skeleton carries %d hand-authored animation curve "
@@ -593,7 +1322,6 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
             hint="replacing hand-authored animation silently would destroy "
                  "work; delete_clip removes it if that is intended")
 
-    warnings: List[str] = []
     for action in session.stop_idle_ipr(cmds):
         warnings.append(
             action + " before keyframe work - an idle IPR re-renders on "
@@ -662,7 +1390,13 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
         return ["%s.%s" % (matches[0], a) for a in ROTATE_ATTRS], ""
 
     root_translate_plugs = ["%s.%s" % (root_long, a) for a in TRANSLATE_ATTRS]
-    mine = {
+    # What this call ASKED for. `mine` - what it actually GOT - is derived
+    # from the writes' own return values after the keying loop below (#796
+    # review round 5 C), and the two differ only when a write vanishes.
+    # Rest capture runs off the DECLARED set deliberately: it happens
+    # before any key is written, and recording a rest value for a channel
+    # that then fails to key costs nothing (nobody pins it either way).
+    declared = {
         "joints": sorted({_short(j) for key in resolved_keys
                           for j in key["rotations"]}),
         "weight_channels": list(weight_channels),
@@ -672,16 +1406,16 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     rest = _rest_map(cmds, root_long)
     rest_before = set(rest)
     bind = _bind_rotations(cmds, root_long, joints)
-    for short in mine["joints"]:
+    for short in declared["joints"]:
         triple = bind.get(short)
         for plug, bind_v in zip(_rot_plugs(short),
                                 triple if triple is not None
                                 else (None, None, None)):
             _capture_rest(cmds, plug, rest, value=bind_v)
-    if mine["root_position_used"]:
+    if declared["root_position_used"]:
         for plug in root_translate_plugs:
             _capture_rest(cmds, plug, rest)
-    for alias in mine["weight_channels"]:
+    for alias in declared["weight_channels"]:
         # By rule, not by capture: weights-all-zero IS the reset (phase 5).
         rest.setdefault(_rest_key("%s.%s" % (alias_map[alias], alias)), 0.0)
 
@@ -731,7 +1465,11 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     # consumer reads.
     replaced, kept = clipmath.drop_record(records, name)
     if replaced is not None:
-        cut_replaced_range(cmds, joints, replaced, weight_plugs)
+        # #796 review round 5 A: the cut steps around a driven-key plug and
+        # SAYS which one - a stale range nobody was told about reads as a
+        # flaky tool.
+        warnings.extend(cut_replaced_range(cmds, joints, replaced,
+                                           weight_plugs))
 
     start_frame = clipmath.next_start_frame(kept)
 
@@ -742,27 +1480,72 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
         warnings.append("scene time unit changed %r -> %r so a frame is "
                         "1/%d s" % (prev_unit, unit, fps))
 
-    keyed: List[tuple] = []   # (node, attr) pairs, for tangents
+    keyed: List[tuple] = []   # (node, attr) pairs that LANDED, for tangents
+    # #796 review round 5 C: OBSERVED, never assumed. Everything this call
+    # counts, records in `mcp_clip` and reports is derived from these three
+    # sets, which only a write that actually created a key adds to.
+    landed_joints: set = set()
+    landed_weights: set = set()
+    landed_root = False
+    lost_writes: Dict[str, int] = {}
+
+    def _key(node: str, attr: str, frame: float, value: float) -> bool:
+        """setKeyframe, with its return read. True when the key exists."""
+        if key_landed(cmds.setKeyframe(node, attribute=attr, time=frame,
+                                       value=value)):
+            keyed.append((node, attr))
+            return True
+        plug = "%s.%s" % (node, attr)
+        lost_writes[plug] = lost_writes.get(plug, 0) + 1
+        return False
+
+    def _place_root(position: List[float]) -> bool:
+        """Move the root to one key's world position. False when that write
+        was refused - counted and reported exactly as a swallowed
+        `setKeyframe` is (`key_landed`'s verdict, reached the other way),
+        because the three translate keys that depend on it cannot be
+        written either. NOT keyed at a guessed value: a key written from a
+        pose write that never happened would be this handler's own guess at
+        where the root is, which is the class round 5 C removed."""
+        try:
+            cmds.xform(root_long, worldSpace=True, translation=position)
+        except Exception:  # noqa: BLE001 - a refusal is data, not a crash
+            for attr in TRANSLATE_ATTRS:
+                plug = "%s.%s" % (root_long, attr)
+                lost_writes[plug] = lost_writes.get(plug, 0) + 1
+            return False
+        return True
+
     for key in resolved_keys:
         frame = start_frame + key["time_s"] * fps
         for joint, triple in key["rotations"].items():
             for attr, value in zip(ROTATE_ATTRS, triple):
-                cmds.setKeyframe(joint, attribute=attr, time=frame,
-                                 value=units.degrees_to_ui(cmds, value))
-                keyed.append((joint, attr))
+                if _key(joint, attr, frame, units.degrees_to_ui(cmds, value)):
+                    landed_joints.add(joint)
         if key["root_position"] is not None:
-            cmds.xform(root_long, worldSpace=True,
-                       translation=key["root_position"])
-            local = [float(v) for v in cmds.xform(
-                root_long, query=True, translation=True)]
-            for attr, value in zip(TRANSLATE_ATTRS, local):
-                cmds.setKeyframe(root_long, attribute=attr, time=frame,
-                                 value=value)
-                keyed.append((root_long, attr))
+            # #796 review round 6 A: this xform is a STATIC write to the
+            # very translate plugs `guard_declared_channels` may have
+            # decided only to WARN about - a pairBlend is what Maya inserts
+            # the moment a plug is both keyed AND constrained, and round 4
+            # B deliberately does not refuse that rig because it authors
+            # clips today. A connection-fed plug refuses a static write, so
+            # on such a root this RAISED: a traceback after
+            # auto_checkpoint, with key 0's rotations already in the scene.
+            # A write that cannot land is REPORTED the way every other lost
+            # write is, and the rest of the clip still ships.
+            # Nested, never `continue`: this key's BLEND WEIGHTS are
+            # written below and have nothing to do with the root's
+            # translate plugs - skipping the rest of the key would lose a
+            # channel that can be written perfectly well.
+            if _place_root(key["root_position"]):
+                local = [float(v) for v in cmds.xform(
+                    root_long, query=True, translation=True)]
+                for attr, value in zip(TRANSLATE_ATTRS, local):
+                    if _key(root_long, attr, frame, value):
+                        landed_root = True
         for alias, value in key["blend_weights"].items():
-            cmds.setKeyframe(alias_map[alias], attribute=alias, time=frame,
-                             value=value)
-            keyed.append((alias_map[alias], alias))
+            if _key(alias_map[alias], alias, frame, value):
+                landed_weights.add(alias)
 
     # MEASURED end frame (#636): the latest key at or after this clip's
     # start, re-read from the curves. Nothing above start_frame can belong
@@ -802,6 +1585,33 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
                         time=(start_frame, measured_end),
                         edit=True, inTangentType=tangent,
                         outTangentType=tangent)
+
+    # #796 review round 5 C: what this clip actually GOT. Every channel
+    # below - padded, back-filled, recorded in `mcp_clip`, counted in the
+    # result - comes from here rather than from `declared`, so a write that
+    # vanished can no longer ship as a channel the take declares and has no
+    # curve for. When every write lands (the measured-today case, and the
+    # only one before a pairBlend is in the way) this is `declared`
+    # verbatim. NOT a refusal: what a key does through an intermediary is
+    # unmeasured, and refusing there would stop a keyed-and-constrained rig
+    # that authors clips today (round 4 B) - the report just has to be true
+    # under both outcomes.
+    for plug in sorted(lost_writes):
+        warnings.append(_lost_write_note("author_clip", plug,
+                                         lost_writes[plug]))
+    mine = {
+        "joints": sorted({_short(j) for j in landed_joints}),
+        "weight_channels": [a for a in weight_channels
+                            if a in landed_weights],
+        "root_position_used": landed_root,
+    }
+    if lost_writes and not (landed_joints or landed_weights or landed_root):
+        warnings.append(
+            "this clip keyed NOTHING: every one of the %d write(s) it "
+            "asked for was swallowed by something on the plug, so %r is "
+            "registered as an empty take that declares no channel at all - "
+            "check the connections named above before exporting it"
+            % (sum(lost_writes.values()), name))
 
     # --- the self-contained rule (#718) --------------------------------
     # All clips share ONE curve per channel, so a channel this clip never
@@ -848,10 +1658,19 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     held_channels: List[str] = []
     back_filled_channels: List[str] = []
 
-    def _pin(plug: str, frames: List[int], value: float) -> None:
+    def _pin(plug: str, frames: List[int], value: float) -> List[int]:
+        """Pin `plug` at `value` on each of `frames`. Returns the frames
+        whose write did NOT land (#796 review round 5 C) - the same
+        observation the authored keys make, at the fourth setKeyframe call
+        site. The tangent edit is skipped for a frame that has no key:
+        there is nothing there to tangent."""
         node, attr = plug.rsplit(".", 1)
+        lost: List[int] = []
         for frame in frames:
-            cmds.setKeyframe(node, attribute=attr, time=frame, value=value)
+            if not key_landed(cmds.setKeyframe(node, attribute=attr,
+                                               time=frame, value=value)):
+                lost.append(frame)
+                continue
             # #718 review Fix 2: a pinned key is scoped to its own frame,
             # and FLAT - not the clip's interpolation. A pin is not
             # authored motion; flat is the honest type, and it keeps a
@@ -860,6 +1679,7 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
             cmds.keyTangent(node, attribute=attr, time=(frame, frame),
                             edit=True, inTangentType="flat",
                             outTangentType="flat")
+        return lost
 
     # #718 review wave 2 Fix 1+2 (one helper, not three copies): the pin
     # VALUE, not just the condition. A missing boundary is pinned at rest
@@ -899,12 +1719,37 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
         own = sorted(t for t in times
                      if start_frame <= t <= max(end_frame, measured_end))
         if not own:
-            _pin(plug, missing, _rest_value(cmds, plug, rest, warnings))
-            return "rest"
-        for frame in missing:
-            source = own[0] if frame == start_frame else own[-1]
-            _pin(plug, [frame], float(cmds.getAttr(plug, time=source)))
-        return "held"
+            lost = _pin(plug, missing, _rest_value(cmds, plug, rest,
+                                                   warnings))
+        else:
+            lost = []
+            for frame in missing:
+                source = own[0] if frame == start_frame else own[-1]
+                lost += _pin(plug, [frame],
+                             float(cmds.getAttr(plug, time=source)))
+        # #796 review round 5 C: a pin that did not land is not a pin. The
+        # caller counts this verdict into `padded_channels`/
+        # `held_channels`, so returning one for a plug where nothing was
+        # written is exactly the false-green round 4 A closed on the
+        # SKIPPED channels - the same hole, one step further in.
+        if lost:
+            warnings.append(_lost_pin_note(plug, lost))
+        if len(lost) == len(missing):
+            return ""
+        return "rest" if not own else "held"
+
+    def _back_fill(plugs: List[str], frames: List[int]) -> bool:
+        """Pin every plug of one channel at rest across `frames`. True when
+        at least one of those writes landed - which is the only thing that
+        makes `back_filled_channels` true (#796 review round 5 C)."""
+        landed = False
+        for plug in plugs:
+            lost = _pin(plug, frames, _rest_value(cmds, plug, rest,
+                                                  warnings))
+            if lost:
+                warnings.append(_lost_pin_note(plug, lost))
+            landed = landed or len(lost) < len(frames)
+        return landed
 
     # #718 review Fix 1 (wave 1): pad by BOUNDARY-KEY PRESENCE, not by
     # mention. A clip may declare a channel in `mine` (it names it on SOME
@@ -923,7 +1768,25 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
         if not plugs:
             warnings.append(warning)
             continue
-        kinds = {kind for kind in (_pad_boundaries(p) for p in plugs) if kind}
+        # #796 review round 4 A: the treatment the weight loop below has
+        # had since #771, which this loop never got. The per-channel
+        # refusal above asks only about the channels THIS call declares -
+        # precisely the ones a pad is NOT: `pad_joints` is other clips'
+        # channels unioned with this call's. Another clip's channel can
+        # have become driven out of band, `_pin`'s setKeyframe silently
+        # no-ops on it (measured), and reporting it "pinned" below would
+        # be false-green. A pad is not the caller's request, so it is
+        # SKIPPED and said - never refused, which would resurrect the
+        # closed loop round 2 opened. Only UNKEYABLE_KINDS skip: a
+        # pairBlend still gets its pin, for defect B's reason - and, since
+        # round 5 B, the same NOTE the declared path gives it.
+        free, notes = pad_pin_verdicts(
+            cmds, "author_clip", plugs[0].rsplit(".", 1)[0], ROTATE_ATTRS,
+            "rotate", "joint channel")
+        warnings.extend(notes)
+        if not free:
+            continue
+        kinds = {kind for kind in (_pad_boundaries(p) for p in free) if kind}
         if "held" in kinds:
             held_channels.append(short)
         elif "rest" in kinds:
@@ -940,13 +1803,14 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
         # out-of-band (its curve deleted, then a corrective wired). _pin's
         # setKeyframe would silently no-op on it (measured), so claiming
         # "pinned" below would be false-green - skip and say so instead.
+        # ANY non-clip kind skips here, which is one kind wider than the
+        # joint loop above: this side's own refusal (refuse_driven_weight,
+        # #771) refuses every non-clip kind for a DECLARED weight, so the
+        # pad matches the refusal on its own side of the rig rather than
+        # the other side's.
         src, drive_kind = driven_weight_source(cmds, "%s.%s" % (node, alias))
         if drive_kind is not None and drive_kind != "clip":
-            warnings.append(
-                "weight channel %r is driven by %s - its boundary pin was "
-                "SKIPPED (a key on a connection-fed plug silently no-ops); "
-                "the clip declaring it can no longer export that channel"
-                % (alias, src))
+            warnings.append(_skip_pin_note("weight channel %r" % alias, src))
             continue
         kind = _pad_boundaries("%s.%s" % (node, alias))
         if kind == "held":
@@ -954,8 +1818,15 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
         elif kind == "rest":
             padded_channels.append(alias)
     if pad_root_position:
-        kinds = {kind for kind in (_pad_boundaries(p)
-                                   for p in root_translate_plugs) if kind}
+        # Same #796 round 4 A treatment as the joint loop (and round 5 B's
+        # note with it): this loop had no guard of any kind, and a root
+        # another clip moves can have become driven out of band exactly
+        # like a joint channel.
+        free, notes = pad_pin_verdicts(
+            cmds, "author_clip", root_long, TRANSLATE_ATTRS, "translate",
+            "root translation channel")
+        warnings.extend(notes)
+        kinds = {kind for kind in (_pad_boundaries(p) for p in free) if kind}
         if "held" in kinds:
             held_channels.append("root_position")
         elif "rest" in kinds:
@@ -994,21 +1865,17 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
             if not plugs:
                 warnings.append(warning)
                 continue
-            for plug in plugs:
-                _pin(plug, their_frames, _rest_value(cmds, plug, rest,
-                                                      warnings))
-            back_filled_channels.append(short)
+            if _back_fill(plugs, their_frames):
+                back_filled_channels.append(short)
         for alias in mine["weight_channels"]:
             if alias in theirs["weight_channels"]:
                 continue
-            plug = "%s.%s" % (alias_map[alias], alias)
-            _pin(plug, their_frames, _rest_value(cmds, plug, rest, warnings))
-            back_filled_channels.append(alias)
+            if _back_fill(["%s.%s" % (alias_map[alias], alias)],
+                          their_frames):
+                back_filled_channels.append(alias)
         if mine["root_position_used"] and not theirs["root_position_used"]:
-            for plug in root_translate_plugs:
-                _pin(plug, their_frames, _rest_value(cmds, plug, rest,
-                                                      warnings))
-            back_filled_channels.append("root_position")
+            if _back_fill(root_translate_plugs, their_frames):
+                back_filled_channels.append("root_position")
     back_filled = {
         "clips": [r["name"] for r in kept] if back_filled_channels else [],
         "channels": back_filled_channels,
@@ -1021,14 +1888,16 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
                ", ".join(back_filled["clips"])))
     _write_rest(cmds, root_long, rest)
 
+    # #796 review round 5 C: `mine` - what LANDED - not the declared set.
+    # A record naming a channel with no curve is what every downstream
+    # reader trusts: export bakes a take declaring it, the pad passes of
+    # the NEXT clip pin against it, and delete_clip's reap goes looking for
+    # a curve that was never created.
     register_clip(
         cmds, root_long, name, fps, start_frame, end_frame, loop=loop,
-        interpolation=interpolation,
-        joints=sorted({_short(j) for key in resolved_keys
-                       for j in key["rotations"]}),
-        weight_channels=weight_channels,
-        root_position_used=any(k["root_position"] is not None
-                               for k in resolved_keys))
+        interpolation=interpolation, joints=mine["joints"],
+        weight_channels=mine["weight_channels"],
+        root_position_used=mine["root_position_used"])
 
     # MEASURED per key: drive the time to each key's frame and read the
     # bound meshes against the evaluated FIRST key. Key 0 is 0 by
@@ -1072,11 +1941,12 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
         "fps": fps,
         "duration_s": duration_s,
         "frames": frames,
-        "keyed_joints": len({j for key in resolved_keys
-                             for j in key["rotations"]}),
-        "keyed_weight_channels": weight_channels,
-        "root_position_keyed": any(k["root_position"] is not None
-                                   for k in resolved_keys),
+        # #796 review round 5 C: all three are what the writes REPORTED,
+        # not what the call asked for. "keyed" is a claim about the scene,
+        # and it used to be a re-read of the request.
+        "keyed_joints": len(landed_joints),
+        "keyed_weight_channels": mine["weight_channels"],
+        "root_position_keyed": mine["root_position_used"],
         "interpolation": interpolation,
         "loop": loop,
         "start_frame": start_frame,
@@ -1114,10 +1984,27 @@ def delete_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     weight_plugs = ["%s.%s" % (node, a) for a, node in alias_map.items()
                     if not isinstance(node, HandlerError)]
     driven = _anim_curves(cmds, _joint_plugs(joints) + weight_plugs)
-    if not driven and not records:
+    # #796: listConnections(type="animCurve") matches the U-typed
+    # set-driven-key nodes too. They are rig setup, not clip motion - this
+    # tool leaves them standing and reports them, so everything below acts
+    # on the clip partition ONLY.
+    #
+    # Classified ONCE, here, while every one of these nodes still exists.
+    # A partition taken after the cut would ask nodeType about names this
+    # call has already deleted, and real Maya raises "No object matches
+    # name" for those - which is a traceback mid-mutation, after the range
+    # is cut but before the surviving metadata is written (#796 review
+    # defect 1). Names are the currency below; the scene is asked nothing.
+    clip_driven = clip_curve_plugs(cmds, driven)
+    before_curves, sdk_curves = partition_driven_keys(cmds, driven)
+    sdk_named = ", ".join(sdk_curves)
+    if not clip_driven and not records:
         raise HandlerError(
             "no clip exists on %s" % root_long,
-            hint="author_clip creates one; this tool removes it")
+            hint="author_clip creates one; this tool removes it"
+                 + ("; the set-driven keys on this rig (%s) are rig setup "
+                    "rather than clip motion, and this tool never removes "
+                    "them" % sdk_named if sdk_curves else ""))
 
     name = params.get("name")
     if name is not None and not isinstance(name, str):
@@ -1132,14 +2019,21 @@ def delete_clip(params: Dict[str, Any]) -> Dict[str, Any]:
                 "no clip named %r on %s (has: %s)"
                 % (name, _short(root_long),
                    ", ".join(repr(r["name"]) for r in records) or "none"),
-                hint="omit `name` to delete every clip and return the "
-                     "skeleton to static posing")
+                # #796: "returns the skeleton to static posing" is only true
+                # while no set-driven key stands. Promising it to a caller
+                # whose rig has one would be a lie they act on.
+                hint="omit `name` to delete every clip"
+                     + ("; the set-driven keys on this rig (%s) are kept "
+                        "either way - they are rig setup rather than clip "
+                        "motion, so those channels stay driven" % sdk_named
+                        if sdk_curves
+                        else " and return the skeleton to static posing"))
 
     warnings: List[str] = []
-    if not records and driven:
+    if not records and clip_driven:
         warnings.append(
             "no clip metadata on %s - deleting %d hand-authored curve "
-            "channel(s)" % (_short(root_long), len(driven)))
+            "channel(s)" % (_short(root_long), len(clip_driven)))
 
     session.auto_checkpoint("delete_clip")
     before = {m: _points(m) for m in meshes}
@@ -1151,7 +2045,7 @@ def delete_clip(params: Dict[str, Any]) -> Dict[str, Any]:
         # re-packed (#718 decision 5) - a take is an explicit range, so a
         # gap costs nothing, and re-packing would move keys the caller did
         # not touch.
-        for plug in sorted(driven):
+        for plug in sorted(clip_driven):
             # #718 final review Fix 2 (consistency, not a defect here): the
             # same widening as author_clip's re-author cut. A fractional
             # straggler past `end_frame` already lands in unowned gap
@@ -1172,40 +2066,61 @@ def delete_clip(params: Dict[str, Any]) -> Dict[str, Any]:
         by_short: Dict[str, List[str]] = {}
         for j in joints:
             by_short.setdefault(_short(j), []).append(j)
-        orphan_plugs: List[str] = []
+        # Keyed by (KIND, name), never by name alone: joint short names,
+        # blendShape weight aliases and the literal 'root_position' all
+        # share one name space, so a 'jaw' joint and a 'jaw' shape used to
+        # overwrite each other here - only one got reaped, and
+        # reaped_channels named it once, so nothing in the result revealed
+        # the loss (#796 review defect 5).
+        orphan_plugs: Dict[Tuple[str, str], List[str]] = {}
         for short in doomed_record.get("joints", []):
             if short in survivors["joints"]:
                 continue
             matches = by_short.get(short) or []
             if len(matches) != 1:
                 continue  # vanished or ambiguous: never guess (_rot_plugs rule)
-            orphan_plugs.extend("%s.%s" % (matches[0], a)
-                                for a in ROTATE_ATTRS)
-            reaped_channels.append(short)
+            orphan_plugs[("joint", short)] = ["%s.%s" % (matches[0], a)
+                                              for a in ROTATE_ATTRS]
         for alias in doomed_record.get("weight_channels", []):
             if alias in survivors["weight_channels"]:
                 continue
             node = alias_map.get(alias)
             if node is None or isinstance(node, HandlerError):
                 continue
-            orphan_plugs.append("%s.%s" % (node, alias))
-            reaped_channels.append(alias)
+            orphan_plugs[("weight", alias)] = ["%s.%s" % (node, alias)]
         if (doomed_record.get("root_position_used")
                 and not survivors["root_position_used"]):
-            orphan_plugs.extend("%s.%s" % (root_long, a)
-                                for a in TRANSLATE_ATTRS)
-            reaped_channels.append("root_position")
-        orphan_curves = sorted({
-            c for plug in orphan_plugs
-            for c in cmds.listConnections(plug, source=True,
-                                          destination=False,
-                                          type="animCurve") or []})
+            orphan_plugs[("root", "root_position")] = [
+                "%s.%s" % (root_long, a) for a in TRANSLATE_ATTRS]
+        # Same #796 split as the two sites above: an orphaned channel whose
+        # curve is a set-driven key is rig setup that outlives every clip on
+        # the rig, so it is neither reaped nor reported as reaped -
+        # reaped_channels is derived from what was actually FOUND to delete,
+        # never from what the doomed record declared.
+        #
         # Invariant this gate relies on: under #718's self-contained rule,
         # every channel a clip declares stays curve-driven outside the
         # doomed range too (a neighbour's rest pin keeps it keyed there), so
-        # an orphaned channel always has a curve to find here. If that ever
-        # breaks, reaped_channels could fill while orphan_curves stays empty
-        # and this warning silently never fires.
+        # an orphaned channel normally has a curve to find here.
+        found: set = set()
+        reaped: List[Tuple[str, str]] = []
+        for (kind, channel), plugs in orphan_plugs.items():
+            curves, _ = partition_driven_keys(cmds, {
+                plug: cmds.listConnections(plug, source=True,
+                                           destination=False,
+                                           type="animCurve") or []
+                for plug in plugs})
+            if curves:
+                reaped.append((kind, channel))
+                found.update(curves)
+        # Qualify ONLY the names that actually collide: the single-kind
+        # case - every case before this ticket - reads exactly as it always
+        # has, and a collision can no longer hide behind one bare name.
+        names = [c for _, c in reaped]
+        reaped_channels = [
+            c if names.count(c) == 1 else "%s (%s)" % (c, _KIND_LABEL[kind])
+            for kind, c in reaped]
+        orphan_curves = sorted(found)
         if orphan_curves:
             # mcp_clip_rest entries for these channels are NOT pruned here -
             # they deliberately survive the reap. Re-introducing the channel
@@ -1217,10 +2132,12 @@ def delete_clip(params: Dict[str, Any]) -> Dict[str, Any]:
                 "surviving clip declares - they carried only rest pins "
                 "inside the surviving clips' ranges (#730)"
                 % (len(reaped_channels), ", ".join(reaped_channels)))
-        remaining = _anim_curves(cmds, _joint_plugs(joints) + weight_plugs)
-        deleted_curves = len({c for curves in driven.values() for c in curves}
-                             - {c for curves in remaining.values()
-                                for c in curves})
+        # Only the SURVIVORS are re-classified: every node this query can
+        # return is still in the scene. `before_curves` was classified up
+        # top, before the cut - see the note there (#796 review defect 1).
+        remaining, _ = partition_driven_keys(cmds, _anim_curves(
+            cmds, _joint_plugs(joints) + weight_plugs))
+        deleted_curves = len(set(before_curves) - set(remaining))
         cmds.setAttr("%s.%s" % (root_long, CLIP_ATTR), json.dumps(kept),
                      type="string")
         span_end = max(r["end_frame"] for r in kept)
@@ -1228,10 +2145,17 @@ def delete_clip(params: Dict[str, Any]) -> Dict[str, Any]:
                              animationStartTime=0, animationEndTime=span_end)
     else:
         if name is not None:
+            # The STEPS the teardown is about to take, not a claim that
+            # each one landed: what the bind-pose restore could not return
+            # (and whether it raised at all) is only knowable after the
+            # curves are gone, and is appended below in the same list
+            # (#796 review round 3 M2).
             warnings.append(
                 "%r was the last clip on this rig - the full teardown ran: "
-                "weight channels zeroed, bind pose restored" % name)
-        doomed = sorted({c for curves in driven.values() for c in curves})
+                "weight channels zeroed, bind pose restored%s"
+                % (name, " (set-driven keys still drive some channels)"
+                   if sdk_curves else ""))
+        doomed = before_curves      # classified up top, pre-deletion
         if doomed:
             cmds.delete(*doomed)
         deleted_curves = len(doomed)
@@ -1239,23 +2163,101 @@ def delete_clip(params: Dict[str, Any]) -> Dict[str, Any]:
         # the skeleton back to bind - reset_pose's exact logic inline so
         # this call holds ONE checkpoint.
         for plug in weight_plugs:
-            if plug in driven:
+            if plug in clip_driven:
                 cmds.setAttr(plug, 0.0)
         poses = cmds.dagPose(root_long, query=True, bindPose=True) or []
         if poses:
-            cmds.dagPose(poses[0], restore=True, g=True)
-            if len(poses) > 1:
+            # #796 review round 3 M2, and this is the COMMON path: any rig
+            # with a skinCluster has a bind pose, so the branch below - the
+            # only one the driven-key guard reached - is the exception, not
+            # the rule. `dagPose -restore` writes the very rotate and
+            # translate plugs a surviving set-driven key now feeds, and
+            # nothing in this repo has MEASURED what it does about that
+            # (see the ticket's live gate). It is written to be right
+            # either way: the channels it cannot return to bind are named
+            # BEFORE the call, a raise is caught rather than killing a
+            # teardown that has already deleted the curves and not yet
+            # removed the metadata, and a silent skip reports the same
+            # fact through the same words.
+            stuck: List[Tuple[str, List[str]]] = []
+            for joint in joints:
+                blocked = _blocked_transform_attrs(cmds, joint)
+                if blocked:
+                    stuck.append((_short(joint), blocked))
+            restored = False
+            try:
+                cmds.dagPose(poses[0], restore=True, g=True)
+                restored = True
+            except Exception as exc:   # noqa: BLE001
+                if not stuck:
+                    # Nothing here explains it, so this is not #796's
+                    # failure and swallowing it would hide a real one.
+                    # A rig with no driven keys gets exactly the restore
+                    # it got before this ticket, this raise included.
+                    raise
+                warnings.append(
+                    "the bind-pose restore RAISED (%s) - the clip curves "
+                    "are already deleted and the clip metadata is removed "
+                    "below, so this rig carries no clip, but the skeleton "
+                    "may be only partly back at its bind pose; check it "
+                    "before exporting" % exc)
+            # #796 review round 4 E: only when the restore actually
+            # happened. Appended unconditionally, this claimed "restored
+            # bindPose1" in the same warnings list as "the bind-pose
+            # restore RAISED", about the call that restored nothing.
+            if restored and len(poses) > 1:
                 warnings.append("%d bind poses exist; restored %s"
                                 % (len(poses), poses[0]))
+            if stuck:
+                # Unlike the fallback below, this branch names TRANSLATE
+                # channels too: dagPose restores a whole transform, so a
+                # connection on `.translateY` defeats it exactly the way
+                # one on `.rotateX` does.
+                warnings.append(_stuck_note(
+                    stuck, "channel(s)",
+                    "and a bind-pose restore cannot return a "
+                    "connection-fed plug to bind either - those channels "
+                    "are still driven, whatever the rest of the skeleton "
+                    "did"))
         else:
+            # #796 review defect 2: before this ticket every curve was
+            # deleted first, so every rotate plug was free by the time this
+            # ran. A surviving set-driven key still feeds one, and setAttr
+            # on a connection-fed plug RAISES - the same reasoning the
+            # weight loop above already applies, carried to the joints.
+            stuck = []
             for joint in joints:
-                cmds.setAttr(joint + ".rotate", 0.0, 0.0, 0.0)
+                blocked = _blocked_rotate_attrs(cmds, joint)
+                if not blocked:
+                    cmds.setAttr(joint + ".rotate", 0.0, 0.0, 0.0)
+                    continue
+                stuck.append((_short(joint), blocked))
+                for attr in ROTATE_ATTRS:
+                    if attr not in blocked:
+                        cmds.setAttr("%s.%s" % (joint, attr), 0.0)
             warnings.append(
-                "no bind pose exists (nothing is bound); rotations zeroed, "
-                "which is the create_skeleton rest pose")
+                "no bind pose exists (nothing is bound); %s zeroed, which "
+                "is the create_skeleton rest pose"
+                % ("the free rotations were" if stuck else "rotations"))
+            if stuck:
+                warnings.append(_stuck_note(
+                    stuck, "rotation(s)",
+                    "and a static write to a connection-fed plug raises "
+                    "rather than landing; the free channels on those "
+                    "joints were zeroed"))
         for attr in (CLIP_ATTR, REST_ATTR):
             if cmds.attributeQuery(attr, node=root_long, exists=True):
                 cmds.deleteAttr("%s.%s" % (root_long, attr))
+
+    if sdk_curves:
+        # #796: a caller who asked for a clean static rig has to learn WHY
+        # the skeleton is still driven - silence here reads as a teardown
+        # that failed rather than as one that refused to eat rig setup.
+        warnings.append(
+            "kept %d set-driven-key curve(s) (%s): they read a driver "
+            "attribute rather than time, so they are rig setup rather than "
+            "clip motion and this tool leaves them standing - those channels "
+            "stay driven" % (len(sdk_curves), sdk_named))
 
     max_disp = 0.0
     for mesh in meshes:

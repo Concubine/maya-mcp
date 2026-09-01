@@ -27,6 +27,12 @@ from typing import Any, Dict, Optional
 
 STAMP_NAME = "deployed_stamp.json"
 
+# What `git_stamp` asks git about. `:(top)` pins it to the repository root, so
+# the answer is the same from any directory in the working tree - a bare
+# "maya_plugin" resolves against the cwd and matches nothing one level down
+# (#796). Kept beside install.py's copy source: they must name the same tree.
+_PACKAGE_PATHSPEC = ":(top)maya_plugin"
+
 # Never copied into the deployed package (install.py), or written after the copy
 # (the stamp) - counting either would make a freshly installed plugin read stale.
 _IGNORED_NAMES = {"__pycache__", "install.py", STAMP_NAME}
@@ -152,6 +158,38 @@ def git_stamp(repo_dir: str) -> Dict[str, Any]:
 
     Only ever called outside Maya (install time, eval harness), so the
     subprocess cost is irrelevant and a missing git is merely uninformative.
+
+    `dirty` is scoped to maya_plugin/ because a stamp describes the DEPLOYED
+    package, and install.py copies nothing else: a rendered PNG under evals/ or
+    an edited plan under docs/ cannot change what was installed, so calling that
+    install "+dirty" is simply a false statement about the artifact. Unscoped,
+    it was always true - this repo permanently carries a dozen untracked eval
+    OUTPUT directories - and the flag said nothing at all. #796. Do not drop the
+    pathspec to "be safe": the cost of the false positive was a throwaway
+    git-worktree ritual before every single deploy.
+
+    The pathspec is only half of it. Every import writes maya_plugin/__pycache__
+    and that is untracked too, so this leans on .gitignore hiding __pycache__/
+    and *.pyc - measured, not assumed, and pinned by a test against this very
+    checkout. Delete those ignore rules and the flag pins to true again.
+
+    Two traps come with scoping, and both would have been read as "clean":
+
+    A relative pathspec resolves against `repo_dir`, so `git_stamp(<repo>/evals)`
+    matched nothing and reported a confident False while the plugin was edited -
+    the scoping quietly narrowed the contract from "any directory in a working
+    tree" to "a directory that CONTAINS maya_plugin". `:(top)` anchors the
+    pathspec at the repository root instead, so every directory in the tree
+    answers for the same package. A git too old to know that magic fails the
+    command outright, which lands on the None below - never on a false clean.
+
+    And git exits 0 printing NOTHING both when the packaged tree is clean and
+    when the pathspec matched nothing at all (measured). Those are different
+    answers, so a tree that ships no maya_plugin/ gets `dirty: None`, matching
+    this module's standing rule that "cannot tell" is distinct from "differs" -
+    the alternative, falling back to the unscoped query, would answer a question
+    nobody asked (is ANYTHING here dirty?) with the very false positive #796
+    exists to delete. `commit` stays knowable either way.
     """
     def _git(*args: str) -> Optional[str]:
         try:
@@ -165,8 +203,20 @@ def git_stamp(repo_dir: str) -> Dict[str, Any]:
     commit = _git("rev-parse", "HEAD")
     if commit is None:
         return {"commit": None, "dirty": None}
-    status = _git("status", "--porcelain")
-    return {"commit": commit, "dirty": None if status is None else bool(status)}
+    status = _git("status", "--porcelain", "--", _PACKAGE_PATHSPEC)
+    if status is None:
+        return {"commit": commit, "dirty": None}
+    if status:
+        return {"commit": commit, "dirty": True}
+    # Empty output is two answers wearing one hat. Ask git whether it knows a
+    # packaged tree here at all before calling this clean; ls-files is the same
+    # question in the same vocabulary, so it cannot disagree with the pathspec
+    # the status used. Only reached on the clean path, so it costs nothing the
+    # rest of the time - and git_stamp runs at install time, never in Maya.
+    tracked = _git("ls-files", "--", _PACKAGE_PATHSPEC)
+    if not tracked:
+        return {"commit": commit, "dirty": None}
+    return {"commit": commit, "dirty": False}
 
 
 def _git_returncode(repo_dir: str, *args: str) -> Optional[int]:

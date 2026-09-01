@@ -20,7 +20,7 @@ own work (pngprobe) and refuses what it cannot bake honestly.
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..dispatcher import HandlerError, require_known_keys
 from . import naming, pbr, pngprobe, session, texclaim
@@ -314,32 +314,178 @@ def _outside_wearers(cmds, sg: str, requested_shapes: List[str]) -> List[str]:
 
     Guarded end to end: a shading group that cannot answer this query must
     not crash a bake - it degrades to reporting no outside wearers, same as
-    a scene where the SG really is worn only by the requested meshes.
+    a scene where the SG really is worn only by the requested meshes. A
+    single member that cannot be resolved is skipped, not fatal: one bad
+    member must not cost the warning about the others.
+
+    Identity here is the NODE, on BOTH sides. `cmds.sets` answers with the
+    shortest name that is UNIQUE, which may be a short name, a partial path
+    or an absolute one - Maya's choice, decided by what else happens to be
+    in the scene. Comparing short names made |left|limb and |right|limb
+    indistinguishable, and since Maya enforces name uniqueness per PARENT
+    only, the guard stopped warning about exactly the meshes a mirrored rig
+    has (#796). Comparing canonical PATHS fixed that and broke its mirror
+    image: an INSTANCED mesh is ONE shape node hanging under several paths,
+    so the caller's own node came back as an outside wearer under its other
+    path - a WARNING here, but a refusal of a legitimate bake at
+    meshmaps.refuse_outside_wearer, naming a path of the very shape it was
+    asked to bake. Asking which NODE a path belongs to answers both: two
+    paths of one node are one wearer whichever name form arrives, and two
+    mirrors stay two.
+
+    The requested-or-not question is asked of EACH resolved shape on its
+    own (#796 round 4). One member name can still resolve to several
+    NODES - 'limbShape' on a mirrored rig is both limbs - and skipping the
+    whole member as soon as ONE of its shapes was the caller's threw that
+    node answer away and lost the twin, the very mesh this guard exists to
+    name. Per shape is right for both cases at once, and it costs the
+    guard its dependence on which name form `cmds.sets` chose - a thing
+    this repo has never measured. Each node is then named ONCE: an
+    instance's several paths are one wearer, and both call sites' remedies
+    (name it in the request, give it its own material) are moves on the
+    node.
     """
     try:
         members = cmds.sets(sg, query=True) or []
     except Exception:  # noqa: BLE001 - an unqueryable SG warns about nothing
         return []
-    requested = set(requested_shapes)
-    requested_short = {s.split("|")[-1] for s in requested_shapes}
+    requested: Set[str] = set()
+    requested_nodes: Set[str] = set()
+    for name in requested_shapes:
+        # The raw name is kept alongside its resolution: both call sites
+        # already hand this function long paths (naming.require_mesh), and
+        # a shape that has since stopped resolving is still the caller's
+        # OWN mesh, never an outside wearer.
+        requested.add(name)
+        for node in _resolve_long(cmds, name):
+            requested.add(node)
+            requested_nodes.update(_node_ids(cmds, node))
     outside: List[str] = []
+    seen_nodes: Set[str] = set()
     for member in members:
         obj = member.split(".")[0]  # strip a component suffix like .f[0:3]
-        shape = obj
-        try:
-            if cmds.nodeType(obj) != "mesh":
-                kids = cmds.listRelatives(obj, shapes=True, fullPath=True,
-                                          noIntermediate=True) or []
-                if not kids:
-                    continue
-                shape = kids[0]
-        except Exception:  # noqa: BLE001 - an unresolvable member is skipped
-            continue
-        if shape in requested or shape.split("|")[-1] in requested_short:
-            continue
-        if shape not in outside:
+        # PER SHAPE, never per member (#796 round 4). A member name can
+        # resolve to several NODES, and _node_ids is precisely what tells
+        # those apart from the several paths of ONE node - dropping the
+        # whole member on `any(...)` threw that answer away and, on a
+        # mirrored rig whose member name is ambiguous, left the twin this
+        # guard exists to name unreported. Asked per shape, an instance
+        # skips itself under every path (same node) and a mirror does not
+        # (different node), whichever name form cmds.sets chose.
+        for node in _resolve_long(cmds, obj):
+            shape = _shape_of(cmds, node)
+            # An empty resolution (a vanished node) contributes nothing,
+            # which is how a member that no longer exists is skipped
+            # without being fatal.
+            if shape is None or shape in outside:
+                continue
+            # ONE identity query per shape, and BOTH decisions below read
+            # that same answer: asking twice would let a Maya that
+            # answered differently the second time admit a shape as an
+            # outsider and then de-duplicate it away.
+            ids = _node_ids(cmds, shape)
+            if _is_requested(shape, ids, requested, requested_nodes):
+                continue
+            # One name per outside NODE. Two paths of one node cannot
+            # diverge in look, so naming both reads as two meshes to fix
+            # where there is one - and at meshmaps.refuse_outside_wearer
+            # this list is the refusal's subject. No identity (an empty
+            # set) degrades to the per-path listing, never to a collapse:
+            # `set() & seen_nodes` is empty.
+            if ids & seen_nodes:
+                continue
+            seen_nodes |= ids
             outside.append(shape)
     return outside
+
+
+def _is_requested(shape: str, shape_nodes: Set[str],
+                  requested_paths: Set[str],
+                  requested_nodes: Set[str]) -> bool:
+    """Is `shape` - a resolved path, with its node identity already in
+    hand - one of the shapes this call named?  The same NODE, not merely
+    the same spelling.
+
+    The path comparison stays first because it costs nothing and answers
+    the ordinary case; the node comparison is what catches the instance,
+    whose other path is a different string for the same mesh. Node
+    identity can only ever widen the match, and only onto paths of one
+    node, so it can never merge a mirrored pair into one wearer. An empty
+    identity - a Maya that would not answer - leaves the path comparison
+    standing alone, which is the round-2 behaviour and still reports the
+    genuine outsider.
+    """
+    if shape in requested_paths:
+        return True
+    return bool(shape_nodes & requested_nodes)
+
+
+def _node_ids(cmds, path: str) -> Set[str]:
+    """The identity of the NODE `path` names - empty when Maya will not
+    say, which degrades this guard to the path comparison above and never
+    to a crash.
+
+    A DAG path is not an identity (#796). An INSTANCED mesh is ONE shape
+    node hanging under several paths; they wear the same material, cannot
+    diverge in look, and are one wearer - but they are different strings,
+    and which one `cmds.sets` hands back is Maya's choice.
+
+    The node's UUID is asked for rather than expanding `path` to every
+    path of its node (`cmds.ls -allPaths`, MFnDagNode.getAllPaths), because
+    an expansion is only ever as good as the name it starts from: a plain
+    `cmds.ls` answers with ONE path per node - an absolute name with
+    itself, an ambiguous one with a path for each node it hits - which is
+    precisely how the instance got through round 2, and expanding from the
+    node's SHORT name instead would merge the mirrored |left|limb /
+    |right|limb pair this guard exists to catch. A UUID belongs to the
+    node itself - the same answer whichever path named it, and never the
+    same answer for two nodes.
+    """
+    try:
+        return set(cmds.ls(path, uuid=True) or [])
+    except Exception:  # noqa: BLE001 - an identity Maya cannot give
+        return set()
+
+
+def _shape_of(cmds, node: str) -> Optional[str]:
+    """`node`'s mesh shape: itself when it already is one, its first
+    non-intermediate shape when it is a transform, None when it has neither
+    - or when the query raises, because a guard must not crash the bake it
+    is guarding.
+    """
+    try:
+        if cmds.nodeType(node) == "mesh":
+            return node
+        kids = cmds.listRelatives(node, shapes=True, fullPath=True,
+                                  noIntermediate=True) or []
+        return kids[0] if kids else None
+    except Exception:  # noqa: BLE001 - an unresolvable member is skipped
+        return None
+
+
+def _resolve_long(cmds, name: str) -> List[str]:
+    """One full DAG path per NODE `name` matches - [] when it matches none.
+
+    `cmds.ls(long=True)` answers with a LIST because a name that is not a
+    full path can match several NODES ('limbShape' is both limbs of a
+    mirrored rig), and a node that has vanished since it was named matches
+    none. It does NOT enumerate the several paths of one INSTANCED node:
+    that is what `allPaths=True` is for, and this guard deliberately does
+    not ask for it (#796 round 4). Node identity already makes an instance
+    one wearer whichever of its paths Maya hands back; naming a wearer
+    under one path is enough to act on it; and naming.require_object one
+    module over already reads this list's LENGTH as a count of NODES, so
+    asking for all paths would make an instanced mesh read as an ambiguous
+    name there. A fake that expanded every path instead was asserting a
+    resolution Maya never performs.
+
+    A query that raises is one of the "matches none" cases, because a
+    guard must not crash the bake it is guarding.
+    """
+    try:
+        return list(cmds.ls(name, long=True) or [])
+    except Exception:  # noqa: BLE001 - a name that cannot be resolved means nothing
+        return []
 
 
 def _has_placement(cmds, node: str) -> bool:

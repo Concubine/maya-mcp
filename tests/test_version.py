@@ -7,6 +7,7 @@ test here is headless and touches only tmp dirs.
 
 import json
 import os
+import subprocess
 
 from maya_plugin import version
 
@@ -246,3 +247,166 @@ class TestGitStamp:
         stamp = version.git_stamp(str(tmp_path))
         assert stamp["commit"] is None
         assert stamp["dirty"] is None
+
+
+def _git(cwd, *args):
+    """git in a throwaway fixture repo, with an identity of its own so the test
+    does not depend on whatever the machine's global config happens to hold."""
+    out = subprocess.run(
+        ("git", "-c", "user.email=fixture@example.invalid", "-c", "user.name=fixture",
+         "-c", "commit.gpgsign=false") + args,
+        cwd=cwd, capture_output=True, text=True, timeout=30,
+    )
+    assert out.returncode == 0, "git %s failed: %s%s" % (args, out.stdout, out.stderr)
+    return out.stdout
+
+
+def _fixture_repo(root):
+    """A real repo shaped like this one: a maya_plugin/ package that ships, an
+    evals/ tree that does not, and the .gitignore rules that hide bytecode.
+
+    Deliberately NOT a subprocess mock. The defect #796 closes is in what git is
+    ASKED - a canned return value answers every pathspec identically, so a mock
+    can only ever confirm the bug.
+    """
+    os.makedirs(os.path.join(root, "maya_plugin", "handlers"))
+    os.makedirs(os.path.join(root, "evals"))
+    _pkg(os.path.join(root, "maya_plugin"), {"version.py": "x = 1\n", "handlers/b.py": "y = 2\n"})
+    _pkg(root, {".gitignore": "__pycache__/\n*.pyc\n", "README.md": "readme\n"})
+    _git(root, "init")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-m", "initial")
+    return root
+
+
+class TestGitStampScopesDirtToThePackage:
+    """#796: the stamp describes the DEPLOYED package, so only maya_plugin/ can
+    dirty it. Before this, any untracked file anywhere - and this repo always
+    carries a dozen untracked eval OUTPUT dirs - stamped every install +dirty,
+    which is why deploys were done from throwaway worktrees."""
+
+    def test_a_clean_checkout_is_clean(self, tmp_path):
+        repo = _fixture_repo(str(tmp_path / "repo"))
+        assert version.git_stamp(repo)["dirty"] is False
+
+    def test_an_untracked_file_outside_the_package_leaves_the_stamp_clean(self, tmp_path):
+        """A rendered eval output cannot change what was installed."""
+        repo = _fixture_repo(str(tmp_path / "repo"))
+        _pkg(os.path.join(repo, "evals"), {"out.png": "not really a png\n"})
+        assert version.git_stamp(repo)["dirty"] is False
+
+    def test_an_untracked_directory_outside_the_package_leaves_the_stamp_clean(self, tmp_path):
+        """The shape this repo actually carries: `?? evals/surfdetail_live/`."""
+        repo = _fixture_repo(str(tmp_path / "repo"))
+        _pkg(os.path.join(repo, "evals", "surfdetail_live"), {"render.png": "bytes\n"})
+        assert version.git_stamp(repo)["dirty"] is False
+
+    def test_a_modification_inside_the_package_still_reports_dirty(self, tmp_path):
+        repo = _fixture_repo(str(tmp_path / "repo"))
+        _pkg(os.path.join(repo, "maya_plugin"), {"version.py": "x = 2  # edited\n"})
+        assert version.git_stamp(repo)["dirty"] is True
+
+    def test_a_modification_in_a_package_subdirectory_still_reports_dirty(self, tmp_path):
+        repo = _fixture_repo(str(tmp_path / "repo"))
+        _pkg(os.path.join(repo, "maya_plugin"), {"handlers/b.py": "y = 99\n"})
+        assert version.git_stamp(repo)["dirty"] is True
+
+    def test_a_new_untracked_file_inside_the_package_reports_dirty(self, tmp_path):
+        """The #718-class miss: a handler module that exists only in the working
+        tree ships in the copy, so it MUST count."""
+        repo = _fixture_repo(str(tmp_path / "repo"))
+        _pkg(os.path.join(repo, "maya_plugin"), {"handlers/c.py": "z = 3\n"})
+        assert version.git_stamp(repo)["dirty"] is True
+
+    def test_a_deleted_file_inside_the_package_reports_dirty(self, tmp_path):
+        repo = _fixture_repo(str(tmp_path / "repo"))
+        os.unlink(os.path.join(repo, "maya_plugin", "handlers", "b.py"))
+        assert version.git_stamp(repo)["dirty"] is True
+
+    def test_bytecode_under_the_package_is_not_dirt(self, tmp_path):
+        """The inert-fix trap (#714, #772, #775 all shipped one). Scoping to
+        maya_plugin only helps if .gitignore already hides the __pycache__ that
+        every import writes there - otherwise the stamp swaps one permanent
+        false dirty for another."""
+        repo = _fixture_repo(str(tmp_path / "repo"))
+        _pkg(os.path.join(repo, "maya_plugin", "__pycache__"),
+             {"version.cpython-311.pyc": "\x00compiled\n"})
+        assert version.git_stamp(repo)["dirty"] is False
+
+    def test_this_repos_own_bytecode_is_ignored(self):
+        """The same claim against the REAL checkout, where the .pyc files are
+        already on disk - the fixture's .gitignore is written by this test, and
+        proving the fix on a tree of the test's own making proves nothing."""
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(version.__file__)))
+        out = subprocess.run(
+            # The pathspec the module actually uses, not a hand-copied twin -
+            # a duplicate here could drift and keep passing (#796).
+            ("git", "status", "--porcelain", "--", version._PACKAGE_PATHSPEC),
+            cwd=repo, capture_output=True, text=True, timeout=30,
+        )
+        assert out.returncode == 0
+        assert "__pycache__" not in out.stdout
+        assert ".pyc" not in out.stdout
+
+    def test_not_a_repo_still_returns_the_documented_shape(self, tmp_path):
+        """Unchanged contract: "cannot tell" stays a distinct answer, and the
+        key set is what install.py destructures."""
+        stamp = version.git_stamp(str(tmp_path))
+        assert set(stamp) == {"commit", "dirty"}
+        assert stamp["commit"] is None
+        assert stamp["dirty"] is None
+
+
+def _repo_without_the_package(root):
+    """A real repo that ships no maya_plugin/ at all - a stripped clone, a
+    consumer checkout, or simply the wrong directory handed to git_stamp."""
+    os.makedirs(os.path.join(root, "evals"))
+    _pkg(root, {".gitignore": "__pycache__/\n*.pyc\n", "README.md": "readme\n"})
+    _git(root, "init")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-m", "initial")
+    return root
+
+
+class TestGitStampWithoutAPackagedTreeCannotTell:
+    """#796 review: a pathspec that matches NOTHING makes git exit 0 printing
+    nothing - byte-identical to "the packaged tree is clean" (measured). The
+    first cut of the scoping read that as a confident False, which silently
+    narrowed the contract from "any directory in a working tree" to "a directory
+    that happens to contain maya_plugin". This module's standing rule is the
+    opposite: "cannot tell" is a distinct answer from "differs"."""
+
+    def test_a_subdirectory_of_the_worktree_still_sees_the_package(self, tmp_path):
+        """The reviewer's measured case: git_stamp(<repo>/evals) reported a
+        false clean while three plugin files were edited. The pathspec is
+        anchored at the repo top now, so any directory in the tree answers."""
+        repo = _fixture_repo(str(tmp_path / "repo"))
+        _pkg(os.path.join(repo, "maya_plugin"), {"version.py": "x = 2  # edited\n"})
+        assert version.git_stamp(os.path.join(repo, "evals"))["dirty"] is True
+
+    def test_a_clean_subdirectory_of_the_worktree_reads_clean(self, tmp_path):
+        """And the anchoring must not turn every subdirectory into "unknown"."""
+        repo = _fixture_repo(str(tmp_path / "repo"))
+        assert version.git_stamp(os.path.join(repo, "evals"))["dirty"] is False
+
+    def test_a_repo_that_ships_no_package_cannot_tell(self, tmp_path):
+        """No maya_plugin anywhere in the tree: there is no deployed package for
+        the flag to describe, so False would be an answer to a question nobody
+        asked. The commit half is still perfectly knowable."""
+        repo = _repo_without_the_package(str(tmp_path / "bare"))
+        _pkg(repo, {"README.md": "edited\n"})
+        stamp = version.git_stamp(repo)
+        assert stamp["commit"] is not None
+        assert stamp["dirty"] is None
+
+    def test_a_repo_that_ships_no_package_cannot_tell_when_clean_either(self, tmp_path):
+        """Not a dirt detector wearing a disguise - the answer is "cannot tell"
+        whatever the rest of the tree looks like."""
+        repo = _repo_without_the_package(str(tmp_path / "bare"))
+        assert version.git_stamp(repo)["dirty"] is None
+
+    def test_the_cannot_tell_answer_keeps_the_documented_shape(self, tmp_path):
+        """install.py destructures this dict; a new key or a missing one would
+        break the caller more loudly than the wrong flag ever did."""
+        repo = _repo_without_the_package(str(tmp_path / "bare"))
+        assert set(version.git_stamp(repo)) == {"commit", "dirty"}
