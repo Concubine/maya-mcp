@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from ..dispatcher import HandlerError
+from ..dispatcher import HandlerError, require_known_keys
 from . import naming, units
 
 SECTIONS = ("transform", "mesh_stats", "uvs", "shading", "history")
@@ -81,7 +81,24 @@ def _history_section(cmds, shape: str) -> Dict[str, Any]:
     return {"node_count": len(nodes), "node_types": types}
 
 
+# Every top-level key get_object_info reads. Anything else is refused rather
+# than ignored (#767): an unread key does not fail, it succeeds and does
+# something else.
+GET_OBJECT_INFO_KEYS = ("name", "include")
+# `mesh` is this repo's own vocabulary on every neighbouring tool that takes
+# a single object - assign_material, deform and bind_skin all spell it that
+# way - while this command also reads groups and joints and so says `name`.
+# `object` is the same reach made in generic English. `sections` is what this
+# module's own constant, its docstring and every refusal hint below call the
+# members of `include`, so the caller is quoting us back at ourselves.
+GET_OBJECT_INFO_SYNONYMS = {
+    "mesh": "name", "object": "name", "sections": "include",
+}
+
+
 def get_object_info(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, GET_OBJECT_INFO_KEYS, "get_object_info",
+                       GET_OBJECT_INFO_SYNONYMS)
     cmds = _cmds()
     name = naming.require_object(cmds, str(params.get("name") or ""))
     include = params.get("include") or DEFAULT_SECTIONS

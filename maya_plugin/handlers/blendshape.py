@@ -128,7 +128,9 @@ def _validated_targets(cmds, mesh_long: str, targets,
 # inputs - the exact #764 shape, and neither shares a 3-char prefix with
 # `mesh`, so require_known_keys' fallback could never suggest it.
 CREATE_BLENDSHAPE_KEYS = ("mesh", "targets")
-CREATE_BLENDSHAPE_SYNONYMS = {"base_mesh": "mesh", "blend_shape": "mesh"}
+CREATE_BLENDSHAPE_SYNONYMS = {"base_mesh": "mesh", "blend_shape": "mesh",
+                              "object": "mesh", "shape": "targets",
+                              "shapes": "targets", "morphs": "targets"}
 
 
 def create_blendshape(params: Dict[str, Any]) -> Dict[str, Any]:
@@ -250,7 +252,11 @@ def create_blendshape(params: Dict[str, Any]) -> Dict[str, Any]:
 # what the result calls the node this command operates on, so addressing it
 # by that name is the plausible miss; it shares no prefix with `mesh`.
 SET_BLENDSHAPE_WEIGHTS_KEYS = ("mesh", "weights")
-SET_BLENDSHAPE_WEIGHTS_SYNONYMS = {"blend_shape": "mesh"}
+# `targets`/`target` are what the weights dict is KEYED BY, so a caller
+# naturally names the payload after its keys rather than its values.
+SET_BLENDSHAPE_WEIGHTS_SYNONYMS = {"blend_shape": "mesh", "object": "mesh",
+                                   "targets": "weights", "target": "weights",
+                                   "values": "weights"}
 
 
 def set_blendshape_weights(params: Dict[str, Any]) -> Dict[str, Any]:

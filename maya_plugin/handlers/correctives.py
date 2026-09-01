@@ -52,10 +52,10 @@ from . import blendshape, clip, naming, rigmath, sculpt_math, session, units
 
 APPLY_DELTA_MUSH_KEYS = ("mesh", "smoothing_iterations", "smoothing_step",
                          "pin_border_vertices", "distance_weight")
-DELTA_MUSH_SYNONYMS = {"iterations": "smoothing_iterations",
-                       "step": "smoothing_step",
-                       "pin_border": "pin_border_vertices",
-                       "object": "mesh", "name": "mesh"}
+APPLY_DELTA_MUSH_SYNONYMS = {"iterations": "smoothing_iterations",
+                             "step": "smoothing_step",
+                             "pin_border": "pin_border_vertices",
+                             "object": "mesh", "name": "mesh"}
 MAX_MUSH_ITERATIONS = rigmath.MAX_SMOOTH_ITERATIONS
 DEFAULT_MUSH_ITERATIONS = 10  # Maya's own default
 DEFAULT_MUSH_STEP = 0.5
@@ -119,7 +119,7 @@ def _short(name: str) -> str:
 def validate_delta_mush(params: Dict[str, Any], cmds) -> Dict[str, Any]:
     """Everything checkable before a node is created."""
     require_known_keys(params, APPLY_DELTA_MUSH_KEYS, "apply_delta_mush",
-                       DELTA_MUSH_SYNONYMS)
+                       APPLY_DELTA_MUSH_SYNONYMS)
 
     mesh_name = params.get("mesh")
     if not isinstance(mesh_name, str) or not mesh_name.strip():
@@ -234,6 +234,11 @@ def worst_edge_ratio(cmds, mesh_long: str,
 
 
 def apply_delta_mush(params: Dict[str, Any]) -> Dict[str, Any]:
+    # Ahead of _cmds(), so a caller with the wrong word is told so without
+    # needing Maya at all (#767). validate_delta_mush guards again because it
+    # is the seam the headless tests drive directly; the call is idempotent.
+    require_known_keys(params, APPLY_DELTA_MUSH_KEYS, "apply_delta_mush",
+                       APPLY_DELTA_MUSH_SYNONYMS)
     cmds = _cmds()
     plan = validate_delta_mush(params, cmds)
     mesh_long = plan["mesh_long"]
@@ -540,6 +545,11 @@ def _unique_pose_name(existing: List[str], requested: str) -> str:
 
 
 def add_corrective(params: Dict[str, Any]) -> Dict[str, Any]:
+    # Ahead of _cmds()/_mel() for the reason apply_delta_mush states above:
+    # an unknown key is answerable without Maya, and validate_corrective
+    # keeps its own guard as the headless test seam.
+    require_known_keys(params, ADD_CORRECTIVE_KEYS, "add_corrective",
+                       ADD_CORRECTIVE_SYNONYMS)
     cmds = _cmds()
     mel = _mel()
     plan = validate_corrective(params, cmds)

@@ -12,7 +12,7 @@ import os
 import re
 from typing import Any, Dict, Optional
 
-from ..dispatcher import HandlerError
+from ..dispatcher import HandlerError, require_known_keys
 from . import ledger, units
 
 KEEP_CHECKPOINTS = 20
@@ -106,7 +106,20 @@ def auto_checkpoint(reason: str) -> Dict[str, str]:
 # ------------------------------------------------------------------ handlers
 
 
+# Every top-level key checkpoint reads. Anything else is refused rather
+# than ignored (#767): an unread key does not fail, it succeeds and does
+# something else.
+CHECKPOINT_KEYS = ("label",)
+# `name` is what all but one of these tools call the string you choose for
+# the thing being made, so it is the word a caller naming a checkpoint
+# reaches for first; it shares no prefix with `label`, so the typo fallback
+# could never suggest it.
+CHECKPOINT_SYNONYMS = {"name": "label"}
+
+
 def checkpoint(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, CHECKPOINT_KEYS, "checkpoint",
+                       CHECKPOINT_SYNONYMS)
     label = params.get("label")
     if not isinstance(label, str) or not label.strip():
         raise HandlerError(
@@ -116,7 +129,21 @@ def checkpoint(params: Dict[str, Any]) -> Dict[str, Any]:
     return _save_checkpoint(_cmds(), label)
 
 
+# Every top-level key restore_checkpoint reads. Anything else is refused
+# rather than ignored (#767): an unread key does not fail, it succeeds and
+# does something else - here it would silently take the missing-argument
+# branch and refuse for the wrong reason.
+RESTORE_CHECKPOINT_KEYS = ("checkpoint_id", "path")
+# `id` is the generic abbreviation for an identifier, and a caller who has
+# the id in hand shortens the word without thinking. It is two characters
+# long, so the three-character prefix fallback cannot reach the real key
+# from it - only a recorded synonym can.
+RESTORE_CHECKPOINT_SYNONYMS = {"id": "checkpoint_id"}
+
+
 def restore_checkpoint(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, RESTORE_CHECKPOINT_KEYS, "restore_checkpoint",
+                       RESTORE_CHECKPOINT_SYNONYMS)
     cmds = _cmds()
     explicit = params.get("path")
     checkpoint_id = str(params.get("checkpoint_id") or "")
@@ -181,7 +208,18 @@ def _steps(params: Dict[str, Any]) -> int:
     return steps
 
 
+# Every top-level key undo reads. Anything else is refused rather than
+# ignored (#767): an unread key does not fail, it succeeds and does
+# something else - an ignored count here falls back to the default of one
+# step and looks like a success.
+UNDO_KEYS = ("steps",)
+# `count` is this repo's own word for how many of something to make - it is
+# what maya_array takes - so it travels to any tool that repeats an action.
+UNDO_SYNONYMS = {"count": "steps"}
+
+
 def undo(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, UNDO_KEYS, "undo", UNDO_SYNONYMS)
     cmds = _cmds()
     steps = _steps(params)
     done = 0
@@ -197,7 +235,16 @@ def undo(params: Dict[str, Any]) -> Dict[str, Any]:
 undo.no_undo_chunk = True
 
 
+# Every top-level key redo reads; the rest is refused rather than ignored,
+# for undo's reason (#767).
+REDO_KEYS = ("steps",)
+# `count` reaches redo by the same route it reaches undo: it is the word
+# maya_array uses for how many, and the two commands are typed together.
+REDO_SYNONYMS = {"count": "steps"}
+
+
 def redo(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, REDO_KEYS, "redo", REDO_SYNONYMS)
     cmds = _cmds()
     steps = _steps(params)
     done = 0
@@ -213,7 +260,24 @@ def redo(params: Dict[str, Any]) -> Dict[str, Any]:
 redo.no_undo_chunk = True
 
 
+# Every top-level key new_scene reads. Anything else is refused rather than
+# ignored (#767), and refused FIRST: this handler already validates
+# everything before it spends a checkpoint, and an unknown key is just one
+# more thing that must never cost the user their scene.
+NEW_SCENE_KEYS = ("confirm", "linear_unit")
+# `units` is what the RESULT calls the block this command hands back, so a
+# caller who read one result reaches for it as the input, and `unit` is the
+# same word said singular. `force` is maya.cmds' own name for the flag on
+# the file(new=True, force=True) call underneath - the word is right there
+# in the API being wrapped. None of the three shares a prefix with the key
+# it means.
+NEW_SCENE_SYNONYMS = {"units": "linear_unit", "unit": "linear_unit",
+                      "force": "confirm"}
+
+
 def new_scene(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, NEW_SCENE_KEYS, "new_scene",
+                       NEW_SCENE_SYNONYMS)
     if params.get("confirm") is not True:
         raise HandlerError(
             "new_scene discards the current scene and requires confirmation",
@@ -252,7 +316,21 @@ def new_scene(params: Dict[str, Any]) -> Dict[str, Any]:
 new_scene.no_undo_chunk = True
 
 
+# Every top-level key open_scene reads. Anything else is refused rather than
+# ignored (#767), and before the checkpoint for new_scene's reason: a
+# misspelt confirm that is merely dropped turns an unsaved scene into a
+# discarded one.
+OPEN_SCENE_KEYS = ("path", "confirm")
+# `file` is what maya.cmds calls the command doing the work here, and
+# `scene` is the word this tool's own name ends in, so both are what a
+# caller types when naming the thing to open. `force` is the flag name on
+# the file(open=True, force=True) call underneath.
+OPEN_SCENE_SYNONYMS = {"file": "path", "scene": "path", "force": "confirm"}
+
+
 def open_scene(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, OPEN_SCENE_KEYS, "open_scene",
+                       OPEN_SCENE_SYNONYMS)
     cmds = _cmds()
     path = str(params.get("path") or "")
     if not os.path.isfile(path):
@@ -279,7 +357,18 @@ def open_scene(params: Dict[str, Any]) -> Dict[str, Any]:
 open_scene.no_undo_chunk = True
 
 
+# Every top-level key save_scene reads. Anything else is refused rather than
+# ignored (#767): a dropped path here does not fail, it writes over
+# whatever the session happens to have open.
+SAVE_SCENE_KEYS = ("path",)
+# `file` is maya.cmds' own name for the command being wrapped, and the
+# destination of a save is the thing a caller most naturally calls a file.
+SAVE_SCENE_SYNONYMS = {"file": "path"}
+
+
 def save_scene(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, SAVE_SCENE_KEYS, "save_scene",
+                       SAVE_SCENE_SYNONYMS)
     cmds = _cmds()
     path: Optional[str] = params.get("path")
     if path:

@@ -26,7 +26,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..dispatcher import HandlerError
+from ..dispatcher import HandlerError, require_known_keys
 from . import material, naming
 
 SHADER = "standardSurface"
@@ -265,7 +265,20 @@ def _wire(cmds, tracker, shader: str, base: str, spec: Dict[str, Any], node: str
     cmds.connectAttr(source, target, force=True)
 
 
+# Every top-level key assign_pbr reads. Anything else is refused rather than
+# ignored (#767): an unread key does not fail, it succeeds and does something
+# else.
+ASSIGN_PBR_KEYS = ("mesh", "maps", "params", "name")
+# `material` is what the RESULT calls the shader this mints, and the tool next
+# door was passed it in place of `name` eleven times before anything said so.
+# `textures` is the everyday word for the images in `maps`; only the slot table
+# above calls them maps.
+ASSIGN_PBR_SYNONYMS = {"material": "name", "textures": "maps"}
+
+
 def assign_pbr(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, ASSIGN_PBR_KEYS, "assign_pbr",
+                       ASSIGN_PBR_SYNONYMS)
     cmds = _cmds()
     meshes = _mesh_names(params)
     specs = validate_maps(params.get("maps"))

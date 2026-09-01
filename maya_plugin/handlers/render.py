@@ -21,7 +21,7 @@ import os
 import uuid
 from typing import Any, Dict, List, Optional, Sequence
 
-from ..dispatcher import HandlerError
+from ..dispatcher import HandlerError, require_known_keys
 from . import capture, lighting, naming, pngprobe, session
 
 VALID_RENDERERS = ("arnold", "hw2")
@@ -668,8 +668,23 @@ def _name_list(params: Dict[str, Any], key: str, example: str):
     return value
 
 
+# Every top-level key render_scene reads, the last six of them inside
+# _run_shots rather than here. Anything else is refused rather than ignored
+# (#767): an unread key does not fail, it succeeds and does something else.
+RENDER_SCENE_KEYS = (
+    "angles", "isolate", "target", "renderer", "resolution", "samples",
+    "zoom", "relight", "fallback_light",
+)
+# `frame_on` is the name this handler itself gives `target` in the shot dicts
+# below, so a caller who has read the code reaches for it; `subjects` is
+# render_sheet's word for the objects to render, one tool over in this module.
+RENDER_SCENE_SYNONYMS = {"frame_on": "target", "subjects": "isolate"}
+
+
 def render_scene(params: Dict[str, Any]) -> Dict[str, Any]:
     """Render named angles through the render pipeline; no viewport involved."""
+    require_known_keys(params, RENDER_SCENE_KEYS, "render_scene",
+                       RENDER_SCENE_SYNONYMS)
     angles = resolve_angles(params.get("angles"))
     isolate = _name_list(params, "isolate", "|golem")
     # Framing and visibility are separate questions. Welding them meant a
@@ -687,6 +702,19 @@ def render_scene(params: Dict[str, Any]) -> Dict[str, Any]:
     return _run_shots(_cmds(), shots, params)
 
 
+# Every top-level key render_sheet reads, the last six of them inside
+# _run_shots rather than here. Anything else is refused rather than ignored
+# (#767): an unread key does not fail, it succeeds and does something else.
+RENDER_SHEET_KEYS = (
+    "subjects", "angle", "isolate", "renderer", "resolution", "samples",
+    "zoom", "relight", "fallback_light",
+)
+# `target` is what render_scene and capture_viewport call the object to frame,
+# and a sheet cell is that same object one per frame, so the singular and its
+# plural both arrive here meaning `subjects`.
+RENDER_SHEET_SYNONYMS = {"target": "subjects", "targets": "subjects"}
+
+
 def render_sheet(params: Dict[str, Any]) -> Dict[str, Any]:
     """One frame per subject, each isolated and framed on itself, in ONE call.
 
@@ -698,6 +726,8 @@ def render_sheet(params: Dict[str, Any]) -> Dict[str, Any]:
     The images come back as a list; the MCP server composites them, exactly as
     it already does for capture_turntable.
     """
+    require_known_keys(params, RENDER_SHEET_KEYS, "render_sheet",
+                       RENDER_SHEET_SYNONYMS)
     subjects = _name_list(params, "subjects", "|kit_wall_a")
     if not subjects:
         raise HandlerError(

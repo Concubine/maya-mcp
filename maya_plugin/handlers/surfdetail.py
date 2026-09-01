@@ -48,8 +48,9 @@ APPLY_SURFACE_DETAIL_KEYS = ("mesh", "maps_dir", "out_dir", "effects",
 # word an agent reaches for is a plausible synonym, not a typo, and no
 # string-similarity test finds "masks_dir" from "maps_dir" or "effect"
 # from "effects" on its own.
-SYNONYMS = {"meshes": "mesh", "masks_dir": "maps_dir", "dir": "maps_dir",
-           "effect": "effects"}
+APPLY_SURFACE_DETAIL_SYNONYMS = {
+    "meshes": "mesh", "masks_dir": "maps_dir", "dir": "maps_dir",
+    "effect": "effects"}
 
 EFFECT_KEYS = ("kind", "strength", "scale", "color")
 EFFECT_SYNONYMS = {"type": "kind", "intensity": "strength",
@@ -184,7 +185,8 @@ def _validate_effect(i: int, raw: Any, seen_kinds: set) -> Dict[str, Any]:
 def validate(params: Dict[str, Any], cmds) -> Dict[str, Any]:
     """Everything checkable before a mask file is opened or a node touched."""
     require_known_keys(params, APPLY_SURFACE_DETAIL_KEYS,
-                       "apply_surface_detail", SYNONYMS)
+                       "apply_surface_detail",
+                       APPLY_SURFACE_DETAIL_SYNONYMS)
 
     mesh_name = params.get("mesh")
     if not isinstance(mesh_name, str) or not mesh_name.strip():
@@ -391,6 +393,10 @@ def _grain_pixels(grain: Dict[str, Any],
 
 
 def apply_surface_detail(params: Dict[str, Any]) -> Dict[str, Any]:
+    # Ahead of _cmds(): an unknown key needs no Maya to answer (#767).
+    # validate() guards again - it is the seam the headless tests drive.
+    require_known_keys(params, APPLY_SURFACE_DETAIL_KEYS,
+                       "apply_surface_detail", APPLY_SURFACE_DETAIL_SYNONYMS)
     cmds = _cmds()
     settings = validate(params, cmds)
     mesh = settings["mesh"]

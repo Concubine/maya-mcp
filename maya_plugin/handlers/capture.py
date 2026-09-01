@@ -20,7 +20,7 @@ import os
 import tempfile
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
-from ..dispatcher import HandlerError
+from ..dispatcher import HandlerError, require_known_keys
 from . import naming, pngprobe
 
 VALID_ANGLES = ("front", "side", "back", "top", "three_quarter", "current")
@@ -216,7 +216,23 @@ def blank_warnings(shot: Dict[str, Any], label: str) -> List[str]:
     return []
 
 
+# Every top-level key capture_viewport reads. Anything else is refused rather
+# than ignored (#767): an unread key does not fail, it succeeds and does
+# something else.
+CAPTURE_VIEWPORT_KEYS = (
+    "angles", "shading", "wireframe_overlay", "buffer", "lighting", "shadows",
+    "isolate", "target", "frame_all", "resolution",
+)
+# `frame_on` is what this module calls the very same thing one layer down -
+# _capture_one takes it under that name and render.py's shot dicts spell it
+# that way too - so anyone who has read the code reaches for it before
+# `target`.
+CAPTURE_VIEWPORT_SYNONYMS = {"frame_on": "target"}
+
+
 def capture_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, CAPTURE_VIEWPORT_KEYS, "capture_viewport",
+                       CAPTURE_VIEWPORT_SYNONYMS)
     angles = resolve_angles(params.get("angles"))
     shading = params.get("shading", "smoothShaded")
     if shading not in VALID_SHADING:
@@ -276,6 +292,18 @@ TURNTABLE_DEFAULT_FRAMES = 8
 TURNTABLE_MAX_FRAMES = 16
 
 
+# Every top-level key capture_turntable reads. Anything else is refused rather
+# than ignored (#767): an unread key does not fail, it succeeds and does
+# something else.
+CAPTURE_TURNTABLE_KEYS = (
+    "n_frames", "target", "shading", "lighting", "resolution", "shadows",
+)
+# `isolate` is capture_viewport's word for naming the subject, and this tool
+# really does isolate the one it is handed, so the neighbouring key comes to
+# hand first; `frames` is the bare noun for the thing `n_frames` counts.
+CAPTURE_TURNTABLE_SYNONYMS = {"isolate": "target", "frames": "n_frames"}
+
+
 def capture_turntable(params: Dict[str, Any]) -> Dict[str, Any]:
     """N evenly-spaced azimuths around the subject, for one composite image.
 
@@ -284,6 +312,8 @@ def capture_turntable(params: Dict[str, Any]) -> Dict[str, Any]:
     ceiling does not apply - but a 32-cell sheet is unreadable at any sane
     resolution.
     """
+    require_known_keys(params, CAPTURE_TURNTABLE_KEYS, "capture_turntable",
+                       CAPTURE_TURNTABLE_SYNONYMS)
     n_frames = params.get("n_frames", TURNTABLE_DEFAULT_FRAMES)
     if (
         not isinstance(n_frames, int) or isinstance(n_frames, bool)

@@ -626,6 +626,10 @@ def _rewire_color(cmds, job: Dict[str, Any], final_path: str,
 
 
 def bake_mesh_maps(params: Dict[str, Any]) -> Dict[str, Any]:
+    # Ahead of _cmds(): an unknown key needs no Maya to answer (#767).
+    # validate() guards again - it is the seam the headless tests drive.
+    require_known_keys(params, BAKE_MESH_MAPS_KEYS, "bake_mesh_maps",
+                       BAKE_MESH_MAPS_SYNONYMS)
     cmds = _cmds()
     settings = validate(params, cmds)
     apply_jobs: List[Dict[str, Any]] = []

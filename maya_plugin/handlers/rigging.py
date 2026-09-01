@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..dispatcher import HandlerError
+from ..dispatcher import HandlerError, require_known_keys
 from . import clip, naming, rigmath, sculpt, sculpt_math, session, units
 
 
@@ -32,7 +32,21 @@ def _long(cmds, node: str) -> str:
     return (cmds.ls(node, long=True) or [node])[0]
 
 
+# Every top-level key create_skeleton reads. Anything else is refused rather
+# than ignored (#767): an unread key does not fail, it succeeds and does
+# something else.
+CREATE_SKELETON_KEYS = ("joints", "chain", "chain_prefix", "root_name")
+# Both wrong words are the shorter, more natural half of a real key. Nothing
+# in this toolbox is called a bare `prefix` - this command qualifies it as
+# `chain_prefix` and `array` qualifies its own as `name_prefix` - so the bare
+# word is what a caller reaches for. And `bones` is what the whole world
+# outside Maya calls joints; Maya's node type is the only reason `joints` won.
+CREATE_SKELETON_SYNONYMS = {"prefix": "chain_prefix", "bones": "joints"}
+
+
 def create_skeleton(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, CREATE_SKELETON_KEYS, "create_skeleton",
+                       CREATE_SKELETON_SYNONYMS)
     cmds = _cmds()
     resolved = rigmath.resolve_joints(params)
     session.auto_checkpoint("create_skeleton")
@@ -146,7 +160,23 @@ def _skin_weights(skin_cluster: str,
     return influences, list(weights), num_verts
 
 
+# Every top-level key bind_skin reads. Anything else is refused rather than
+# ignored (#767): an unread key does not fail, it succeeds and does something
+# else.
+BIND_SKIN_KEYS = ("mesh", "root", "method", "max_influences")
+# A caller thinks of the thing being bound to as the skeleton - it is what
+# create_skeleton just handed back - while this command names it by the one
+# joint at its top. `influences` is weight_report's own vocabulary, the word
+# its histogram entries and per_joint counts are phrased in, so it reads as
+# the input for the cap that is actually spelled `max_influences`. And
+# `bind_method` is the qualified spelling the BIND_METHODS table invites.
+BIND_SKIN_SYNONYMS = {"skeleton": "root", "influences": "max_influences",
+                      "bind_method": "method"}
+
+
 def bind_skin(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, BIND_SKIN_KEYS, "bind_skin",
+                       BIND_SKIN_SYNONYMS)
     cmds = _cmds()
     mesh_long, mesh_shape = naming.require_mesh(cmds, str(params.get("mesh") or ""))
     root_long = _require_joint(cmds, params.get("root"))
@@ -336,7 +366,21 @@ def _resolve_rotations(cmds, joints: List[str], rotations) -> Dict[str, List[flo
     return resolved
 
 
+# Every top-level key pose_skeleton reads. Anything else is refused rather
+# than ignored (#767): an unread key does not fail, it succeeds and does
+# something else.
+POSE_SKELETON_KEYS = ("root", "rotations", "space")
+# `pose` is the command's own noun, and add_corrective takes a pose under a
+# neighbouring spelling, so a caller naturally names the payload after the
+# operation rather than after the degrees it actually carries. `skeleton` is
+# the same slip bind_skin sees: the argument feels like the whole skeleton,
+# not the single joint at its top.
+POSE_SKELETON_SYNONYMS = {"pose": "rotations", "skeleton": "root"}
+
+
 def pose_skeleton(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, POSE_SKELETON_KEYS, "pose_skeleton",
+                       POSE_SKELETON_SYNONYMS)
     cmds = _cmds()
     root_long = _require_joint(cmds, params.get("root"))
     space = params.get("space", "local")
@@ -401,7 +445,18 @@ def pose_skeleton(params: Dict[str, Any]) -> Dict[str, Any]:
             "per_mesh": per_mesh, "warnings": warnings}
 
 
+# Every top-level key reset_pose reads. Anything else is refused rather than
+# ignored (#767): an unread key does not fail, it succeeds and does something
+# else.
+RESET_POSE_KEYS = ("root",)
+# `skeleton` again: with a single argument the caller has nothing to
+# disambiguate against, and what they mean to reset is the whole skeleton.
+RESET_POSE_SYNONYMS = {"skeleton": "root"}
+
+
 def reset_pose(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, RESET_POSE_KEYS, "reset_pose",
+                       RESET_POSE_SYNONYMS)
     cmds = _cmds()
     root_long = _require_joint(cmds, params.get("root"))
     joints = _hierarchy_joints(cmds, root_long)
@@ -445,9 +500,16 @@ def _skin_cluster_for(cmds, mesh_long: str, mesh_shape: str) -> str:
     return existing[0]
 
 
+# Every top-level key weight_report reads. Anything else is refused rather
+# than ignored (#767): an unread key does not fail, it succeeds and does
+# something else.
+WEIGHT_REPORT_KEYS = ("mesh",)
+
+
 def weight_report(params: Dict[str, Any]) -> Dict[str, Any]:
     """The perception tool: how an agent judges weights without a viewport.
     A measurement - no checkpoint, nothing in the scene changes."""
+    require_known_keys(params, WEIGHT_REPORT_KEYS, "weight_report")
     cmds = _cmds()
     mesh_long, mesh_shape = naming.require_mesh(cmds, str(params.get("mesh") or ""))
     sc = _skin_cluster_for(cmds, mesh_long, mesh_shape)
@@ -526,7 +588,14 @@ def _pose_warning(cmds, influences: List[str]) -> Optional[str]:
     return None
 
 
+# Every top-level key mirror_weights reads. Anything else is refused rather
+# than ignored (#767): an unread key does not fail, it succeeds and does
+# something else.
+MIRROR_WEIGHTS_KEYS = ("mesh", "axis", "direction")
+
+
 def mirror_weights(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, MIRROR_WEIGHTS_KEYS, "mirror_weights")
     cmds = _cmds()
     mesh_long, mesh_shape = naming.require_mesh(cmds, str(params.get("mesh") or ""))
     axis = params.get("axis", "x")
@@ -639,7 +708,19 @@ def _resolve_influences(influences: List[str], names) -> List[int]:
     return columns
 
 
+# Every top-level key smooth_weights reads. Anything else is refused rather
+# than ignored (#767): an unread key does not fail, it succeeds and does
+# something else.
+SMOOTH_WEIGHTS_KEYS = ("mesh", "iterations", "joints")
+# `passes` is the word this handler's own hint teaches - it advises two or
+# three of them - so the vocabulary the caller is handed back differs from the
+# one the caller must send.
+SMOOTH_WEIGHTS_SYNONYMS = {"passes": "iterations"}
+
+
 def smooth_weights(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, SMOOTH_WEIGHTS_KEYS, "smooth_weights",
+                       SMOOTH_WEIGHTS_SYNONYMS)
     cmds = _cmds()
     mesh_long, mesh_shape = naming.require_mesh(cmds, str(params.get("mesh") or ""))
     iterations = params.get("iterations", 1)
@@ -713,7 +794,20 @@ def _region_vertex_ids_from_faces(cmds, mesh_long: str, faces) -> List[int]:
     return sorted(set(ids))
 
 
+# Every top-level key set_region_weights reads. Anything else is refused
+# rather than ignored (#767): an unread key does not fail, it succeeds and
+# does something else.
+SET_REGION_WEIGHTS_KEYS = ("mesh", "joint", "weight", "faces",
+                           "within_radius_of", "radius", "falloff")
+# A sphere is named by its centre everywhere else in this toolbox - `array`
+# takes a literal `center` - so the caller supplies the geometric word while
+# this command spells the same point as the phrase `within_radius_of`.
+SET_REGION_WEIGHTS_SYNONYMS = {"center": "within_radius_of"}
+
+
 def set_region_weights(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, SET_REGION_WEIGHTS_KEYS, "set_region_weights",
+                       SET_REGION_WEIGHTS_SYNONYMS)
     cmds = _cmds()
     mesh_long, mesh_shape = naming.require_mesh(cmds, str(params.get("mesh") or ""))
     weight = params.get("weight")
@@ -1038,7 +1132,19 @@ def solve_ik_chain(cmds, chain: List[str], target: List[float],
     }
 
 
+# Every top-level key pose_ik reads. Anything else is refused rather than
+# ignored (#767): an unread key does not fail, it succeeds and does something
+# else.
+POSE_IK_KEYS = ("root", "joint", "target", "pole", "start", "keep")
+# `start` IS a key here, so the caller pairs it with `end` for the far end of
+# the chain - which is what this handler calls the joint internally too, only
+# after resolving it. `skeleton` is the same slip bind_skin and pose_skeleton
+# see: the argument feels like the whole skeleton, not its topmost joint.
+POSE_IK_SYNONYMS = {"end": "joint", "skeleton": "root"}
+
+
 def pose_ik(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, POSE_IK_KEYS, "pose_ik", POSE_IK_SYNONYMS)
     cmds = _cmds()
     root_long = _require_joint(cmds, params.get("root"))
     joints = _hierarchy_joints(cmds, root_long)

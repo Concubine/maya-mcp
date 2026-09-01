@@ -270,10 +270,21 @@ def _validated_overrides(params: Dict[str, Any], chunk_shorts,
 # something else. The root-vs-chunks exclusivity refusal stays in
 # _collect_chunks - this guard only answers "is this key read at all".
 AUTHOR_PHYSICS_KEYS = ("root", "chunks", "exclude", "density", "overrides")
+# `chunks` is this tool's word for the bodies; every other tool in the set
+# calls a list of objects `meshes` or `names`, and `mass` is what the RESULT
+# reports (mass = volume x density), so a caller reaches for the output's
+# noun as the input. `joints`/`limits` name what an override actually
+# carries, and `ignore`/`skip` are the plain words for `exclude`.
+AUTHOR_PHYSICS_SYNONYMS = {
+    "mesh": "chunks", "meshes": "chunks", "bodies": "chunks",
+    "parts": "chunks", "mass": "density", "joints": "overrides",
+    "limits": "overrides", "ignore": "exclude", "skip": "exclude",
+}
 
 
 def author_physics(params: Dict[str, Any]) -> Dict[str, Any]:
-    require_known_keys(params, AUTHOR_PHYSICS_KEYS, "author_physics")
+    require_known_keys(params, AUTHOR_PHYSICS_KEYS, "author_physics",
+                       AUTHOR_PHYSICS_SYNONYMS)
     cmds = _cmds()
     warnings: List[str] = []
     density = params.get("density", DENSITY_DEFAULT)

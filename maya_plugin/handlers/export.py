@@ -26,7 +26,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..dispatcher import HandlerError
+from ..dispatcher import HandlerError, require_known_keys
 from . import clip as clip_mod
 from . import clipmath
 from . import fbxbytes
@@ -897,8 +897,36 @@ def _bounds(facts):
     return list(lo), list(hi), hi[1] - lo[1], None
 
 
+# Every top-level key export_fbx reads. Anything else is refused rather than
+# ignored (#767): an unread key does not fail, it succeeds and does something
+# else.
+EXPORT_FBX_KEYS = ("path", "metres_per_unit", "nodes", "include_skins",
+                   "include_animation", "require_baked_textures")
+# `skin`, `skins`, `animation` and `unit_scale_factor` are RESULT field names:
+# the report calls the skin block `skin`, the take block `animation`, and
+# echoes the file's own `unit_scale_factor` beside `metres_per_unit`, so a
+# caller who read one export back reaches for those words writing the next.
+# `names` and `meshes` are this repo's own vocabulary for the same subject
+# list on neighbouring tools (uv_atlas and delete_objects take `names`,
+# bake_textures takes `meshes`), while `objects` and `file` are the generic
+# words. None of them shares a three-character prefix with the key it means,
+# so require_known_keys' typo fallback could never suggest one.
+EXPORT_FBX_SYNONYMS = {
+    "animation": "include_animation",
+    "skin": "include_skins",
+    "skins": "include_skins",
+    "unit_scale_factor": "metres_per_unit",
+    "objects": "nodes",
+    "meshes": "nodes",
+    "names": "nodes",
+    "file": "path",
+}
+
+
 def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
     global _fbx_loaded_time_unit
+    require_known_keys(params, EXPORT_FBX_KEYS, "export_fbx",
+                       EXPORT_FBX_SYNONYMS)
     path, nodes, include_skins, include_animation, require_baked = _validate(
         params)
     cmds = _cmds()

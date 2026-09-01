@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List
 
-from ..dispatcher import HandlerError
+from ..dispatcher import HandlerError, require_known_keys
 from . import naming
 from .capture import find_model_panel
 
@@ -53,7 +53,33 @@ def look_at_rotation(position: List[float], target: List[float]) -> List[float]:
     return [-elevation, azimuth, 0.0]
 
 
+# Every top-level key set_viewport reads. Anything else is refused rather
+# than ignored (#767): an unread key does not fail, it succeeds and does
+# something else.
+SET_VIEWPORT_KEYS = (
+    "show_grid", "show_light_icons", "show_camera_icons", "show_locators",
+    "show_manipulators", "show_texture_placements", "wireframe_on_shaded",
+    "display_lights",
+)
+# `lighting` is what the neighbouring capture tools call the very same
+# light-display choice, so a caller who has just written a capture call
+# carries the word over. The rest are Maya's own modelEditor flag names,
+# sitting in _EDITOR_FLAGS as the values these params map onto: anyone who
+# knows the underlying command reaches for the flag before the param.
+SET_VIEWPORT_SYNONYMS = {
+    "lighting": "display_lights",
+    "grid": "show_grid",
+    "lights": "show_light_icons",
+    "cameras": "show_camera_icons",
+    "locators": "show_locators",
+    "manipulators": "show_manipulators",
+    "textures": "show_texture_placements",
+}
+
+
 def set_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, SET_VIEWPORT_KEYS, "set_viewport",
+                       SET_VIEWPORT_SYNONYMS)
     cmds = _cmds()
     panel = find_model_panel(cmds)
     edits: Dict[str, Any] = {}
@@ -89,7 +115,25 @@ def set_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
     return state
 
 
+# Every top-level key set_camera reads. Anything else is refused rather than
+# ignored: an unread key does not fail, it succeeds and does something else.
+SET_CAMERA_KEYS = ("camera", "position", "look_at", "focal_length",
+                   "set_active")
+# `name` is what the RESULT calls the camera, and it is also the create-key
+# every other node-making tool in this plugin takes, so it is the first word
+# reached for. `translate`/`translation` are the xform flag and the transform
+# attribute this handler itself drives underneath — the Maya spelling of the
+# thing, not the parameter's.
+SET_CAMERA_SYNONYMS = {
+    "name": "camera",
+    "translate": "position",
+    "translation": "position",
+}
+
+
 def set_camera(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, SET_CAMERA_KEYS, "set_camera",
+                       SET_CAMERA_SYNONYMS)
     cmds = _cmds()
     name = str(params.get("camera") or DEFAULT_CAMERA)
     warnings: List[str] = []

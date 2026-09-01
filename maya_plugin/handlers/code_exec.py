@@ -24,7 +24,7 @@ import io
 import traceback
 from typing import Any, Dict, Optional
 
-from ..dispatcher import HandlerError
+from ..dispatcher import HandlerError, require_known_keys
 
 STDOUT_CAP = 8 * 1024
 # A structured result is the whole point of the call, not chatter: 4 KB used to
@@ -67,8 +67,15 @@ def get_namespace() -> Dict[str, Any]:
     return _namespace
 
 
+# reset_namespace reads nothing at all, so every top-level key is refused
+# rather than ignored (#767): an unread key does not fail, it succeeds and does
+# something else.
+RESET_NAMESPACE_KEYS = ()
+
+
 def reset_namespace(params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Handler for maya_reset_namespace; also used directly by tests."""
+    require_known_keys(params or {}, RESET_NAMESPACE_KEYS, "reset_namespace")
     global _namespace
     _namespace = None
     return {"reset": True}
@@ -82,7 +89,20 @@ def _cap(text: str, limit: int) -> tuple:
     return text[:limit] + TRUNCATION_NOTICE % limit, True
 
 
+# Every top-level key execute_python reads. Anything else is refused rather
+# than ignored (#767): an unread key does not fail, it succeeds and does
+# something else.
+EXECUTE_PYTHON_KEYS = ("code", "risky", "timeout_s")
+# `source` is what this handler's own refusal hint calls the thing it wants -
+# "pass the Python source to run" - so a caller who read the error reaches for
+# the word the error used. `script` is simply the everyday word for a body of
+# Python, and nothing about `code` warns that it is the only accepted one.
+EXECUTE_PYTHON_SYNONYMS = {"script": "code", "source": "code"}
+
+
 def execute_python(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, EXECUTE_PYTHON_KEYS, "execute_python",
+                       EXECUTE_PYTHON_SYNONYMS)
     code = params.get("code")
     if not isinstance(code, str) or not code.strip():
         raise HandlerError(

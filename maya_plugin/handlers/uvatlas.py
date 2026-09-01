@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from ..dispatcher import HandlerError
+from ..dispatcher import HandlerError, require_known_keys
 from . import naming, units, uvmath
 
 PROJECTIONS = ("box", "planar", "keep")
@@ -157,7 +157,25 @@ def pack_shape(
     return {"uv_bounds": [round(q, 6) for q in bounds], "inside_patch": bool(inside)}
 
 
+# Every top-level key uv_atlas reads. Anything else is refused rather than
+# ignored (#767): an unread key does not fail, it succeeds and does something
+# else - and a silently ignored packing param leaves UVs sitting in the wrong
+# patch, which reads as another material's pixels rather than as an error.
+UV_ATLAS_KEYS = ("names", "patch", "cols", "rows", "margin", "project",
+                 "normalize", "world_scale", "uv_per_metre")
+# `projection` is the unabbreviated English word for `project`, and `mode` is
+# the generic word for the same three-way choice; both name PROJECTIONS above.
+# `normalized` is the past participle a caller writes when they mean the
+# `normalize` flag. `mesh` and `meshes` are what every neighbouring tool calls
+# its subject - assign_material takes `mesh`, bake_textures takes `meshes` -
+# while this one, which packs several pieces into one patch, calls it `names`.
+UV_ATLAS_SYNONYMS = {"projection": "project", "mode": "project",
+                     "normalized": "normalize", "meshes": "names",
+                     "mesh": "names"}
+
+
 def uv_atlas(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, UV_ATLAS_KEYS, "uv_atlas", UV_ATLAS_SYNONYMS)
     cmds = _cmds()
 
     names = params.get("names")

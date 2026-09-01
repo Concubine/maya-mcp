@@ -22,7 +22,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..dispatcher import HandlerError
+from ..dispatcher import HandlerError, require_known_keys
 from . import naming, pbr, pngprobe, session, texclaim
 
 RESOLUTIONS = (256, 512, 1024, 2048, 4096)
@@ -619,7 +619,33 @@ def _sweep_orphans(cmds, candidates: List[str],
     return deleted, warnings
 
 
+# Every top-level key bake_textures reads. Anything else is refused rather
+# than ignored (#767): an unread key does not fail, it succeeds and does
+# something else.
+BAKE_TEXTURES_KEYS = ("meshes", "out_dir", "resolution", "slots")
+# The singulars are this repo's own vocabulary next door: every tool that
+# takes one mesh calls it `mesh` (assign_material, apply_texture_recipe) and
+# apply_texture_recipe calls one slot `slot`, so reaching for them here, where
+# both are plural, is the plausible miss rather than a typo. `nodes` is
+# export_fbx's word for the same list of subjects. `path` is what export_fbx
+# calls the place it writes to, and `output_dir`, `folder`, `directory` and
+# `size` are the generic words a caller falls back on when the tool's own is
+# not to hand.
+BAKE_TEXTURES_SYNONYMS = {
+    "nodes": "meshes",
+    "mesh": "meshes",
+    "path": "out_dir",
+    "output_dir": "out_dir",
+    "folder": "out_dir",
+    "directory": "out_dir",
+    "size": "resolution",
+    "slot": "slots",
+}
+
+
 def bake_textures(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, BAKE_TEXTURES_KEYS, "bake_textures",
+                       BAKE_TEXTURES_SYNONYMS)
     cmds = _cmds()
     settings = validate(params, cmds)
     jobs, warnings = plan_bakes(cmds, settings["meshes"], settings["slots"])

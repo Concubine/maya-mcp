@@ -206,7 +206,7 @@ def _tendril_ring_probe() -> list:
         "ys = sorted(buckets.keys(), reverse=True)\n"
         "[buckets[y] for y in ys]\n"
     ) % (name,)
-    exec_res = call("execute_python", {"code": code, "timeout_s": 60})
+    exec_res = call("execute_python", {"code": code}, timeout_s=60)
     if exec_res.get("status") != "ok":
         raise SystemExit("ring probe measurement call failed: %r"
                          % (exec_res.get("error"),))
@@ -246,7 +246,7 @@ def _tendril_ring_centroids(mesh: str, ring_indices: list) -> list:
         "    out.append(([cx, cy, cz], radius))\n"
         "out\n"
     ) % (mesh, ring_indices)
-    exec_res = call("execute_python", {"code": code, "timeout_s": 60})
+    exec_res = call("execute_python", {"code": code}, timeout_s=60)
     if exec_res.get("status") != "ok":
         raise SystemExit("ring centroid call on %s failed: %r"
                          % (mesh, exec_res.get("error")))
@@ -346,7 +346,7 @@ def assert_joints_inside(mesh: str, joint_names: list, radius_of: dict) -> dict:
         "    out.append(best ** 0.5)\n"
         "out\n"
     ) % (mesh, joint_names)
-    exec_res = call("execute_python", {"code": code, "timeout_s": 180})
+    exec_res = call("execute_python", {"code": code}, timeout_s=180)
     if exec_res.get("status") != "ok":
         raise SystemExit("assert_joints_inside call failed: %r"
                          % (exec_res.get("error"),))
@@ -716,7 +716,10 @@ def probe_mirror(mesh: str) -> dict:
     self-paired joint is a case it has never met. Whatever it does is a
     FINDING, not an obstacle - record it and move on.
     """
-    res = call("mirror_weights", {"mesh": mesh, "root": ROOT})
+    # No `root`: mirror_weights pairs influences off the mesh's own
+    # skinCluster and never reads one. It was passed here for years and
+    # silently ignored - the #764 shape that #767 now refuses outright.
+    res = call("mirror_weights", {"mesh": mesh})
     return {"status": res.get("status"),
             "error": res.get("error"),
             "result": res.get("result"),
@@ -1301,7 +1304,7 @@ def _find_landmarks(mesh: str) -> dict:
         "'min_y': lo, 'max_y': hi}\n"
         "result\n"
     ) % (mesh, TIP_BAND, APEX_BAND, RIM_Y, RIM_BAND_HALF, RIM_RADIUS_MIN)
-    res = call("execute_python", {"code": code, "timeout_s": 120})
+    res = call("execute_python", {"code": code}, timeout_s=120)
     if res.get("status") != "ok":
         raise SystemExit("_find_landmarks call failed: %r" % (res.get("error"),))
     exec_result = res.get("result") or {}
@@ -1372,7 +1375,7 @@ def sample_deformation(mesh: str, clips: list, landmarks: dict) -> list:
                 "for i in v]) for k, v in IDX.items())\n"
                 "result\n"
             ) % (frame, mesh, idx)
-            res = call("execute_python", {"code": code, "timeout_s": 120})
+            res = call("execute_python", {"code": code}, timeout_s=120)
             if res.get("status") != "ok":
                 raise SystemExit("sample_deformation(%s@%d) call failed: %r"
                                  % (clip["name"], frame, res.get("error")))
@@ -1708,7 +1711,7 @@ def verify_prebuilt_scene(mesh: str, root: str) -> dict:
         "timeChange=True) or []))\n"
         "out\n"
     ) % (mesh, mesh, tendril_name(1, 5) + ".rotateY", root + ".translateZ")
-    res = call("execute_python", {"code": code, "timeout_s": 60})
+    res = call("execute_python", {"code": code}, timeout_s=60)
     if res.get("status") != "ok":
         raise SystemExit("BLOCKED: scene probe failed: %r" % (res.get("error"),))
     exec_result = res.get("result") or {}
@@ -1761,8 +1764,8 @@ def gather_skin_facts(mesh: str) -> dict:
     report = report_frame.get("result") or {}
     facts = dm.histogram_facts(report.get("histogram", []))
     res = call("execute_python",
-              {"code": "import maya.cmds as cmds\ncmds.ls(type='skinCluster')\n",
-               "timeout_s": 30})
+              {"code": "import maya.cmds as cmds\ncmds.ls(type='skinCluster')\n"},
+              timeout_s=30)
     if res.get("status") != "ok":
         raise SystemExit("skinCluster lookup failed: %r" % (res.get("error"),))
     exec_result = res.get("result") or {}

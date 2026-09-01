@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..dispatcher import HandlerError
+from ..dispatcher import HandlerError, require_known_keys
 from . import combine, ledger, modeling, naming, session, uvatlas, uvmath
 
 # A ceiling on the CALL, not on ambition: one assemble runs on Maya's main
@@ -263,7 +263,20 @@ def _apply_taper(cmds, node: str, flare: Dict[str, float], part: Dict[str, Any])
         cmds.delete(handle)
 
 
+# Every top-level key assemble reads. Anything else is refused rather than
+# ignored (#767): an unread key does not fail, it succeeds and does something
+# else.
+ASSEMBLE_KEYS = ("name", "parts", "atlas", "combine", "pivot", "pivots",
+                 "freeze")
+# `merge` is this module's own vocabulary for the flag - the docstring above
+# describes the second half of the loop as merging, and the handler's own
+# local variable is called `merge` - whereas the key on the wire is named
+# after the neighbouring maya_combine tool that actually performs it.
+ASSEMBLE_SYNONYMS = {"merge": "combine"}
+
+
 def assemble(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, ASSEMBLE_KEYS, "assemble", ASSEMBLE_SYNONYMS)
     cmds = _cmds()
     base = params.get("name")
     if not isinstance(base, str) or not base.strip():

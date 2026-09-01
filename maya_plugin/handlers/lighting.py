@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..dispatcher import HandlerError
+from ..dispatcher import HandlerError, require_known_keys
 from . import naming
 
 PRESETS = ("three_point", "single_sun", "hdri", "environment")
@@ -144,7 +144,19 @@ def _build(cmds, prefix: str, specs, intensity: float) -> List[str]:
     return created
 
 
+# Every top-level key setup_lighting reads. Anything else is refused rather
+# than ignored (#767): an unread key does not fail, it succeeds and does
+# something else.
+SETUP_LIGHTING_KEYS = ("preset", "intensity", "hdri_path", "replace_existing")
+# `brightness` is the plain word for what a light does, and the FULLY_LIT note
+# above exists precisely because `intensity` here is a unit rather than the
+# brightness dial a caller expects - so the wrong word is the natural reach.
+SETUP_LIGHTING_SYNONYMS = {"brightness": "intensity"}
+
+
 def setup_lighting(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, SETUP_LIGHTING_KEYS, "setup_lighting",
+                       SETUP_LIGHTING_SYNONYMS)
     cmds = _cmds()
     preset = params.get("preset")
     if preset not in PRESETS:

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..dispatcher import HandlerError
+from ..dispatcher import HandlerError, require_known_keys
 from . import ledger, naming, uvmath
 
 PRIMITIVE_KINDS = (
@@ -300,7 +300,28 @@ def _long(cmds, name: str) -> str:
     return matches[0]
 
 
+# Every top-level key create_primitive reads. Anything else is refused rather
+# than ignored (#767): an unread key does not fail, it succeeds and does
+# something else.
+CREATE_PRIMITIVE_KEYS = (
+    "kind", "name", "translate", "rotate", "scale", "divisions",
+    "subdivisions",
+)
+# `type` is the generic word for a shape category where this repo says `kind`.
+# `position` and `rotation` are the nouns the neighbouring tools use -
+# set_camera takes `position`, pose_skeleton takes `rotations` - while the
+# transform params here are spelled as verbs, and `pos` reaches no key for
+# the prefix fallback to suggest. `size` is what a caller means when scaling
+# a unit-box primitive, and `siz` never reaches `scale` either.
+CREATE_PRIMITIVE_SYNONYMS = {
+    "type": "kind", "position": "translate", "rotation": "rotate",
+    "size": "scale",
+}
+
+
 def create_primitive(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, CREATE_PRIMITIVE_KEYS, "create_primitive",
+                       CREATE_PRIMITIVE_SYNONYMS)
     kind = params.get("kind")
     if kind not in PRIMITIVE_KINDS:
         raise HandlerError(
@@ -431,7 +452,23 @@ def build_unit_primitive(
     return creators[kind]()[0]
 
 
+# Every top-level key duplicate reads. Anything else is refused rather
+# than ignored (#767): an unread key does not fail, it succeeds and does
+# something else.
+DUPLICATE_KEYS = ("name", "new_name", "translate", "rotate", "scale")
+# `source` is the generic word for the object being copied, and this handler
+# even calls it that internally, but the key that names it is plainly `name`;
+# `sou` matches nothing, so the prefix fallback stays silent. `position` and
+# `rotation` are the nouns the camera and rigging tools use for the offsets
+# this command spells as verbs.
+DUPLICATE_SYNONYMS = {
+    "source": "name", "position": "translate", "rotation": "rotate",
+}
+
+
 def duplicate(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, DUPLICATE_KEYS, "duplicate",
+                       DUPLICATE_SYNONYMS)
     cmds = _cmds()
     source = naming.require_object(cmds, str(params.get("name") or ""))
     requested = params.get("new_name")
@@ -453,7 +490,21 @@ def duplicate(params: Dict[str, Any]) -> Dict[str, Any]:
     return {"name": long_name, "warnings": warnings}
 
 
+# Every top-level key transform reads. Anything else is refused rather
+# than ignored (#767): an unread key does not fail, it succeeds and does
+# something else.
+TRANSFORM_KEYS = ("names", "translate", "rotate", "scale", "relative", "pivot")
+# `position` and `rotation` are the nouns the neighbouring tools reach for -
+# set_camera takes `position`, pose_skeleton takes `rotations` - where this
+# command names the same two things as verbs. `position` is the dangerous
+# one: `pos` matches no key, so without this entry the refusal could not say
+# what was meant.
+TRANSFORM_SYNONYMS = {"position": "translate", "rotation": "rotate"}
+
+
 def transform(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, TRANSFORM_KEYS, "transform",
+                       TRANSFORM_SYNONYMS)
     cmds = _cmds()
     names = params.get("names")
     if not isinstance(names, list) or not names:
@@ -498,7 +549,21 @@ def transform(params: Dict[str, Any]) -> Dict[str, Any]:
     return {"objects": objects, "warnings": warnings}
 
 
+# Every top-level key group reads. Anything else is refused rather
+# than ignored (#767): an unread key does not fail, it succeeds and does
+# something else.
+GROUP_KEYS = ("names", "group_name")
+# `name` is what the RESULT calls the group that was made, so a caller who
+# read one result reaches for it as the input - the #764 shape. Recording it
+# is what makes the refusal useful here, because the prefix fallback would
+# point at `names`, the list of CHILDREN, and send the caller further wrong.
+# `objects` is the generic word for the things being gathered, and it is what
+# transform's result calls the objects it touched.
+GROUP_SYNONYMS = {"name": "group_name", "objects": "names"}
+
+
 def group(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, GROUP_KEYS, "group", GROUP_SYNONYMS)
     cmds = _cmds()
     names = params.get("names")
     if not isinstance(names, list) or not names:
@@ -532,7 +597,19 @@ def group(params: Dict[str, Any]) -> Dict[str, Any]:
     return {"name": group_long, "warnings": []}
 
 
+# Every top-level key parent reads. Anything else is refused rather
+# than ignored (#767): an unread key does not fail, it succeeds and does
+# something else.
+PARENT_KEYS = ("child", "parent")
+# `name` is what the result calls the reparented child, so a caller echoing a
+# result back reaches for it. Neither `child` nor `parent` starts like it, so
+# the prefix fallback has nothing to offer and the entry is the only way the
+# refusal can say which of the two was meant.
+PARENT_SYNONYMS = {"name": "child"}
+
+
 def parent(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, PARENT_KEYS, "parent", PARENT_SYNONYMS)
     cmds = _cmds()
     child = naming.require_object(cmds, str(params.get("child") or ""))
     target = naming.require_object(cmds, str(params.get("parent") or ""))
@@ -543,7 +620,18 @@ def parent(params: Dict[str, Any]) -> Dict[str, Any]:
     return {"name": long_name, "warnings": []}
 
 
+# Every top-level key rename reads. Anything else is refused rather
+# than ignored (#767): an unread key does not fail, it succeeds and does
+# something else.
+RENAME_KEYS = ("name", "new_name")
+# Because the destination key is `new_name`, the source key reads as
+# `old_name` by symmetry, but here it is plainly `name`. `old` starts neither
+# allowed key, so the prefix fallback would say nothing at all.
+RENAME_SYNONYMS = {"old_name": "name"}
+
+
 def rename(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, RENAME_KEYS, "rename", RENAME_SYNONYMS)
     cmds = _cmds()
     old = naming.require_object(cmds, str(params.get("name") or ""))
     requested = params.get("new_name")
@@ -558,7 +646,19 @@ def rename(params: Dict[str, Any]) -> Dict[str, Any]:
     return {"name": long_name, "warnings": []}
 
 
+# Every top-level key delete_objects reads. Anything else is refused rather
+# than ignored (#767): an unread key does not fail, it succeeds and does
+# something else.
+DELETE_OBJECTS_KEYS = ("names",)
+# The command's own name ends in `objects` and transform's result calls the
+# things it touched `objects`, so that is the word a caller reaches for; the
+# key is `names`, which `obj` never reaches.
+DELETE_OBJECTS_SYNONYMS = {"objects": "names"}
+
+
 def delete_objects(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, DELETE_OBJECTS_KEYS, "delete_objects",
+                       DELETE_OBJECTS_SYNONYMS)
     cmds = _cmds()
     names = params.get("names")
     if not isinstance(names, list) or not names:
@@ -812,7 +912,20 @@ def _do_boolean(cmds, a_long: str, b_long: str, op: str, new_name: str) -> Dict[
     }
 
 
+# Every top-level key boolean_op reads. Anything else is refused rather than
+# ignored (#767): an unread key does not fail, it succeeds and does something
+# else. Refusing here also spares the auto_checkpoint below - an invalid call
+# must not burn a checkpoint slot.
+BOOLEAN_OP_KEYS = ("a", "b", "op", "new_name")
+# The result reports the surviving object as `name`, so a caller who read one
+# result reaches for `name` when they mean to name the new one - the #764
+# shape, and `nam` reaches no key for the prefix fallback to suggest.
+BOOLEAN_OP_SYNONYMS = {"name": "new_name"}
+
+
 def boolean_op(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, BOOLEAN_OP_KEYS, "boolean_op",
+                       BOOLEAN_OP_SYNONYMS)
     cmds = _cmds()
     op = params.get("op")
     if op not in BOOLEAN_OPS:
@@ -843,7 +956,19 @@ MIN_TARGET_POLYCOUNT = 100
 MAX_TARGET_POLYCOUNT = 200000
 
 
+# Every top-level key remesh_retopo reads. Anything else is refused rather
+# than ignored (#767). `name` is the generic word for the single object this
+# operates on; `polycount` and `faces` are what the budget is called
+# everywhere except in this key, and none of the three reaches its target
+# through the prefix fallback.
+REMESH_RETOPO_KEYS = ("mesh", "target_polycount", "keep_original")
+REMESH_RETOPO_SYNONYMS = {"name": "mesh", "polycount": "target_polycount",
+                          "faces": "target_polycount"}
+
+
 def remesh_retopo(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, REMESH_RETOPO_KEYS, "remesh_retopo",
+                       REMESH_RETOPO_SYNONYMS)
     cmds = _cmds()
     mesh_long, _ = naming.require_mesh(cmds, str(params.get("mesh") or ""))
     target = params.get("target_polycount")
@@ -931,7 +1056,19 @@ def remesh_retopo(params: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# Every top-level key mesh_cleanup reads. Anything else is refused rather
+# than ignored (#767). `name` is the generic word for the mesh; `threshold`
+# is what the merge distance is called in conversation and in this handler's
+# own local variable, while the key spells out which threshold it is.
+MESH_CLEANUP_KEYS = ("mesh", "merge_verts_threshold", "conform_normals",
+                     "freeze_transforms", "delete_history")
+MESH_CLEANUP_SYNONYMS = {"name": "mesh",
+                         "threshold": "merge_verts_threshold"}
+
+
 def mesh_cleanup(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, MESH_CLEANUP_KEYS, "mesh_cleanup",
+                       MESH_CLEANUP_SYNONYMS)
     cmds = _cmds()
     from . import meshcheck  # noqa: PLC0415 - keep module import cheap headless
 

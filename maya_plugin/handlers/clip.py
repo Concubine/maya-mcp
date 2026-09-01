@@ -24,7 +24,7 @@ import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..dispatcher import HandlerError
+from ..dispatcher import HandlerError, require_known_keys
 from . import (capture, clipmath, naming, render, rigmath, sculpt,
               sculpt_math, session, units)
 
@@ -451,7 +451,20 @@ def register_clip(cmds, root_long: str, name: str, fps: int, start: int,
                  type="string")
 
 
+# Every top-level key author_clip reads. Anything else is refused rather
+# than ignored (#767): an unread key does not fail, it succeeds and does
+# something else.
+AUTHOR_CLIP_KEYS = ("root", "name", "fps", "interpolation", "loop", "keys")
+# `clip` is what the RESULT calls the thing just authored, and it is the
+# real input key on clean_clip next door - this repo's own vocabulary
+# pulling a caller toward the wrong word. `frame_rate` is the unabbreviated
+# spelling of fps, which a caller writes out when unsure of the short form.
+AUTHOR_CLIP_SYNONYMS = {"clip": "name", "frame_rate": "fps"}
+
+
 def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, AUTHOR_CLIP_KEYS, "author_clip",
+                       AUTHOR_CLIP_SYNONYMS)
     cmds = _cmds()
     from . import rigging  # noqa: PLC0415 - rigging imports clip for guards
 
@@ -1040,7 +1053,18 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# Every top-level key delete_clip reads; anything else is refused rather
+# than ignored.
+DELETE_CLIP_KEYS = ("root", "name")
+# `clip` is what this handler's own result calls the deleted clip, and what
+# clean_clip takes as its input key - the word is already in circulation
+# here for exactly this thing, so a caller reaches for it first.
+DELETE_CLIP_SYNONYMS = {"clip": "name"}
+
+
 def delete_clip(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, DELETE_CLIP_KEYS, "delete_clip",
+                       DELETE_CLIP_SYNONYMS)
     cmds = _cmds()
     from . import rigging  # noqa: PLC0415
 
@@ -1211,6 +1235,17 @@ def delete_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# Every top-level key preview_clip reads; anything else is refused rather
+# than ignored.
+PREVIEW_CLIP_KEYS = ("root", "name", "angle", "every_nth", "renderer",
+                     "resolution", "samples", "zoom")
+# `clip` is the word the result uses for the thing being previewed and the
+# input key clean_clip takes, so it is the first one a caller tries.
+# `stride` is the generic term for sampling every nth frame, which reads
+# more naturally than the explicit `every_nth` this tool settled on.
+PREVIEW_CLIP_SYNONYMS = {"clip": "name", "stride": "every_nth"}
+
+
 def preview_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     """A contact sheet of the clip's frames - motion judged the way
     everything here is judged, from pixels, with NO playblast dependency.
@@ -1219,6 +1254,8 @@ def preview_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     read against a fixed frame, and a camera chasing the subject would hide
     root motion entirely. Perception: no checkpoint, current time restored.
     """
+    require_known_keys(params, PREVIEW_CLIP_KEYS, "preview_clip",
+                       PREVIEW_CLIP_SYNONYMS)
     cmds = _cmds()
     from . import rigging  # noqa: PLC0415
 
@@ -1358,6 +1395,10 @@ preview_clip.no_undo_chunk = True
 
 # Every top-level key measure_clip reads; anything else is refused (#764).
 MEASURE_CLIP_KEYS = ("root", "name", "joints", "contact_joints")
+# The clip is named by `name` here, while clean_clip and retarget_clip spell
+# the same thing `clip` - so the word a caller carries between them is the
+# one that reaches nothing, and `cli` finds no key by prefix (#767).
+MEASURE_CLIP_SYNONYMS = {"clip": "name"}
 
 
 def measure_clip(params: Dict[str, Any]) -> Dict[str, Any]:
@@ -1377,7 +1418,8 @@ def measure_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     from ..dispatcher import require_known_keys  # noqa: PLC0415
     from . import motionmath, rigging  # noqa: PLC0415
 
-    require_known_keys(params, MEASURE_CLIP_KEYS, "measure_clip")
+    require_known_keys(params, MEASURE_CLIP_KEYS, "measure_clip",
+                       MEASURE_CLIP_SYNONYMS)
     cmds = _cmds()
     root_long = rigging._require_joint(cmds, params.get("root"))
     records = clip_meta(cmds, root_long)

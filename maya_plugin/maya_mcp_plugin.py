@@ -22,7 +22,7 @@ import time
 from typing import Any, Dict, Optional
 
 from . import logsetup, protocol, version
-from .dispatcher import Dispatcher
+from .dispatcher import Dispatcher, require_known_keys
 from .handlers import (
     array,
     assemble,
@@ -150,6 +150,13 @@ def _process_info() -> Dict[str, Any]:
     }
 
 
+# ping reads nothing: it reports, it does not act. An empty tuple still
+# refuses (#767) rather than ignoring, which matters most here - ping is the
+# first call every client makes, so a caller whose vocabulary is wrong learns
+# it from the cheapest command in the set instead of from a modelling call.
+PING_KEYS = ()
+
+
 def _ping(params: Dict[str, Any]) -> Dict[str, Any]:
     """Liveness AND identity: which copy of the plugin is running, in which process.
 
@@ -158,6 +165,7 @@ def _ping(params: Dict[str, Any]) -> Dict[str, Any]:
     code. See version.py; clients feed `plugin` to version.compare(). `process`
     answers the other half - whether it describes their Maya (#648).
     """
+    require_known_keys(params, PING_KEYS, "ping")
     return {
         "pong": True,
         "maya": is_maya_available(),

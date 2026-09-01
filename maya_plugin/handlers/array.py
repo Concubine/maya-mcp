@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..dispatcher import HandlerError
+from ..dispatcher import HandlerError, require_known_keys
 from . import arraymath, ledger, naming
 
 
@@ -89,7 +89,30 @@ def _linear(cmds, source: str, prefix: str, params: Dict[str, Any]) -> List[str]
     return names
 
 
+# Every top-level key array reads. Anything else is refused rather than
+# ignored (#767): an unread key does not fail, it succeeds and does something
+# else.
+ARRAY_KEYS = (
+    "name", "mode", "count", "axis", "center", "angle", "offset",
+    "step_rotate", "step_scale", "pivot", "name_prefix", "group_name",
+)
+# Each of these four is a plausible word rather than a typo. `group` is what
+# the RESULT calls the node the copies were parented under, and `prefix` is
+# the bare noun this module's own internals use for the copy naming, so both
+# are the caller reading back what they were told. `mesh` is what nearly every
+# modelling and rigging command calls the object it acts on, and `source` is
+# what this module's docstring calls element 0 - but here the thing being
+# copied is addressed by plain `name`.
+ARRAY_SYNONYMS = {
+    "group": "group_name",
+    "prefix": "name_prefix",
+    "mesh": "name",
+    "source": "name",
+}
+
+
 def array(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, ARRAY_KEYS, "array", ARRAY_SYNONYMS)
     cmds = _cmds()
     source = naming.require_object(cmds, str(params.get("name") or ""))
     mode = params.get("mode")

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from ..dispatcher import HandlerError
+from ..dispatcher import HandlerError, require_known_keys
 from . import meshcheck, naming, session
 
 PIVOT_MODES = ("center", "origin", "keep")
@@ -93,7 +93,19 @@ def _place_pivot(cmds, node: str, mode: str) -> List[float]:
     return target
 
 
+# Every top-level key combine reads. Anything else is refused rather than
+# ignored (#767): an unread key does not fail, it succeeds and does something
+# else.
+COMBINE_KEYS = ("names", "name", "pivot", "freeze")
+# `new_name` is this repo's own word for the output name everywhere a command
+# consumes its inputs and hands back one node - boolean_op, etch_text, rename
+# and duplicate all spell it that way - so a caller arriving from any of them
+# reaches for it here, where the merged object is named by plain `name`.
+COMBINE_SYNONYMS = {"new_name": "name"}
+
+
 def combine(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, COMBINE_KEYS, "combine", COMBINE_SYNONYMS)
     cmds = _cmds()
     longs = _resolve_inputs(cmds, params)
 

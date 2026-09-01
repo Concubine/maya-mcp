@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from ..dispatcher import HandlerError
+from ..dispatcher import HandlerError, require_known_keys
 from . import units
 
 MAX_OBJECTS_CAP = 500
@@ -68,7 +68,25 @@ def _entry(cmds, transform: str, shape: Optional[str], obj_type: str) -> Dict[st
     }
 
 
+# Every top-level key get_scene_graph reads. Anything else is refused rather
+# than ignored (#767): an unread key does not fail, it succeeds and does
+# something else.
+GET_SCENE_GRAPH_KEYS = ("filter", "max_objects", "cursor")
+# `name` and `type` are what every returned object calls its own fields, so a
+# caller narrowing the outline reaches for the word the result taught it -
+# and `filter` is the one key that matches against both. `limit` is the
+# ordinary English word for a page size. `offset` is the integer this handler
+# decodes the cursor into; it is named in no result field, which is exactly
+# why a caller resuming a page would invent it.
+GET_SCENE_GRAPH_SYNONYMS = {
+    "limit": "max_objects", "type": "filter", "name": "filter",
+    "offset": "cursor",
+}
+
+
 def get_scene_graph(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, GET_SCENE_GRAPH_KEYS, "get_scene_graph",
+                       GET_SCENE_GRAPH_SYNONYMS)
     cmds = _cmds()
 
     filt = params.get("filter")

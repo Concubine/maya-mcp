@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List
 
-from ..dispatcher import HandlerError
+from ..dispatcher import HandlerError, require_known_keys
 from . import material, naming
 
 RECIPES = ("noise_bump", "ramp_gradient", "layered_mask", "file_texture")
@@ -136,7 +136,15 @@ _BUILDERS: Dict[str, Callable] = {
 }
 
 
+# Every top-level key apply_texture_recipe reads. Anything else is refused
+# rather than ignored (#767): an unread key does not fail, it succeeds and does
+# something else.
+APPLY_TEXTURE_RECIPE_KEYS = ("mesh", "recipe", "params", "slot")
+
+
 def apply_texture_recipe(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, APPLY_TEXTURE_RECIPE_KEYS,
+                       "apply_texture_recipe")
     cmds = _cmds()
     mesh_long, shape = naming.require_mesh(cmds, str(params.get("mesh") or ""))
     recipe = params.get("recipe")

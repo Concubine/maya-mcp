@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List
 
-from ..dispatcher import HandlerError
+from ..dispatcher import HandlerError, require_known_keys
 from . import naming
 
 DEFAULT_WIDTH = 0.6
@@ -197,7 +197,25 @@ def _create_glyph(cmds, text: str, font: str) -> str:
     return glyph_tf
 
 
+# Every top-level key etch_text reads. Anything else is refused rather than
+# ignored (#767): an unread key does not fail, it succeeds and does something
+# else.
+ETCH_TEXT_KEYS = ("mesh", "text", "face", "width", "depth", "font", "mirror",
+                  "rotate_deg", "new_name")
+# `name` is what every neighbouring modelling tool calls the object it names,
+# so a caller naming the carved result reaches for it rather than the
+# `new_name` this tool needs in order to keep the output distinct from its
+# `mesh` input. `rotate` is this repo's own transform vocabulary - the word
+# create_primitive, duplicate and transform all take - while the in-plane spin
+# here is `rotate_deg`. And `a` is what boolean_op calls the host operand,
+# which is the very call etch_text makes to do the carving, so the word
+# travels in from the tool next door.
+ETCH_TEXT_SYNONYMS = {"name": "new_name", "rotate": "rotate_deg", "a": "mesh"}
+
+
 def etch_text(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, ETCH_TEXT_KEYS, "etch_text",
+                       ETCH_TEXT_SYNONYMS)
     cmds = _cmds()
     from . import modeling, session  # noqa: PLC0415
 
