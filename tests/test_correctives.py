@@ -96,7 +96,9 @@ class FakeCmds:
 
     def listHistory(self, node, pruneDagObjects=False, **kw):
         self._require(node)
-        return list(self.history.get(node, []))
+        # MEASURED (#805): a history-less shape answers None, never [] -
+        # every production call site carries `or []` for exactly this.
+        return list(self.history.get(node, [])) or None
 
     def listAttr(self, plug, multi=False, **kw):
         node = plug.split(".")[0]

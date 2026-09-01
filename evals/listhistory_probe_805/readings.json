@@ -1,0 +1,73 @@
+{
+ "setup": {
+  "frozen_shape": "|slab|slabShape",
+  "far_shape": "|far|farShape",
+  "mush": "far_relax",
+  "skin": "far_skin",
+  "bs": "far_bs"
+ },
+ "1_listHistory_frozen_pruned": {
+  "repr": "None",
+  "type": "NoneType"
+ },
+ "1b_listHistory_frozen_unpruned": "['slabShape']",
+ "1c_listHistory_far_pruned": "['far_bs', 'far_skin', 'far_relax', 'polySphere1']",
+ "2a_ls_emptylist_deltaMush": {
+  "repr": "[]"
+ },
+ "2b_ls_emptylist_skinCluster": {
+  "repr": "[]"
+ },
+ "2c_ls_emptylist_blendShape": {
+  "repr": "[]"
+ },
+ "2d_ls_none_deltaMush": {
+  "repr": "[]"
+ },
+ "2e_ls_emptytuple_deltaMush": {
+  "repr": "[]"
+ },
+ "2f_ls_noargs_deltaMush": {
+  "repr": "['far_relax']"
+ },
+ "3a_real_expr_frozen_deltaMush": {
+  "repr": "[]"
+ },
+ "3b_real_expr_frozen_skinCluster": {
+  "repr": "[]"
+ },
+ "3c_real_expr_frozen_blendShape": {
+  "repr": "[]"
+ },
+ "3d_real_expr_far_deltaMush": {
+  "repr": "['far_relax']"
+ },
+ "3e_real_expr_far_skinCluster": {
+  "repr": "['far_skin']"
+ },
+ "3f_real_expr_far_blendShape": {
+  "repr": "['far_bs']"
+ },
+ "4a_listHistory_plain_pruned": "['polyCube1']",
+ "4b_real_expr_plain_deltaMush": {
+  "repr": "[]"
+ },
+ "5a_scoped_frozen_deltaMush": {
+  "repr": "[]"
+ },
+ "5b_scoped_far_deltaMush": {
+  "repr": "['far_relax']"
+ },
+ "scene_wide": {
+  "deltaMush": [
+   "far_relax"
+  ],
+  "skinCluster": [
+   "far_skin"
+  ],
+  "blendShape": [
+   "far_bs"
+  ]
+ },
+ "maya_version": "2027"
+}

@@ -464,8 +464,7 @@ class FakeCmds:
 
     def __init__(self, existing=("golem_C_pelvis",), load_plugin_raises=None,
                  plugin_loaded=True, node_types=None, history=None,
-                 aliases=None, shading=None, attrs=None,
-                 empty_ls_is_scene_wide=None):
+                 aliases=None, shading=None, attrs=None):
         self.existing = set(existing)
         self.calls = []
         self.load_plugin_raises = load_plugin_raises
@@ -485,18 +484,6 @@ class FakeCmds:
         # authored attr and the answer follows the scene.
         self.attrs = dict(attrs or {})
         self.deleted = []
-        # Which of the two candidate semantics `ls` takes when it is handed
-        # an EMPTY list - see the comment on ls() below.
-        #
-        # #799 round 2: this DEFAULTED TO FALSE, the forgiving reading, in a
-        # file whose two strict xfails assert the other reading as fact. The
-        # file therefore answered one and the same Maya call two ways and
-        # made the permissive one the default - the exact pattern this
-        # ticket exists to remove, retained behind a switch. There is no
-        # default now: a test that reaches the empty-operand branch must say
-        # which reading it is testing under, and one that does not say gets
-        # a refusal naming the choice, not an invented answer.
-        self.empty_ls_is_scene_wide = empty_ls_is_scene_wide
 
     # --- existence -------------------------------------------------------
     def _require(self, node):
@@ -554,43 +541,23 @@ class FakeCmds:
         """`ls` is the non-raising query: an unmatched name is an empty
         result, never an error.
 
-        The EMPTY-LIST case is the one that matters, and the one nobody has
-        measured. Production calls
-        `cmds.ls(cmds.listHistory(shape, pruneDagObjects=True) or [],
-                 type="deltaMush")`
-        and a mesh with no construction history makes that argument `[]`.
-        Maya flattens list arguments into the command's operand list, so an
-        empty list plausibly contributes NO operands - leaving `ls -type
-        deltaMush`, which answers SCENE-WIDE. If that is what really
-        happens, the walk stops being scoped to the mesh it was asked about.
-        Note that the `nodes is None` branch just above already commits to
-        exactly that reading for the no-operand call, which is the argument
-        for it - an argument, not a measurement.
-
-        #799 round 2 settles the contradiction the reviewer found: round 1
-        made the forgiving reading the DEFAULT while the two strict xfails
-        below assert the other one as fact. Neither is the default now.
-        `empty_ls_is_scene_wide` has no value until a test gives it one, and
-        the empty-operand branch REFUSES rather than picking a side - so a
-        test written tomorrow against blendshape.py:58/171 or rigging.py:
-        203/494 (the same `cmds.ls(listHistory(...) or [], type=...)` shape)
-        cannot inherit a forgiving answer by accident and ship green.
-
-        Round 2 tried to measure it and could not: the maya MCP at
-        127.0.0.1:9877 refused the connection (no Maya running), so this is
-        still a live-confirmation job. `cmds.ls([], type="mesh")` against
-        `cmds.ls(type="mesh")` in any session answers it in one call.
+        The EMPTY-LIST case is MEASURED (#805, evals/listhistory_probe_805.py,
+        Maya 2027): `cmds.ls([], type="deltaMush")` answers `[]` in a scene
+        holding a deltaMush, and so do `cmds.ls(None, type=...)` and
+        `cmds.ls((), type=...)`. Only the true NO-OPERAND call,
+        `cmds.ls(type="deltaMush")`, is scene-wide. #799 had hypothesised
+        that Maya's list-flattening drops an empty list to no operands and
+        degenerates the production walk
+        `cmds.ls(cmds.listHistory(shape, pruneDagObjects=True) or [], type=)`
+        into the scene-wide form for a history-less mesh; it does not, and
+        the walk is scoped as written at all six call sites (export.py x2,
+        blendshape.py x2, rigging.py x2). The round-2 switch that refused to
+        pick a reading is gone - the fake answers what Maya answers.
         """
         if nodes is None:
             pool = self._live()
         elif not nodes:
-            assert self.empty_ls_is_scene_wide is not None, (
-                "cmds.ls([], type=%r): whether Maya's list-flattening leaves "
-                "this scene-wide or selects nothing is UNMEASURED, and this "
-                "fake will not pick a side for you. Pass "
-                "empty_ls_is_scene_wide=True or False and name the reading "
-                "your test asserts under." % (type,))
-            pool = self._live() if self.empty_ls_is_scene_wide else []
+            pool = []  # MEASURED (#805): an empty operand list selects nothing
         elif dagObjects:
             pool = [n for n in self._live()
                     if any(n == r or n.startswith(r + "|") for r in nodes)]
@@ -602,7 +569,10 @@ class FakeCmds:
 
     def listHistory(self, node, pruneDagObjects=False, **kw):
         self._require(node)
-        return list(self.history.get(node, []))
+        # MEASURED (#805): a shape with NO history answers None, not [] -
+        # which is why every production call site carries `or []`. A fake
+        # that returned [] here would let a site drop that guard and ship.
+        return list(self.history.get(node, [])) or None
 
     def listAttr(self, attr, multi=False, **kw):
         node = self._require(attr)
@@ -1323,15 +1293,14 @@ def test_a_shape_violation_in_export_raises_with_hint_and_deletes_tmp(
     assert not (tmp_path / "shape_violation.fbx.part.fbx").exists()
 
 
-def _history_less_mesh_scene(scene_wide):
+def _history_less_mesh_scene():
     """A frozen mesh with NO construction history, exported while some other
     rig in the same scene wears a blendShape. Nothing about the exported
     mesh is shaped, so the file correctly carries no blend channels."""
     return FakeCmds(
         node_types={"|slab|slabShape": "mesh", "face_shapes": "blendShape"},
         history={"|slab|slabShape": []},
-        aliases={"face_shapes": ["brow_raise"]},
-        empty_ls_is_scene_wide=scene_wide)
+        aliases={"face_shapes": ["brow_raise"]})
 
 
 def _shapeless_export(monkeypatch, tmp_path, cmds, name):
@@ -1347,38 +1316,20 @@ def _shapeless_export(monkeypatch, tmp_path, cmds, name):
                               "metres_per_unit": 1.0})
 
 
-def test_a_history_less_mesh_declares_no_shapes_if_empty_selects_nothing(
-        monkeypatch, tmp_path):
-    # The paired half of the xfail below, under ONE of the two candidate
-    # readings - stated in the name since #799 round 2, because the file
-    # used to assert this outcome flatly while the xfail below asserted the
-    # opposite reading as fact. Here the empty operand list selects nothing,
-    # so the other rig's blendShape is not attributed to this mesh and the
-    # export stands.
-    out = _shapeless_export(monkeypatch, tmp_path,
-                            _history_less_mesh_scene(False), "slab.fbx")
-    assert out["shapes"] is None
-    assert os.path.isfile(out["path"])
-
-
-@pytest.mark.xfail(strict=True, reason=(
-    "#799 HYPOTHESIS, NOT MEASURED - stated as a hypothesis since round 2, "
-    "which found this reason claiming Maya's behaviour as fact while the "
-    "fake's default asserted the opposite. IF Maya's list-flattening leaves "
-    "no operands for a history-less mesh, then _scene_shape_aliases' "
-    "cmds.ls(history or [], type='blendShape') degenerates to a scene-wide "
-    "`ls -type blendShape`, ANOTHER rig's weight aliases are declared as "
-    "this export's, and shape_violations refuses a correct file for missing "
-    "a channel it was never supposed to carry. Round 2 tried to measure it "
-    "and could not (the maya MCP at 127.0.0.1:9877 refused the connection). "
-    "One live call settles it: cmds.ls([], type='mesh') vs "
-    "cmds.ls(type='mesh'). This pin XPASSES the day the handler skips the "
-    "ls for an empty history, which is the fix if the hypothesis holds"))
 def test_a_history_less_mesh_is_not_refused_for_another_rigs_shapes(
         monkeypatch, tmp_path):
+    # #805 MEASURED: cmds.listHistory(frozen_shape, pruneDagObjects=True) is
+    # None, `or []` makes it [], and cmds.ls([], type="blendShape") selects
+    # NOTHING - so _scene_shape_aliases never attributes the other rig's
+    # aliases to this mesh, shape_violations has nothing to refuse, and the
+    # export stands. #799 pinned the opposite as a strict xfail under the
+    # hypothesis that an empty list degenerates to the scene-wide ls; the
+    # probe (evals/listhistory_probe_805.py) refuted it and no call site
+    # changed.
     out = _shapeless_export(monkeypatch, tmp_path,
-                            _history_less_mesh_scene(True), "slab_wide.fbx")
+                            _history_less_mesh_scene(), "slab.fbx")
     assert out["shapes"] is None
+    assert os.path.isfile(out["path"])
 
 
 def test_the_tool_is_exposed():
@@ -2229,12 +2180,9 @@ class TestLiveDeltaMushes:
         is cmds.ls(type="deltaMush"), and a name-prefix fake could not fail
         for a renamed mush (review catch)."""
 
-        def __init__(self, history, node_types, empty_ls_is_scene_wide=None):
+        def __init__(self, history, node_types):
             self.history = history
             self.node_types = node_types
-            # See FakeCmds.ls: the unmeasured half of Maya's list-flattening.
-            # #799 round 2: no default, for the reason given there.
-            self.empty_ls_is_scene_wide = empty_ls_is_scene_wide
 
         def ls(self, nodes=None, dagObjects=False, type=None, long=False,
                noIntermediate=False, **kw):
@@ -2245,19 +2193,11 @@ class TestLiveDeltaMushes:
                             if any(s.startswith(n) for n in nodes)]
                 return pool
             if type is not None:
-                if not nodes:
-                    # #799: an EMPTY operand list. Either it selects nothing
-                    # (what this fake always assumed) or it drops out of the
-                    # command and leaves a scene-wide `ls -type deltaMush`.
-                    # Round 2: unmeasured, so no default - the caller says.
-                    if nodes is not None:
-                        assert self.empty_ls_is_scene_wide is not None, (
-                            "cmds.ls([], type=%r) is UNMEASURED; pass "
-                            "empty_ls_is_scene_wide and name the reading "
-                            "your test asserts under." % (type,))
-                    pool = (list(self.node_types)
-                            if nodes is not None and self.empty_ls_is_scene_wide
-                            else [])
+                if nodes is None:
+                    pool = list(self.node_types)   # the no-operand ls: scene-wide
+                elif not nodes:
+                    # MEASURED (#805): cmds.ls([], type=X) selects nothing.
+                    pool = []
                 else:
                     pool = list(nodes)
                 return [n for n in pool if self.node_types.get(n) == type]
@@ -2271,7 +2211,8 @@ class TestLiveDeltaMushes:
             # for a mesh this scene does not hold. Maya raises.
             if node not in self.history:
                 raise RuntimeError("No object matches name: %s" % node)
-            return list(self.history[node])
+            # MEASURED (#805): a history-less shape answers None, not [].
+            return list(self.history[node]) or None
 
     def test_finds_a_renamed_mush_by_type(self):
         cmds = self._Cmds({"|arm|armShape": ["arm_relax", "arm_skin"]},
@@ -2286,36 +2227,17 @@ class TestLiveDeltaMushes:
                            "arm_shapes": "blendShape"})
         assert export._live_delta_mushes(cmds, None) == []
 
-    def test_a_history_less_mesh_reports_nothing_if_empty_selects_nothing(self):
-        # A frozen or imported mesh has no construction history at all, so
-        # cmds.listHistory(shape, pruneDagObjects=True) prunes away the only
-        # DAG node it would have returned and the walk is handed an EMPTY
-        # list.
-        #
-        # #799 round 2: the reading is now IN THE NAME and on the call. This
-        # test is true under ONE of the two candidate semantics, not full
-        # stop - it used to take the forgiving one silently from a default,
-        # in a class whose xfail below asserts the other one as fact.
-        cmds = self._Cmds({"|slab|slabShape": []},
-                          {"far_relax": "deltaMush"},
-                          empty_ls_is_scene_wide=False)
-        assert export._live_delta_mushes(cmds, None) == []
-
-    @pytest.mark.xfail(strict=True, reason=(
-        "#799 HYPOTHESIS, NOT MEASURED - stated as a hypothesis since round "
-        "2, which found this reason claiming Maya's behaviour as fact while "
-        "the fake's default asserted the opposite. IF cmds.ls([], "
-        "type='deltaMush') has no operands left after Maya flattens the "
-        "empty list, it degenerates to the scene-wide `ls -type deltaMush` "
-        "and a history-less mesh is reported as carrying every deltaMush in "
-        "the scene. Round 2 tried to measure it and could not (the maya MCP "
-        "at 127.0.0.1:9877 refused the connection). One live call settles "
-        "it. This pin XPASSES the day the handler skips the ls for an empty "
-        "history, which is the fix if the hypothesis holds"))
     def test_a_history_less_mesh_must_not_inherit_a_foreign_mush(self):
+        # A frozen or imported mesh has no construction history at all:
+        # cmds.listHistory(shape, pruneDagObjects=True) prunes away the only
+        # DAG node it would have returned and answers None. #805 MEASURED
+        # (evals/listhistory_probe_805.py): `or []` then hands cmds.ls an
+        # EMPTY list, and an empty operand list selects NOTHING - only the
+        # no-operand form is scene-wide. So far_relax stays where it is.
+        # #799 had pinned the scene-wide reading as a strict xfail; the
+        # probe refuted it and the handler is unchanged.
         cmds = self._Cmds({"|slab|slabShape": []},
-                          {"far_relax": "deltaMush"},
-                          empty_ls_is_scene_wide=True)
+                          {"far_relax": "deltaMush"})
         assert export._live_delta_mushes(cmds, None) == []
 
     def test_selected_export_scopes_the_walk(self):
@@ -2397,43 +2319,37 @@ class TestTheFakeRefusesWhatMayaRefuses:
         assert cmds.listAttr("tube_shapes.w", multi=True) is None
 
     # --- finding 2: the unmeasured empty-operand ls ----------------------
-    def test_an_empty_operand_ls_refuses_to_pick_a_reading(self):
-        # THE round-2 fix. Round 1 gave this call two different answers and
-        # made the permissive one the default, in a file whose two strict
-        # xfails assert the other reading as fact. Neither is the default
-        # now: a test that reaches this branch must name the reading it
-        # asserts under, so a future test against blendshape.py:58/171 or
-        # rigging.py:203/494 cannot inherit a forgiving answer and ship
-        # green. If someone restores a default, this goes red.
-        with pytest.raises(AssertionError, match="UNMEASURED"):
-            self._scene().ls([], type="blendShape")
-        with pytest.raises(AssertionError, match="UNMEASURED"):
-            TestLiveDeltaMushes._Cmds({"|slab|slabShape": []},
-                                      {"far_relax": "deltaMush"}).ls(
-                                          [], type="deltaMush")
-
-    def test_both_readings_are_reachable_once_a_test_names_one(self):
-        # And the two answers really do differ, which is why the choice
-        # cannot be left to a default.
-        scene_wide = FakeCmds(node_types={"face_shapes": "blendShape"},
-                              empty_ls_is_scene_wide=True)
-        selects_nothing = FakeCmds(node_types={"face_shapes": "blendShape"},
-                                   empty_ls_is_scene_wide=False)
-        assert scene_wide.ls([], type="blendShape") == ["face_shapes"]
-        assert selects_nothing.ls([], type="blendShape") == []
+    def test_an_empty_operand_ls_selects_nothing_in_both_fakes(self):
+        # #805 MEASURED: cmds.ls([], type=X) is [] in a scene that holds an
+        # X. #799 round 2 had refused to pick a reading here (the round-1
+        # default was this one, but unmeasured); the probe settled it and
+        # the switch is gone. If a fake ever answers scene-wide for an
+        # empty list, this goes red - and a history-less mesh would start
+        # inheriting every deformer in the scene in the tests, which Maya
+        # does not do.
+        assert self._scene().ls([], type="blendShape") == []
+        assert TestLiveDeltaMushes._Cmds({"|slab|slabShape": []},
+                                         {"far_relax": "deltaMush"}).ls(
+                                             [], type="deltaMush") == []
 
     def test_a_no_operand_ls_is_scene_wide_in_both_fakes(self):
-        # The `nodes is None` branch, which is the real cmds.ls(type=X) and
-        # is not in doubt - and is also the argument for the scene-wide
-        # reading of the empty list above.
+        # The `nodes is None` branch is the real cmds.ls(type=X), the ONLY
+        # form that is scene-wide (#805 measured both in one session).
         cmds = self._scene()
         assert cmds.ls(type="blendShape") == ["tube_shapes"]
+        assert TestLiveDeltaMushes._Cmds({"|slab|slabShape": []},
+                                         {"far_relax": "deltaMush"}).ls(
+                                             type="deltaMush") == ["far_relax"]
 
     # --- contract point 3: no answers-anything fallback ------------------
-    def test_the_history_of_a_mesh_that_has_none_is_empty_not_invented(self):
+    def test_the_history_of_a_mesh_that_has_none_is_none_as_measured(self):
+        # #805 MEASURED: Maya answers None for a history-less shape, which
+        # is what every production `listHistory(...) or []` is guarding.
         cmds = FakeCmds(node_types={"|slab|slabShape": "mesh"},
                         history={"|slab|slabShape": []})
-        assert cmds.listHistory("|slab|slabShape", pruneDagObjects=True) == []
+        assert cmds.listHistory("|slab|slabShape", pruneDagObjects=True) is None
+        assert TestLiveDeltaMushes._Cmds({"|slab|slabShape": []}, {}).listHistory(
+            "|slab|slabShape", pruneDagObjects=True) is None
 
     def test_an_attr_probe_answers_from_the_scene_not_a_constant(self):
         # Round 1 left this a bare `return False` for everything.
