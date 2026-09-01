@@ -610,7 +610,16 @@ _OPS: Dict[str, Callable] = {
 }
 
 
+# Every top-level key sculpt_ops reads (#767). Per-op dicts are validated
+# separately (INSERT_LOOP_KEYS and friends) - that is a different question
+# from what arrived at the top level.
+SCULPT_OPS_KEYS = ("mesh", "ops")
+SCULPT_OPS_SYNONYMS = {"operations": "ops"}
+
+
 def sculpt_ops(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, SCULPT_OPS_KEYS, "sculpt_ops",
+                       SCULPT_OPS_SYNONYMS)
     cmds = _cmds()
     mesh_long, _ = naming.require_mesh(cmds, str(params.get("mesh") or ""))
     ops = params.get("ops")
@@ -771,7 +780,18 @@ def _set_deformer_attr(cmds, node: str, attr: str, value: Any) -> None:
     cmds.setAttr(plug, value)
 
 
+# Every top-level key deform reads (#767). The nested `params` dict is
+# already refused per deformer type against DEFORMER_WHITELIST below.
+# `type` is the generic word for `deformer`; `bake`/`baked` are what a
+# caller reaches for when they mean delete_history_after, and none of the
+# three shares a 3-char prefix with the key it means.
+DEFORM_KEYS = ("mesh", "deformer", "params", "delete_history_after")
+DEFORM_SYNONYMS = {"type": "deformer", "bake": "delete_history_after",
+                   "baked": "delete_history_after"}
+
+
 def deform(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, DEFORM_KEYS, "deform", DEFORM_SYNONYMS)
     cmds = _cmds()
     mesh_long, _ = naming.require_mesh(cmds, str(params.get("mesh") or ""))
     deformer = params.get("deformer")

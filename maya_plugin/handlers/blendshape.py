@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..dispatcher import HandlerError
+from ..dispatcher import HandlerError, require_known_keys
 from . import clip, naming, sculpt, sculpt_math, session
 
 MAX_TARGETS = 20
@@ -121,7 +121,19 @@ def _validated_targets(cmds, mesh_long: str, targets,
     return out
 
 
+# Every top-level key create_blendshape reads. Anything else is refused
+# rather than ignored (#767). Both synonyms are result-field names: the
+# result calls the node `blend_shape` and each target entry names its mesh
+# `target_mesh`, so a caller who read one result reaches for those as
+# inputs - the exact #764 shape, and neither shares a 3-char prefix with
+# `mesh`, so require_known_keys' fallback could never suggest it.
+CREATE_BLENDSHAPE_KEYS = ("mesh", "targets")
+CREATE_BLENDSHAPE_SYNONYMS = {"base_mesh": "mesh", "blend_shape": "mesh"}
+
+
 def create_blendshape(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, CREATE_BLENDSHAPE_KEYS, "create_blendshape",
+                       CREATE_BLENDSHAPE_SYNONYMS)
     cmds = _cmds()
     mesh_long, mesh_shape = naming.require_mesh(
         cmds, str(params.get("mesh") or ""))
@@ -234,7 +246,17 @@ def create_blendshape(params: Dict[str, Any]) -> Dict[str, Any]:
             "targets": targets_out, "warnings": warnings}
 
 
+# Every top-level key set_blendshape_weights reads (#767). `blend_shape` is
+# what the result calls the node this command operates on, so addressing it
+# by that name is the plausible miss; it shares no prefix with `mesh`.
+SET_BLENDSHAPE_WEIGHTS_KEYS = ("mesh", "weights")
+SET_BLENDSHAPE_WEIGHTS_SYNONYMS = {"blend_shape": "mesh"}
+
+
 def set_blendshape_weights(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, SET_BLENDSHAPE_WEIGHTS_KEYS,
+                       "set_blendshape_weights",
+                       SET_BLENDSHAPE_WEIGHTS_SYNONYMS)
     cmds = _cmds()
     mesh_long, mesh_shape = naming.require_mesh(
         cmds, str(params.get("mesh") or ""))

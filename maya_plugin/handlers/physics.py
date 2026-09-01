@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..dispatcher import HandlerError
+from ..dispatcher import HandlerError, require_known_keys
 from . import naming, physmath, sculpt_math
 
 
@@ -265,7 +265,15 @@ def _validated_overrides(params: Dict[str, Any], chunk_shorts,
     return overrides
 
 
+# Every top-level key author_physics reads. Anything else is refused rather
+# than ignored (#767): an unread key does not fail, it succeeds and does
+# something else. The root-vs-chunks exclusivity refusal stays in
+# _collect_chunks - this guard only answers "is this key read at all".
+AUTHOR_PHYSICS_KEYS = ("root", "chunks", "exclude", "density", "overrides")
+
+
 def author_physics(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, AUTHOR_PHYSICS_KEYS, "author_physics")
     cmds = _cmds()
     warnings: List[str] = []
     density = params.get("density", DENSITY_DEFAULT)
