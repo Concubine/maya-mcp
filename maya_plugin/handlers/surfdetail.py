@@ -38,7 +38,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..dispatcher import HandlerError, require_known_keys
 from . import (meshmaps, naming, pbr, pngprobe, pngwrite, session,
-              surfdetail_math, texbake, texclaim, texture_recipes)
+              surfdetail_math, texbake, texclaim)
 
 EFFECT_KINDS = ("wear", "grime", "grain")
 
@@ -421,7 +421,16 @@ def apply_surface_detail(params: Dict[str, Any]) -> Dict[str, Any]:
 
     if grain_cfg is not None:
         if shader is None:
-            shader, _stype = texture_recipes._shader_of(cmds, shape)
+            # Not texture_recipes._shader_of, which only finds a shader:
+            # grain rewires `shader.normalCamera`, and that is as
+            # material-level an edit as the colour composite, so a
+            # grain-only call owes the same two guarantees (#767 minor M1).
+            # Without them the bump reached one face subset of a multi-SG
+            # mesh, or changed the look of a mesh the caller never named.
+            # The colour-slot classification deliberately stays inside
+            # plan_apply - grain writes no colour and must not inherit it.
+            shader = next(iter(meshmaps.require_sole_wearers(
+                cmds, [mesh], "adding grain to it")))
         existing = cmds.listConnections("%s.normalCamera" % shader,
                                         source=True, destination=False)
         if existing:

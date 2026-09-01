@@ -161,20 +161,58 @@ def guard_static_pose(cmds, root_long: str, joints: List[str],
     """Refuse a static pose write while curves drive the skeleton.
 
     Structural, not metadata: a hand-keyed channel fights a static write the
-    same way a clip does. The clip name is named when metadata exists."""
+    same way a clip does. The clip name is named when metadata exists.
+
+    Two kinds of curve reach these plugs and each needs its own exit. A
+    time-based curve is this module's currency, so delete_clip is a real
+    fix; a driven-key (U-typed) curve is a connection reading a DRIVER
+    attribute, and "the clip owns these channels; delete_clip" is a wrong
+    diagnosis for it (#767 M2 - the same reason guard_static_weights leaves
+    those curves to the driven_weight_source classifier).
+
+    When both drive the skeleton the caller is told about both AND warned
+    what delete_clip would cost, because delete_clip's teardown reaps
+    whatever _anim_curves returned - and that query asks for type
+    "animCurve", which matches the derived U-typed nodes too. So the clip
+    fix really does destroy the driven keys as well: saying otherwise would
+    send a caller to delete rig setup this refusal had just told them was a
+    separate concern."""
     driven = _anim_curves(cmds, _joint_plugs(joints))
     if not driven:
         return
+    clip_curves: List[str] = []
+    sdk_curves: List[str] = []
+    for curves in driven.values():
+        for curve in curves:
+            bucket = (sdk_curves if cmds.nodeType(curve) in _DRIVEN_KEY_TYPES
+                      else clip_curves)
+            if curve not in bucket:
+                bucket.append(curve)
+    sdk_named = ", ".join(sorted(sdk_curves))
+    sdk_hint = ("remove the driven key (delete its curve node) to return "
+                "those channels to static posing")
+    if not clip_curves:
+        raise HandlerError(
+            "%s refuses while set-driven keys drive this skeleton (%s) - a "
+            "static write here would be overridden the next time the driver "
+            "attribute moves" % (what, sdk_named),
+            hint=sdk_hint)
     records = clip_meta(cmds, root_long)
     label = ((" (clip%s %s)" % ("s" if len(records) > 1 else "",
                                 ", ".join(repr(r["name"]) for r in records)))
              if records else "")
-    raise HandlerError(
-        "%s refuses while animation curves drive this skeleton%s - a static "
-        "write here would be overridden on the next frame change"
-        % (what, label),
-        hint="author_clip re-authors the motion; delete_clip removes the "
-             "curves and returns the skeleton to static posing")
+    message = ("%s refuses while animation curves drive this skeleton%s - a "
+               "static write here would be overridden on the next frame "
+               "change" % (what, label))
+    hint = ("author_clip re-authors the motion; delete_clip removes the "
+            "curves and returns the skeleton to static posing")
+    if sdk_curves:
+        message += ("; set-driven keys drive it as well (%s), which is rig "
+                    "setup rather than clip motion" % sdk_named)
+        hint += ("; note that delete_clip's teardown would delete those "
+                 "driven-key curves too, so re-create them afterwards or "
+                 "%s instead" % sdk_hint)
+    raise HandlerError(message, hint=hint)
 
 
 def guard_static_weights(cmds, node: str, aliases: List[str],

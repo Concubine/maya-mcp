@@ -223,30 +223,39 @@ def _uv_count(cmds, shape: str) -> int:
 # --------------------------------------------------------------------------
 
 
-def plan_apply(cmds, meshes: List[Tuple[str, str]]) -> Tuple[
-        List[Dict[str, Any]], List[str]]:
-    """One composite job per material worn by the requested meshes.
+# What the edit built on these guards actually does to the material, said
+# in the caller's own terms. A grain call told "compositing AO into it"
+# would be reading about an effect it never asked for, and apply_ao is not
+# even a param it has.
+AO_EDIT = "compositing AO into it"
+DEFAULT_EDIT = "editing it"
 
-    Pre-mutation and pre-bake: a refusal here costs nothing. The colour
-    slot must be something this tool can composite honestly - a plain
-    value, or a single readable PNG file. Anything procedural refuses
-    (texbake flattens those first), and a material worn by a mesh OUTSIDE
-    the request refuses because the rewire would change that mesh's look
-    with an AO it never contributed to.
+
+def resolve_wearers(cmds, meshes: List[Tuple[str, str]]) -> Dict[
+        str, Dict[str, Any]]:
+    """The material each requested mesh wears - one per mesh, or refuse.
+
+    Every edit built on this is MATERIAL-level, not mesh-level, so a mesh
+    must wear exactly ONE shading group (per-face assignment gives the
+    rewire no single place to land, and would reach one face subset only)
+    and that group must carry a surface shader to rewire at all.
+
+    Returns {shader: {"sg": ..., "wearers": [(transform, shape), ...]}} in
+    the order the shaders were first met.
     """
-    warnings: List[str] = []
-    shapes = [shape for _t, shape in meshes]
     by_material: Dict[str, Dict[str, Any]] = {}
     for transform, shape in meshes:
         sgs = cmds.listSets(object=shape, type=1) or []
         if len(sgs) != 1:
             raise HandlerError(
-                "%s wears %d shading groups - per-face material assignment "
-                "has no single colour slot to composite into"
+                "%s wears %d shading groups - this edit is per-material, and "
+                "a per-face assignment gives it no single material to land on"
                 % (shape, len(sgs)),
-                hint="apply_ao composites one AO into one material per mesh; "
-                     "bake without apply_ao and composite by hand, or "
-                     "consolidate the assignment first")
+                hint="one material per mesh; consolidate the assignment "
+                     "first, or make the edit by hand"
+                if sgs else
+                "assign a material (maya_assign_material or maya_assign_pbr) "
+                "to this mesh first")
         sg = sgs[0]
         shaders = cmds.listConnections(sg + ".surfaceShader",
                                        source=True) or []
@@ -254,10 +263,70 @@ def plan_apply(cmds, meshes: List[Tuple[str, str]]) -> Tuple[
             raise HandlerError(
                 "%s's shading group %s has no surface shader" % (shape, sg),
                 hint="assign a material (maya_assign_material or "
-                     "maya_assign_pbr) before compositing AO into it")
+                     "maya_assign_pbr) before editing it")
         shader = shaders[0]
         entry = by_material.setdefault(shader, {"sg": sg, "wearers": []})
         entry["wearers"].append((transform, shape))
+    return by_material
+
+
+def refuse_outside_wearer(cmds, shader: str, sg: str, shapes: List[str],
+                          edit: str = DEFAULT_EDIT) -> None:
+    """Refuse when a mesh the call did not name wears this material too.
+
+    That mesh's look would change as well, and its owner never asked and
+    cannot see it happen.
+    """
+    outside = texbake._outside_wearers(cmds, sg, shapes)
+    if not outside:
+        return
+    raise HandlerError(
+        "%s is also worn by %s, which this call did not name - %s would "
+        "change that mesh's look too"
+        % (shader, ", ".join(sorted(outside)), edit),
+        hint="name every wearer, or give %s its own material first"
+             % ", ".join(sorted(outside)))
+
+
+def require_sole_wearers(cmds, meshes: List[Tuple[str, str]],
+                         edit: str = DEFAULT_EDIT) -> Dict[
+        str, Dict[str, Any]]:
+    """resolve_wearers plus the outside-wearer refusal, in one call.
+
+    Split out of plan_apply because #775's apply_surface_detail makes the
+    same material-level edit for a different reason: its grain-only path
+    wires bump into `shader.normalCamera` and inherited none of these
+    guarantees while it resolved the shader on its own (#767 minor M1).
+    plan_apply does NOT use this wrapper - it interleaves its own
+    colour-slot check between the two halves, which is the order its
+    callers have always seen.
+    """
+    shapes = [shape for _t, shape in meshes]
+    by_material = resolve_wearers(cmds, meshes)
+    for shader, entry in by_material.items():
+        refuse_outside_wearer(cmds, shader, entry["sg"], shapes, edit)
+    return by_material
+
+
+def plan_apply(cmds, meshes: List[Tuple[str, str]]) -> Tuple[
+        List[Dict[str, Any]], List[str]]:
+    """One composite job per material worn by the requested meshes.
+
+    Pre-mutation and pre-bake: a refusal here costs nothing. The material
+    itself must be safe to rewire (resolve_wearers), and on top of that the
+    colour SLOT must be something this tool can composite honestly - a
+    plain value, or a single readable PNG file. Anything procedural
+    refuses; texbake flattens those first.
+
+    The two material-level guards are called separately rather than
+    through require_sole_wearers so the colour-slot check keeps sitting
+    BETWEEN them, which is the order this tool's callers have always seen:
+    a shader type with no slot mapping cannot be composited into no matter
+    who else wears it, so it is the more useful thing to be told first.
+    """
+    warnings: List[str] = []
+    shapes = [shape for _t, shape in meshes]
+    by_material = resolve_wearers(cmds, meshes)
 
     claims = texclaim.material_claims(cmds, shapes)
     jobs: List[Dict[str, Any]] = []
@@ -271,16 +340,7 @@ def plan_apply(cmds, meshes: List[Tuple[str, str]]) -> Tuple[
                 % (shader, shader_type),
                 hint="supported shader types: %s"
                      % ", ".join(sorted(material_mod.SHADER_SLOTS)))
-
-        outside = texbake._outside_wearers(cmds, entry["sg"], shapes)
-        if outside:
-            raise HandlerError(
-                "%s is also worn by %s, which this call did not name - "
-                "compositing AO into it would change that mesh's look with "
-                "an occlusion it never contributed to"
-                % (shader, ", ".join(sorted(outside))),
-                hint="name every wearer in meshes, or give %s its own "
-                     "material first" % ", ".join(sorted(outside)))
+        refuse_outside_wearer(cmds, shader, entry["sg"], shapes, AO_EDIT)
 
         claim = next((c for c in claims
                       if c["material"] == shader and c["attr"] == attr), None)

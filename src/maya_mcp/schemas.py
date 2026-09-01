@@ -553,7 +553,10 @@ class AssembledObject(BaseModel):
         default=None,
         description="World-space rotate pivot after the call - the point this "
                     "object turns about. Null means no pivot treatment was "
-                    "applied at all (an omitted single-part chunk); otherwise "
+                    "applied at all, which now happens only when freeze is "
+                    "false and the chunk has no entry in `pivots`: a freeze "
+                    "moves the pivot to the origin, so a frozen chunk always "
+                    "reports where its pivot actually ended up. Otherwise "
                     "this is measured from Maya after the write, the same as "
                     "TransformedObject.pivot.",
     )

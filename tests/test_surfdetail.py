@@ -16,7 +16,7 @@ import pytest
 
 from maya_plugin.dispatcher import HandlerError
 from maya_plugin.handlers import (meshmaps, pngprobe, pngwrite, surfdetail,
-                                  surfdetail_math, texture_recipes)
+                                  surfdetail_math)
 
 
 class FakeCmds:
@@ -488,12 +488,50 @@ class TestPlanning:
         assert "maya_bake_textures" in (exc.value.hint or "")
         assert fake.checkpoints == []  # refused before any mutation
 
-    def test_grain_only_finds_shader_via_shader_of(self, fake, tmp_path):
+    def test_grain_only_resolves_the_shader_the_mesh_wears(self, fake,
+                                                            tmp_path):
         _masks(tmp_path)
         fake.conns["limb_mat.normalCamera"] = ["someBump.outNormal"]
         with pytest.raises(HandlerError, match="limb_mat"):
             surfdetail.apply_surface_detail(
                 _params(tmp_path, effects=[{"kind": "grain"}]))
+
+    # #767 minor M1: grain wires bump into shader.normalCamera, which is the
+    # same MATERIAL-level edit the colour path makes - so it owes the same
+    # two guarantees. Before this fix a grain-only call ran neither: on a
+    # multi-SG mesh the bump silently reached one face subset only, and on a
+    # shared material it silently changed an unnamed mesh's look.
+    def test_grain_only_on_a_multi_sg_mesh_refuses(self, fake, tmp_path):
+        _masks(tmp_path)
+        fake.shape_sgs["|limbShape"] = ["limbSG", "trimSG"]
+        with pytest.raises(HandlerError, match="shading groups"):
+            surfdetail.apply_surface_detail(
+                _params(tmp_path, effects=[{"kind": "grain"}]))
+        assert fake.checkpoints == []  # refused before any mutation
+        assert not list(tmp_path.glob("*_height.png"))
+
+    def test_grain_only_on_a_material_worn_outside_the_request_refuses(
+            self, fake, tmp_path):
+        _masks(tmp_path)
+        fake.meshes["|other"] = "|otherShape"
+        fake.sg_members["limbSG"] = ["|limbShape", "|otherShape"]
+        with pytest.raises(HandlerError, match="otherShape"):
+            surfdetail.apply_surface_detail(
+                _params(tmp_path, effects=[{"kind": "grain"}]))
+        assert fake.checkpoints == []
+        assert not list(tmp_path.glob("*_height.png"))
+
+    def test_grain_only_on_a_clean_mesh_still_wires_through(self, fake,
+                                                             tmp_path):
+        # The guard must refuse the two harmful shapes and NOTHING else -
+        # the ordinary single-SG, sole-wearer case reaches the same bump
+        # wiring it always did.
+        _masks(tmp_path)
+        out = surfdetail.apply_surface_detail(
+            _params(tmp_path, effects=[{"kind": "grain"}]))
+        assert os.path.isfile(out["height_file"])
+        assert any(dst == "limb_mat.normalCamera"
+                   for _src, dst in fake.connected)
 
 
 # --------------------------------------------------------------------------

@@ -767,6 +767,141 @@ def test_a_violating_file_that_wont_unlink_says_so_and_names_the_path(
     assert not path.exists(), "path itself must never have been written to"
 
 
+class TestARefusedExportKeepsTheMushWarning:
+    """#771 M3: a doomed deltaMush must survive a refused export.
+
+    The warning reached the caller only through the success path's
+    `warnings` list, so a refused export swallowed it: the caller fixed the
+    violation, re-exported, and only THEN learned that the relaxation was
+    never going to travel. That is two round trips for one scene, and the
+    second one is the surprise this suite exists to prevent.
+    """
+
+    def _violating(self):
+        """The #629 shape, the violation this suite has used throughout: a
+        compensating scale on a root whose mesh child makes that scale reach
+        a vertex. Which violation refuses the export does not matter here -
+        only that one does."""
+        return [fbxbytes.FbxNode(name="kit_root", kind="Null", uid=1,
+                                 scaling=(0.01, 0.01, 0.01)),
+                fbxbytes.FbxNode(name="kit_piece", kind="Mesh", uid=2,
+                                 parent=1, geometry=99)]
+
+    def _with_mushes(self, monkeypatch, pairs):
+        """Patched at the module seam, the way TestExportFbxReportsClips
+        patches _scene_clips: the history walk itself is already pinned by
+        TestLiveDeltaMushes, and what is under test here is only whether its
+        result reaches a caller whose export was refused."""
+        monkeypatch.setattr(export, "_live_delta_mushes",
+                            lambda _cmds, _nodes: list(pairs))
+
+    def test_a_refusal_names_a_live_delta_mush(self, monkeypatch, tmp_path):
+        _install(monkeypatch, FakeCmds(), _facts(self._violating()))
+        self._with_mushes(monkeypatch, [("|arm|armShape", "arm_relax")])
+
+        path = tmp_path / "bad.fbx"
+        with pytest.raises(HandlerError) as exc:
+            export.export_fbx({"path": str(path), "metres_per_unit": 1.0})
+
+        told = str(exc.value) + (exc.value.hint or "")
+        assert "arm_relax" in told and "|arm|armShape" in told
+        assert "does not travel in FBX" in told
+        # The refusal itself must be untouched: same reason named, same file
+        # outcome. The mush is an addition, never a substitution.
+        assert "kit_root" in str(exc.value)
+        assert not path.exists()
+        assert not (tmp_path / "bad.fbx.part.fbx").exists()
+
+    def test_the_earlier_refusals_carry_it_too(self, monkeypatch, tmp_path):
+        """The gate refusal is not the only exit before the file is written.
+
+        include_animation with no clip refuses well upstream of the gate,
+        and it is the more expensive one to be sent away from twice: the
+        caller goes off to author a clip, comes back, and only then hears
+        about the relaxation. Same for the require_baked_textures refusals.
+        """
+        _install(monkeypatch, FakeCmds(), _facts([]))
+        self._with_mushes(monkeypatch, [("|arm|armShape", "arm_relax")])
+
+        with pytest.raises(HandlerError) as exc:
+            export.export_fbx({"path": str(tmp_path / "noclip.fbx"),
+                               "metres_per_unit": 1.0,
+                               "include_animation": True})
+        told = str(exc.value) + (exc.value.hint or "")
+        assert "no clip exists" in str(exc.value)
+        assert "arm_relax" in told
+
+    def test_the_undeletable_branch_carries_it_too(self, monkeypatch,
+                                                   tmp_path):
+        """The other raise in that region. A caller reaches it rarely (an AV
+        scanner or a Maya handle holding the temp file open), but the mush is
+        just as doomed there, and a warning that survives only one of two
+        refusals is a warning that depends on the weather."""
+        _install(monkeypatch, FakeCmds(), _facts(self._violating()))
+        self._with_mushes(monkeypatch, [("|arm|armShape", "arm_relax")])
+
+        def _refuse_to_unlink(_p):
+            raise OSError("file is in use by another process")
+
+        monkeypatch.setattr(export.os, "unlink", _refuse_to_unlink)
+
+        with pytest.raises(HandlerError) as exc:
+            export.export_fbx({"path": str(tmp_path / "stuck.fbx"),
+                               "metres_per_unit": 1.0})
+
+        told = str(exc.value) + (exc.value.hint or "")
+        assert "arm_relax" in told
+        assert "kit_root" in str(exc.value)
+        assert "NOT" in str(exc.value) and "DELETE" in str(exc.value)
+
+    def test_a_refusal_with_no_mush_is_unchanged(self, monkeypatch, tmp_path):
+        _install(monkeypatch, FakeCmds(), _facts(self._violating()))
+        self._with_mushes(monkeypatch, [])
+
+        with pytest.raises(HandlerError) as exc:
+            export.export_fbx({"path": str(tmp_path / "clean.fbx"),
+                               "metres_per_unit": 1.0})
+
+        assert "deltaMush" not in str(exc.value) + (exc.value.hint or "")
+        assert "kit_root" in str(exc.value)
+        # The hint still ends where it always ended: a scene with no mush
+        # must read exactly as it did before this clause existed.
+        assert (exc.value.hint or "").endswith(
+            "how maya-mcp #629 reached three deliveries")
+
+    def test_a_forest_of_mushes_cannot_swamp_the_refusal(self, monkeypatch,
+                                                         tmp_path):
+        """Six relaxed limbs is an ordinary rig, and six of these sentences
+        would bury the violation that actually stopped the export. Capped the
+        way the violations themselves are, with the remainder COUNTED rather
+        than silently dropped - an unmentioned mush is the defect this whole
+        class exists to close."""
+        _install(monkeypatch, FakeCmds(), _facts(self._violating()))
+        self._with_mushes(monkeypatch,
+                          [("|m%d|shape" % i, "relax_%d" % i)
+                           for i in range(6)])
+
+        with pytest.raises(HandlerError) as exc:
+            export.export_fbx({"path": str(tmp_path / "many.fbx"),
+                               "metres_per_unit": 1.0})
+
+        hint = exc.value.hint or ""
+        assert "relax_0" in hint and "relax_3" in hint
+        assert "relax_4" not in hint and "relax_5" not in hint
+        assert "2 more" in hint
+
+    def test_the_success_path_still_returns_the_warning(self, monkeypatch,
+                                                        tmp_path):
+        node = fbxbytes.FbxNode(name="golem_C_pelvis", kind="Mesh", uid=1)
+        _install(monkeypatch, FakeCmds(), _facts([node]))
+        self._with_mushes(monkeypatch, [("|arm|armShape", "arm_relax")])
+
+        out = export.export_fbx(_params(tmp_path))
+
+        assert any("arm_relax" in w and "does not travel in FBX" in w
+                   for w in out["warnings"])
+
+
 def test_an_exception_between_write_and_gate_does_not_leave_a_file(
         monkeypatch, tmp_path):
     # Finding B: set_unit_scale_factor / read_fbx can raise for reasons that

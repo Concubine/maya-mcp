@@ -280,6 +280,78 @@ class TestValidation:
                               fake)
 
 
+class TestRequireSoleWearers:
+    """The material-level guard, factored out of plan_apply so the callers
+    that rewire a SHADER rather than a colour slot run it too (#767 minor
+    M1: apply_surface_detail's grain-only path wires bump into
+    shader.normalCamera and was bypassing every one of these)."""
+
+    def test_it_groups_the_wearers_under_their_shader(self, fake, tmp_path):
+        fake.meshes["|collar"] = "|collarShape"
+        fake.uv_counts["|collarShape"] = 8
+        fake.shape_sgs["|collarShape"] = ["limbSG"]
+        fake.sg_members["limbSG"] = ["|limbShape", "|collarShape"]
+        wearers = meshmaps.require_sole_wearers(
+            fake, [("|limb", "|limbShape"), ("|collar", "|collarShape")])
+        assert list(wearers) == ["limb_mat"]
+        assert wearers["limb_mat"]["sg"] == "limbSG"
+        assert [w[0] for w in wearers["limb_mat"]["wearers"]] == ["|limb",
+                                                                  "|collar"]
+
+    def test_a_multi_sg_mesh_refuses(self, fake, tmp_path):
+        fake.shape_sgs["|limbShape"] = ["limbSG", "trimSG"]
+        with pytest.raises(HandlerError, match="shading groups"):
+            meshmaps.require_sole_wearers(fake, [("|limb", "|limbShape")])
+
+    def test_a_shading_group_without_a_surface_shader_refuses(self, fake,
+                                                              tmp_path):
+        del fake.conns["limbSG.surfaceShader"]
+        with pytest.raises(HandlerError, match="no surface shader") as exc:
+            meshmaps.require_sole_wearers(fake, [("|limb", "|limbShape")])
+        assert "maya_assign_material" in (exc.value.hint or "")
+
+    def test_a_wearer_outside_the_request_refuses(self, fake, tmp_path):
+        fake.meshes["|other"] = "|otherShape"
+        fake.uv_counts["|otherShape"] = 8
+        fake.sg_members["limbSG"] = ["|limbShape", "|otherShape"]
+        with pytest.raises(HandlerError, match="otherShape"):
+            meshmaps.require_sole_wearers(fake, [("|limb", "|limbShape")])
+
+    def test_the_refusal_names_the_edit_the_caller_actually_asked_for(
+            self, fake, tmp_path):
+        """The guard is shared, so the harm has to be described in the
+        caller's terms - a grain call told about "compositing AO" is being
+        read an effect it never asked for, and apply_ao is not even one of
+        its params."""
+        fake.meshes["|other"] = "|otherShape"
+        fake.uv_counts["|otherShape"] = 8
+        fake.sg_members["limbSG"] = ["|limbShape", "|otherShape"]
+        with pytest.raises(HandlerError) as exc:
+            meshmaps.require_sole_wearers(
+                fake, [("|limb", "|limbShape")], "adding grain to it")
+        assert "adding grain to it" in str(exc.value)
+        assert "AO" not in str(exc.value)
+
+    def test_plan_apply_reports_an_unusable_shader_before_a_shared_one(
+            self, fake, tmp_path):
+        """Order matters when a material is BOTH unmapped and shared.
+
+        A shader type this tool cannot composite into is unusable no matter
+        who else wears it, so it is the more useful thing to say first;
+        reporting the shared wearer instead sends the caller off to split
+        materials before they meet the real blocker. plan_apply therefore
+        keeps the colour-slot check BETWEEN the two halves of the guard.
+        """
+        fake.meshes["|other"] = "|otherShape"
+        fake.uv_counts["|otherShape"] = 8
+        fake.sg_members["limbSG"] = ["|limbShape", "|otherShape"]
+        fake.types["limb_mat"] = "openPBR_shader"
+        settings = meshmaps.validate(_params(tmp_path, apply_ao=True), fake)
+        with pytest.raises(HandlerError) as exc:
+            meshmaps.plan_apply(fake, settings["meshes"])
+        assert "no colour-slot mapping" in str(exc.value)
+
+
 class TestPlanApply:
     def test_a_plain_colour_material_is_a_value_base(self, fake, tmp_path):
         settings = meshmaps.validate(_params(tmp_path, apply_ao=True), fake)

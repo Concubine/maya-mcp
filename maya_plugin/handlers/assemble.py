@@ -411,12 +411,30 @@ def assemble(params: Dict[str, Any]) -> Dict[str, Any]:
                                               naming.unique_name(cmds, chunk)),
                                   long=True) or [nodes[0]])[0]]
             for node in nodes:
+                # combine.unite is what applies the freeze, so before this a
+                # chunk was frozen or not depending on how many parts happened
+                # to land in it - and a caller does not choose that, their
+                # generator does. A scale left on the transform is the state
+                # the FBX export unit gate refuses (#629), so the same call
+                # with the same flags runs here, where there is no unite.
+                #
+                # It has to precede the pivot write below: makeIdentity resets
+                # pivots to the world origin, which is exactly why the merged
+                # branch writes its explicit pivot AFTER unite rather than
+                # handing it in.
+                if freeze:
+                    cmds.makeIdentity(node, apply=True, translate=True,
+                                      rotate=True, scale=True)
                 placed = None
                 if wanted is not None:
                     cmds.xform(node, worldSpace=True, pivots=tuple(wanted))
-                    # Query back, not the input echoed: a chunk that got NO
-                    # pivot treatment (wanted is None) still reports None, so
-                    # the "was a pivot placed" signal survives.
+                if wanted is not None or freeze:
+                    # Query back, not the input echoed. The freeze counts as
+                    # pivot treatment even with no `wanted`: makeIdentity
+                    # moves the pivot to the origin, so reporting None here
+                    # would claim the pivot was left alone while this call
+                    # had just moved it. None still means untouched, which
+                    # is what it has always promised.
                     placed = list(cmds.xform(node, query=True, worldSpace=True,
                                              rotatePivot=True))
                 shape = cmds.listRelatives(node, shapes=True, fullPath=True,

@@ -1734,13 +1734,17 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "Chunk name -> world-space pivot. What an omitted chunk keeps "
             "depends on its shape: a MULTI-part chunk still gets the global "
             "`pivot` mode (it always goes through combine.unite, which always "
-            "places one); a SINGLE-part chunk gets NO pivot treatment at all - "
-            "`combine` never runs for it, so Maya's own default pivot stands. "
+            "places one); a SINGLE-part chunk gets no pivot MODE applied, but "
+            "`freeze` (on by default) moves its pivot to the origin, so name "
+            "it here if it needs to turn about a particular point. "
             "For an articulated figure this is the rig: each chunk pivots at "
             "its own joint, which `center` never gets right."
         ))] = None,
         freeze: Annotated[bool, Field(description=(
-            "Freeze transforms on each combined object."
+            "Freeze transforms on every object this call produces, combined "
+            "or not. A scale left on a transform is what the FBX export unit "
+            "gate refuses, and which chunks got combined is decided by the "
+            "caller's generator rather than by the caller."
         ))] = True,
     ) -> AssembleResult:
         """Build many primitives, pack their UVs, and merge them - in ONE call.

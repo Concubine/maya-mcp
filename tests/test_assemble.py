@@ -314,6 +314,79 @@ class TestChunking:
         assert all(o["combined"] is False for o in result["objects"])
 
 
+class TestFreeze:
+    """Freezing must not depend on how many parts landed in a chunk.
+
+    combine.unite is what applies the freeze, and only chunks that go through
+    it were reaching it - so a chunk of one box, or any chunk at all when
+    combine is false, kept its scale on the transform. That is exactly the
+    state the FBX export unit gate refuses (#629), and the #770 mesh-map gate
+    had to freeze those objects by hand before it could export them.
+    """
+
+    def _frozen(self, fake):
+        return [c[1] for c in fake.calls if c[0] == "freeze"]
+
+    def test_a_one_part_chunk_is_frozen_like_a_merged_one(self, fake):
+        result = assemble.assemble({"name": "solo", "atlas": None,
+                                    "parts": _parts(1)})
+        assert self._frozen(fake) == [result["objects"][0]["name"]]
+
+    def test_combine_false_freezes_every_loose_part(self, fake):
+        result = assemble.assemble({"name": "loose", "atlas": None,
+                                    "parts": _parts(3), "combine": False})
+        assert (sorted(self._frozen(fake))
+                == sorted(o["name"] for o in result["objects"]))
+
+    def test_freeze_false_freezes_nothing_at_all(self, fake):
+        """The flag is the caller saying they want the transform kept, and a
+        chunk of one has to honour that as much as a merged one does."""
+        assemble.assemble({"name": "loose", "atlas": None, "parts": _parts(3),
+                           "combine": False, "freeze": False})
+        assert self._frozen(fake) == []
+
+    def test_a_frozen_chunk_reports_where_its_pivot_ended_up(self, fake):
+        """`pivot: null` promises the pivot was left alone, so a freeze -
+        which makeIdentity moves to the origin - has to be reported.
+
+        Before this, a single-part chunk with no entry in `pivots` came back
+        null while the freeze had just moved its pivot, which is the schema
+        saying the opposite of what happened.
+        """
+        result = assemble.assemble({"name": "solo", "atlas": None,
+                                    "parts": _parts(1)})
+        assert result["objects"][0]["pivot"] is not None
+
+    def test_an_unfrozen_chunk_still_reports_null(self, fake):
+        """null keeps meaning untouched: nothing moved this pivot."""
+        result = assemble.assemble({"name": "solo", "atlas": None,
+                                    "parts": _parts(1), "freeze": False})
+        assert result["objects"][0]["pivot"] is None
+
+    def test_a_merged_chunk_is_still_frozen_once_inside_unite(self, fake):
+        """The merged path already worked; adding a second freeze in the loop
+        would be a silent double-bake of the same transform."""
+        result = assemble.assemble({"name": "pair", "atlas": None,
+                                    "parts": _parts(2)})
+        assert self._frozen(fake) == [result["objects"][0]["name"]]
+        assert any(c[0] == "polyUnite" for c in fake.calls)
+
+    def test_an_explicit_pivot_outlives_the_freeze_on_a_lone_part(self, fake):
+        """makeIdentity resets pivots to the world origin, so the freeze has
+        to happen BEFORE the caller's pivot is written or the pivot is
+        silently thrown away - the ordering the merged branch already relies
+        on, now owed by this branch too."""
+        result = assemble.assemble({
+            "name": "golem", "atlas": None,
+            "parts": [{"pos": [0, 1, 0], "dim": [1, 1, 1], "chunk": "fist"}],
+            "pivots": {"fist": [1.0, 2.0, 3.0]},
+        })
+        node = result["objects"][0]["name"]
+        write = ("xform", node, {"worldSpace": True, "pivots": (1.0, 2.0, 3.0)})
+        assert fake.calls.index(("freeze", node)) < fake.calls.index(write)
+        assert result["objects"][0]["pivot"] == [1.0, 2.0, 3.0]
+
+
 class TestTaper:
     def test_a_bare_number_is_the_end_flare(self, fake):
         assemble.assemble({"name": "p", "atlas": None,

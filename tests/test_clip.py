@@ -1149,12 +1149,83 @@ class TestDelete:
 
 
 class TestGuards:
+    JOINTS = ["|root", "|root|mid", "|root|mid|tip"]
+
+    def _plant_sdk_curve(self, fake, plug="|root|mid|tip.rotateX",
+                         curve="tip_rotX_driven", node_type="animCurveUA"):
+        """A set-driven key on a joint rotate plug: a curve node of a U-typed
+        type, which reads a DRIVER attribute rather than time."""
+        fake.curves[plug] = curve
+        fake.node_types = dict(getattr(fake, "node_types", {}),
+                               **{curve: node_type})
+
     def test_static_pose_guard_names_the_clip(self, fake):
         _author(fake)
         with pytest.raises(HandlerError, match="clip 'idle'"):
-            clip.guard_static_pose(fake, "|root",
-                                   ["|root", "|root|mid", "|root|mid|tip"],
+            clip.guard_static_pose(fake, "|root", self.JOINTS,
                                    "pose_skeleton")
+
+    def test_static_pose_guard_clip_curves_keep_todays_wording(self, fake):
+        # The clip wording is load-bearing: the live gate and the tests above
+        # assert on it, so the driven-key split must leave it byte-identical.
+        _author(fake)
+        with pytest.raises(HandlerError) as exc:
+            clip.guard_static_pose(fake, "|root", self.JOINTS,
+                                   "pose_skeleton")
+        assert str(exc.value) == (
+            "pose_skeleton refuses while animation curves drive this "
+            "skeleton (clip 'idle') - a static write here would be "
+            "overridden on the next frame change")
+        assert exc.value.hint == (
+            "author_clip re-authors the motion; delete_clip removes the "
+            "curves and returns the skeleton to static posing")
+
+    def test_static_pose_guard_sends_a_driven_key_to_its_own_fix(self, fake):
+        # #767 M2: an SDK curve is a connection reading a driver, not a clip
+        # channel. delete_clip would never remove it, so naming delete_clip
+        # here sends the caller to a dead end.
+        self._plant_sdk_curve(fake)
+        with pytest.raises(HandlerError) as exc:
+            clip.guard_static_pose(fake, "|root", self.JOINTS,
+                                   "pose_skeleton")
+        assert "set-driven key" in str(exc.value)
+        assert "tip_rotX_driven" in str(exc.value)
+        assert "remove the driven key" in exc.value.hint
+        assert "delete_clip" not in str(exc.value) + (exc.value.hint or "")
+        assert "author_clip" not in str(exc.value) + (exc.value.hint or "")
+
+    def test_static_pose_guard_names_both_kinds_when_both_drive(self, fake):
+        # Authoring first keeps author_clip's foreign-curve refusal out of
+        # this: the SDK curve is planted onto a channel the clip never keys.
+        _author(fake)
+        self._plant_sdk_curve(fake)
+        with pytest.raises(HandlerError) as exc:
+            clip.guard_static_pose(fake, "|root", self.JOINTS,
+                                   "pose_skeleton")
+        message, hint = str(exc.value), exc.value.hint
+        assert "animation curves drive this skeleton (clip 'idle')" in message
+        assert "set-driven key" in message and "tip_rotX_driven" in message
+        assert "delete_clip removes the curves" in hint
+        assert "remove the driven key" in hint
+
+    def test_the_mixed_hint_warns_that_delete_clip_reaps_the_driven_keys(
+            self, fake):
+        """The clip fix really does destroy the SDK curves as well.
+
+        delete_clip dooms whatever _anim_curves returned, and that query
+        asks for type "animCurve", which matches the derived U-typed nodes -
+        which is why guard_static_weights has to filter them back out. A
+        hint that called them untouched would send a caller to delete rig
+        setup this same refusal had just told them was a separate concern.
+        """
+        _author(fake)
+        self._plant_sdk_curve(fake)
+        with pytest.raises(HandlerError) as exc:
+            clip.guard_static_pose(fake, "|root", self.JOINTS,
+                                   "pose_skeleton")
+        hint = exc.value.hint
+        assert "delete_clip's teardown would delete those" in hint
+        assert "does not touch" not in str(exc.value)
 
     def test_static_weight_guard(self, fake):
         _author(fake, keys=[

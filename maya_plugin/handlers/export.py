@@ -958,6 +958,29 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
             "- if a deltaMush is live, its relaxation will NOT be in the "
             "file" % mush_exc]
 
+    # #771 M3: a doomed deltaMush otherwise reaches the caller only through
+    # the success path's `warnings`, so ANY refusal swallowed it - the
+    # caller fixed what was refused, re-exported, and only THEN learned the
+    # relaxation was never going to travel. Composed here rather than beside
+    # the gate refusal so every refusal below this point can carry it: the
+    # require_baked_textures and missing-clip refusals fire earlier, and
+    # they are the more expensive ones to be sent away from twice. It is not
+    # a reason for any of those refusals and must not read like one, hence
+    # "separately". Capped the way the violations themselves are, because a
+    # rig with a relaxed limb apiece would otherwise bury the reason the
+    # export actually stopped; the remainder is counted rather than dropped,
+    # since an unmentioned mush is exactly the silence this clause exists to
+    # break.
+    if mush_warnings:
+        _mush_extra = len(mush_warnings) - 4
+        mush_hint = (
+            " Separately, and still true once the above is fixed: "
+            + "; ".join(mush_warnings[:4])
+            + ("; and %d more like it" % _mush_extra if _mush_extra > 0
+               else ""))
+    else:
+        mush_hint = ""
+
     # #714: what the SCENE says its materials carry. Read-only queries; the
     # scene is never modified. Scoped to the exported shapes, like shape
     # aliases and clips above.
@@ -997,21 +1020,22 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
                      "(maya_assign_pbr, or the file_texture recipe) only if "
                      "you want a different look than what is baked. Or "
                      "export with require_baked_textures=false and accept "
-                     "that the look does not travel")
+                     "that the look does not travel" + mush_hint)
         if claims_unavailable:
             raise HandlerError(
                 "require_baked_textures=true but %s - the export cannot "
                 "prove the materials carry only file-backed maps"
                 % claims_unavailable,
                 hint="re-run without require_baked_textures to export "
-                     "anyway, or fix the scene condition named above")
+                     "anyway, or fix the scene condition named above"
+                     + mush_hint)
 
     declared_clip = _scene_clips(cmds) if include_animation else None
     if include_animation and declared_clip is None:
         raise HandlerError(
             "include_animation=true but no clip exists",
             hint="author_clip keys the motion first; a static export needs "
-                 "no flag at all")
+                 "no flag at all" + mush_hint)
 
     # MEASURED under mayapy (TestClipExportInMaya, the baked-key-count item
     # of the #695 battery): the bundled FBX plugin (2020.3.9) reads the
@@ -1197,7 +1221,7 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
                      "convention). Deletion itself failed - remove %s by hand "
                      "before it reaches a delivery" % tmp_path
                      + skin_hint + shape_hint + anim_hint
-                     + texture_hint) from unlink_exc
+                     + texture_hint + mush_hint) from unlink_exc
         raise HandlerError(
             "the exported FBX failed the unit gate and was never written to "
             "%s - the temp file was deleted, and any pre-existing file at "
@@ -1208,7 +1232,8 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
                  "means one metre (linear_unit 'cm' in this repo's convention). "
                  "Nothing reaches %s until it passes - a wrong file on disk is "
                  "how maya-mcp #629 reached three deliveries" % path
-                 + skin_hint + shape_hint + anim_hint + texture_hint)
+                 + skin_hint + shape_hint + anim_hint + texture_hint
+                 + mush_hint)
 
     # Only now, with the gate passed, does the real path get touched.
     os.replace(tmp_path, path)
