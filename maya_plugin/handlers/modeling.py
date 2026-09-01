@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..dispatcher import HandlerError, require_known_keys
-from . import ledger, naming, uvmath
+from . import ledger, naming, plugwrite, uvmath
 
 PRIMITIVE_KINDS = (
     "cube", "sphere", "cylinder", "plane", "torus", "cone",
@@ -523,6 +523,27 @@ def transform(params: Dict[str, Any]) -> Dict[str, Any]:
         )
     relative = params.get("relative", True) is not False
     resolved = [naming.require_object(cmds, str(n)) for n in names]
+    # delete_objects promises all-or-nothing on exactly this shape of input
+    # and says so in its own refusal; transform resolved every name up front
+    # and then wrote object by object, so a plug the rig owns on the third
+    # name left the first two moved and ledger-recorded (#802). Every plug
+    # of every object is asked about before the first one is written.
+    #
+    # The COMPOUNDS are asked about, not the axes: `cmds.xform` does not
+    # raise on a channel it cannot write, it writes the children it can and
+    # silently skips the rest (measured, #802), so a locked translateY on
+    # one object used to give that object a two-thirds move and the caller a
+    # success report.
+    channels = [c for c, v in (("translate", translate), ("rotate", rotate),
+                               ("scale", scale), ("pivots", pivot))
+                if v is not None]
+    plugwrite.guard(
+        cmds,
+        [plug for name in resolved
+         for plug in plugwrite.transform_plugs(name, channels)],
+        "transform",
+        consequence="nothing was moved - the transform is all-or-nothing "
+                    "across every name in the call, as delete_objects is")
 
     warnings: List[str] = []
     objects: List[Dict[str, Any]] = []

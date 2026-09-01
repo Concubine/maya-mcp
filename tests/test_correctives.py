@@ -320,7 +320,12 @@ class TestAddCorrectiveValidate:
         fake.types["rotCurve"] = "animCurveTA"
         fake.conns["|arm_01|arm_02.rotateZ"] = ["rotCurve.output"]
         msg = _err(correctives.validate_corrective, _params(), fake)
-        assert "animation curves" in msg
+        # Singular since #802 moved the diagnosis into the shared guard,
+        # which names the ONE curve it found rather than a class of them.
+        # The claim is unchanged: a curve is named as a curve, not folded
+        # into a generic "a connection owns this".
+        assert "animation curve" in msg
+        assert "rotCurve" in msg
 
     def test_duplicate_rotation_reuses_the_existing_pose(self):
         # A second pose within a degree would ill-condition the

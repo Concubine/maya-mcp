@@ -68,8 +68,17 @@ class FakeCmds:
         self.visible_panels = ["modelPanel4"]
         self.focus_panel = "modelPanel4"
         self.deleted = []
-        # plug -> the node feeding it. setAttr/xform refuse these.
+        # plug -> the SOURCE PLUG feeding it. setAttr/xform refuse these.
+        # A source plug (not a bare node name) because that is what Maya's
+        # listConnections(plugs=True) answers, and the shared writability
+        # guard classifies the source by asking nodeType about it (#802) -
+        # so every entry's node must be registered in `node_type` too.
         self.driven_plugs = {}
+        # plugs a rigger locked. Modelled here for the first time in #802:
+        # setAttr refuses one, and `xform` does NOT - it writes the children
+        # it can and skips the rest, which is why set_camera has to ask
+        # before it writes rather than catch afterwards.
+        self.locked_plugs = set()
         self.node_type = {}
         self.shape_of = {}
         self.translate = {}
@@ -135,8 +144,10 @@ class FakeCmds:
         if attr[-1:] in ("X", "Y", "Z"):
             candidates.append("%s.%s" % (node, attr[:-1]))
         for plug in candidates:
+            if plug in self.locked_plugs:
+                return "%s is locked" % plug
             if plug in self.driven_plugs:
-                return self.driven_plugs[plug]
+                return "%s feeds it" % self.driven_plugs[plug]
         return None
 
     def _all_matches(self, name):
@@ -294,15 +305,55 @@ class FakeCmds:
         if blocker:
             raise RuntimeError(
                 "setAttr: The attribute '%s' is locked or connected and "
-                "cannot be modified (%s feeds it)" % (attr, blocker))
+                "cannot be modified (%s)" % (attr, blocker))
         self.attrs[attr] = values[0] if len(values) == 1 else list(values)
 
-    def getAttr(self, attr):
+    def getAttr(self, attr, lock=False, **kw):
         node, _, _name = str(attr).rpartition(".")
         self._require(node)
+        if kw:
+            # #802: an unmodelled flag used to fall into **kw and come back
+            # as the VALUE, which is a silent lie about a question the fake
+            # was never taught to answer.
+            raise TypeError(
+                "FakeCmds.getAttr models lock= only (#802), not %r" % sorted(kw))
+        if lock:
+            # Exact-plug, like Maya: getAttr('.rotate', lock=True) is False
+            # while rotateX is locked (measured A01), which is why the guard
+            # asks the compound AND its children.
+            return attr in self.locked_plugs
         if attr not in self.attrs:
             raise RuntimeError("No object matches name: %s" % attr)
         return self.attrs[attr]
+
+    def listConnections(self, plug, source=False, destination=True,
+                        plugs=False, type=None, **kw):
+        """Source-side connections of ONE EXACT plug, as Maya answers them.
+
+        Exact, because Maya is: a query on `.rotate` returns None while all
+        three of its children are constraint-fed, and a query on `.rotateX`
+        does not see a connection made on `.rotate` - MEASURED on 2027 by
+        evals/static_write_probe_802.py (B01/B02, C01/C02). That asymmetry
+        is the whole reason `plugwrite.family` asks about the compound and
+        the children separately, so a fake that folded them together would
+        make the guard's central case untestable (#802).
+        """
+        self._require(str(plug).split(".")[0])
+        if not source:
+            raise AssertionError(
+                "FakeCmds.listConnections models source queries only (#802)")
+        src = self.driven_plugs.get(plug)
+        if src is None:
+            return None
+        node = src.split(".")[0]
+        if type is not None:
+            # Maya's type filter matches DERIVED types, so an animCurveTA
+            # answers type="animCurve" (the #796 defect-1 trap).
+            actual = self.nodeType(node)
+            if not (actual == type
+                    or (type == "animCurve" and actual.startswith(type))):
+                return None
+        return [src] if plugs else [node]
 
     def lookThru(self, panel, cam):
         self._require_panel(panel)
@@ -397,7 +448,9 @@ class TestTheFakeRefusesWhatMayaRefuses:
     def test_setattr_refuses_a_connection_fed_plug(self, fake_cmds):
         # focalLength is the one plug set_camera writes with setAttr, and a
         # keyed zoom feeds exactly it.
-        fake_cmds.driven_plugs["|bkCam|bkCamShape.focalLength"] = "focal_anim"
+        fake_cmds.node_type["focal_anim"] = "animCurveTU"
+        fake_cmds.driven_plugs["|bkCam|bkCamShape.focalLength"] = (
+            "focal_anim.output")
         with pytest.raises(RuntimeError, match="locked or connected"):
             fake_cmds.setAttr("|bkCam|bkCamShape.focalLength", 50.0)
         assert fake_cmds.attrs["|bkCam|bkCamShape.focalLength"] == 35.0
@@ -427,13 +480,17 @@ class TestTheFakeRefusesWhatMayaRefuses:
         compound through xform, and an aim or point constraint feeds the
         children. Maya refuses the compound write, and round 1 reported this
         guard as living on setAttr as well when it lived only here."""
-        fake_cmds.driven_plugs["|bkCam.translateX"] = "bkCam_pointConstraint1"
+        fake_cmds.node_type["bkCam_pointConstraint1"] = "pointConstraint"
+        fake_cmds.driven_plugs["|bkCam.translateX"] = (
+            "bkCam_pointConstraint1.constraintTranslateX")
         with pytest.raises(RuntimeError, match="locked or connected"):
             fake_cmds.xform("|bkCam", translation=(1, 2, 3))
         assert fake_cmds.translate["|bkCam"] == [0.0, 0.0, 5.0]
 
     def test_xform_refuses_a_write_to_the_fed_compound_itself(self, fake_cmds):
-        fake_cmds.driven_plugs["|bkCam.rotate"] = "bkCam_aimConstraint1"
+        fake_cmds.node_type["bkCam_aimConstraint1"] = "aimConstraint"
+        fake_cmds.driven_plugs["|bkCam.rotate"] = (
+            "bkCam_aimConstraint1.constraintRotate")
         with pytest.raises(RuntimeError, match="locked or connected"):
             fake_cmds.xform("|bkCam", rotation=(0, 90, 0))
         assert fake_cmds.rotate["|bkCam"] == [0.0, 0.0, 0.0]
@@ -442,13 +499,53 @@ class TestTheFakeRefusesWhatMayaRefuses:
         """setAttr and xform go through this one helper, so the two cannot
         drift apart: a fed CHILD blocks the compound, and a fed COMPOUND
         blocks the child."""
-        fake_cmds.driven_plugs["|bkCam.translateX"] = "bkCam_pointConstraint1"
-        assert fake_cmds._static_write_blocker("|bkCam", "translate") == \
-            "bkCam_pointConstraint1"
-        fake_cmds.driven_plugs["|bkCam.rotate"] = "bkCam_aimConstraint1"
-        assert fake_cmds._static_write_blocker("|bkCam", "rotateY") == \
-            "bkCam_aimConstraint1"
+        fake_cmds.node_type["bkCam_pointConstraint1"] = "pointConstraint"
+        fake_cmds.driven_plugs["|bkCam.translateX"] = (
+            "bkCam_pointConstraint1.constraintTranslateX")
+        assert fake_cmds._static_write_blocker("|bkCam", "translate") == (
+            "bkCam_pointConstraint1.constraintTranslateX feeds it")
+        fake_cmds.node_type["bkCam_aimConstraint1"] = "aimConstraint"
+        fake_cmds.driven_plugs["|bkCam.rotate"] = (
+            "bkCam_aimConstraint1.constraintRotate")
+        assert fake_cmds._static_write_blocker("|bkCam", "rotateY") == (
+            "bkCam_aimConstraint1.constraintRotate feeds it")
         assert fake_cmds._static_write_blocker("|bkCam", "visibility") is None
+
+    # -- #802: the two queries the shared writability guard makes ---------
+    def test_getattr_lock_is_exact_plug_like_maya(self, fake_cmds):
+        """MEASURED (A01): getAttr('.rotate', lock=True) is False while
+        rotateX is locked. A fake that folded the family together would
+        make the guard's whole reason for walking one untestable."""
+        fake_cmds.locked_plugs = {"|bkCam.translateY"}
+        assert fake_cmds.getAttr("|bkCam.translateY", lock=True) is True
+        assert fake_cmds.getAttr("|bkCam.translate", lock=True) is False
+        assert fake_cmds.getAttr("|bkCam.translateX", lock=True) is False
+
+    def test_a_locked_plug_refuses_the_write_the_guard_asks_about(self, fake_cmds):
+        fake_cmds.locked_plugs = {"|bkCam.translateY"}
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            fake_cmds.xform("|bkCam", translation=(1, 2, 3))
+        assert fake_cmds.translate["|bkCam"] == [0.0, 0.0, 5.0]
+
+    def test_listconnections_answers_the_exact_plug_only(self, fake_cmds):
+        """MEASURED (B01/B02): the compound query answers None while every
+        child is constraint-fed, and a child query does not see a
+        connection made on the compound."""
+        fake_cmds.node_type["bkCam_pointConstraint1"] = "pointConstraint"
+        fake_cmds.driven_plugs["|bkCam.translateX"] = (
+            "bkCam_pointConstraint1.constraintTranslateX")
+        ask = lambda plug: fake_cmds.listConnections(  # noqa: E731
+            plug, source=True, destination=False, plugs=True)
+        assert ask("|bkCam.translateX") == [
+            "bkCam_pointConstraint1.constraintTranslateX"]
+        assert ask("|bkCam.translate") is None
+        assert ask("|bkCam.translateY") is None
+        with pytest.raises(AssertionError, match="source queries only"):
+            fake_cmds.listConnections("|bkCam.translateX", destination=True)
+
+    def test_an_unmodelled_getattr_flag_raises_rather_than_lying(self, fake_cmds):
+        with pytest.raises(TypeError, match="lock="):
+            fake_cmds.getAttr("|bkCam.translate", settable=True)
 
     def test_an_unfed_camera_still_moves(self, fake_cmds):
         # The refusal must not become the answer to everything.
@@ -566,6 +663,19 @@ class TestSetCamera:
             )
         assert exc.value.hint
 
+    def test_an_animated_lens_is_refused_before_the_camera_moves(self, fake_cmds):
+        """#802: focal_length on a keyed lens is the same collision as a
+        constrained transform, and it used to be applied THIRD - after the
+        position and the aim had already landed."""
+        fake_cmds.node_type["focal_anim"] = "animCurveTU"
+        fake_cmds.driven_plugs["|bkCam|bkCamShape.focalLength"] = (
+            "focal_anim.output")
+        with pytest.raises(HandlerError) as exc:
+            viewport.set_camera({"camera": "bkCam", "position": [1, 2, 3],
+                                 "focal_length": 50.0, "set_active": False})
+        assert "focalLength" in str(exc.value) and exc.value.hint
+        assert fake_cmds.translate["|bkCam"] == [0.0, 0.0, 5.0]
+
     def test_focal_length_sets_shape_attr(self, fake_cmds):
         result = viewport.set_camera(
             {"camera": "mcpCam", "focal_length": 50.0, "set_active": False}
@@ -637,16 +747,22 @@ class TestSetCameraMeetsAConnectedPlug:
         fake_cmds.rotate["|shotCam"] = [0.0, 0.0, 0.0]
         fake_cmds.attrs["|shotCam|shotCamShape.focalLength"] = 35.0
         for plug in plugs:
-            fake_cmds.driven_plugs[plug] = "shotCam_constraint1"
+            fake_cmds.node_type["shotCam_constraint1"] = "parentConstraint"
+            fake_cmds.driven_plugs[plug] = (
+            "shotCam_constraint1.constraint") +                 plug.rpartition(".")[2].capitalize()
         return fake_cmds
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "#799: set_camera writes position/look_at with a bare cmds.xform. On "
-        "a parent-constrained camera Maya raises 'The attribute "
-        "|shotCam.translate is locked or connected and cannot be modified' "
-        "and the handler lets that RuntimeError out raw - no HandlerError, "
-        "no hint, where the neighbouring not-a-camera collision gets both"))
     def test_a_constrained_camera_is_refused_with_a_hint(self, fake_cmds):
+        """#802 FIXED. The refusal the neighbouring collision already got.
+
+        #799 pinned this expecting a raw RuntimeError out of cmds.xform.
+        The live probe measured otherwise (evals/static_write_probe_802b.py,
+        R3/R4/R5): xform does not raise on a parent-constrained camera at
+        all - it writes what it can, the constraint reasserts on the next
+        evaluation, and set_camera used to report the position it had asked
+        for as though it had taken. So the defect was a SILENT wrong answer,
+        not an ugly one, and no except clause could ever have caught it.
+        """
         self._constrained(fake_cmds, ["|shotCam.translate", "|shotCam.rotate"])
         with pytest.raises(HandlerError) as exc:
             viewport.set_camera(
@@ -654,13 +770,15 @@ class TestSetCameraMeetsAConnectedPlug:
             )
         assert exc.value.hint
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "#799: position is applied before look_at is attempted, so an "
-        "AIM-constrained camera (translate free, rotate fed) is MOVED and "
-        "then the call dies on the rotation. set_camera makes deliberate "
-        "persistent changes and has no restore, so the caller sees an "
-        "exception and the user's camera has silently relocated"))
     def test_a_refusal_does_not_leave_the_camera_half_moved(self, fake_cmds):
+        """#802 FIXED. Position used to be applied before look_at was tried.
+
+        An AIM-constrained camera has translate free and rotate fed, so the
+        move landed and the aim did not. set_camera makes deliberate
+        persistent changes and has no restore, so the user's camera had
+        relocated for nothing. Every plug the call will write is now asked
+        about together, before the first one lands.
+        """
         self._constrained(fake_cmds, ["|shotCam.rotate"])
         with pytest.raises(Exception):
             viewport.set_camera({

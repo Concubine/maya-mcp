@@ -12,7 +12,7 @@ import math
 from typing import Any, Dict, List
 
 from ..dispatcher import HandlerError, require_known_keys
-from . import naming
+from . import naming, plugwrite
 from .capture import find_model_panel
 
 DEFAULT_CAMERA = "mcpCam"
@@ -167,23 +167,55 @@ def set_camera(params: Dict[str, Any]) -> Dict[str, Any]:
 
     position = params.get("position")
     look_at = params.get("look_at")
+    focal = params.get("focal_length")
+    if position is not None and (
+            not isinstance(position, (list, tuple)) or len(position) != 3):
+        raise HandlerError(
+            "position must be [x, y, z]", hint="world-space coordinates"
+        )
+    if look_at is not None and (
+            not isinstance(look_at, (list, tuple)) or len(look_at) != 3):
+        raise HandlerError("look_at must be [x, y, z]", hint="world-space point")
+    shape = None
+    if focal is not None:
+        shape = cmds.listRelatives(cam, shapes=True, fullPath=True)[0]
+
+    # `camera` names a node the caller need not have made, and a shot camera
+    # riding a vehicle through a parentConstraint - or aimed at a subject, or
+    # with a keyed lens - is an ordinary scene, not a broken one. The reuse
+    # path above already converts the OTHER kind of collision into a hinted
+    # refusal precisely so the caller never meets a raw Maya exception; this
+    # is the same collision, and the name resolved to a camera that belongs
+    # to something else (#802).
+    #
+    # ALL THREE writes are asked about together, before the first one lands.
+    # They used to be applied in sequence with the check absent, so an
+    # aim-constrained camera (translate free, rotate fed) was MOVED and then
+    # failed on the rotation: set_camera makes deliberate persistent changes
+    # and has no restore, so the caller saw an error and their camera had
+    # silently relocated. Measured (#802): the xform would not even have
+    # raised - it writes the children it can and skips the rest - so the
+    # camera moved, the aim did nothing, and the call REPORTED SUCCESS.
+    wanted = []
     if position is not None:
-        if not isinstance(position, (list, tuple)) or len(position) != 3:
-            raise HandlerError(
-                "position must be [x, y, z]", hint="world-space coordinates"
-            )
+        wanted.append(cam + ".translate")
+    if look_at is not None:
+        wanted.append(cam + ".rotate")
+    if focal is not None:
+        wanted.append(shape + ".focalLength")
+    plugwrite.guard(
+        cmds, wanted, "set_camera",
+        consequence="nothing was written - the camera is where it was")
+
+    if position is not None:
         cmds.xform(cam, translation=[float(v) for v in position], worldSpace=True)
     if look_at is not None:
-        if not isinstance(look_at, (list, tuple)) or len(look_at) != 3:
-            raise HandlerError("look_at must be [x, y, z]", hint="world-space point")
         current = cmds.xform(cam, query=True, worldSpace=True, translation=True)
         cmds.xform(
             cam, rotation=look_at_rotation(current, [float(v) for v in look_at]),
             worldSpace=True,
         )
-    focal = params.get("focal_length")
     if focal is not None:
-        shape = cmds.listRelatives(cam, shapes=True, fullPath=True)[0]
         cmds.setAttr(shape + ".focalLength", float(focal))
     if params.get("set_active", True):
         panel = find_model_panel(cmds)

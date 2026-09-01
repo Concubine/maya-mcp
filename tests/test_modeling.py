@@ -46,13 +46,27 @@ class FakeCmds:
         # refuse a static write to a connected or locked plug, and to a
         # compound whose CHILD is fed. Empty by default: every pre-existing
         # test here writes to something it just built.
+        # Values are SOURCE PLUGS, because that is what Maya's
+        # listConnections(plugs=True) answers and what the shared
+        # writability guard classifies with nodeType (#802).
         self.connected_plugs = {}
+        # Plugs a rigger locked. First modelled in #802: `cmds.xform` does
+        # NOT raise over one - it writes the children it can and skips the
+        # rest (measured) - so transform has to ask before it writes.
+        self.locked_plugs = set()
+        # source node -> its Maya type, for the nodes feeding connected_plugs
+        self.node_types = {}
 
     # --- existence --------------------------------------------------------
     def _live(self, name):
         node = name.split(".")[0]      # ".vtx[*]" / ".curvature" name a node
+        # A connection implies both of its ends, so the node feeding a
+        # connected plug exists by definition (#802). Its TYPE still has to
+        # be declared in `node_types`, or nodeType answers "transform" -
+        # which for a constraint is a lie the guard would classify on.
         known = (list(self.objects) + [s for s, _k in self.shapes.values()]
-                 + list(self.dg_nodes))
+                 + list(self.dg_nodes)
+                 + [v.split(".")[0] for v in self.connected_plugs.values()])
         if node in known:
             return True
         # An ABSOLUTE path names one node and nothing else; a short name
@@ -76,6 +90,8 @@ class FakeCmds:
         compound whose CHILD is connected - the asymmetry #796 measured on
         the live rig.
         """
+        if plug in self.locked_plugs:
+            return plug
         if plug in self.connected_plugs:
             return plug
         node, _, attr = plug.rpartition(".")
@@ -84,24 +100,26 @@ class FakeCmds:
         # disagreed on that single entry (#799 round 2), which is how the
         # next reader concludes Maya's behaviour differs by handler. They
         # match now.
-        compounds = ("translate", "rotate", "scale", "rotatePivot")
+        compounds = ("translate", "rotate", "scale", "rotatePivot",
+                     "scalePivot")
         if attr in compounds:
             for child in ("%s.%s%s" % (node, attr, ax) for ax in "XYZ"):
-                if child in self.connected_plugs:
+                if child in self.locked_plugs or child in self.connected_plugs:
                     return child
         elif attr[:-1] in compounds and attr[-1] in "XYZ":
             parent = "%s.%s" % (node, attr[:-1])
-            if parent in self.connected_plugs:
+            if parent in self.locked_plugs or parent in self.connected_plugs:
                 return parent
         return None
 
     def _refuse_static_write(self, command, plug):
         blocker = self._write_blocker(plug)
         if blocker:
+            why = ("%s is locked" % blocker if blocker in self.locked_plugs
+                   else "%s feeds it" % self.connected_plugs[blocker])
             raise RuntimeError(
                 "%s: The attribute '%s' is locked or connected and cannot be "
-                "modified (%s feeds it)"
-                % (command, plug, self.connected_plugs[blocker])
+                "modified (%s)" % (command, plug, why)
             )
 
     def objExists(self, name):
@@ -154,6 +172,8 @@ class FakeCmds:
         # reads as a fixture problem - or, for a shape whose transform was
         # deleted, still answering "mesh" from a stale entry.
         self._require(node)
+        if node in self.node_types:
+            return self.node_types[node]
         for shape, ntype in self.shapes.values():
             if shape == node:
                 return ntype
@@ -172,10 +192,40 @@ class FakeCmds:
         self.xf[long_name] = ((0, 0, 0), (0, 0, 0), (1, 1, 1))
         return [name, name + "Shape"]
 
-    def getAttr(self, plug, type=False):
+    def getAttr(self, plug, type=False, lock=False):
         self._require(plug)
-        assert type, "the fake only serves type queries"
+        if lock:
+            # #802: exact-plug, as Maya is - getAttr('.translate',
+            # lock=True) is False while translateY alone is locked
+            # (measured A01), which is why the guard asks the compound AND
+            # its children.
+            return plug in self.locked_plugs
+        assert type, "the fake only serves type and lock queries"
         return "doubleAngle" if plug.split(".")[-1] in self.angle_attrs else "double"
+
+    def listConnections(self, plug, source=False, destination=True,
+                        plugs=False, type=None, **kw):
+        """Source-side connections of ONE EXACT plug, as Maya answers them.
+
+        Exact, because Maya is: a query on `.translate` returns None while
+        all three children are constraint-fed, and a child query does not
+        see a connection on the compound - measured on 2027 by
+        evals/static_write_probe_802.py (B01/B02, C01/C02).
+        """
+        self._require(plug)
+        if not source:
+            raise AssertionError(
+                "FakeCmds.listConnections models source queries only (#802)")
+        src = self.connected_plugs.get(plug)
+        if src is None:
+            return None
+        node = src.split(".")[0]
+        if type is not None:
+            actual = self.nodeType(node)
+            if not (actual == type
+                    or (type == "animCurve" and actual.startswith(type))):
+                return None
+        return [src] if plugs else [node]
 
     def currentUnit(self, query=False, angle=False, **kw):
         assert query and angle
@@ -193,7 +243,12 @@ class FakeCmds:
                 if key in kw:
                     self._refuse_static_write("xform", "%s.%s" % (name, channel))
             if "pivots" in kw:
+                # `xform -pivots` writes BOTH pivots (the handler's own
+                # comment says so); this fake refused on rotatePivot only,
+                # so a fed scalePivot was a write it took and Maya would
+                # not (#802 review).
                 self._refuse_static_write("xform", name + ".rotatePivot")
+                self._refuse_static_write("xform", name + ".scalePivot")
         if kw.get("query"):
             if ".vtx[" in name:
                 built = any(c[0] in ("nonLinear", "lattice", "sculpt") for c in self.calls)
@@ -658,20 +713,24 @@ def test_transform_pivot_rejects_bad_shape(monkeypatch):
     assert "pivot" in str(exc.value)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "#799: a constrained/driven translate plug REFUSES the write in Maya - "
-    "cmds.xform raises 'locked or connected and cannot be modified', the "
-    "second of #796's three blocking defects. transform writes one object at "
-    "a time with no guard, so the raw RuntimeError escapes as a traceback "
-    "AND the earlier names in the list are already moved, with no report of "
-    "the partial write. delete_objects promises all-or-nothing on the same "
-    "shape of input; transform does not."))
 def test_transform_is_all_or_nothing_when_a_plug_refuses_the_write(monkeypatch):
+    """#802 FIXED. transform now promises what delete_objects promises.
+
+    It wrote one object at a time with no guard, so a plug the rig owns on
+    the second name left the first one moved and ledger-recorded. #799
+    pinned this expecting cmds.xform to raise; measured (#802, P8/P9), it
+    does not - it writes the children it can and silently skips the rest,
+    so the caller got a two-thirds move and a success report. The fake
+    refuses the whole call, which is the stricter of the two and is what
+    setAttr does on a compound; either way the guard has to run first.
+    """
     fake = FakeCmds(objects={"|a", "|b"})
     # What a parentConstraint, an anim layer or a set-driven key leaves on a
     # rigged object. Only ONE child of the compound is fed, which is enough:
     # Maya refuses the whole compound write.
-    fake.connected_plugs["|b.translateX"] = "|b_parentConstraint1"
+    fake.node_types["|b_parentConstraint1"] = "parentConstraint"
+    fake.connected_plugs["|b.translateX"] = (
+        "|b_parentConstraint1.constraintTranslateX")
     monkeypatch.setattr(modeling, "_cmds", lambda: fake)
     with pytest.raises(HandlerError) as exc:
         modeling.transform({"names": ["|a", "|b"], "translate": [1.0, 0.0, 0.0]})
@@ -1464,6 +1523,74 @@ class TestTheFakeRefusesWhatMayaRefuses:
     rather than silently.
     """
 
+    # -- #802: the two queries the shared writability guard makes ---------
+    def test_getattr_lock_is_exact_plug_like_maya(self):
+        """MEASURED (A01): getAttr('.translate', lock=True) is False while
+        translateY is locked, which is why the guard walks the family."""
+        fake = FakeCmds(objects={"|a"})
+        fake.locked_plugs = {"|a.translateY"}
+        assert fake.getAttr("|a.translateY", lock=True) is True
+        assert fake.getAttr("|a.translate", lock=True) is False
+
+    def test_a_locked_child_refuses_the_compound_write(self):
+        fake = FakeCmds(objects={"|a"})
+        fake.locked_plugs = {"|a.translateY"}
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            fake.xform("|a", worldSpace=True, translation=(1.0, 2.0, 3.0))
+        assert not [c for c in fake.calls if c[0] == "xform"]
+
+    def test_listconnections_answers_the_exact_plug_only(self):
+        """MEASURED (B01/B02, C01/C02): compound and child do not see each
+        other's connections, which is why the guard asks about both."""
+        fake = FakeCmds(objects={"|a"})
+        fake.node_types["|a_pc1"] = "parentConstraint"
+        fake.connected_plugs["|a.translateX"] = "|a_pc1.constraintTranslateX"
+
+        def ask(plug):
+            return fake.listConnections(plug, source=True, destination=False,
+                                        plugs=True)
+
+        assert ask("|a.translateX") == ["|a_pc1.constraintTranslateX"]
+        assert ask("|a.translate") is None
+        assert ask("|a.translateY") is None
+        with pytest.raises(AssertionError, match="source queries only"):
+            fake.listConnections("|a.translateX", destination=True)
+
+    def test_a_source_node_exists_but_its_type_can_be_declared(self):
+        """A connection implies both ends, so the feeding node exists. This
+        fake's nodeType falls back to "transform" for a non-shape, so a
+        constraint's real type has to be declared for the guard to
+        classify it as anything but "other"."""
+        fake = FakeCmds(objects={"|a"})
+        fake.connected_plugs["|a.translateX"] = "mystery.out"
+        assert fake.nodeType("mystery") == "transform"
+        fake.node_types["mystery"] = "parentConstraint"
+        assert fake.nodeType("mystery") == "parentConstraint"
+
+    def test_a_pivot_write_asks_about_the_scale_pivot_too(self, monkeypatch):
+        """`xform -pivots` sets rotatePivot AND scalePivot; the guard asks
+        about both, and so does the fake now."""
+        fake = FakeCmds(objects={"|a"})
+        fake.locked_plugs = {"|a.scalePivotY"}
+        monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+        with pytest.raises(HandlerError, match="scalePivot"):
+            modeling.transform({"names": ["|a"], "pivot": [0.0, 1.0, 0.0]})
+        assert not [c for c in fake.calls if c[0] == "xform"]
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            fake.xform("|a", worldSpace=True, pivots=(0.0, 1.0, 0.0))
+
+    def test_transform_is_all_or_nothing_across_every_name(self, monkeypatch):
+        """The claim delete_objects makes and transform now makes too: the
+        SECOND name's locked plug leaves the FIRST one where it was."""
+        fake = FakeCmds(objects={"|a", "|b"})
+        fake.locked_plugs = {"|b.rotateZ"}
+        monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+        with pytest.raises(HandlerError) as exc:
+            modeling.transform({"names": ["|a", "|b"],
+                                "rotate": [0.0, 0.0, 45.0]})
+        assert "|b" in str(exc.value)
+        assert not [c for c in fake.calls if c[0] == "xform"]
+
     def test_a_query_about_a_node_that_never_existed_raises(self):
         fake = FakeCmds()
         with pytest.raises(RuntimeError):
@@ -1523,25 +1650,31 @@ class TestTheFakeRefusesWhatMayaRefuses:
     def test_a_write_to_a_connection_fed_plug_raises_both_ways(self):
         # A compound write when a CHILD is fed...
         fake = FakeCmds(objects={"|a"})
-        fake.connected_plugs["|a.translateX"] = "|a_parentConstraint1"
+        fake.node_types["|a_parentConstraint1"] = "parentConstraint"
+        fake.connected_plugs["|a.translateX"] = (
+            "|a_parentConstraint1.constraintTranslateX")
         with pytest.raises(RuntimeError):
             fake.xform("|a", worldSpace=True, translation=(1.0, 0.0, 0.0))
         assert not [c for c in fake.calls if c[0] == "xform"]
         # ...and a CHILD write when the compound is fed.
         other = FakeCmds(objects={"|a"})
-        other.connected_plugs["|a.scale"] = "|a_scaleBlend"
+        other.node_types["|a_scaleBlend"] = "pairBlend"
+        other.connected_plugs["|a.scale"] = "|a_scaleBlend.outScale"
         with pytest.raises(RuntimeError):
             other.setAttr("|a.scaleY", 2.0)
         assert other._write_blocker("|a.scaleY") == "|a.scale"
 
     def test_a_pivot_write_to_a_fed_rotatepivot_raises_both_ways(self):
         fake = FakeCmds(objects={"|a"})
-        fake.connected_plugs["|a.rotatePivotX"] = "pc1"
+        fake.node_types["pc1"] = "pointConstraint"
+        fake.connected_plugs["|a.rotatePivotX"] = "pc1.constraintTranslateX"
         with pytest.raises(RuntimeError):
             fake.xform("|a", worldSpace=True, pivots=(1.0, 2.0, 3.0))
         assert fake.pivots == {}
         child_fed = FakeCmds(objects={"|a"})
-        child_fed.connected_plugs["|a.rotatePivot"] = "pc1"
+        child_fed.node_types["pc1"] = "pointConstraint"
+        child_fed.connected_plugs["|a.rotatePivot"] = (
+            "pc1.constraintTranslate")
         assert child_fed._write_blocker("|a.rotatePivotZ") == "|a.rotatePivot"
 
     def test_a_freeze_throws_the_live_pivot_away(self):

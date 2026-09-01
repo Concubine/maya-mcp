@@ -19,10 +19,10 @@ import base64
 import math
 import os
 import uuid
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..dispatcher import HandlerError, require_known_keys
-from . import capture, lighting, naming, pngprobe, session
+from . import capture, lighting, naming, plugwrite, pngprobe, session
 
 VALID_RENDERERS = ("arnold", "hw2")
 RENDERER_TO_MAYA = {"arnold": "arnold", "hw2": "mayaHardware2"}
@@ -545,28 +545,66 @@ def _rig_lights(cmds) -> Dict[str, float]:
     return rig
 
 
-def _orient_rig(cmds, rig: Dict[str, float], azimuth_deg: float) -> None:
+def _orient_rig(cmds, rig: Dict[str, float],
+                azimuth_deg: float) -> Tuple[List[str], List[str]]:
     """Swing the tool's rig to sit behind the camera at `azimuth_deg`.
 
     setup_lighting builds a WORLD-locked rig while render_scene orbits the
     subject, so a side or back angle renders nearly black - measured on the
     #585 run: key at yaw +30, camera at yaw 90. Yaw only: the rig's elevation
     is the look, and only its bearing needs to follow the camera.
+
+    Returns (warnings, refused): a warning per light it could NOT swing,
+    and those lights' transforms so the caller can count what it DID swing.
+    A user may key a rig light or park it on a constraint, and the write
+    used to sit in a bare `except Exception: pass` while `relit_lights`
+    reported the count of lights DISCOVERED - so the caller was told the
+    rig had followed the camera and got the nearly-black side render this
+    function exists to prevent (#802). The warning names the pass rather
+    than a command, because _run_shots serves render_scene, render_sheet
+    and preview_clip alike. The refusal is asked for rather than caught, because
+    for a constrained or keyed rotateY there is no exception to catch: the
+    setAttr is taken and the constraint or curve reasserts on the next
+    evaluation (measured, evals/static_write_probe_802b.py O4/O6, K3/K5).
+
+    A `cmds.xform(transform, edit=True, rotateAxis=(0, 0, 0))` used to sit
+    above the yaw write, inside its own copy of the swallow. It is gone
+    because it never ran: `cmds.xform` has NO `edit` flag, so that call
+    raised "TypeError: Invalid flag 'edit'" on every render this function
+    has ever done and the bare except ate it - found the moment #802's live
+    gate removed the swallow, and confirmed against Maya 2027 on its own
+    (`xform(loc, rotateAxis=...)` succeeds, `edit=True` raises). It is
+    DELETED rather than repaired: making a write work for the first time is
+    a behaviour change no measurement backs, and `_restore_rig` never put
+    rotateAxis back, so a repair would leave a permanent mutation in the
+    user's rig where today there is none.
     """
+    warnings = []
+    refused = []
     for transform, original_yaw in rig.items():
-        try:
-            cmds.xform(transform, edit=True, rotateAxis=(0, 0, 0))
-        except Exception:
-            pass
-        try:
-            cmds.setAttr(transform + ".rotateY", original_yaw + azimuth_deg)
-        except Exception:
-            pass
+        blocked = plugwrite.blockers(cmds, [transform + ".rotateY"])
+        if blocked:
+            warnings.append(
+                plugwrite.describe(blocked[0], "the relight pass")
+                + " - it stays where you put it, so this angle is lit from "
+                  "the rig's original bearing")
+            refused.append(transform)
+            continue
+        cmds.setAttr(transform + ".rotateY", original_yaw + azimuth_deg)
+    return warnings, refused
 
 
 def _restore_rig(cmds, rig: Dict[str, float]) -> None:
     for transform, original_yaw in rig.items():
+        # A light _orient_rig refused to swing was never moved, so putting
+        # it back is a no-op that would refuse in its own right. The whole
+        # body stays inside the swallow, guard included: this runs in a
+        # `finally`, and a restore that raises - even from the guard's own
+        # query, on a light something else deleted - would mask the error
+        # that got us here.
         try:
+            if plugwrite.blockers(cmds, [transform + ".rotateY"]):
+                continue
             cmds.setAttr(transform + ".rotateY", original_yaw)
         except Exception:
             pass
@@ -577,9 +615,19 @@ def _under_any(name: str, roots: set) -> bool:
 
 
 def _hide_non_targets(
-    cmds, isolate: List[str], exclude: Optional[List[str]] = None
+    cmds, isolate: List[str], exclude: Optional[List[str]] = None,
+    warnings: Optional[List[str]] = None,
 ) -> List[str]:
     """Hide every piece of geometry that is not in `isolate`; return what was hidden.
+
+    A shape it could NOT hide is appended to `warnings` by name. A keyed or
+    expression-driven `.visibility` is ordinary on a rig, and the refusal
+    used to sit in the bare `except: pass` below with nothing said - so a
+    rival subject stayed in the cell and the sheet reported no warnings at
+    all, which is the #640 defect this function exists to prevent (#802).
+    Measured: `cmds.hide` on such a shape does not even raise, it returns
+    cleanly and leaves the shape visible, so the refusal has to be asked
+    for rather than caught.
 
     `exclude` overrides the descendant rule below. Keeping a target's whole
     subtree is right for render_scene - isolate an assembly and you want to see
@@ -633,14 +681,33 @@ def _hide_non_targets(
         ):
             continue
         try:
-            if not cmds.getAttr(name + ".visibility"):
-                # Already hidden by the user. Hiding it changes nothing, but
-                # RESTORING it would show them an object they deliberately hid.
-                continue
+            visible = cmds.getAttr(name + ".visibility")
+        except Exception:  # noqa: BLE001 - a node that cannot even be asked
+            continue       # stays in frame; nothing here can improve on that
+        if not visible:
+            # Already hidden by the user. Hiding it changes nothing, but
+            # RESTORING it would show them an object they deliberately hid.
+            continue
+        # OUTSIDE the swallow, deliberately. Round 1 of this fix put the
+        # guard inside it, and a guard that cannot answer then failed
+        # silently into the very `except: pass` it was added to replace -
+        # the same shape of defect, one layer up.
+        blocked = plugwrite.blockers(cmds, [name + ".visibility"])
+        if blocked:
+            if warnings is not None:
+                note = (plugwrite.describe(blocked[0], "the isolate pass")
+                        + " - it stays in frame alongside the subject")
+                # Deduped like the relight notes: a contact sheet
+                # re-runs this pass once per cell, and the same rival
+                # fails identically in every one of them.
+                if note not in warnings:
+                    warnings.append(note)
+            continue
+        try:
             cmds.hide(name)
-            hidden.append(name)
-        except Exception:
-            pass  # unhideable node (referenced, locked): it stays in frame
+        except Exception:  # noqa: BLE001 - see the docstring
+            continue       # unhideable for a reason the guard cannot name
+        hidden.append(name)
     return hidden
 
 
@@ -860,6 +927,12 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
         images_out = []
         positions = []
         framing_warnings: List[str] = []
+        # Rig lights the relight pass could not swing, across every shot.
+        # `relit_lights` used to be len(rig) - lights DISCOVERED - so a rig
+        # whose every write was refused still reported that it had followed
+        # the camera (#802). The count is what was actually moved now, and
+        # the warnings name the rest; the two cannot disagree.
+        unswung: set = set()
         # (isolate, exclude) - the pair that decides what is visible.
         current_isolate: Optional[tuple] = None
         for index, shot in enumerate(shots):
@@ -880,7 +953,8 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
                     except Exception:
                         pass
                 hidden = (
-                    _hide_non_targets(cmds, shot["isolate"], shot.get("exclude"))
+                    _hide_non_targets(cmds, shot["isolate"],
+                                      shot.get("exclude"), framing_warnings)
                     if shot["isolate"] else []
                 )
                 current_isolate = visible_key
@@ -911,8 +985,17 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
                 if zoom != 1.0:
                     position = zoomed_position(position, bbox_min, bbox_max, zoom)
                 if relight:
-                    _orient_rig(cmds, rig,
-                               capture._ANGLE_DIRECTIONS[resolved_angle][0])
+                    # Deduped: _orient_rig runs once per shot and a light the
+                    # rig cannot swing fails identically on every one of
+                    # them, so an 8-angle turntable would otherwise say the
+                    # same sentence eight times.
+                    notes, refused = _orient_rig(
+                        cmds, rig,
+                        capture._ANGLE_DIRECTIONS[resolved_angle][0])
+                    for note in notes:
+                        if note not in framing_warnings:
+                            framing_warnings.append(note)
+                    unswung.update(refused)
                 if temp_camera is None:
                     created = cmds.camera()[0]
                     temp_camera = cmds.rename(created, naming.unique_name(cmds, _TEMP_CAM))
@@ -987,7 +1070,7 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
             "samples": samples,
             "fallback_light": temp_light is not None,
             "zoom": zoom,
-            "relit_lights": len(rig),
+            "relit_lights": len(rig) - len(unswung),
             "warnings": framing_warnings,
         }
     finally:

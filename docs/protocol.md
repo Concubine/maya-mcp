@@ -50,6 +50,23 @@ Failure — tracebacks are sacred, never truncated:
   carry images; the 64 MB protocol cap applies to responses only). Once a
   frame starts arriving, its remainder must land within 30 s or the connection
   is dropped — idle connections between requests block indefinitely and are fine.
+- **Static writes ask first (#802).** A command that writes a plug statically
+  — `pose_skeleton`, `reset_pose`, `pose_ik`, `set_camera`, `transform`,
+  `add_corrective` — asks, before its checkpoint and before its first write,
+  whether every plug it will touch is free: not locked, and not fed by a
+  constraint, curve, driven key, expression or wire. If any is not, the whole
+  call refuses with a `HandlerError` naming the plug, the obstacle and the
+  fix, and NOTHING is written — `transform` is all-or-nothing across every
+  name in the call, as `delete_objects` is, and `reset_pose` never leaves a
+  rig half at its bind pose. The render passes cannot refuse (a render still
+  has to render), so `render_scene` and `render_sheet` instead put a warning
+  in `warnings` naming each rig light they could not swing and each rival
+  shape they could not hide. Measured on Maya 2027, and the reason a
+  pre-check is the only shape that works: Maya refuses a locked or hard-wired
+  plug, but a constraint- or curve-driven plug TAKES the write and discards
+  it at the next evaluation, and `cmds.xform` never raises at all — it writes
+  the children it can and silently skips the rest. Neither failure is
+  catchable after the fact.
 - **Undo.** Every mutating command runs inside one `undoInfo` chunk = one undo
   step. Read-only perception commands (`capture_viewport`) suppress undo
   recording (`stateWithoutFlush`) so their internal churn never lands on the

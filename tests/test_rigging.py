@@ -1211,20 +1211,22 @@ class TestClipGuard:
 
 
 class TestConnectionGuard:
-    """#799: `guard_static_pose` refuses CURVES, and nothing else.
+    """#802 FIXED: `guard_static_pose` refuses CURVES, and nothing else.
 
     Its own docstring counts "FOUR kinds of CURVE" - so a rotate channel a
     CONSTRAINT owns (an orientConstraint, an HIK retarget, an expression, a
-    poseInterpolator) and a channel a rigger simply LOCKED both walk past
-    it into `cmds.setAttr(joint + ".rotate", ...)`. Maya refuses that write
-    with "locked or connected and cannot be modified" - #771 MEASURED it on
-    that class of plug, and `correctives._joint_rotation_writable` exists to
-    pre-empt exactly this for add_corrective's driver joint. The three
-    commands that pose a skeleton never got the same guard.
+    poseInterpolator) and a channel a rigger simply LOCKED both walked past
+    it into `cmds.setAttr(joint + ".rotate", ...)`. All three commands ask
+    `plugwrite.guard` now, which is the guard
+    `correctives._joint_rotation_writable` was and now calls.
 
-    Pinned, not fixed: the fix belongs with a live-Maya gate (#796 spent six
-    review rounds learning that), and the fake models the refusal from what
-    #771 measured, not from a guess.
+    #799 pinned these expecting Maya to refuse every one of those writes.
+    The live probe it asked for (evals/static_write_probe_802b.py) found
+    that only the LOCK does: a constraint-driven setAttr returns cleanly,
+    reads back the value written, and reverts at the next evaluation. So
+    the constrained cases were never a traceback - they were a pose the
+    tool reported as applied and Maya quietly undid, which is why the fix
+    had to be a pre-check and could never have been an except clause.
     """
 
     @staticmethod
@@ -1237,11 +1239,15 @@ class TestConnectionGuard:
         fake.driven_plugs = {"|r|a.rotate%s" % ax: "|oc1.constraintRotate%s" % ax
                              for ax in "XYZ"}
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "#799: pose_skeleton refuses animation curves only, so a "
-        "constraint-driven joint reaches cmds.setAttr and Maya raises a raw "
-        "'locked or connected' RuntimeError after the checkpoint"))
     def test_pose_skeleton_refuses_a_constrained_joint(self, fake):
+        """#802 FIXED. guard_static_pose answers for CURVES; this is not one.
+
+        #799 pinned it expecting a raw RuntimeError after the checkpoint.
+        Measured (#802, O4/O5/O6): Maya takes that setAttr without a murmur
+        and the constraint reasserts on the next evaluation - so the pose
+        was reported as applied and then quietly undone. Worse than the
+        traceback, and invisible to any except clause.
+        """
         self._constrained(fake)
         with pytest.raises(HandlerError, match="connect|constraint|driven"):
             rigging.pose_skeleton({"root": "r",
@@ -1256,20 +1262,25 @@ class TestConnectionGuard:
         fake.parents = {"|r|a": "|r"}
         fake.locked_plugs = {"|r|a.rotateX"}
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "#799: reset_pose zeroes joint by joint with no lock check, so the "
-        "locked joint reaches cmds.setAttr and Maya raises a raw 'locked or "
-        "connected' RuntimeError where a HandlerError belongs"))
     def test_reset_pose_refuses_a_locked_rotate_channel(self, fake):
+        """#802 FIXED. A HandlerError where a raw RuntimeError used to be.
+
+        The lock arm IS the one #799 described accurately: Maya refuses a
+        compound write when any child of it is locked, with "A child
+        attribute of 'x.rotate' is locked or connected" (measured A04).
+        """
         self._locked(fake)
         with pytest.raises(HandlerError, match="lock"):
             rigging.reset_pose({"root": "r"})
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "#799: the refusal has to land BEFORE the first write - reset_pose "
-        "zeroes |r, Maya then raises on |r|a, and nothing rolls |r back, so "
-        "the call half-poses the rig and reports nothing"))
     def test_reset_pose_refuses_before_it_writes_any_joint(self, fake):
+        """#802 FIXED. The refusal lands before the first write.
+
+        reset_pose zeroed |r, Maya then refused |r|a, and nothing rolled |r
+        back - the call half-poses the rig and reports nothing. The guard
+        now runs before the checkpoint, so the damage it prevents is
+        asserted below as an ABSENCE.
+        """
         self._locked(fake)
         with pytest.raises((HandlerError, RuntimeError)):
             rigging.reset_pose({"root": "r"})
@@ -1278,6 +1289,146 @@ class TestConnectionGuard:
         # one body - a pair no fix can satisfy at once, so that strict
         # marker could never XPASS and the fix would have landed unannounced.
         assert not [c for c in fake.calls if c[0] == "setAttr"]
+
+    # ---- pose_ik: the third command, unpinned by #799 rather than given a
+    # near-duplicate marker, and fixed here with the other two.
+
+    @staticmethod
+    def _chain(fake):
+        fake.objects += ["|r", "|r|m", "|r|m|t"]
+        fake.parents = {"|r|m": "|r", "|r|m|t": "|r|m"}
+
+    def test_pose_ik_refuses_a_constrained_chain_joint(self, fake):
+        self._chain(fake)
+        fake.node_types = {"|oc1": "orientConstraint"}
+        fake.driven_plugs = {"|r|m.rotateY": "|oc1.constraintRotateY"}
+        with pytest.raises(HandlerError, match="connect|constraint|driven"):
+            rigging.pose_ik({"root": "r", "joint": "t",
+                             "target": [1.0, 0.0, 0.0], "start": "r"})
+        assert not [c for c in fake.calls if c[0] == "setAttr"]
+
+    def test_pose_ik_refuses_a_locked_chain_joint(self, fake):
+        self._chain(fake)
+        fake.locked_plugs = {"|r|m.rotateX"}
+        with pytest.raises(HandlerError, match="lock"):
+            rigging.pose_ik({"root": "r", "joint": "t",
+                             "target": [1.0, 0.0, 0.0], "start": "r"})
+        assert not [c for c in fake.calls if c[0] == "setAttr"]
+
+    # preferredAngle: the solve seeds it on the INTERIOR joints, and only
+    # when the chain is straight and a pole exists (#671) - so that is the
+    # exact set the guard asks about. Review of the first cut measured it
+    # guarding every chain joint: on an already-bent limb, the ordinary
+    # case, that refused a command for a channel the solve never touches.
+
+    @staticmethod
+    def _limb(fake, bent):
+        TestPoseIk._rig(None, fake, bent=bent)
+
+    def test_pose_ik_refuses_a_driven_preferred_angle_it_will_seed(self, fake):
+        self._limb(fake, bent=False)           # straight: the prebend path
+        fake.node_types = {"|sdk1": "animCurveUA"}
+        fake.driven_plugs = {"|pelvis|hip|knee.preferredAngleY": "|sdk1.output"}
+        with pytest.raises(HandlerError, match="knee.preferredAngle"):
+            rigging.pose_ik({"root": "pelvis", "joint": "ankle",
+                             "target": [0.1, 0.6, 0.2], "pole": [0.1, 0.5, 1.0]})
+        assert not [c for c in fake.calls if c[0] == "setAttr"]
+
+    def test_a_bent_chain_seeds_nothing_so_nothing_is_refused(self, fake):
+        self._limb(fake, bent=True)            # bent: no prebend at all
+        fake.node_types = {"|sdk1": "animCurveUA"}
+        fake.driven_plugs = {"|pelvis|hip|knee.preferredAngleY": "|sdk1.output"}
+        out = rigging.pose_ik({"root": "pelvis", "joint": "ankle",
+                               "target": [0.1, 0.6, 0.2]})
+        assert out["chain"][1] == "|pelvis|hip|knee"
+
+    def test_an_end_joints_preferred_angle_is_never_asked_about(self, fake):
+        """chain[0] and chain[-1] never take a preferredAngle write on any
+        input; a lock there is a rigger's cleanup, not an obstacle."""
+        self._limb(fake, bent=False)
+        fake.locked_plugs = {"|pelvis|hip.preferredAngleX",
+                             "|pelvis|hip|knee|ankle.preferredAngleZ"}
+        out = rigging.pose_ik({"root": "pelvis", "joint": "ankle",
+                               "target": [0.1, 0.6, 0.2], "pole": [0.1, 0.5, 1.0]})
+        assert out["kept"] is True
+
+    # ---- the ordering plugwrite calls "the point": refuse BEFORE the
+    # checkpoint. The class fixture stubs auto_checkpoint with a lambda, so
+    # nothing above could see it move below the guard (review catch).
+
+    @staticmethod
+    def _no_checkpoint(monkeypatch):
+        monkeypatch.setattr(
+            session, "auto_checkpoint",
+            lambda reason: pytest.fail("checkpointed before refusing (%s)"
+                                       % reason))
+
+    def test_pose_skeleton_refuses_before_it_checkpoints(self, fake, monkeypatch):
+        self._constrained(fake)
+        self._no_checkpoint(monkeypatch)
+        with pytest.raises(HandlerError):
+            rigging.pose_skeleton({"root": "r", "rotations": {"a": [0, 0, 1]}})
+
+    def test_reset_pose_refuses_before_it_checkpoints(self, fake, monkeypatch):
+        self._locked(fake)
+        self._no_checkpoint(monkeypatch)
+        with pytest.raises(HandlerError):
+            rigging.reset_pose({"root": "r"})
+
+    def test_pose_ik_refuses_before_it_checkpoints(self, fake, monkeypatch):
+        self._chain(fake)
+        fake.locked_plugs = {"|r|m.rotateX"}
+        self._no_checkpoint(monkeypatch)
+        with pytest.raises(HandlerError):
+            rigging.pose_ik({"root": "r", "joint": "t",
+                             "target": [1.0, 0.0, 0.0], "start": "r"})
+
+    # ---- reset_pose has two branches with two write sets, and the one that
+    # runs on every BOUND rig is dagPose -restore, which returns a whole
+    # transform (review catch: the first cut guarded .rotate for both).
+
+    def test_a_bound_rig_with_a_locked_translate_is_refused(self, fake):
+        self._locked(fake)
+        fake.locked_plugs = {"|r|a.translateY"}
+        fake.bind_poses = ["bindPose1"]
+        with pytest.raises(HandlerError, match="translateY"):
+            rigging.reset_pose({"root": "r"})
+        assert not [c for c in fake.calls if c[0] == "dagPose"
+                    and c[2].get("restore")]
+
+    def test_a_bound_rig_with_a_locked_scale_still_resets(self, fake):
+        """Riggers lock joint scale as a matter of course, and the bind pose
+        holds the scale the joint already has - refusing there would cost
+        every production rig the command for nothing."""
+        self._locked(fake)
+        fake.locked_plugs = {"|r|a.scaleX"}
+        fake.bind_poses = ["bindPose1"]
+        out = rigging.reset_pose({"root": "r"})
+        assert out["reset"] is True
+
+    def test_an_unbound_rig_with_a_locked_translate_still_zeroes(self, fake):
+        """No bind pose: the zeroing loop writes .rotate and nothing else,
+        so a locked translate is not an obstacle to it."""
+        self._locked(fake)
+        fake.locked_plugs = {"|r|a.translateY"}
+        out = rigging.reset_pose({"root": "r"})
+        assert out["reset"] is True
+        assert [c for c in fake.calls if c[0] == "setAttr"]
+
+    def test_a_joint_outside_the_write_set_is_not_refused(self, fake):
+        """pose_skeleton guards the joints it will WRITE, not the whole
+        hierarchy: refusing because some unrelated joint elsewhere on an
+        ordinary control rig is constrained would make the command unusable
+        on exactly the rigs it is for. A guard that over-refuses gets
+        weakened back by the next reader (#799's lesson, both directions).
+        """
+        fake.objects += ["|r", "|r|a", "|r|b"]
+        fake.parents = {"|r|a": "|r", "|r|b": "|r"}
+        fake.node_types = {"|oc1": "orientConstraint"}
+        fake.driven_plugs = {"|r|b.rotateX": "|oc1.constraintRotateX"}
+        out = rigging.pose_skeleton({"root": "r",
+                                     "rotations": {"a": [0, 0, 10]}})
+        assert out["applied"] == 1
 
 
 class TestPositionsSurviveExplicitOrient:

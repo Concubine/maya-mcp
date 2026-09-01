@@ -180,7 +180,17 @@ class FakeCmds:
         # bare `except Exception: pass`. Narrowing this to `hide` on the
         # premise that everything else render.py writes is a temp camera or
         # a render-globals plug was simply wrong.
+        # plug -> the SOURCE PLUG feeding it, because that is what Maya's
+        # listConnections(plugs=True) answers and what the shared
+        # writability guard classifies with nodeType (#802). Every entry's
+        # source node must therefore be registered in `node_types`.
         self.driven_plugs = {}
+        # Plugs a rigger locked. First modelled in #802: `_orient_rig`
+        # writes a rig light the user may have locked, and `cmds.hide` on a
+        # shape whose visibility is driven does not raise at all - it
+        # returns cleanly and leaves the shape in frame (measured), which
+        # is why the guard asks rather than catches.
+        self.locked_plugs = set()
         self.undo_state = True
         # Nodes this fake MADE (cameras, the fallback light) plus the
         # parent/shape wiring Maya would have given them (#799).
@@ -206,6 +216,11 @@ class FakeCmds:
         # A light shape's transform: real lights hang under one.
         nodes |= {s.rsplit("|", 1)[0] for s in self._lights if s.count("|") > 1}
         nodes |= self._made
+        # A connection implies both of its ends, so the node feeding a
+        # driven plug exists by definition (#802). Its TYPE still has to be
+        # declared in `node_types` - nodeType raises otherwise, which is the
+        # #799 rule that a fake answers only what it was told.
+        nodes |= {src.split(".")[0] for src in self.driven_plugs.values()}
         return nodes
 
     def _resolve(self, name):
@@ -308,9 +323,18 @@ class FakeCmds:
             max(b[i] for b in boxes) for i in range(3, 6)
         ]
 
-    def getAttr(self, attr):
+    def getAttr(self, attr, lock=False, **kw):
         node, _, name = str(attr).rpartition(".")
         self._require(node)
+        if kw:
+            # #802: an unmodelled flag used to fall into **kw and come back
+            # as the VALUE - a silent lie about a question never taught.
+            raise TypeError(
+                "FakeCmds.getAttr models lock= only (#802), not %r" % sorted(kw))
+        if lock:
+            # Exact-plug, as Maya is: getAttr('.rotate', lock=True) is False
+            # while rotateY alone is locked (measured A01).
+            return attr in self.locked_plugs
         if name == "visibility":
             return self.visibility.get(node, True)
         if attr not in self.attrs:
@@ -367,6 +391,35 @@ class FakeCmds:
             return "transform"
         raise RuntimeError("No object matches name: %s" % name)
 
+
+    def listConnections(self, plug, source=False, destination=True,
+                        plugs=False, type=None, **kw):
+        """Source-side connections of ONE EXACT plug, as Maya answers them.
+
+        Exact, because Maya is: a query on `.rotate` returns None while all
+        three children are constraint-fed, and a child query does not see a
+        connection on the compound - measured on 2027 by
+        evals/static_write_probe_802.py (B01/B02). The shared guard asks
+        about the compound and its children separately BECAUSE of that, so
+        a fake that folded them together would make its central case
+        untestable (#802).
+        """
+        self._require(str(plug).split(".")[0])
+        if not source:
+            raise AssertionError(
+                "FakeCmds.listConnections models source queries only (#802)")
+        src = self.driven_plugs.get(plug)
+        if src is None:
+            return None
+        node = src.split(".")[0]
+        if type is not None:
+            # Maya's type filter matches DERIVED types (the #796 trap).
+            actual = self.nodeType(node)
+            if not (actual == type
+                    or (type == "animCurve" and actual.startswith(type))):
+                return None
+        return [src] if plugs else [node]
+
     # --- mutations
     def _static_write_blocker(self, node, name):
         """The connection that makes a static write to `node.name` raise.
@@ -378,15 +431,15 @@ class FakeCmds:
         `.rotateY` on the tool's own rig lights, and a rig light riding a
         parentConstraint has the compound fed.
         """
-        exact = self.driven_plugs.get("%s.%s" % (node, name))
-        if exact:
-            return exact
-        for axis in "XYZ":
-            child = self.driven_plugs.get("%s.%s%s" % (node, name, axis))
-            if child:
-                return child
+        candidates = ["%s.%s" % (node, name)]
+        candidates += ["%s.%s%s" % (node, name, axis) for axis in "XYZ"]
         if name[-1:] in ("X", "Y", "Z"):
-            return self.driven_plugs.get("%s.%s" % (node, name[:-1]))
+            candidates.append("%s.%s" % (node, name[:-1]))
+        for plug in candidates:
+            if plug in self.locked_plugs:
+                return "%s is locked" % plug
+            if plug in self.driven_plugs:
+                return self.driven_plugs[plug]
         return None
 
     def setAttr(self, attr, *values, **kwargs):
@@ -487,6 +540,14 @@ class FakeCmds:
 
     def xform(self, *args, **kwargs):
         transform = self._require(args[0]) if args else None
+        if "edit" in kwargs:
+            # MEASURED on Maya 2027 (#802): cmds.xform has no `edit` flag
+            # at all - it raises "Invalid flag 'edit'". This fake accepted
+            # it, so `_orient_rig`'s rotateAxis write looked alive here
+            # while raising on every real render, swallowed by a bare
+            # `except Exception: pass`. A fake that accepts what Maya
+            # rejects is how a dead call stays green for a year.
+            raise TypeError("Invalid flag 'edit'")
         if kwargs.get("query") and kwargs.get("rotation"):
             return list(self.light_yaw_query.get(transform, (0.0, 0.0, 0.0)))
         return None
@@ -578,6 +639,94 @@ class TestTheFakeRefusesWhatMayaRefuses:
     resolves a short name) are pinned alongside the refusals.
     """
 
+    # -- #802: the two queries the shared writability guard makes ---------
+    def test_getattr_lock_is_exact_plug_like_maya(self):
+        """MEASURED (A01): getAttr('.rotate', lock=True) is False while
+        rotateY is locked, which is why the guard walks the family."""
+        fake = FakeCmds(lights=["|mcpLight_key|mcpLight_keyShape"])
+        fake.locked_plugs = {"|mcpLight_key.rotateY"}
+        assert fake.getAttr("|mcpLight_key.rotateY", lock=True) is True
+        assert fake.getAttr("|mcpLight_key.rotate", lock=True) is False
+
+    def test_a_locked_rig_light_refuses_its_setattr(self):
+        fake = FakeCmds(lights=["|mcpLight_key|mcpLight_keyShape"])
+        fake.locked_plugs = {"|mcpLight_key.rotateY"}
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            fake.setAttr("|mcpLight_key.rotateY", 90.0)
+
+    def test_listconnections_answers_the_exact_plug_only(self):
+        """MEASURED (B01/B02): the compound answers None while the children
+        are fed, and a child does not see the compound's own source."""
+        fake = FakeCmds(lights=["|mcpLight_key|mcpLight_keyShape"])
+        fake.node_types["key_anim"] = "animCurveTA"
+        fake.driven_plugs["|mcpLight_key.rotateY"] = "key_anim.output"
+        ask = lambda plug: fake.listConnections(  # noqa: E731
+            plug, source=True, destination=False, plugs=True)
+        assert ask("|mcpLight_key.rotateY") == ["key_anim.output"]
+        assert ask("|mcpLight_key.rotate") is None
+        assert ask("|mcpLight_key.rotateX") is None
+        with pytest.raises(AssertionError, match="source queries only"):
+            fake.listConnections("|mcpLight_key.rotateY", destination=True)
+
+    def test_a_source_node_exists_but_its_type_must_be_declared(self):
+        """A connection implies both ends, so the source node exists. Its
+        TYPE does not follow from that, and inventing one would let a wrong
+        hint ship green (#799's rule, applied to the new query)."""
+        fake = FakeCmds(lights=["|mcpLight_key|mcpLight_keyShape"])
+        fake.driven_plugs["|mcpLight_key.rotateY"] = "mystery.output"
+        with pytest.raises(RuntimeError, match="No object matches name"):
+            fake.nodeType("mystery")
+        fake.node_types["mystery"] = "pairBlend"
+        assert fake.nodeType("mystery") == "pairBlend"
+
+    def test_an_unmodelled_getattr_flag_raises_rather_than_lying(self):
+        fake = FakeCmds()
+        with pytest.raises(TypeError, match="lock="):
+            fake.getAttr("|ball|ballShape.visibility", settable=True)
+
+    def test_xform_has_no_edit_flag(self):
+        """MEASURED on Maya 2027 (#802): `cmds.xform(node, edit=True, ...)`
+        raises "Invalid flag 'edit'". This fake used to accept it, and
+        `_orient_rig`'s rotateAxis write therefore looked alive here while
+        raising on every real render into a bare `except Exception: pass`.
+        The dead call is gone; this keeps it from coming back green."""
+        fake = FakeCmds(lights=["|mcpLight_key|mcpLight_keyShape"])
+        with pytest.raises(TypeError, match="Invalid flag 'edit'"):
+            fake.xform("|mcpLight_key", edit=True, rotateAxis=(0, 0, 0))
+        # ...and the form Maya DOES take is still accepted.
+        fake.xform("|mcpLight_key", rotateAxis=(0, 0, 0))
+
+    def test_orient_rig_makes_only_the_yaw_write(self, monkeypatch, tmp_path):
+        """The rotateAxis write is deleted, not repaired: making it work for
+        the first time would leave a permanent mutation in the user's rig
+        that _restore_rig never undoes."""
+        fake = FakeCmds(lights=["|mcpLight_key|mcpLight_keyShape"])
+        fake.light_yaw_query["|mcpLight_key"] = (-35.0, 30.0, 0.0)
+        notes, refused = render._orient_rig(fake, {"|mcpLight_key": 30.0}, 90.0)
+        assert notes == [] and refused == []
+        assert fake.yaw_history == [120.0]
+
+    def test_a_blocked_light_is_neither_swung_nor_restored(self, monkeypatch,
+                                                           tmp_path):
+        """One keyed light, one free: the free one swings and is put back,
+        the keyed one is never written - not by the relight, and not by the
+        restore in the finally either (review catch: the restore's skip was
+        covered by nothing)."""
+        fake = FakeCmds(lights=["|mcpLight_key|mcpLight_keyShape",
+                                "|mcpLight_fill|mcpLight_fillShape"])
+        fake.light_yaw_query["|mcpLight_key"] = (-35.0, 30.0, 0.0)
+        fake.light_yaw_query["|mcpLight_fill"] = (-20.0, -55.0, 0.0)
+        fake.node_types["fill_anim"] = "animCurveTA"
+        fake.driven_plugs["|mcpLight_fill.rotateY"] = "fill_anim.output"
+        monkeypatch.setattr(render, "_cmds", lambda: fake)
+        monkeypatch.setattr(render, "_render_frame", _stub_render_frame(tmp_path, fake))
+        out = render.render_scene({"angles": ["side"]})
+        assert out["relit_lights"] == 1
+        # exactly two writes in the whole render: the key out, the key back
+        assert fake.yaw_history == [120.0, 30.0]
+        assert "|mcpLight_fill.rotateY" not in fake.attrs
+        assert sum("mcpLight_fill" in w for w in out["warnings"]) == 1
+
     # -- contract 1: existence -------------------------------------------
     def test_every_query_about_a_node_nobody_made_raises(self):
         fake = FakeCmds()
@@ -652,7 +801,9 @@ class TestTheFakeRefusesWhatMayaRefuses:
     # -- contract 2: a fed plug refuses a static write --------------------
     def test_setattr_refuses_a_connection_fed_plug(self):
         fake = FakeCmds(lights=["|mcpLight_key|mcpLight_keyShape"])
-        fake.driven_plugs["|mcpLight_key.rotateY"] = "key_rotateY_anim"
+        fake.node_types["key_rotateY_anim"] = "animCurveTA"
+        fake.driven_plugs["|mcpLight_key.rotateY"] = (
+            "key_rotateY_anim.output")
         with pytest.raises(RuntimeError, match="locked or connected"):
             fake.setAttr("|mcpLight_key.rotateY", 90.0)
         assert fake.yaw_history == []
@@ -662,7 +813,9 @@ class TestTheFakeRefusesWhatMayaRefuses:
         # .rotateY, and a rig light riding a parentConstraint has the whole
         # .rotate compound fed.
         fake = FakeCmds(lights=["|mcpLight_key|mcpLight_keyShape"])
-        fake.driven_plugs["|mcpLight_key.rotate"] = "mcpLight_key_parentConstraint1"
+        fake.node_types["mcpLight_key_pc1"] = "parentConstraint"
+        fake.driven_plugs["|mcpLight_key.rotate"] = (
+            "mcpLight_key_pc1.constraintRotate")
         with pytest.raises(RuntimeError, match="locked or connected"):
             fake.setAttr("|mcpLight_key.rotateY", 90.0)
 
@@ -671,7 +824,9 @@ class TestTheFakeRefusesWhatMayaRefuses:
         # too. A blocker that models only one of the two is a guard a test
         # can be written on and pass vacuously.
         fake = FakeCmds(lights=["|mcpLight_key|mcpLight_keyShape"])
-        fake.driven_plugs["|mcpLight_key.rotateY"] = "key_rotateY_anim"
+        fake.node_types["key_rotateY_anim"] = "animCurveTA"
+        fake.driven_plugs["|mcpLight_key.rotateY"] = (
+            "key_rotateY_anim.output")
         with pytest.raises(RuntimeError, match="locked or connected"):
             fake.setAttr("|mcpLight_key.rotate", 0.0, 90.0, 0.0)
 
@@ -686,7 +841,9 @@ class TestTheFakeRefusesWhatMayaRefuses:
         # cmds.hide IS a setAttr on .visibility - the refusal the
         # _hide_non_targets xfail is built on.
         fake = FakeCmds()
-        fake.driven_plugs["|floor|floorShape.visibility"] = "floor_vis_anim"
+        fake.node_types["floor_vis_anim"] = "animCurveTU"
+        fake.driven_plugs["|floor|floorShape.visibility"] = (
+            "floor_vis_anim.output")
         with pytest.raises(RuntimeError, match="locked or connected"):
             fake.hide("|floor|floorShape")
         assert fake.visibility["|floor|floorShape"] is True
@@ -997,21 +1154,24 @@ class TestRenderScene:
         # ...and 30 is where it ends up, because the rig is the user's scene.
         assert fake.attrs["|mcpLight_key.rotateY"] == 30.0
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "#799: _orient_rig swallows the refusal from a rig light whose "
-        "rotateY is connection-fed - a key the user keyed, or one riding a "
-        "parentConstraint. Maya raises 'The attribute |mcpLight_key.rotateY "
-        "is locked or connected and cannot be modified' and both writes sit "
-        "in a bare `except Exception: pass`. Measured here: relit_lights is "
-        "1 (render.py:990 reports len(rig), a count of lights DISCOVERED, "
-        "not lights moved), warnings is [], and the key never swung - so "
-        "the caller is told the rig followed the camera and gets the "
-        "nearly-black side render #585 exists to prevent. Same silent- "
-        "degradation class as _hide_non_targets twelve lines below"))
     def test_a_rig_light_it_could_not_swing_is_named(self, monkeypatch, tmp_path):
+        """#802 FIXED. A rig it could not swing is named, not counted.
+
+        Both writes sat in a bare `except Exception: pass` while
+        `relit_lights` reported len(rig) - the count of lights DISCOVERED,
+        not lights moved - so the caller was told the rig had followed the
+        camera and got the nearly-black side render #585 exists to prevent.
+        #799 pinned this expecting Maya to raise. It does not: a keyed
+        rotateY takes the setAttr and the curve reasserts on the next frame
+        change, and the `xform -rotateAxis` beside it never raises at all
+        (measured, evals/static_write_probe_802b.py K3/K5 and L8/L9). There
+        was no exception to catch, which is why the guard asks first.
+        """
         fake = FakeCmds(lights=["|mcpLight_key|mcpLight_keyShape"])
         fake.light_yaw_query["|mcpLight_key"] = (-35.0, 30.0, 0.0)
-        fake.driven_plugs["|mcpLight_key.rotateY"] = "mcpLight_key_rotateY_anim"
+        fake.node_types["mcpLight_key_rotateY_anim"] = "animCurveTA"
+        fake.driven_plugs["|mcpLight_key.rotateY"] = (
+            "mcpLight_key_rotateY_anim.output")
         monkeypatch.setattr(render, "_cmds", lambda: fake)
         monkeypatch.setattr(render, "_render_frame", _stub_render_frame(tmp_path, fake))
         out = render.render_scene({"angles": ["side"]})
@@ -1021,6 +1181,14 @@ class TestRenderScene:
         assert "|mcpLight_key.rotateY" not in fake.attrs
         # The claim: a rig it could not swing must be named, not counted.
         assert any("mcpLight_key" in w for w in out["warnings"]), out["warnings"]
+        # ...and not counted as swung either. The first cut of #802 added
+        # the warning and left relit_lights at len(rig) - the count of
+        # lights DISCOVERED - so the one structured field a caller reads
+        # contradicted the warning beside it (review catch).
+        assert out["relit_lights"] == 0
+        # The pass belongs to three commands, so the sentence names the
+        # pass, not render_scene.
+        assert not any(w.startswith("render_scene") for w in out["warnings"])
 
     def test_a_user_authored_rig_is_never_touched(self, monkeypatch, tmp_path):
         fake = FakeCmds(lights=["|myKeyLight|myKeyLightShape"])
@@ -1195,19 +1363,21 @@ class TestRenderSheet:
     def test_a_sheet_does_not_pollute_the_undo_queue(self):
         assert render.render_sheet.no_undo_chunk is True
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "#799: _hide_non_targets swallows the refusal from a shape whose "
-        ".visibility is connection-fed (a keyed or expression-driven "
-        "visibility, common on a rig) - Maya raises 'The attribute "
-        "|floor|floorShape.visibility is locked or connected and cannot be "
-        "modified' and the handler's bare `except: pass` leaves it in frame "
-        "with nothing said. Measured here: the |ball cell renders the floor "
-        "too and out['warnings'] is []. That is the #640 defect the tool "
-        "exists to prevent, and the far milder nesting case gets a "
-        "paragraph of warning while this one is silent"))
     def test_a_rival_subject_it_could_not_hide_is_named(self, fake_maya):
-        fake_maya.driven_plugs["|floor|floorShape.visibility"] = \
-            "floorShape_visibility_anim"
+        """#802 FIXED. A cell that could not be isolated says so.
+
+        A keyed or expression-driven `.visibility` is ordinary on a rig,
+        and the refusal used to vanish into the bare `except: pass` - the
+        rival stayed in frame and out["warnings"] was []. That is the #640
+        defect this tool exists to prevent, and the far milder nesting case
+        already got a paragraph of warning while this one was silent.
+
+        #799 pinned it expecting Maya to raise. Measured (#802, W2/W3):
+        `cmds.hide` on such a shape returns cleanly and leaves it visible.
+        """
+        fake_maya.node_types["floorShape_visibility_anim"] = "animCurveTU"
+        fake_maya.driven_plugs["|floor|floorShape.visibility"] = (
+            "floorShape_visibility_anim.output")
         out = render.render_sheet({"subjects": ["|ball", "|floor"]})
         # The mechanism: the hide was refused, so the ball's cell still
         # contains the floor.
@@ -1215,6 +1385,20 @@ class TestRenderSheet:
         assert "|floor|floorShape" in fake_maya.written[0]["visible"]
         # The claim: a cell that could not be isolated must say so.
         assert any("floor" in w for w in out["warnings"]), out["warnings"]
+
+    def test_the_unhideable_rival_is_named_once_not_once_per_cell(self, fake_maya):
+        """The isolate pass re-runs for every cell of a sheet, and the same
+        rival fails identically in each; the relight notes beside it were
+        deduped for exactly this reason and this path was not (review)."""
+        fake_maya._geometry.append("|crate|crateShape")
+        fake_maya._transforms.append("|crate")
+        fake_maya.visibility["|crate|crateShape"] = True
+        fake_maya.node_types["floorShape_visibility_anim"] = "animCurveTU"
+        fake_maya.driven_plugs["|floor|floorShape.visibility"] = (
+            "floorShape_visibility_anim.output")
+        out = render.render_sheet({"subjects": ["|ball", "|floor", "|crate"]})
+        assert len(fake_maya.written) == 3
+        assert sum("floorShape.visibility" in w for w in out["warnings"]) == 1
 
 
 # A parented rig, as the #601 golem was: the pelvis contains the chest, which

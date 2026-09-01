@@ -48,7 +48,8 @@ import json
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..dispatcher import HandlerError, require_known_keys
-from . import blendshape, clip, naming, rigmath, sculpt_math, session, units
+from . import (blendshape, clip, naming, plugwrite, rigmath, sculpt_math,
+               session, units)
 
 APPLY_DELTA_MUSH_KEYS = ("mesh", "smoothing_iterations", "smoothing_step",
                          "pin_border_vertices", "distance_weight")
@@ -378,34 +379,21 @@ def _joint_rotation_writable(cmds, joint_long: str) -> None:
 
     The handler must write joint.rotate to record the trigger; a locked or
     connection-fed channel would raise mid-mutation - after the checkpoint,
-    with the restore step then masking the real error (review catch)."""
-    plugs = [joint_long + ".rotate"] + [
-        "%s.%s" % (joint_long, a) for a in ROTATE_ATTRS]
-    for plug in plugs:
-        if cmds.getAttr(plug, lock=True):
-            raise HandlerError(
-                "%s is locked - add_corrective must pose the driver joint "
-                "to record the trigger" % plug,
-                hint="unlock the channel first")
-        srcs = cmds.listConnections(plug, source=True, destination=False,
-                                    plugs=True) or []
-        if not srcs:
-            continue
-        src_type = cmds.nodeType(srcs[0].split(".")[0])
-        if src_type.startswith("animCurve"):
-            raise HandlerError(
-                "add_corrective refuses while animation curves drive %s - "
-                "the handler must pose the joint to record the trigger, "
-                "and a static write here would fight the curves"
-                % joint_long,
-                hint="delete_clip first, add the corrective, then "
-                     "re-author the motion")
-        raise HandlerError(
-            "%s is driven by %s - add_corrective must pose the driver "
-            "joint to record the trigger, and a connection-fed channel "
-            "cannot be posed" % (plug, srcs[0]),
-            hint="a constraint or expression owns this joint; drive the "
-                 "corrective from a joint this handler can pose")
+    with the restore step then masking the real error (review catch).
+
+    This was the package's ONLY writability guard, and #802 made it the
+    model for the five commands that had none. It now calls that shared
+    guard rather than classifying for itself: two sites answering "who owns
+    this plug" independently is exactly how #771 and #796 each shipped a
+    wrong hint. `plugwrite.family` asks about the compound and its three
+    children, which is the plug list this function used to build by hand.
+    """
+    plugwrite.guard(
+        cmds, [joint_long + ".rotate"], "add_corrective",
+        consequence="add_corrective must pose the driver joint to record "
+                    "the trigger, and it cannot pose this one",
+        hint_tail="for a keyed rig: delete_clip first, add the corrective, "
+                  "then re-author the motion")
 
 
 def validate_corrective(params: Dict[str, Any], cmds) -> Dict[str, Any]:

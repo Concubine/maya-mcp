@@ -15,7 +15,8 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..dispatcher import HandlerError, require_known_keys
-from . import clip, naming, rigmath, sculpt, sculpt_math, session, units
+from . import (clip, naming, plugwrite, rigmath, sculpt, sculpt_math,
+               session, units)
 
 
 def _cmds():
@@ -393,6 +394,12 @@ def pose_skeleton(params: Dict[str, Any]) -> Dict[str, Any]:
     joints = _hierarchy_joints(cmds, root_long)
     clip.guard_static_pose(cmds, root_long, joints, "pose_skeleton")
     resolved = _resolve_rotations(cmds, joints, params.get("rotations"))
+    # guard_static_pose above answers for CURVES; a locked axis and a
+    # constraint are neither, and both were walking straight into the
+    # setAttr below (#802). Only the joints this call will actually write:
+    # refusing because some unrelated joint elsewhere in the hierarchy is
+    # constrained would be an over-refusal on an ordinary control rig.
+    plugwrite.guard(cmds, [j + ".rotate" for j in resolved], "pose_skeleton")
 
     session.auto_checkpoint("pose_skeleton")
     meshes = _bound_meshes(cmds, set(joints))
@@ -461,13 +468,33 @@ def reset_pose(params: Dict[str, Any]) -> Dict[str, Any]:
     root_long = _require_joint(cmds, params.get("root"))
     joints = _hierarchy_joints(cmds, root_long)
     clip.guard_static_pose(cmds, root_long, joints, "reset_pose")
+    # #802: two branches below, two write sets, so the bind pose is asked
+    # about FIRST (a pure query) and the branch that will run is the one
+    # guarded. The zeroing loop writes every joint's rotate compound one at
+    # a time, and Maya refuses a compound write when any child of it is
+    # locked - a rigger who locked one axis got the first joints zeroed, a
+    # raw RuntimeError on the joint that refused, and a rig left half at
+    # its bind pose. `dagPose -restore` returns a whole transform, so on a
+    # bound rig translate is asked about as well - the same rotate+translate
+    # set delete_clip's twin of this restore names (clip._blocked_transform_
+    # attrs), because two diagnoses of one call is how the wrong one ships.
+    # Scale is deliberately NOT asked: riggers lock joint scale as a matter
+    # of course, the bind pose holds the scale the joint already has, and a
+    # refusal there would cost every production rig the command for a
+    # channel the restore leaves exactly where it is.
+    poses = cmds.dagPose(root_long, query=True, bindPose=True) or []
+    channels = ("rotate", "translate") if poses else ("rotate",)
+    plugwrite.guard(
+        cmds, [j + "." + c for j in joints for c in channels], "reset_pose",
+        consequence="nothing was written - a partial reset leaves the rig "
+                    "half at its bind pose and half where the caller left "
+                    "it, which is worse than not resetting at all")
 
     session.auto_checkpoint("reset_pose")
     meshes = _bound_meshes(cmds, set(joints))
     before = {m: sculpt.vertex_positions(cmds, m) for m in meshes}
 
     warnings: List[str] = []
-    poses = cmds.dagPose(root_long, query=True, bindPose=True) or []
     if poses:
         cmds.dagPose(poses[0], restore=True, g=True)
         if len(poses) > 1:
@@ -1191,6 +1218,21 @@ def pose_ik(params: Dict[str, Any]) -> Dict[str, Any]:
     plan = solve_ik_plan(cmds, chain, target, pole)
     warnings: List[str] = list(plan["warnings"])
     pole_used = plan["pole_used"]
+
+    # #802: the solve bakes .rotate on every joint of the chain, and seeds
+    # .preferredAngle on the INTERIOR joints, only when the chain is straight
+    # and a pole exists (solve_ik_and_bake's own predicate - see the note
+    # below). The guard asks about exactly that set and no wider: the first
+    # cut guarded preferredAngle on every chain joint, and review measured
+    # that on an already-bent limb - the ordinary case - it refused a
+    # command for a channel the solve never touches. guard_static_pose
+    # covers neither a lock nor a constraint, and preferredAngle is outside
+    # its plug set entirely.
+    seeded = chain[1:-1] if plan["straight"] and pole_used is not None else []
+    plugwrite.guard(
+        cmds,
+        [j + ".rotate" for j in chain] + [j + ".preferredAngle" for j in seeded],
+        "pose_ik")
 
     session.auto_checkpoint("pose_ik")
     meshes = _bound_meshes(cmds, set(joints))
