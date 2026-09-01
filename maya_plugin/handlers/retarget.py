@@ -662,9 +662,18 @@ def _retarget_bvh(path: str, root_param: str, name: str,
             "baking the new range - no other clip's motion changed"
             % (name, replaced["start_frame"], replaced["end_frame"]))
 
-    target_hips_height = float(cmds.xform(
-        target_slot_joints["Hips"], query=True, worldSpace=True,
-        translation=True)[1])
+    # #788 (third symptom): the target's hips height must be read at STANCE, not at whatever
+    # pose the rig's existing clip curves hold at currentTime — a posed read (crouched, mid-hit,
+    # airborne) scales the whole retarget wrong, and the error ships silently as a subject who
+    # stands taller or shorter than the rig (measured: an idle baked from a mid-clip read came
+    # out 15% tall, floating feet and all).
+    stance_snapshot = _stance_snapshot(cmds, target_joints)
+    try:
+        target_hips_height = float(cmds.xform(
+            target_slot_joints["Hips"], query=True, worldSpace=True,
+            translation=True)[1])
+    finally:
+        _stance_restore(cmds, stance_snapshot)
     source_hips_height = _source_hips_height(
         bvh, source_slot_map["Hips"], start_row)
     if abs(source_hips_height) > 1e-9:
@@ -891,9 +900,14 @@ def _retarget_fbx(path: str, root_param: str, name: str,
                 "baking the new range - no other clip's motion changed"
                 % (name, replaced["start_frame"], replaced["end_frame"]))
 
-        target_hips_height = float(cmds.xform(
-            target_slot_joints["Hips"], query=True, worldSpace=True,
-            translation=True)[1])
+        # #788 third symptom — stance-read the target's hips, see the BVH route's identical block.
+        stance_snapshot = _stance_snapshot(cmds, target_joints)
+        try:
+            target_hips_height = float(cmds.xform(
+                target_slot_joints["Hips"], query=True, worldSpace=True,
+                translation=True)[1])
+        finally:
+            _stance_restore(cmds, stance_snapshot)
         prev_time = cmds.currentTime(query=True)
         cmds.currentTime(row_start)
         source_hips_height = float(cmds.xform(
