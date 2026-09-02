@@ -17,7 +17,9 @@ import pytest
 
 from maya_plugin.dispatcher import HandlerError, require_known_keys
 from maya_plugin.handlers import cleanclip, clip, retarget
-from tests.test_clip import FakeCmds, _plant_blend_curve, _plant_sdk_curve
+from maya_plugin.handlers.clipmath import drop_record as clipmath_drop
+from tests.test_clip import (FakeCmds, _install, _plant_blend_curve,
+                             _plant_sdk_curve)
 
 
 def base(**over):
@@ -364,36 +366,252 @@ class TestReplaceCut:
                    for n in notes)
 
 
-class TestNotSelfContainedNote:
-    """#796 review round 5, the round-4 leftover ASSESSED: `retarget_clip`
-    runs no #718 self-contained pad/back-fill pass. It bakes the 15 HIK slot
-    joints over its own frames and registers a record declaring no channel
-    at all, so a channel another clip declares and this bake does not cover
-    holds that neighbour's value across the retargeted take - and the NEXT
-    author_clip does not pin against this one either.
-
-    The fix is author_clip's whole padding pass, whose pieces are closures
-    inside it; too large to lift on a round that ends at a live gate. The
-    take is named instead of silently wrong.
+class TestFilterPassPartition:
+    """#798 finding 1: `cleanclip._keyed_plugs` returned every plug an
+    animCurve drives, UN-partitioned, so the filter pass sampled a
+    set-driven key at frame NUMBERS (MEASURED: getAttr(time=f) answers the
+    driver's constant at every f), re-keyed it (setKeyframe returned 0
+    every time) and listed the plug as smoothed. #796 gave clip the
+    partition for exactly this; cleanclip is the one site that never used
+    it.
     """
 
-    def test_the_retarget_first_ordering_is_told_too(self):
-        # #796 review round 6 B: the note fired ONLY where neighbours
-        # already existed - and the ordering that actually needs it is the
-        # normal mocap workflow, which retargets FIRST. That record
-        # declares `joints: []`, so the author_clip that comes next pins
-        # nothing against this take and its neighbour's pose bleeds
-        # straight into the retargeted range. The mitigation covered the
-        # one ordering it was not filed for.
-        note = retarget.not_self_contained_note([])
-        assert note is not None
-        assert "NOT self-contained" in note
-        assert "declares no channel" in note
+    JOINTS = TestSharedGuards.JOINTS
 
-    def test_a_rig_with_neighbours_is_told_and_they_are_named(self):
-        note = retarget.not_self_contained_note(
-            [{"name": "idle"}, {"name": "wave"}])
-        assert note is not None
-        assert "NOT self-contained" in note
-        assert "'idle', 'wave'" in note
-        assert "declares no channel" in note
+    def _keyed(self, fake, plug, curve):
+        fake.curves[plug] = curve
+        fake.keys[plug] = {float(f): float(f % 3) for f in range(0, 31)}
+
+    def test_the_filter_pass_never_touches_a_driven_key_plug(self):
+        fake = FakeCmds()
+        self._keyed(fake, "|root|mid.rotateZ", "mid_rotZ_crv")
+        _plant_sdk_curve(fake)                       # |root|mid|tip.rotateX
+        fake.keys["|root|mid|tip.rotateX"] = {0.0: 0.0, 10.0: 35.0}
+        warnings = []
+        filtered = cleanclip._run_filter_pass(fake, self.JOINTS, 0, 30, 5,
+                                              warnings)
+        assert filtered == ["|root|mid.rotateZ"]
+        assert fake.keys["|root|mid|tip.rotateX"] == {0.0: 0.0, 10.0: 35.0}
+        assert warnings == []
+
+    def test_a_channel_whose_writes_vanish_is_reported_not_counted(self):
+        # A keyed channel LOCKED after keying: sampled fine, re-keyed
+        # never (setKeyframe returns 0). The count is what landed.
+        fake = FakeCmds()
+        self._keyed(fake, "|root|mid.rotateZ", "mid_rotZ_crv")
+        self._keyed(fake, "|root|mid.rotateY", "mid_rotY_crv")
+        fake.locked.add("|root|mid.rotateY")
+        warnings = []
+        filtered = cleanclip._run_filter_pass(fake, self.JOINTS, 0, 30, 5,
+                                              warnings)
+        assert filtered == ["|root|mid.rotateZ"]
+        assert any("|root|mid.rotateY" in w and "did NOT land" in w
+                   and "locked" in w for w in warnings), warnings
+
+
+class TestRetargetedTakesAreSelfContained:
+    """#798 finding 2, MEASURED (evals/clip_edges_probe_798, section B):
+    retarget_clip baked 'walk01' over 0-150 and registered `joints: []`;
+    author_clip then appended 'idle' declaring only the head, and every
+    slot joint held the walk's LAST pose across the whole idle take - no
+    boundary pin at idle's start or end, because the record named nothing
+    to pin. And the reverse: idle's back-fill of the head over walk01's
+    boundaries pinned it at the bake's FIRST key (no rest was ever
+    captured), rewriting the walk's last head key. Both halves are the
+    #718 pass author_clip runs, now extracted (`clip.make_self_contained`)
+    and run by this producer too: rest captured at stance BEFORE the
+    bake, `mine` derived from what the bake left in the scene.
+    """
+
+    JOINTS = TestSharedGuards.JOINTS
+    SLOTS = TestSharedGuards.SLOTS
+    BAKED = ("rotateX", "rotateY", "rotateZ",
+             "translateX", "translateY", "translateZ")
+
+    def _bake(self, fake, start, end, joints=None):
+        """What `bakeResults` leaves on the slot joints: one key per frame
+        on every channel, and the values MOVE (a constant would hide a
+        missing pin)."""
+        for j in joints or self.SLOTS.values():
+            for attr in self.BAKED:
+                for f in range(start, end + 1):
+                    assert fake.setKeyframe(j, attribute=attr, time=f,
+                                            value=5.0 + (f - start) * 0.1)
+
+    def _finish(self, fake, kept, start, end, rest, warnings=None):
+        return retarget._finish_take(
+            fake, "|root", self.JOINTS, self.SLOTS, "walk01", 30, start,
+            end, kept, rest, [] if warnings is None else warnings)
+
+    def _idle_on_tip(self, fake):
+        """An earlier author_clip-shaped clip 'idle' (0-30) declaring tip,
+        with its rest recorded the way author_clip records it."""
+        fake.curves["|root|mid|tip.rotateZ"] = "tip_rotZ_crv"
+        fake.keys["|root|mid|tip.rotateZ"] = {0.0: 0.0, 30.0: 20.0}
+        clip._write_rest(fake, "|root", {"tip.rotateX": 0.0,
+                                          "tip.rotateY": 0.0,
+                                          "tip.rotateZ": 0.0})
+        clip.register_clip(fake, "|root", "idle", 30, 0, 30, joints=["tip"])
+        return clip.clip_meta(fake, "|root")
+
+    def _rest(self, fake, slots=None):
+        """The handler's order: the root's translation BEFORE the replace
+        cut (a curve-fed plug is skipped, an unkeyed one is read), the
+        rotations inside the stance window."""
+        slots = slots or self.SLOTS
+        rest = retarget._rest_before_cut(fake, "|root", slots)
+        retarget._rest_at_stance(fake, "|root", slots, rest)
+        return rest
+
+    def test_a_retargeted_take_declares_the_joints_it_baked(self):
+        fake = FakeCmds()
+        rest = self._rest(fake)
+        self._bake(fake, 0, 30)
+        self._finish(fake, [], 0, 30, rest)
+        record = clip.clip_meta(fake, "|root")[0]
+        assert record["joints"] == ["mid", "root"]
+        assert record["root_position_used"] is True
+
+    def test_a_slot_joint_the_bake_left_alone_is_not_declared(self):
+        # Derived from the SCENE, never from the aim list (#796's
+        # observed-writes rule): a channel with no curve is not declared.
+        fake = FakeCmds()
+        rest = self._rest(fake)
+        self._bake(fake, 0, 30, joints=["|root"])
+        self._finish(fake, [], 0, 30, rest)
+        assert clip.clip_meta(fake, "|root")[0]["joints"] == ["root"]
+
+    def test_the_rest_captured_at_stance_is_the_stance_value(self):
+        # Not the bake's first key: the probe measured author_clip pinning
+        # the head at the WALK's first frame because no rest existed.
+        fake = FakeCmds()
+        rest = self._rest(fake)
+        assert rest["mid.rotateZ"] == 0.0
+        assert rest["root.translateY"] == 1.0
+        self._bake(fake, 0, 30)
+        self._finish(fake, [], 0, 30, rest)
+        assert clip._rest_map(fake, "|root")["mid.rotateZ"] == 0.0
+
+    def test_a_retargeted_take_pins_a_neighbours_channel_at_rest(self):
+        fake = FakeCmds()
+        kept = self._idle_on_tip(fake)
+        rest = self._rest(fake)
+        self._bake(fake, 32, 62)
+        out = self._finish(fake, kept, 32, 62, rest)
+        assert out["padded_channels"] == ["tip"]
+        assert fake.keys["|root|mid|tip.rotateZ"][32.0] == 0.0
+        assert fake.keys["|root|mid|tip.rotateZ"][62.0] == 0.0
+
+    def test_a_retargeted_take_back_fills_its_joints_across_earlier_clips(
+            self):
+        fake = FakeCmds()
+        kept = self._idle_on_tip(fake)
+        rest = self._rest(fake)
+        self._bake(fake, 32, 62)
+        out = self._finish(fake, kept, 32, 62, rest)
+        assert out["back_filled"] == {
+            "clips": ["idle"], "channels": ["mid", "root", "root_position"]}
+        # idle measures what it measured: mid at stance, root at bind
+        assert fake.keys["|root|mid.rotateZ"][0.0] == 0.0
+        assert fake.keys["|root|mid.rotateZ"][30.0] == 0.0
+        assert fake.keys["|root.translateY"][0.0] == 1.0
+
+    def test_author_clip_after_a_retarget_pins_the_baked_joints(
+            self, monkeypatch):
+        # The ticket's exact scenario, headless: walk01 baked first, idle
+        # authored after it declaring only tip.
+        fake = _install(FakeCmds(), monkeypatch)
+        rest = self._rest(fake)
+        self._bake(fake, 0, 30)
+        self._finish(fake, [], 0, 30, rest)
+        out = clip.author_clip({
+            "root": "root", "name": "idle", "fps": 30,
+            "keys": [{"time_s": 0.0, "rotations": {"tip": [0, 0, 0]}},
+                     {"time_s": 1.0, "rotations": {"tip": [0, 0, 20]}}]})
+        assert sorted(out["padded_channels"]) == ["mid", "root",
+                                                  "root_position"]
+        start = float(out["start_frame"])
+        assert fake.keys["|root|mid.rotateZ"][start] == 0.0     # stance
+        assert fake.keys["|root.translateY"][start] == 1.0      # bind
+        assert fake.keys["|root|mid.rotateZ"][30.0] == 8.0      # untouched
+
+    def test_the_retargeted_result_reports_its_pins(self):
+        fake = FakeCmds()
+        kept = self._idle_on_tip(fake)
+        rest = self._rest(fake)
+        self._bake(fake, 32, 62)
+        warnings = []
+        out = self._finish(fake, kept, 32, 62, rest, warnings)
+        assert set(out) == {"padded_channels", "held_channels",
+                            "back_filled"}
+        assert any("pinned 1 channel(s) (tip) at rest" in w for w in warnings)
+        assert not any("NOT self-contained" in w for w in warnings)
+
+    def test_the_old_not_self_contained_note_is_gone(self):
+        assert not hasattr(retarget, "not_self_contained_note")
+
+    def test_a_root_translation_another_clip_keys_is_not_captured_as_rest(
+            self):
+        # Review catch 3: on a legacy scene (a pre-#798 retarget keyed the
+        # root, no rest recorded) the replace cut empties that curve and
+        # leaves the plug at a meaningless static value. The root's
+        # translation is therefore captured BEFORE the cut, where a
+        # curve-fed plug is skipped - the honest "no rest known" answer,
+        # which `_rest_value` then infers and WARNS about.
+        fake = FakeCmds()
+        fake.curves["|root.translateY"] = "walk_ty_crv"
+        fake.keys["|root.translateY"] = {0.0: 1.3, 30.0: 1.5}
+        rest = retarget._rest_before_cut(fake, "|root", self.SLOTS)
+        assert "root.translateY" not in rest
+        # and an unkeyed root IS read - at its bind position
+        assert retarget._rest_before_cut(
+            FakeCmds(), "|root", self.SLOTS)["root.translateY"] == 1.0
+
+    def test_a_root_above_the_hips_is_warned_about(self):
+        # Review catch 2: the pelvis's baked translation carries the root
+        # motion when the rig's root sits ABOVE the Hips slot, and the clip
+        # model has no channel for it - nothing pads or back-fills it.
+        # Said, at least, rather than documented as constant.
+        fake = FakeCmds()
+        slots = {"Hips": "|root|mid", "Spine": "|root|mid|tip"}
+        rest = self._rest(fake, slots)
+        self._bake(fake, 0, 30, joints=list(slots.values()))
+        warnings = []
+        retarget._finish_take(fake, "|root", self.JOINTS, slots, "walk01",
+                              30, 0, 30, [], rest, warnings)
+        record = clip.clip_meta(fake, "|root")[0]
+        assert record["root_position_used"] is False
+        assert any("|root|mid" in w and "translation" in w
+                   and "outside" in w for w in warnings), warnings
+
+    def test_the_replace_cut_covers_the_weight_pins_this_producer_writes(
+            self):
+        # Review catch 5: retarget now pins weight channels at its
+        # boundaries, so its re-retarget cut has to clear them like
+        # author_clip's and delete_clip's do.
+        fake = FakeCmds()
+        assert retarget._weight_plugs(fake, self.JOINTS) == [
+            "body_shapes.blink"]
+
+    def test_a_re_retarget_replaces_the_take_at_the_tail(self):
+        # The replace path, headless (review 7 made the fake able to
+        # model it): the old bake is cut, the new one appended after every
+        # other clip, the neighbour re-padded at the NEW boundaries.
+        fake = FakeCmds()
+        kept = self._idle_on_tip(fake)
+        rest = self._rest(fake)
+        self._bake(fake, 32, 62)
+        self._finish(fake, kept, 32, 62, rest)
+        records = clip.clip_meta(fake, "|root")
+        replaced, kept2 = clipmath_drop(records, "walk01")
+        clip.cut_replaced_range(fake, self.JOINTS, replaced,
+                                retarget._weight_plugs(fake, self.JOINTS))
+        rest2 = self._rest(fake)
+        self._bake(fake, 32, 72)
+        out = self._finish(fake, kept2, 32, 72, rest2)
+        names = [(r["name"], r["start_frame"], r["end_frame"])
+                 for r in clip.clip_meta(fake, "|root")]
+        assert names == [("idle", 0, 30), ("walk01", 32, 72)]
+        assert out["padded_channels"] == ["tip"]
+        assert fake.keys["|root|mid|tip.rotateZ"][72.0] == 0.0
+        assert clip.clip_meta(fake, "|root")[1]["joints"] == ["mid", "root"]

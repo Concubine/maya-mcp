@@ -188,8 +188,12 @@ def blockers(cmds, plugs: Iterable[str]) -> List[Blocked]:
     return found
 
 
-def _because(block: Blocked) -> str:
-    """The clause that says what is in the way, from the plug's side."""
+def because(block: Blocked) -> str:
+    """The clause that says what is in the way, from the plug's side.
+
+    Public since #798: clip's lost-write notes carry it inline, so a note
+    about a key that vanished names the lock or the connection itself
+    instead of pointing at a note that may not exist."""
     if block.reason == "locked":
         return "%s is locked" % block.at
     kind = {"clip": "an animation curve",
@@ -209,10 +213,10 @@ def describe(block: Blocked, what: str) -> str:
     """
     if block.reason == "locked":
         return ("%s could not write %s: %s, and Maya refuses that write"
-                % (what, block.plug, _because(block)))
+                % (what, block.plug, because(block)))
     return ("%s could not write %s: %s, so a static write here is either "
             "refused or overridden on the next evaluation"
-            % (what, block.plug, _because(block)))
+            % (what, block.plug, because(block)))
 
 
 def _hint(block: Blocked) -> str:
@@ -272,7 +276,7 @@ def refuse(what: str, found: Sequence[Blocked],
     """
     if not found:  # pragma: no cover - callers check first
         raise ValueError("refuse() called with nothing to refuse")
-    reasons = "; ".join(_because(b) for b in found)
+    reasons = "; ".join(because(b) for b in found)
     plugs = ", ".join(sorted({b.plug for b in found}))
     tail = consequence or ("nothing was written - this command refuses "
                            "before it mutates rather than leaving the "

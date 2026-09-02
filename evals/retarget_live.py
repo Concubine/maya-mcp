@@ -57,12 +57,11 @@ The #718 composition byte-gate is reused from `evals/multi_take_live.py`
 independent `fbxbytes.read_fbx`/`anim_facts` re-read are copied verbatim in
 spirit (adapted here since this rig carries no mesh - retarget_clip needs a
 skeleton only, so there is no `combine`/`bind_skin` scene-build phase).
-`retarget_clip`'s own registered clip records carry an EMPTY declared
-`joints` list (`clip.register_clip`'s documented default for a baked clip -
-"the whole rig is baked, not authored key by key"), so multi_take_live's
-per-declared-joint channel-union check is vacuous here (the union is
-empty). This gate checks the thing that actually matters for a baked clip
-instead: every one of the 15 HIK-characterized joints
+Since #798 `retarget_clip`'s registered clip records declare the slot
+joints the bake actually keyed (and `root_position_used`), so the export
+gate's per-declared-joint check is no longer vacuous here; before #798 the
+record carried `joints: []`. This gate still checks the thing that matters
+for a baked clip directly: every one of the 15 HIK-characterized joints
 (`mocapmath.SKELETON_HIK_MAP`'s values) carries a correct 3-curve rotation
 record, with the right key count for ITS OWN take, in both takes.
 
@@ -460,9 +459,8 @@ def main():
          "export: an independent byte read agrees with the tool's own "
          "animation report")
 
-    # retarget_clip's own registered clips carry an EMPTY declared `joints`
-    # list (see module docstring), so the multi_take_live per-declared-
-    # joint check is vacuous here. Checked directly instead: every one of
+    # The record declares the baked slot joints since #798 (see module
+    # docstring); this direct check predates that and stays: every one of
     # the 15 HIK-characterized joints this handler actually bakes carries a
     # correct 3-curve rotation record with the right key count for ITS OWN
     # take, in both takes; the pelvis (Hips) also carries root translation,

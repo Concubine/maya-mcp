@@ -960,6 +960,19 @@ class RetargetClipResult(BaseModel):
         "symmetry, loop closure. Every relative threshold in it is a "
         "fraction of RIG HEIGHT, the #773 convention - read `thresholds` "
         "inside this dict for the derived absolute numbers."))
+    padded_channels: List[str] = Field(default_factory=list, description=(
+        "Channels other clips on this rig declare and the bake does not "
+        "cover - keyed at rest at this take's own boundary frames so the "
+        "take is self-contained (#718's rule, run by this producer since "
+        "#798; author_clip's field of the same name)."))
+    held_channels: List[str] = Field(default_factory=list, description=(
+        "Channels pinned at this take's own held value at a boundary it "
+        "did not key - normally empty for a bake, which keys every frame."))
+    back_filled: BackFillReport = Field(default_factory=BackFillReport,
+                                        description=(
+        "The baked joints (and the root's translation), pinned at their "
+        "stance rest across every EARLIER clip's range so those clips "
+        "measure exactly what they measured before this take existed."))
     warnings: List[str] = Field(default_factory=list)
 
 

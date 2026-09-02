@@ -710,7 +710,15 @@ connection — instead of misdiagnosing anim-layer/expression sources):
   clip. The refusal names the channel and its source; for a driven key the
   hint says to pose the DRIVER (`delete_clip` does not remove one — see
   below), not to delete the clip.
-- **Only those two kinds refuse.** Any OTHER connection on a declared
+- `author_clip` refuses a declared channel a rigger **LOCKED** (#798),
+  before the checkpoint, with the same hint every static-write guard gives
+  (`setAttr -lock false <plug>`). Measured: `setKeyframe` on a locked plug
+  reports 0 and creates nothing (a driven key's tell), and the root's
+  `xform` pose write drops a locked child WITHOUT raising — so a locked
+  `root.translateY` used to ship a clip declaring `root_position` with one
+  of its three channels never written. Declared channels only: a lock
+  elsewhere on the rig blocks nothing.
+- **Only those kinds refuse.** Any OTHER connection on a declared
   channel — a pairBlend (which Maya inserts the moment a plug is both keyed
   AND constrained), an anim layer, a unitConversion — is keyed exactly as
   it was before #796 and NAMED in `warnings`, with the curve behind the
@@ -723,7 +731,8 @@ connection — instead of misdiagnosing anim-layer/expression sources):
   once, at the compound; the children are asked first, so a driven key on
   one axis is never blamed on a free sibling.
 - **Boundary pins are skipped, not refused**, on a JOINT or root-translate
-  channel a driven key or a corrective owns — the treatment the weight pins
+  channel a driven key or a corrective owns, or that is locked (#798) — the
+  treatment the weight pins
   have had since #771, extended to the other two pad loops (#796). A pad
   channel belongs to some OTHER clip, so refusing it would block this call
   over rig setup it never asked to touch; instead the pin is skipped, the
@@ -749,7 +758,18 @@ connection — instead of misdiagnosing anim-layer/expression sources):
   `tip.rotateY`/`.rotateZ`, which are still cut. A connection landing on
   the `.rotate` COMPOUND does cover all three, because there it really
   does. `retarget_clip`'s re-retarget of an existing name shares the
-  function and the behaviour.
+  function and the behaviour. Its cost was measured (#798): the blend walk
+  adds ~5 connection queries per plug, 2130 vs 360 on a 60-joint rig, for
+  48 ms inside a 220 ms re-author — not worth a cache.
+- `clean_clip`'s filter pass smooths the CLIP partition only (#798). The
+  raw `type="animCurve"` query also returns set-driven-key curves, which
+  are indexed by DRIVER VALUE: measured, `getAttr(time=f)` on such a plug
+  answers the driver's constant at every frame and the re-key reports 0
+  every time, so the pass listed the channel as smoothed having changed
+  nothing. It now reads `setKeyframe`'s return too: a channel whose re-keys
+  vanished (a plug locked after it was keyed) is named with its cause; one
+  whose every re-key vanished is not counted, one that partly landed is
+  counted and named.
 - **What the result says is what the writes REPORTED** (#796).
   `cmds.setKeyframe` returns the number of keys it set, and #771 measured 0
   as the tell on a connection-fed plug — no curve, no key, no error. Every
@@ -757,8 +777,11 @@ connection — instead of misdiagnosing anim-layer/expression sources):
   writes landed. Now `keyed_joints`, `keyed_weight_channels`,
   `root_position_keyed` and the `mcp_clip` record itself count only
   channels whose key actually exists; a channel whose every write vanished
-  is named in `warnings` (with the note saying what drives it) and is
-  absent from all of them, and a clip that keyed NOTHING says so in one
+  is named in `warnings` — the note itself says what swallowed the write
+  (a lock, a driven key, a corrective, a blend node), from the one
+  classifier every static-write guard in this toolbox asks (#798; it used
+  to point at "the note naming what drives it", which did not exist for a
+  lock) — and is absent from all of them, and a clip that keyed NOTHING says so in one
   loud warning rather than registering as a normal take. A pin that did not
   land is likewise never counted in `padded_channels`, `held_channels` or
   `back_filled`. `root_position` loses its keys one step earlier than the
@@ -787,20 +810,34 @@ connection — instead of misdiagnosing anim-layer/expression sources):
   is a `setKeyframe` measurement, and what `bakeResults` does to a
   connection-fed plug is not measured here, so refusing on it would refuse
   on the wrong measurement.
-- **A retargeted take is NOT self-contained** (#718's rule, which
-  `retarget_clip` does not implement — assessed, named, not fixed). The
-  bake writes the 15 HIK slot joints over this clip's own frames and
-  nothing else, and the record it registers declares no channel of its own,
-  so: a channel some OTHER clip declares and the bake does not cover (a
-  blendShape weight, a finger, a jaw) holds that neighbour's value straight
-  through the retargeted range; the baked channels hold their first value
-  BACKWARDS across every earlier clip's range; and a LATER `author_clip`
-  does not pin against this clip either, because its record names nothing
-  to pin. **Every** retargeted take says so in `warnings`, naming the
-  neighbours when there are any — including the take that has none yet,
-  which is the normal mocap ordering (retarget first, author around it) and
-  the one the un-pinnable record hurts most. Check the exported takes for a
-  neighbour's pose bleeding through.
+- **A retargeted take is self-contained too** (#798; before it, #796 had
+  named the gap and left it). The #718 pass author_clip runs is one
+  function now, `clip.make_self_contained`, and `retarget_clip` runs it
+  after the bake: a channel some OTHER clip declares and the bake does not
+  cover (a blendShape weight, a finger, a jaw) is pinned at rest at this
+  take's own boundary frames (`padded_channels`), and the baked joints —
+  plus the root's translation when the root is a slot joint — are pinned
+  at their STANCE rest across every earlier clip's range (`back_filled`),
+  so those clips measure what they measured before. The record declares
+  what the bake actually left in the scene: the slot joints whose rotate
+  channels carry a clip curve keyed inside the take's range, and
+  `root_position_used` when the root's translation got the same (derived
+  from the scene, never from the aim list), so a LATER `author_clip` pins
+  against this take like any other. Measured before the fix: the walk's
+  slot joints held its LAST pose across the whole of the idle take
+  authored after it, and idle's back-fill of the head — a slot joint with
+  no recorded rest — wrote the walk's FIRST head value over its last
+  frame. The rotation rest is captured at the same stance the hips height
+  is read at, before the bake; the root's translation rest before the
+  replace cut, where a curve-fed root is skipped rather than read at a
+  post-cut static value. A slot joint the bake left without a rotation
+  curve is named in `warnings` and not declared. The bake's scale curves,
+  and its translate curves on slot joints other than the root, stay
+  outside the clip model as before — constant when the rig's root IS the
+  Hips joint; when the Hips slot sits BELOW the root its baked translation
+  carries the root motion and nothing pins it, which `warnings` now says.
+  The re-retarget cut clears weight plugs too, since this producer pins
+  them.
 
 Export facts (measured, `evals/correctives_probe/`): a live deltaMush is
 DROPPED by FBX export with byte-identical output — `export_fbx` warns,

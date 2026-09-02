@@ -71,6 +71,13 @@ class FakeCmds:
         # a fix must not regress; the tests that care flip it and assert
         # the handler is honest under both.
         self.blend_swallows_keys = False
+        # #798: plugs a rigger LOCKED. MEASURED (evals/clip_edges_probe_798):
+        # setKeyframe on one returns 0 and creates nothing, setAttr raises,
+        # and `xform -translation` drops the locked child and writes the
+        # rest WITHOUT raising - the shape that let author_clip report a
+        # root as keyed with one of its three channels never written.
+        # getAttr(lock=True) answers per CHILD; the compound says False.
+        self.locked = set()
 
     # --- resolution ------------------------------------------------------
     def ls(self, pattern=None, long=False, type=None, **kw):
@@ -163,7 +170,9 @@ class FakeCmds:
         return None
 
     # --- attributes ------------------------------------------------------
-    def getAttr(self, key, time=None):
+    def getAttr(self, key, time=None, lock=False):
+        if lock:
+            return key in self.locked
         if key.endswith(".mcp_clip") or key.endswith(".mcp_clip_rest"):
             node, attr = key.rsplit(".", 1)
             return self.string_attrs[node][attr]
@@ -218,7 +227,7 @@ class FakeCmds:
             node, attr = key.rsplit(".", 1)
             self.string_attrs.setdefault(node, {})[attr] = values[0]
             return
-        blocker = self._connected_child(key)
+        blocker = self._connected_child(key) or self._locked_child(key)
         if blocker:
             raise RuntimeError(
                 "setAttr: The attribute '%s' is locked or connected and "
@@ -227,6 +236,18 @@ class FakeCmds:
             self.attrs[key] = tuple(values)
         else:
             self.attrs[key] = values[0]
+
+    def _locked_child(self, plug):
+        """`_connected_child` for locks (#798): a locked child refuses its
+        compound's write too."""
+        if plug in self.locked:
+            return plug
+        node, _, attr = plug.rpartition(".")
+        if attr in ("rotate", "translate"):
+            for child in ("%s.%s%s" % (node, attr, ax) for ax in "XYZ"):
+                if child in self.locked:
+                    return child
+        return None
 
     def addAttr(self, node, longName=None, dataType=None):
         self.string_attrs.setdefault(node, {})[longName] = ""
@@ -278,6 +299,10 @@ class FakeCmds:
                 "xform: The attribute '%s.translate' is locked or connected "
                 "and cannot be modified (%s feeds it)" % (node, blocker))
         for axis, v in zip("XYZ", translation):
+            # #798 MEASURED: a locked child is dropped, the rest written,
+            # and nothing raised.
+            if node + ".translate" + axis in self.locked:
+                continue
             self.attrs[node + ".translate" + axis] = float(v)
 
     # --- animation -------------------------------------------------------
@@ -307,6 +332,8 @@ class FakeCmds:
         works (#796 review round 4 B). `blend_swallows_keys` flips the
         fake to the other outcome.
         """
+        if plug in self.locked:
+            return plug         # #798 MEASURED: 0 keys, nothing created
         driven = getattr(self, "driven_plugs", {})
         source = driven.get(plug)
         if source is None:
@@ -342,8 +369,17 @@ class FakeCmds:
             return 0        # measured: no curve, no key, and no error
         # No dot in the generated name: real Maya node names cannot carry
         # one, and the #771 classifier splits "node.attr" sources on it.
-        self.curves.setdefault(
-            plug, plug.replace("|", "_").replace(".", "_") + "_crv")
+        # A NEW name once the old one was deleted (#798 review 7): real
+        # Maya creates a fresh animCurve when a plug is re-keyed after its
+        # emptied curve went, and re-using the dead name here made
+        # nodeType raise on a live curve.
+        if plug not in self.curves:
+            base = plug.replace("|", "_").replace(".", "_") + "_crv"
+            name, n = base, 1
+            while name in self.deleted:
+                n += 1
+                name = "%s%d" % (base, n)
+            self.curves[plug] = name
         self.keys.setdefault(plug, {})[float(time)] = float(value)
         return 1
 
@@ -1585,6 +1621,180 @@ class TestPadNotesMatchTheDeclaredPath:
         _author(fake, name="wave", keys=self._wave())
         out = _author(fake, name="idle", keys=self._idle())
         assert not any("is driven by" in w for w in out["warnings"])
+
+
+class TestTheFakeModelsLocks:
+    """#798: a LOCKED plug is the third thing Maya refuses, after a driven
+    key and a corrective, and the fake never modelled it - so a locked
+    root.translateY looked keyable here while the probe (evals/
+    clip_edges_probe_798) measured: setKeyframe on a locked plug returns 0
+    and creates nothing, setAttr raises, and `xform -translation` writes
+    the FREE children and silently drops the locked one WITHOUT raising.
+    The fake has to be as harsh as Maya in exactly those three shapes, or
+    a guard built on it certifies a belief (#799's lesson)."""
+
+    def test_setkeyframe_on_a_locked_plug_returns_zero_and_creates_nothing(
+            self):
+        fake = FakeCmds()
+        fake.locked.add("|root.translateY")
+        assert fake.setKeyframe("|root", attribute="translateY", time=3,
+                                value=1.0) == 0
+        assert "|root.translateY" not in fake.keys
+        assert "|root.translateY" not in fake.curves
+
+    def test_xform_drops_the_locked_child_and_writes_the_rest_silently(self):
+        fake = FakeCmds()
+        fake.locked.add("|root.translateY")
+        fake.xform("|root", worldSpace=True, translation=[1.0, 2.0, 3.0])
+        assert fake.attrs["|root.translateX"] == 1.0
+        assert fake.attrs["|root.translateY"] == 1.0     # untouched (bind)
+        assert fake.attrs["|root.translateZ"] == 3.0
+
+    def test_setattr_on_a_locked_plug_raises(self):
+        fake = FakeCmds()
+        fake.locked.add("|root|mid.rotateZ")
+        with pytest.raises(RuntimeError, match="locked or connected"):
+            fake.setAttr("|root|mid.rotateZ", 5.0)
+
+    def test_a_curve_recreated_after_a_cut_is_a_new_node(self):
+        # Real Maya names a fresh animCurve when a plug is re-keyed after
+        # its emptied curve was deleted; the fake re-used the dead name,
+        # so nodeType raised on a perfectly live curve and the
+        # re-retarget path could not be exercised headlessly (#798
+        # review 7).
+        fake = FakeCmds()
+        fake.setKeyframe("|root|mid", attribute="rotateZ", time=0, value=0.0)
+        old = fake.curves["|root|mid.rotateZ"]
+        fake.cutKey("|root|mid.rotateZ", time=(0, 10), clear=True)
+        assert old in fake.deleted
+        fake.setKeyframe("|root|mid", attribute="rotateZ", time=5, value=1.0)
+        new = fake.curves["|root|mid.rotateZ"]
+        assert new != old
+        assert fake.nodeType(new) == "animCurveTU"
+
+    def test_the_lock_query_answers_per_child_never_at_the_compound(self):
+        # MEASURED: getAttr(".translate", lock=True) is False while
+        # translateY is locked - the compound does not fold its children.
+        fake = FakeCmds()
+        fake.locked.add("|root.translateY")
+        assert fake.getAttr("|root.translateY", lock=True) is True
+        assert fake.getAttr("|root.translateX", lock=True) is False
+        assert fake.getAttr("|root.translate", lock=True) is False
+
+
+class TestLockedDeclaredChannels:
+    """#798 finding 3, widened by the probe: a locked root.translateY under
+    author_clip's root_position did not just leave a dead-end note - the
+    call reported `root_position_keyed: True` with translateY never keyed,
+    because `xform` drops a locked child without raising and setKeyframe
+    on it returns 0. A lock is a static, user-set refusal of the very write
+    the clip needs, so it is refused BEFORE the checkpoint (#802's rule:
+    every static write asks first), with plugwrite's own hint."""
+
+    def _root_keys(self):
+        return [{"time_s": 0.0, "rotations": {"mid": [0, 0, 0]},
+                 "root_position": [0.0, 1.0, 0.0]},
+                {"time_s": 1.0, "rotations": {"mid": [0, 0, 45]},
+                 "root_position": [0.0, 1.4, 0.0]}]
+
+    def _mid(self):
+        return [{"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+                {"time_s": 1.0, "rotations": {"mid": [0, 0, 45]}}]
+
+    def test_a_locked_declared_root_translate_refuses_before_the_checkpoint(
+            self, fake):
+        fake.locked.add("|root.translateY")
+        with pytest.raises(HandlerError) as exc:
+            _author(fake, keys=self._root_keys())
+        assert "|root.translateY is locked" in str(exc.value)
+        assert "unlock" in (exc.value.hint or "")
+        assert fake.checkpoints == []
+        assert "|root.translateX" not in fake.keys
+
+    def test_a_locked_declared_weight_channel_refuses_before_the_checkpoint(
+            self, fake):
+        # Review catch: the sweep covered rotate and root translate only,
+        # so a locked blendShape weight the clip DECLARES checkpointed and
+        # shipped without the channel - the post-checkpoint partial write
+        # the refusal exists to prevent.
+        fake.locked.add("body_shapes.blink")
+        with pytest.raises(HandlerError) as exc:
+            _author(fake, keys=[
+                {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]},
+                 "blend_weights": {"blink": 0.0}},
+                {"time_s": 1.0, "rotations": {"mid": [0, 0, 45]},
+                 "blend_weights": {"blink": 1.0}}])
+        assert "body_shapes.blink is locked" in str(exc.value)
+        assert fake.checkpoints == []
+        assert "|root|mid.rotateZ" not in fake.keys
+
+    def test_a_locked_declared_rotate_child_refuses(self, fake):
+        fake.locked.add("|root|mid.rotateZ")
+        with pytest.raises(HandlerError) as exc:
+            _author(fake, keys=self._mid())
+        assert "|root|mid.rotateZ is locked" in str(exc.value)
+        assert fake.checkpoints == []
+
+    def test_a_locked_channel_the_clip_does_not_declare_never_blocks(
+            self, fake):
+        # Per channel, never per rig (#796 defect 3's rule, for locks).
+        fake.locked.add("|root|mid|tip.rotateX")
+        out = _author(fake, keys=self._mid())
+        assert out["keyed_joints"] == 1
+        assert not any("locked" in w for w in out["warnings"])
+
+    def test_a_locked_pad_channel_is_skipped_and_named(self, fake):
+        # A pad belongs to ANOTHER clip: skipped and said, never refused
+        # (the UNKEYABLE_KINDS treatment, #796 round 4 A) - and the free
+        # siblings on the same joint are still pinned.
+        _author(fake, name="wave", keys=[
+            {"time_s": 0.0, "rotations": {"tip": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"tip": [0, 0, 20]}}])
+        fake.locked.add("|root|mid|tip.rotateX")
+        out = _author(fake, name="idle", keys=self._mid())
+        assert any("|root|mid|tip.rotateX" in w and "SKIPPED" in w
+                   and "locked" in w for w in out["warnings"]), out["warnings"]
+        assert fake.keys["|root|mid|tip.rotateY"][
+            float(out["start_frame"])] == 0.0
+        assert float(out["start_frame"]) not in fake.keys[
+            "|root|mid|tip.rotateX"]
+
+    def test_a_locked_pad_weight_channel_is_skipped_and_named(self, fake):
+        _author(fake, name="blinky", keys=[
+            {"time_s": 0.0, "blend_weights": {"blink": 0.0}},
+            {"time_s": 1.0, "blend_weights": {"blink": 1.0}}])
+        fake.locked.add("body_shapes.blink")
+        out = _author(fake, name="idle", keys=self._mid())
+        assert any("blink" in w and "SKIPPED" in w and "locked" in w
+                   for w in out["warnings"]), out["warnings"]
+        assert "blink" not in out["padded_channels"]
+
+    def test_swallowed_by_never_blames_the_plugs_own_clip_curve(self, fake):
+        # Review catch: `plugwrite.blocker` classifies a plug's OWN time
+        # curve as a "driven" obstacle, so with a lock the child cannot
+        # see (on the compound) the note named the very curve the key was
+        # meant to land on. The lock wins; a clip curve is never the cause.
+        fake.curves["|root|mid.rotateZ"] = "mid_rotZ_crv"
+        fake.keys["|root|mid.rotateZ"] = {0.0: 0.0}
+        fake.locked.add("|root|mid.rotate")
+        note = clip.swallowed_by(fake, "|root|mid.rotateZ")
+        assert "|root|mid.rotate is locked" in note
+        assert "mid_rotZ_crv" not in note
+
+    def test_a_lost_write_note_names_what_swallowed_it(self, fake):
+        # The dead-end pointer the ticket named: "see the note naming what
+        # drives it" pointed at nothing when the cause was not a
+        # connection. The note now carries the cause itself, from the one
+        # classifier (plugwrite.blocker), so it is true for every cause.
+        fake.blend_swallows_keys = True
+        _plant_blend_curve(fake, "|root|mid.rotateZ", blend="mid_pairBlend",
+                           curve="mid_rotZ_crv")
+        out = _author(fake, keys=self._mid())
+        note = [w for w in out["warnings"]
+                if "|root|mid.rotateZ" in w and "did NOT land" in w]
+        assert note, out["warnings"]
+        assert "mid_pairBlend" in note[0]
+        assert "see the note" not in note[0]
 
 
 class TestObservedWrites:

@@ -512,13 +512,23 @@ def pad_pin_verdicts(cmds, what: str, node: str, attrs: Tuple[str, ...],
     notes: List[str] = []
     for attr in attrs:
         plug = "%s.%s" % (node, attr)
+        # #798: a LOCK is the third thing a key measurably cannot land
+        # on (setKeyframe returns 0, nothing created - the same tell as
+        # a driven key), and it is not a connection, so the landing map
+        # above cannot see it. Skipped and said, exactly like the
+        # unkeyable kinds: a pad belongs to another clip, never refused.
+        if is_locked(cmds, plug):
+            notes.append(_skip_pin_note("%s %s" % (label, plug),
+                                        "is locked"))
+            continue
         entry = landing.get(attr)
         if entry is None or entry[2] == "clip":
             free.append(plug)
             continue
         at, src, kind = entry
         if kind in UNKEYABLE_KINDS:
-            notes.append(_skip_pin_note("%s %s" % (label, plug), src))
+            notes.append(_skip_pin_note("%s %s" % (label, plug),
+                                        "is driven by %s" % src))
             continue
         free.append(plug)
         # `at`, not `plug`: the note names where the connection LANDS (the
@@ -622,17 +632,58 @@ def guard_declared_channels(cmds, what: str,
     return list(dict.fromkeys(notes))
 
 
-def _skip_pin_note(what: str, src: str) -> str:
+def _skip_pin_note(what: str, because: str) -> str:
     """The ONE way the padding pass says a boundary pin was skipped.
 
     #771 gave the weight loop this sentence; #796 review round 4 A gave
     the joint and root-translation loops the same guard, and a second
     wording for one fact is how a reader concludes they are two different
-    problems (the `_stuck_note` rule, one pass over).
+    problems (the `_stuck_note` rule, one pass over). `because` is the
+    clause - "is driven by <src>", or since #798 "is locked" - so a lock
+    and a driven key read as the same fact with a different cause.
     """
-    return ("%s is driven by %s - its boundary pin was SKIPPED (a key on a "
+    return ("%s %s - its boundary pin was SKIPPED (a key on a locked or "
             "connection-fed plug silently no-ops); the clip declaring it "
-            "can no longer export that channel" % (what, src))
+            "can no longer export that channel" % (what, because))
+
+
+def is_locked(cmds, plug: str) -> bool:
+    """Whether `plug` itself is locked (#798). Per CHILD, never folded from
+    the compound: MEASURED, `getAttr('.translate', lock=True)` is False
+    while translateY is locked. A plug that cannot answer is not locked -
+    the write-side guards then report what the write itself says."""
+    try:
+        return bool(cmds.getAttr(plug, lock=True))
+    except Exception:  # noqa: BLE001 - cannot tell: the write will tell
+        return False
+
+
+def swallowed_by(cmds, plug: str) -> str:
+    """The clause naming what made a write to `plug` vanish (#798).
+
+    ONE classifier - `plugwrite.blocker`, the same one every static-write
+    guard in this repo asks - so a lock, a driven key, a corrective and a
+    blend node are all named the way the rest of the toolbox names them.
+    `_lost_write_note` used to end "see the note naming what drives it",
+    which pointed at nothing whenever the cause was not a connection: a
+    lock is not a connection and nothing asked about locks.
+    """
+    from . import plugwrite  # noqa: PLC0415 - plugwrite imports clip lazily
+    try:
+        found = plugwrite.blocker(cmds, plug)
+    except Exception:  # noqa: BLE001 - a plug that cannot answer
+        found = []
+    # A plug's OWN clip curve is where the key was meant to land, never
+    # what swallowed it - `blocker` lists it because a STATIC write cannot
+    # go through one, which is not this question. And a lock outranks any
+    # connection: it is the one thing a single command clears (review).
+    found = [b for b in found
+             if not (b.reason == "driven" and b.kind == "clip")]
+    found.sort(key=lambda b: b.reason != "locked")
+    if found:
+        return plugwrite.because(found[0])
+    return ("nothing on %s answers to a lock or connection query, so this "
+            "tool cannot name the cause" % plug)
 
 
 def key_landed(result: Any) -> bool:
@@ -656,7 +707,8 @@ def key_landed(result: Any) -> bool:
     return True
 
 
-def _lost_write_note(what: str, plug: str, frames: int) -> str:
+def _lost_write_note(what: str, plug: str, frames: int,
+                     because: str) -> str:
     """The ONE way this module says a key it ASKED for was not created.
 
     Distinct from `_skip_pin_note` on purpose: that one is a write this
@@ -671,22 +723,23 @@ def _lost_write_note(what: str, plug: str, frames: int) -> str:
     TRANSLATION only, is the `xform` pose write that has to land first
     being refused outright by the same connection - a connection-fed plug
     takes no static write (#796 review round 6 A).
+
+    `because` names the cause INLINE (#798, from `swallowed_by`): the
+    sentence used to end by pointing at "the note naming what drives it",
+    and on a LOCKED plug no such note existed.
     """
     return ("%s's key on %s did NOT land at %d frame(s) (setKeyframe "
             "reported 0 keys, or - on root translation - the pose write it "
-            "depends on was refused) - something on that plug swallowed "
-            "the write, so this clip neither counts nor declares that "
-            "channel; see the note naming what drives it"
-            % (what, plug, frames))
+            "depends on was refused): %s, so this clip neither counts nor "
+            "declares that channel" % (what, plug, frames, because))
 
 
-def _lost_pin_note(plug: str, frames: List[float]) -> str:
+def _lost_pin_note(plug: str, frames: List[float], because: str) -> str:
     """The same fact about a BOUNDARY PIN rather than an authored key."""
     return ("the boundary pin on %s did NOT land at frame(s) %s "
-            "(setKeyframe reported 0 keys) - something on that plug "
-            "swallowed the write, so a take that does not declare that "
-            "channel may inherit a neighbour's value there (#796)"
-            % (plug, ", ".join("%g" % f for f in frames)))
+            "(setKeyframe reported 0 keys): %s, so a take that does not "
+            "declare that channel may inherit a neighbour's value there "
+            "(#796)" % (plug, ", ".join("%g" % f for f in frames), because))
 
 
 def _blocked_rotate_attrs(cmds, joint: str) -> List[str]:
@@ -1204,6 +1257,357 @@ def register_clip(cmds, root_long: str, name: str, fps: int, start: int,
                  type="string")
 
 
+def make_self_contained(cmds, what: str, root_long: str, joints: List[str],
+                        alias_map: Dict[str, Any], start_frame: int,
+                        end_frame: int, measured_end: float,
+                        kept: List[Dict[str, Any]], mine: Dict[str, Any],
+                        rest: Dict[str, float],
+                        warnings: List[str]) -> Dict[str, Any]:
+    """The #718 self-contained rule, for ANY producer of a clip (#798).
+
+    All clips share ONE curve per channel, so a channel this clip never
+    mentions would hold whatever a neighbour left on it - forwards from
+    the previous clip's last key, and BACKWARDS from a later clip's first
+    key. Both are pinned here, and both are reported:
+
+    * every channel any clip on the rig declares (`theirs`, unioned with
+      `mine` once an earlier clip exists) is pinned at this clip's own
+      boundary frames - at rest when this clip never keys it, at its own
+      held value when it does (`_pad_boundaries`);
+    * every channel THIS clip introduces is pinned at rest across every
+      earlier clip's boundaries (`_back_fill`), which RESTORES what each
+      of them measured when it was authored.
+
+    `mine` is what this clip actually GOT - derived by the caller from the
+    writes' own returns (author_clip) or from what the bake left in the
+    scene (retarget_clip), never from the request (#796 review round 5 C).
+    `rest` is the rig's rest map with this clip's own channels already
+    captured BEFORE its keys were written; it is completed here (the
+    legacy inference in `_rest_value`) and written back. `measured_end` is
+    the unrounded keyed maximum, see `_pad_boundaries`.
+
+    Lived as closures inside author_clip until #798, which is exactly why
+    retarget_clip ran no such pass: a retargeted take registered `joints:
+    []`, so the author_clip that came next pinned nothing against it and
+    the slot joints held the walk's last pose across the whole idle take
+    (MEASURED, evals/clip_edges_probe_798 section B). Returns
+    `padded_channels`, `held_channels` and `back_filled`, the three
+    result fields both producers now report.
+    """
+    by_short: Dict[str, List[str]] = {}
+    for j in joints:
+        by_short.setdefault(_short(j), []).append(j)
+    root_translate_plugs = ["%s.%s" % (root_long, a) for a in TRANSLATE_ATTRS]
+
+    def _pin_plugs(short: str) -> Tuple[List[str], str]:
+        """The same resolution as `_rot_plugs`, but paired with the
+        warning naming WHY a channel could not be pinned - used by the
+        padding/back-fill passes below, which must say so. (The
+        rest-capture pass above just skips silently: there is nothing yet
+        to warn about - a channel that never gets pinned by anyone never
+        needed a rest value.)"""
+        matches = by_short.get(short) or []
+        if not matches:
+            return [], (
+                "a clip declares joint %r, which is not under this root "
+                "any more - it cannot be pinned at rest, so takes that do "
+                "not declare it may inherit a neighbour's value" % short)
+        if len(matches) > 1:
+            return [], (
+                "joint short name %r is ambiguous under this root (%s) - "
+                "it cannot be pinned at rest, so takes that do not declare "
+                "it may inherit a neighbour's value"
+                % (short, ", ".join(sorted(matches))))
+        return ["%s.%s" % (matches[0], a) for a in ROTATE_ATTRS], ""
+
+    # --- the self-contained rule (#718) --------------------------------
+    # All clips share ONE curve per channel, so a channel this clip never
+    # mentions would hold whatever a neighbour left on it - forwards from
+    # the previous clip's last key, and BACKWARDS from a later clip's
+    # first key. Both are pinned here, and both are reported.
+    theirs = clipmath.channel_union(kept)
+    # #718 final review Fix 3: `mine`'s setdefault (above) only covers
+    # weight channels THIS clip declares. A weight channel declared solely
+    # by an earlier (possibly pre-#718 legacy) clip needs the same
+    # by-rule 0.0 - without it, a legacy clip's weight channel falls
+    # through to `_rest_value`'s curve-inference fallback and gets pinned
+    # at whatever that legacy clip happened to key FIRST (e.g. a blink
+    # held open at 1.0), which is a visibly wrong pose in the exported
+    # take. Weights-all-zero IS the reset (phase 5), for a legacy channel
+    # exactly as much as for one this clip itself introduces.
+    for alias in theirs["weight_channels"]:
+        node = alias_map.get(alias)
+        if node is not None and not isinstance(node, HandlerError):
+            rest.setdefault(_rest_key("%s.%s" % (node, alias)), 0.0)
+    # #718 final review Fix 1: pad over `theirs` UNION `mine`, not
+    # `theirs` alone, whenever an earlier clip exists on this rig. The
+    # excuse the wave-1 comment gave for skipping `mine \ theirs` - "a
+    # channel only this clip touches has no other clip's keys on its
+    # curve to bleed in" - is FALSE: the BACK-FILL pass below writes rest
+    # keys onto exactly that curve, at every earlier clip's own boundary
+    # frames, and the nearest of those can sit as little as GAP_FRAMES+1
+    # frames before this clip's start. So a channel this clip introduces
+    # still needs its own boundary pins - not because a neighbour
+    # declares it, but because THIS call's own back-fill puts foreign
+    # keys on that curve outside this clip's range. Gated on `kept` being
+    # non-empty: a rig's first clip has no earlier clip to back-fill
+    # against, so its own channels are left exactly as authored - no new
+    # keys, no auto-tangent perturbation.
+    pad_joints = theirs["joints"]
+    pad_weight_channels = theirs["weight_channels"]
+    pad_root_position = theirs["root_position_used"]
+    if kept:
+        pad_joints = sorted(set(pad_joints) | set(mine["joints"]))
+        pad_weight_channels = sorted(
+            set(pad_weight_channels) | set(mine["weight_channels"]))
+        pad_root_position = pad_root_position or mine["root_position_used"]
+    padded_channels: List[str] = []
+    held_channels: List[str] = []
+    back_filled_channels: List[str] = []
+
+    def _pin(plug: str, frames: List[int], value: float) -> List[int]:
+        """Pin `plug` at `value` on each of `frames`. Returns the frames
+        whose write did NOT land (#796 review round 5 C) - the same
+        observation the authored keys make, at the fourth setKeyframe call
+        site. The tangent edit is skipped for a frame that has no key:
+        there is nothing there to tangent."""
+        node, attr = plug.rsplit(".", 1)
+        lost: List[int] = []
+        for frame in frames:
+            if not key_landed(cmds.setKeyframe(node, attribute=attr,
+                                               time=frame, value=value)):
+                lost.append(frame)
+                continue
+            # #718 review Fix 2: a pinned key is scoped to its own frame,
+            # and FLAT - not the clip's interpolation. A pin is not
+            # authored motion; flat is the honest type, and it keeps a
+            # pinned span genuinely flat regardless of what interpolation
+            # this clip was authored with.
+            cmds.keyTangent(node, attribute=attr, time=(frame, frame),
+                            edit=True, inTangentType="flat",
+                            outTangentType="flat")
+        return lost
+
+    # #718 review wave 2 Fix 1+2 (one helper, not three copies): the pin
+    # VALUE, not just the condition. A missing boundary is pinned at rest
+    # ONLY when this clip never keyed the plug at all anywhere in its own
+    # [start_frame, end_frame] - the isolation case. When it DID key the
+    # plug somewhere in its own range (a sparse declared channel, or a
+    # fractional-time key that rounds short of the boundary), pinning rest
+    # there would invent motion the clip never authored: rewrite a flat
+    # hold into a rise-and-fall, or rewrite an authored final pose into a
+    # rest pose 0.01 frames later. So the missing start pins at the value
+    # the plug held at its OWN earliest key (min(own)), and the missing
+    # end pins at the value it held at its OWN latest key (max(own)) -
+    # exactly what a lone clip's curve would already hold there, read the
+    # same way `_rest_value` reads any evaluated value: `getAttr(time=t)`.
+    # #718 review wave 3 Fix: `own`'s upper bound is `measured_end` (the
+    # UNROUNDED keyed maximum), not `end_frame`. `end_frame` is
+    # int(round(measured_end)), which rounds DOWN whenever the last key's
+    # fractional part is below 0.5 - a key at frame 14.4 with end_frame 14
+    # would sit outside [start_frame, end_frame] and get filtered out of
+    # `own` entirely. That silently swaps this clip's OWN final value for
+    # whichever earlier value happened to survive the filter (its first
+    # key, if the channel has no other keys in range), flattening the
+    # authored motion; or, if the fractional key was the plug's ONLY key
+    # in range, empties `own` altogether and misclassifies a channel this
+    # clip genuinely animates as "rest". `measured_end` is already this
+    # clip's true keyed span (computed above, per #636) - reuse it rather
+    # than re-deriving the same quantity.
+    def _pad_boundaries(plug: str) -> str:
+        """Pin `plug`'s missing boundary frame(s) of THIS clip's own
+        [start_frame, end_frame]. Returns "held", "rest", or "" (nothing
+        was missing)."""
+        times = set(cmds.keyframe(plug, query=True) or [])
+        missing = [f for f in (start_frame, end_frame)
+                  if float(f) not in times]
+        if not missing:
+            return ""
+        own = sorted(t for t in times
+                     if start_frame <= t <= max(end_frame, measured_end))
+        if not own:
+            lost = _pin(plug, missing, _rest_value(cmds, plug, rest,
+                                                   warnings))
+        else:
+            lost = []
+            for frame in missing:
+                source = own[0] if frame == start_frame else own[-1]
+                lost += _pin(plug, [frame],
+                             float(cmds.getAttr(plug, time=source)))
+        # #796 review round 5 C: a pin that did not land is not a pin. The
+        # caller counts this verdict into `padded_channels`/
+        # `held_channels`, so returning one for a plug where nothing was
+        # written is exactly the false-green round 4 A closed on the
+        # SKIPPED channels - the same hole, one step further in.
+        if lost:
+            warnings.append(_lost_pin_note(plug, lost,
+                                           swallowed_by(cmds, plug)))
+        if len(lost) == len(missing):
+            return ""
+        return "rest" if not own else "held"
+
+    def _back_fill(plugs: List[str], frames: List[int]) -> bool:
+        """Pin every plug of one channel at rest across `frames`. True when
+        at least one of those writes landed - which is the only thing that
+        makes `back_filled_channels` true (#796 review round 5 C)."""
+        landed = False
+        for plug in plugs:
+            lost = _pin(plug, frames, _rest_value(cmds, plug, rest,
+                                                  warnings))
+            if lost:
+                warnings.append(_lost_pin_note(plug, lost,
+                                               swallowed_by(cmds, plug)))
+            landed = landed or len(lost) < len(frames)
+        return landed
+
+    # #718 review Fix 1 (wave 1): pad by BOUNDARY-KEY PRESENCE, not by
+    # mention. A clip may declare a channel in `mine` (it names it on SOME
+    # key) while never keying it at its OWN first/last frame - `mine`
+    # alone can't tell whether the boundary is actually covered, so
+    # skipping a channel just because it's in `mine` let a neighbour's
+    # pose bleed across the boundary the clip never keyed.
+    #
+    # The set iterated is `pad_joints`/`pad_weight_channels`/
+    # `pad_root_position` (computed above, final review Fix 1) - `theirs`
+    # union `mine` when an earlier clip exists, `theirs` alone otherwise -
+    # not `theirs` by itself: see that block for why a channel this clip
+    # alone introduces still needs its own pins.
+    for short in pad_joints:
+        plugs, warning = _pin_plugs(short)
+        if not plugs:
+            warnings.append(warning)
+            continue
+        # #796 review round 4 A: the treatment the weight loop below has
+        # had since #771, which this loop never got. The per-channel
+        # refusal above asks only about the channels THIS call declares -
+        # precisely the ones a pad is NOT: `pad_joints` is other clips'
+        # channels unioned with this call's. Another clip's channel can
+        # have become driven out of band, `_pin`'s setKeyframe silently
+        # no-ops on it (measured), and reporting it "pinned" below would
+        # be false-green. A pad is not the caller's request, so it is
+        # SKIPPED and said - never refused, which would resurrect the
+        # closed loop round 2 opened. Only UNKEYABLE_KINDS skip: a
+        # pairBlend still gets its pin, for defect B's reason - and, since
+        # round 5 B, the same NOTE the declared path gives it.
+        free, notes = pad_pin_verdicts(
+            cmds, what, plugs[0].rsplit(".", 1)[0], ROTATE_ATTRS,
+            "rotate", "joint channel")
+        warnings.extend(notes)
+        if not free:
+            continue
+        kinds = {kind for kind in (_pad_boundaries(p) for p in free) if kind}
+        if "held" in kinds:
+            held_channels.append(short)
+        elif "rest" in kinds:
+            padded_channels.append(short)
+    for alias in pad_weight_channels:
+        node = alias_map.get(alias)
+        if node is None or isinstance(node, HandlerError):
+            warnings.append(
+                "a clip declares weight channel %r, which no mesh bound to "
+                "this skeleton carries any more - it cannot be pinned at "
+                "rest" % alias)
+            continue
+        # #771: another clip's declared channel can have become driven
+        # out-of-band (its curve deleted, then a corrective wired). _pin's
+        # setKeyframe would silently no-op on it (measured), so claiming
+        # "pinned" below would be false-green - skip and say so instead.
+        # ANY non-clip kind skips here, which is one kind wider than the
+        # joint loop above: this side's own refusal (refuse_driven_weight,
+        # #771) refuses every non-clip kind for a DECLARED weight, so the
+        # pad matches the refusal on its own side of the rig rather than
+        # the other side's.
+        if is_locked(cmds, "%s.%s" % (node, alias)):
+            warnings.append(_skip_pin_note("weight channel %r" % alias,
+                                           "is locked"))
+            continue
+        src, drive_kind = driven_weight_source(cmds, "%s.%s" % (node, alias))
+        if drive_kind is not None and drive_kind != "clip":
+            warnings.append(_skip_pin_note("weight channel %r" % alias,
+                                           "is driven by %s" % src))
+            continue
+        kind = _pad_boundaries("%s.%s" % (node, alias))
+        if kind == "held":
+            held_channels.append(alias)
+        elif kind == "rest":
+            padded_channels.append(alias)
+    if pad_root_position:
+        # Same #796 round 4 A treatment as the joint loop (and round 5 B's
+        # note with it): this loop had no guard of any kind, and a root
+        # another clip moves can have become driven out of band exactly
+        # like a joint channel.
+        free, notes = pad_pin_verdicts(
+            cmds, what, root_long, TRANSLATE_ATTRS, "translate",
+            "root translation channel")
+        warnings.extend(notes)
+        kinds = {kind for kind in (_pad_boundaries(p) for p in free) if kind}
+        if "held" in kinds:
+            held_channels.append("root_position")
+        elif "rest" in kinds:
+            padded_channels.append("root_position")
+    if padded_channels:
+        warnings.append(
+            "pinned %d channel(s) (%s) at rest at this clip's own boundary "
+            "frame(s) - it never keys them anywhere in its own range"
+            % (len(padded_channels), ", ".join(padded_channels)))
+    if held_channels:
+        warnings.append(
+            "pinned %d channel(s) (%s) at this clip's OWN held value at "
+            "its boundary frame(s) - it keys them elsewhere in its own "
+            "range, so the boundary is pinned at what that range would "
+            "hold there anyway, not at rest"
+            % (len(held_channels), ", ".join(held_channels)))
+
+    # BACKWARDS contamination: a curve holds its FIRST key's value
+    # backwards in time, so a channel this clip introduces would rewrite
+    # every earlier clip's pose for it. Pinning at rest across their
+    # ranges RESTORES what each of them measured when it was authored -
+    # this clip has no keys of its own inside an EARLIER clip's range (by
+    # construction: clips are always appended at the tail), so there is no
+    # "own held value" to prefer here - rest is always right.
+    their_frames = [f for r in kept
+                    for f in (r["start_frame"], r["end_frame"])]
+    if their_frames:
+        for short in mine["joints"]:
+            if short in theirs["joints"]:
+                continue
+            # Fix 3's guard applies here too: mine["joints"] normally can't
+            # be ambiguous (name resolution already refused it), but a key
+            # naming a joint by its FULL long name bypasses that check, so
+            # an ambiguous short name can still reach here.
+            plugs, warning = _pin_plugs(short)
+            if not plugs:
+                warnings.append(warning)
+                continue
+            if _back_fill(plugs, their_frames):
+                back_filled_channels.append(short)
+        for alias in mine["weight_channels"]:
+            if alias in theirs["weight_channels"]:
+                continue
+            if _back_fill(["%s.%s" % (alias_map[alias], alias)],
+                          their_frames):
+                back_filled_channels.append(alias)
+        if mine["root_position_used"] and not theirs["root_position_used"]:
+            if _back_fill(root_translate_plugs, their_frames):
+                back_filled_channels.append("root_position")
+    back_filled = {
+        "clips": [r["name"] for r in kept] if back_filled_channels else [],
+        "channels": back_filled_channels,
+    }
+    if back_filled_channels:
+        warnings.append(
+            "pinned %d channel(s) (%s) at rest across %s so their motion is "
+            "unchanged by this clip"
+            % (len(back_filled_channels), ", ".join(back_filled_channels),
+               ", ".join(back_filled["clips"])))
+    _write_rest(cmds, root_long, rest)
+    return {
+        "padded_channels": padded_channels,
+        "held_channels": held_channels,
+        "back_filled": back_filled,
+    }
+
+
 # Every top-level key author_clip reads. Anything else is refused rather
 # than ignored (#767): an unread key does not fail, it succeeds and does
 # something else.
@@ -1300,6 +1704,35 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
         declared_groups.append((root_long, TRANSLATE_ATTRS, "translate"))
     warnings: List[str] = guard_declared_channels(
         cmds, "author_clip", declared_groups)
+    # #798: the third refusal, for a LOCK. MEASURED: setKeyframe on a
+    # locked plug returns 0 and creates nothing (a driven key's tell), and
+    # the root's `xform` pose write drops a locked child WITHOUT raising -
+    # so a locked root.translateY shipped a clip declaring root_position
+    # with one of its three channels never written. A lock is a static,
+    # rigger-set refusal of the very write this clip needs, so it is
+    # refused before the checkpoint (#802's rule) with plugwrite's own
+    # hint; every other kind of obstacle stays with the guard above.
+    # Declared channels only, like everything else here: a lock elsewhere
+    # on the rig blocks nothing.
+    from . import plugwrite  # noqa: PLC0415 - plugwrite imports clip lazily
+    # Weight channels too (review catch): the weight guard above asks
+    # about CONNECTIONS, and a locked, unconnected weight answered it
+    # with nothing - then checkpointed and shipped without the channel.
+    locked = [b for b in plugwrite.blockers(
+        cmds, ["%s.%s" % (node, a) for node, attrs, _ in declared_groups
+               for a in attrs]
+        + ["%s.%s" % (alias_map[a], a) for a in weight_channels])
+        if b.reason == "locked"]
+    if locked:
+        plugwrite.refuse(
+            "author_clip", locked,
+            consequence="a key on a locked plug measurably does not land "
+                        "(setKeyframe reports 0), so the clip would ship "
+                        "declaring a channel it never keyed; nothing was "
+                        "written",
+            hint_tail="or leave that channel out of this clip's keys - a "
+                      "lock on a channel the clip does not declare blocks "
+                      "nothing")
 
     if loop:
         violations = clipmath.loop_violations(resolved_keys[0],
@@ -1384,27 +1817,6 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
         if len(matches) != 1:
             return []
         return ["%s.%s" % (matches[0], a) for a in ROTATE_ATTRS]
-
-    def _pin_plugs(short: str) -> Tuple[List[str], str]:
-        """The same resolution as `_rot_plugs`, but paired with the
-        warning naming WHY a channel could not be pinned - used by the
-        padding/back-fill passes below, which must say so. (The
-        rest-capture pass above just skips silently: there is nothing yet
-        to warn about - a channel that never gets pinned by anyone never
-        needed a rest value.)"""
-        matches = by_short.get(short) or []
-        if not matches:
-            return [], (
-                "a clip declares joint %r, which is not under this root "
-                "any more - it cannot be pinned at rest, so takes that do "
-                "not declare it may inherit a neighbour's value" % short)
-        if len(matches) > 1:
-            return [], (
-                "joint short name %r is ambiguous under this root (%s) - "
-                "it cannot be pinned at rest, so takes that do not declare "
-                "it may inherit a neighbour's value"
-                % (short, ", ".join(sorted(matches))))
-        return ["%s.%s" % (matches[0], a) for a in ROTATE_ATTRS], ""
 
     root_translate_plugs = ["%s.%s" % (root_long, a) for a in TRANSLATE_ATTRS]
     # What this call ASKED for. `mine` - what it actually GOT - is derived
@@ -1615,7 +2027,8 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     # under both outcomes.
     for plug in sorted(lost_writes):
         warnings.append(_lost_write_note("author_clip", plug,
-                                         lost_writes[plug]))
+                                         lost_writes[plug],
+                                         swallowed_by(cmds, plug)))
     mine = {
         "joints": sorted({_short(j) for j in landed_joints}),
         "weight_channels": [a for a in weight_channels
@@ -1631,279 +2044,16 @@ def author_clip(params: Dict[str, Any]) -> Dict[str, Any]:
             % (sum(lost_writes.values()), name))
 
     # --- the self-contained rule (#718) --------------------------------
-    # All clips share ONE curve per channel, so a channel this clip never
-    # mentions would hold whatever a neighbour left on it - forwards from
-    # the previous clip's last key, and BACKWARDS from a later clip's
-    # first key. Both are pinned here, and both are reported.
-    theirs = clipmath.channel_union(kept)
-    # #718 final review Fix 3: `mine`'s setdefault (above) only covers
-    # weight channels THIS clip declares. A weight channel declared solely
-    # by an earlier (possibly pre-#718 legacy) clip needs the same
-    # by-rule 0.0 - without it, a legacy clip's weight channel falls
-    # through to `_rest_value`'s curve-inference fallback and gets pinned
-    # at whatever that legacy clip happened to key FIRST (e.g. a blink
-    # held open at 1.0), which is a visibly wrong pose in the exported
-    # take. Weights-all-zero IS the reset (phase 5), for a legacy channel
-    # exactly as much as for one this clip itself introduces.
-    for alias in theirs["weight_channels"]:
-        node = alias_map.get(alias)
-        if node is not None and not isinstance(node, HandlerError):
-            rest.setdefault(_rest_key("%s.%s" % (node, alias)), 0.0)
-    # #718 final review Fix 1: pad over `theirs` UNION `mine`, not
-    # `theirs` alone, whenever an earlier clip exists on this rig. The
-    # excuse the wave-1 comment gave for skipping `mine \ theirs` - "a
-    # channel only this clip touches has no other clip's keys on its
-    # curve to bleed in" - is FALSE: the BACK-FILL pass below writes rest
-    # keys onto exactly that curve, at every earlier clip's own boundary
-    # frames, and the nearest of those can sit as little as GAP_FRAMES+1
-    # frames before this clip's start. So a channel this clip introduces
-    # still needs its own boundary pins - not because a neighbour
-    # declares it, but because THIS call's own back-fill puts foreign
-    # keys on that curve outside this clip's range. Gated on `kept` being
-    # non-empty: a rig's first clip has no earlier clip to back-fill
-    # against, so its own channels are left exactly as authored - no new
-    # keys, no auto-tangent perturbation.
-    pad_joints = theirs["joints"]
-    pad_weight_channels = theirs["weight_channels"]
-    pad_root_position = theirs["root_position_used"]
-    if kept:
-        pad_joints = sorted(set(pad_joints) | set(mine["joints"]))
-        pad_weight_channels = sorted(
-            set(pad_weight_channels) | set(mine["weight_channels"]))
-        pad_root_position = pad_root_position or mine["root_position_used"]
-    padded_channels: List[str] = []
-    held_channels: List[str] = []
-    back_filled_channels: List[str] = []
-
-    def _pin(plug: str, frames: List[int], value: float) -> List[int]:
-        """Pin `plug` at `value` on each of `frames`. Returns the frames
-        whose write did NOT land (#796 review round 5 C) - the same
-        observation the authored keys make, at the fourth setKeyframe call
-        site. The tangent edit is skipped for a frame that has no key:
-        there is nothing there to tangent."""
-        node, attr = plug.rsplit(".", 1)
-        lost: List[int] = []
-        for frame in frames:
-            if not key_landed(cmds.setKeyframe(node, attribute=attr,
-                                               time=frame, value=value)):
-                lost.append(frame)
-                continue
-            # #718 review Fix 2: a pinned key is scoped to its own frame,
-            # and FLAT - not the clip's interpolation. A pin is not
-            # authored motion; flat is the honest type, and it keeps a
-            # pinned span genuinely flat regardless of what interpolation
-            # this clip was authored with.
-            cmds.keyTangent(node, attribute=attr, time=(frame, frame),
-                            edit=True, inTangentType="flat",
-                            outTangentType="flat")
-        return lost
-
-    # #718 review wave 2 Fix 1+2 (one helper, not three copies): the pin
-    # VALUE, not just the condition. A missing boundary is pinned at rest
-    # ONLY when this clip never keyed the plug at all anywhere in its own
-    # [start_frame, end_frame] - the isolation case. When it DID key the
-    # plug somewhere in its own range (a sparse declared channel, or a
-    # fractional-time key that rounds short of the boundary), pinning rest
-    # there would invent motion the clip never authored: rewrite a flat
-    # hold into a rise-and-fall, or rewrite an authored final pose into a
-    # rest pose 0.01 frames later. So the missing start pins at the value
-    # the plug held at its OWN earliest key (min(own)), and the missing
-    # end pins at the value it held at its OWN latest key (max(own)) -
-    # exactly what a lone clip's curve would already hold there, read the
-    # same way `_rest_value` reads any evaluated value: `getAttr(time=t)`.
-    # #718 review wave 3 Fix: `own`'s upper bound is `measured_end` (the
-    # UNROUNDED keyed maximum), not `end_frame`. `end_frame` is
-    # int(round(measured_end)), which rounds DOWN whenever the last key's
-    # fractional part is below 0.5 - a key at frame 14.4 with end_frame 14
-    # would sit outside [start_frame, end_frame] and get filtered out of
-    # `own` entirely. That silently swaps this clip's OWN final value for
-    # whichever earlier value happened to survive the filter (its first
-    # key, if the channel has no other keys in range), flattening the
-    # authored motion; or, if the fractional key was the plug's ONLY key
-    # in range, empties `own` altogether and misclassifies a channel this
-    # clip genuinely animates as "rest". `measured_end` is already this
-    # clip's true keyed span (computed above, per #636) - reuse it rather
-    # than re-deriving the same quantity.
-    def _pad_boundaries(plug: str) -> str:
-        """Pin `plug`'s missing boundary frame(s) of THIS clip's own
-        [start_frame, end_frame]. Returns "held", "rest", or "" (nothing
-        was missing)."""
-        times = set(cmds.keyframe(plug, query=True) or [])
-        missing = [f for f in (start_frame, end_frame)
-                  if float(f) not in times]
-        if not missing:
-            return ""
-        own = sorted(t for t in times
-                     if start_frame <= t <= max(end_frame, measured_end))
-        if not own:
-            lost = _pin(plug, missing, _rest_value(cmds, plug, rest,
-                                                   warnings))
-        else:
-            lost = []
-            for frame in missing:
-                source = own[0] if frame == start_frame else own[-1]
-                lost += _pin(plug, [frame],
-                             float(cmds.getAttr(plug, time=source)))
-        # #796 review round 5 C: a pin that did not land is not a pin. The
-        # caller counts this verdict into `padded_channels`/
-        # `held_channels`, so returning one for a plug where nothing was
-        # written is exactly the false-green round 4 A closed on the
-        # SKIPPED channels - the same hole, one step further in.
-        if lost:
-            warnings.append(_lost_pin_note(plug, lost))
-        if len(lost) == len(missing):
-            return ""
-        return "rest" if not own else "held"
-
-    def _back_fill(plugs: List[str], frames: List[int]) -> bool:
-        """Pin every plug of one channel at rest across `frames`. True when
-        at least one of those writes landed - which is the only thing that
-        makes `back_filled_channels` true (#796 review round 5 C)."""
-        landed = False
-        for plug in plugs:
-            lost = _pin(plug, frames, _rest_value(cmds, plug, rest,
-                                                  warnings))
-            if lost:
-                warnings.append(_lost_pin_note(plug, lost))
-            landed = landed or len(lost) < len(frames)
-        return landed
-
-    # #718 review Fix 1 (wave 1): pad by BOUNDARY-KEY PRESENCE, not by
-    # mention. A clip may declare a channel in `mine` (it names it on SOME
-    # key) while never keying it at its OWN first/last frame - `mine`
-    # alone can't tell whether the boundary is actually covered, so
-    # skipping a channel just because it's in `mine` let a neighbour's
-    # pose bleed across the boundary the clip never keyed.
-    #
-    # The set iterated is `pad_joints`/`pad_weight_channels`/
-    # `pad_root_position` (computed above, final review Fix 1) - `theirs`
-    # union `mine` when an earlier clip exists, `theirs` alone otherwise -
-    # not `theirs` by itself: see that block for why a channel this clip
-    # alone introduces still needs its own pins.
-    for short in pad_joints:
-        plugs, warning = _pin_plugs(short)
-        if not plugs:
-            warnings.append(warning)
-            continue
-        # #796 review round 4 A: the treatment the weight loop below has
-        # had since #771, which this loop never got. The per-channel
-        # refusal above asks only about the channels THIS call declares -
-        # precisely the ones a pad is NOT: `pad_joints` is other clips'
-        # channels unioned with this call's. Another clip's channel can
-        # have become driven out of band, `_pin`'s setKeyframe silently
-        # no-ops on it (measured), and reporting it "pinned" below would
-        # be false-green. A pad is not the caller's request, so it is
-        # SKIPPED and said - never refused, which would resurrect the
-        # closed loop round 2 opened. Only UNKEYABLE_KINDS skip: a
-        # pairBlend still gets its pin, for defect B's reason - and, since
-        # round 5 B, the same NOTE the declared path gives it.
-        free, notes = pad_pin_verdicts(
-            cmds, "author_clip", plugs[0].rsplit(".", 1)[0], ROTATE_ATTRS,
-            "rotate", "joint channel")
-        warnings.extend(notes)
-        if not free:
-            continue
-        kinds = {kind for kind in (_pad_boundaries(p) for p in free) if kind}
-        if "held" in kinds:
-            held_channels.append(short)
-        elif "rest" in kinds:
-            padded_channels.append(short)
-    for alias in pad_weight_channels:
-        node = alias_map.get(alias)
-        if node is None or isinstance(node, HandlerError):
-            warnings.append(
-                "a clip declares weight channel %r, which no mesh bound to "
-                "this skeleton carries any more - it cannot be pinned at "
-                "rest" % alias)
-            continue
-        # #771: another clip's declared channel can have become driven
-        # out-of-band (its curve deleted, then a corrective wired). _pin's
-        # setKeyframe would silently no-op on it (measured), so claiming
-        # "pinned" below would be false-green - skip and say so instead.
-        # ANY non-clip kind skips here, which is one kind wider than the
-        # joint loop above: this side's own refusal (refuse_driven_weight,
-        # #771) refuses every non-clip kind for a DECLARED weight, so the
-        # pad matches the refusal on its own side of the rig rather than
-        # the other side's.
-        src, drive_kind = driven_weight_source(cmds, "%s.%s" % (node, alias))
-        if drive_kind is not None and drive_kind != "clip":
-            warnings.append(_skip_pin_note("weight channel %r" % alias, src))
-            continue
-        kind = _pad_boundaries("%s.%s" % (node, alias))
-        if kind == "held":
-            held_channels.append(alias)
-        elif kind == "rest":
-            padded_channels.append(alias)
-    if pad_root_position:
-        # Same #796 round 4 A treatment as the joint loop (and round 5 B's
-        # note with it): this loop had no guard of any kind, and a root
-        # another clip moves can have become driven out of band exactly
-        # like a joint channel.
-        free, notes = pad_pin_verdicts(
-            cmds, "author_clip", root_long, TRANSLATE_ATTRS, "translate",
-            "root translation channel")
-        warnings.extend(notes)
-        kinds = {kind for kind in (_pad_boundaries(p) for p in free) if kind}
-        if "held" in kinds:
-            held_channels.append("root_position")
-        elif "rest" in kinds:
-            padded_channels.append("root_position")
-    if padded_channels:
-        warnings.append(
-            "pinned %d channel(s) (%s) at rest at this clip's own boundary "
-            "frame(s) - it never keys them anywhere in its own range"
-            % (len(padded_channels), ", ".join(padded_channels)))
-    if held_channels:
-        warnings.append(
-            "pinned %d channel(s) (%s) at this clip's OWN held value at "
-            "its boundary frame(s) - it keys them elsewhere in its own "
-            "range, so the boundary is pinned at what that range would "
-            "hold there anyway, not at rest"
-            % (len(held_channels), ", ".join(held_channels)))
-
-    # BACKWARDS contamination: a curve holds its FIRST key's value
-    # backwards in time, so a channel this clip introduces would rewrite
-    # every earlier clip's pose for it. Pinning at rest across their
-    # ranges RESTORES what each of them measured when it was authored -
-    # this clip has no keys of its own inside an EARLIER clip's range (by
-    # construction: clips are always appended at the tail), so there is no
-    # "own held value" to prefer here - rest is always right.
-    their_frames = [f for r in kept
-                    for f in (r["start_frame"], r["end_frame"])]
-    if their_frames:
-        for short in mine["joints"]:
-            if short in theirs["joints"]:
-                continue
-            # Fix 3's guard applies here too: mine["joints"] normally can't
-            # be ambiguous (name resolution already refused it), but a key
-            # naming a joint by its FULL long name bypasses that check, so
-            # an ambiguous short name can still reach here.
-            plugs, warning = _pin_plugs(short)
-            if not plugs:
-                warnings.append(warning)
-                continue
-            if _back_fill(plugs, their_frames):
-                back_filled_channels.append(short)
-        for alias in mine["weight_channels"]:
-            if alias in theirs["weight_channels"]:
-                continue
-            if _back_fill(["%s.%s" % (alias_map[alias], alias)],
-                          their_frames):
-                back_filled_channels.append(alias)
-        if mine["root_position_used"] and not theirs["root_position_used"]:
-            if _back_fill(root_translate_plugs, their_frames):
-                back_filled_channels.append("root_position")
-    back_filled = {
-        "clips": [r["name"] for r in kept] if back_filled_channels else [],
-        "channels": back_filled_channels,
-    }
-    if back_filled_channels:
-        warnings.append(
-            "pinned %d channel(s) (%s) at rest across %s so their motion is "
-            "unchanged by this clip"
-            % (len(back_filled_channels), ", ".join(back_filled_channels),
-               ", ".join(back_filled["clips"])))
-    _write_rest(cmds, root_long, rest)
+    # Extracted to `make_self_contained` (#798) so retarget_clip, the
+    # repo's second clip producer, runs the identical pass: the closures
+    # that used to live here were the reason a retargeted take pinned
+    # nothing and was pinned against by nobody.
+    contained = make_self_contained(
+        cmds, "author_clip", root_long, joints, alias_map, start_frame,
+        end_frame, measured_end, kept, mine, rest, warnings)
+    padded_channels = contained["padded_channels"]
+    held_channels = contained["held_channels"]
+    back_filled = contained["back_filled"]
 
     # #796 review round 5 C: `mine` - what LANDED - not the declared set.
     # A record naming a channel with no curve is what every downstream

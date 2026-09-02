@@ -163,28 +163,52 @@ def _resolve_contact_joints(
 
 
 def _keyed_plugs(cmds, joints: List[str]) -> List[str]:
-    """Every joint rotate/translate plug an animCurve currently drives.
+    """Every joint rotate/translate plug a CLIP curve currently drives.
     `clip._joint_plugs` never lists a weight/custom channel, so skipping
-    those happens by construction, not a special case here."""
-    return sorted(clip._anim_curves(cmds, clip._joint_plugs(joints)))
+    those happens by construction, not a special case here.
+
+    The CLIP partition only (#798): the raw `type="animCurve"` query also
+    returns the U-typed set-driven-key nodes, which are indexed by DRIVER
+    VALUE rather than time. MEASURED (evals/clip_edges_probe_798): on such
+    a plug `getAttr(time=f)` answers the driver's constant at every f, the
+    re-key returns 0 every time, and the pass listed the channel as
+    smoothed having changed nothing. #796 built the partition for exactly
+    this; this was the one site that never asked it."""
+    return sorted(clip.clip_curve_plugs(
+        cmds, clip._anim_curves(cmds, clip._joint_plugs(joints))))
 
 
 def _run_filter_pass(cmds, joints: List[str], start_frame: int,
-                     end_frame: int, window: int) -> List[str]:
+                     end_frame: int, window: int,
+                     warnings: List[str]) -> List[str]:
     """Sample every currently-keyed channel at every integer frame of the
     clip's own [start_frame, end_frame], Savitzky-Golay smooth it, and
     re-key the smoothed values - one animCurve per plug, and NEVER a frame
     outside this range, so a neighbouring clip sharing the same shared
-    curve (#718) is untouched."""
+    curve (#718) is untouched.
+
+    Returns the channels whose re-key LANDED (#798, the #796 observed-
+    writes rule at this module's own setKeyframe site): a plug locked
+    after it was keyed samples fine and re-keys never - setKeyframe
+    reports 0 - and counting it would report a smoothing that did not
+    happen. A write that vanished is named, with its cause."""
     frames = list(range(start_frame, end_frame + 1))
     filtered: List[str] = []
     for plug in _keyed_plugs(cmds, joints):
         node, attr = plug.rsplit(".", 1)
         values = [float(cmds.getAttr(plug, time=f)) for f in frames]
         smoothed = mocapmath.smooth_track(values, window)
+        lost = 0
         for frame, value in zip(frames, smoothed):
-            cmds.setKeyframe(node, attribute=attr, time=frame, value=value)
-        filtered.append(plug)
+            if not clip.key_landed(cmds.setKeyframe(
+                    node, attribute=attr, time=frame, value=value)):
+                lost += 1
+        if lost:
+            warnings.append(clip._lost_write_note(
+                "clean_clip's filter pass", plug, lost,
+                clip.swallowed_by(cmds, plug)))
+        if lost < len(frames):
+            filtered.append(plug)
     return filtered
 
 
@@ -402,7 +426,7 @@ def clean_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     passes: List[str] = []
     if filter_enabled:
         filtered = _run_filter_pass(cmds, joints, start_frame, end_frame,
-                                    filter_window)
+                                    filter_window, warnings)
         passes.append("filter")
         if filtered:
             warnings.append(

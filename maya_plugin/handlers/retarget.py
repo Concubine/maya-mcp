@@ -441,48 +441,126 @@ def _teardown_hik(cmds, mel, characters: Sequence[Optional[str]], ns: str,
 # ---------------------------------------------------------------------------
 
 
-def not_self_contained_note(kept: Sequence[Dict[str, Any]]) -> str:
-    """The warning EVERY retargeted take owes its caller.
+def _weight_plugs(cmds, target_joints: List[str]) -> List[str]:
+    """Every blendShape weight plug on the meshes this rig moves - what
+    the replace cut has to clear, now that this producer pins weight
+    channels at its boundaries like author_clip does (#798 review 5)."""
+    alias_map = clip._weight_alias_map(
+        cmds, rigging._bound_meshes(cmds, set(target_joints)))
+    return sorted("%s.%s" % (node, alias) for alias, node in alias_map.items()
+                  if not isinstance(node, HandlerError))
 
-    Not conditional on neighbours (#796 review round 6 B). Returning None
-    for an empty `kept` covered only the ordering where clips already
-    exist, and the ordering that actually needs the warning is the normal
-    mocap workflow: retarget FIRST, author around it. The record this tool
-    registers declares `joints: []`, so a LATER author_clip pads nothing
-    against this take and its own boundary pins never cover it - the
-    neighbour's pose bleeds straight into the retargeted range, with the
-    take that has no neighbours yet being exactly the one nobody was told
-    about.
 
-    #796 review round 5, ASSESSED AND NOT FIXED (see the ticket): this tool
-    runs no #718 self-contained pad/back-fill pass. `bakeResults` writes the
-    15 HIK slot joints over this clip's own frames and nothing else, so a
-    channel some OTHER clip declares - a blendShape weight, a finger, a jaw
-    - keeps whatever that neighbour's curve holds there, forwards from its
-    last key or backwards from its first. author_clip pins exactly those
-    channels at rest at its own boundary frames; this tool does not, and
-    the record it writes declares no channel of its own either, so the NEXT
-    author_clip does not pin against it.
+def _rest_before_cut(cmds, root_long: str,
+                     slot_joints: Dict[str, str]) -> Dict[str, float]:
+    """The rig's rest map, with the root's TRANSLATION rest captured before
+    anything on this call mutates the scene (#798 review 3).
 
-    The fix is the whole padding pass, whose pieces are closures inside
-    author_clip - too large to lift safely on a code round that ends at a
-    live gate. Naming it costs nothing and is the difference between a take
-    that is wrong and a take that is wrong AND silent.
+    Translate curves are not disconnected by the stance window, so the
+    stance is the wrong moment for them on a RE-retarget: the replace cut
+    has just emptied the old bake's root curve and left the plug at a
+    meaningless static value, which `_capture_rest` would then record as
+    rest with no warning at all. Captured here instead, a curve-fed root
+    is skipped - the honest "no rest known" that `_rest_value` later
+    infers and WARNS about - and an unkeyed root is read at its bind.
     """
-    neighbours = (
-        "any channel %s declare(s) and this bake does not cover - a blend "
-        "weight, a finger, a jaw - holds whatever that clip's curve leaves "
-        "on it across this range, and this clip's own baked channels hold "
-        "their first value backwards across theirs; "
-        % ", ".join(repr(r["name"]) for r in kept)) if kept else ""
-    return (
-        "this take is NOT self-contained (#718's rule, which this tool "
-        "does not implement): it bakes the HIK slot joints over its own "
-        "frames only, and the clip record it registers declares no channel "
-        "of its own, so %sany clip authored AFTER this one pins nothing "
-        "against it and leaves its own pose showing through this range. "
-        "author_clip pins both boundaries; check the exported takes for a "
-        "neighbour's pose bleeding through" % neighbours)
+    rest = clip._rest_map(cmds, root_long)
+    if root_long in set(slot_joints.values()):
+        for attr in clip.TRANSLATE_ATTRS:
+            clip._capture_rest(cmds, "%s.%s" % (root_long, attr), rest)
+    return rest
+
+
+def _rest_at_stance(cmds, root_long: str, slot_joints: Dict[str, str],
+                    rest: Dict[str, float]) -> Dict[str, float]:
+    """Every ROTATION this bake is about to write, captured into `rest`
+    NOW - which must be while the rig stands at its stance (#798).
+
+    author_clip captures a channel's rest the moment before it keys it,
+    and the #718 pass pins against that record. This tool captured
+    nothing, so the author_clip that came next inferred a "rest" for a
+    baked joint from its EARLIEST KEY - the walk's first frame - and its
+    back-fill wrote that value over the walk's last frame (MEASURED,
+    evals/clip_edges_probe_798 section B: head.rotateX at walk01's end
+    became its start). Called inside the caller's `_stance_snapshot`
+    window: the rotate curves are disconnected there, so `_capture_rest`
+    reads the stance pose rather than skipping a plug some other clip
+    already drives, and a channel already recorded is left alone as
+    always. The root's translation is `_rest_before_cut`'s.
+    """
+    for j in sorted(set(slot_joints.values())):
+        for attr in clip.ROTATE_ATTRS:
+            clip._capture_rest(cmds, "%s.%s" % (j, attr), rest)
+    return rest
+
+
+def _finish_take(cmds, root_long: str, target_joints: List[str],
+                 slot_joints: Dict[str, str], name: str, bake_fps: int,
+                 start_frame: int, end_frame: int,
+                 kept: List[Dict[str, Any]], rest: Dict[str, float],
+                 warnings: List[str]) -> Dict[str, Any]:
+    """After the bake: say what it left, make the take self-contained, and
+    register it (#798).
+
+    `mine` is derived from the SCENE - the slot joints whose rotate
+    channels carry a clip curve keyed inside this take's range, and the
+    root's translation when it is a slot joint and got the same - never
+    from the list `bakeResults` was aimed at (#796's observed-writes
+    rule, at this producer's one write site). The record used to declare
+    `joints: []` for every retargeted take, which is why the author_clip
+    that came next pinned nothing against it. Then `clip.make_self_
+    contained` runs exactly as it does for author_clip: the neighbours'
+    channels this bake does not cover are pinned at rest at this take's
+    boundaries, and this take's own joints are pinned at rest across
+    every earlier clip's range.
+    """
+    slots = sorted(set(slot_joints.values()))
+    keyed = clip.clip_curve_plugs(
+        cmds, clip._anim_curves(cmds, clip._joint_plugs(slots)))
+    landed_joints = set()
+    root_landed = False
+    for plug in keyed:
+        times = cmds.keyframe(plug, query=True) or []
+        if not any(start_frame <= t <= end_frame for t in times):
+            continue
+        node, attr = plug.rsplit(".", 1)
+        if attr in clip.ROTATE_ATTRS:
+            landed_joints.add(clip._short(node))
+        elif node == root_long and attr in clip.TRANSLATE_ATTRS:
+            root_landed = True
+    if root_long not in slots:
+        # Review catch 2: the Hips slot's baked TRANSLATION carries this
+        # bake's root motion, and the clip model has a channel only for
+        # the ROOT's translation. Nothing declares, pads or back-fills it,
+        # so it holds across every neighbour and through this take's own
+        # boundaries - said here, since the model cannot carry it.
+        warnings.append(
+            "%s is the Hips slot but not this rig's root, so its baked "
+            "translation - the root motion of %r - sits outside the clip "
+            "model: no record declares it, nothing pins it at any clip's "
+            "boundary, and it holds across the neighbouring takes; make "
+            "the Hips joint the root to have it treated as root_position"
+            % (slot_joints.get("Hips", "the Hips joint"), name))
+    silent = [clip._short(j) for j in slots
+              if clip._short(j) not in landed_joints]
+    if silent:
+        warnings.append(
+            "the bake left no rotation curve keyed in frames %d-%d on %s - "
+            "those slot joints are not declared by %r, so nothing pins "
+            "them at its boundaries; check what drives them"
+            % (start_frame, end_frame, ", ".join(silent), name))
+    mine = {"joints": sorted(landed_joints), "weight_channels": [],
+            "root_position_used": root_landed}
+    alias_map = clip._weight_alias_map(
+        cmds, rigging._bound_meshes(cmds, set(target_joints)))
+    contained = clip.make_self_contained(
+        cmds, "retarget_clip", root_long, target_joints, alias_map,
+        start_frame, end_frame, float(end_frame), kept, mine, rest,
+        warnings)
+    clip.register_clip(cmds, root_long, name, bake_fps, start_frame,
+                       end_frame, loop=False, joints=mine["joints"],
+                       root_position_used=mine["root_position_used"])
+    return contained
 
 
 # The three channel groups with a COMPOUND: a connection can land on
@@ -789,16 +867,19 @@ def _retarget_bvh(path: str, root_param: str, name: str,
     # freed range is not reused, the new bake goes to the tail of every
     # OTHER clip.
     replaced, kept = clipmath.drop_record(records, name)
-    warnings.append(not_self_contained_note(kept))
+    # #798: the root's translation rest, read before the cut below can
+    # disturb it (see _rest_before_cut); the rotations follow at stance.
+    rest = _rest_before_cut(cmds, root_long, target_slot_joints)
 
     session.auto_checkpoint("retarget_clip")
     _set_bake_unit(cmds, bake_fps, warnings)
     if replaced is not None:
         # #796 review round 5 A: the cut is partitioned now (a driven-key
         # curve is indexed by driver VALUE, so a frame range would eat rig
-        # setup) and NAMES every plug it stepped around.
-        warnings.extend(clip.cut_replaced_range(cmds, target_joints,
-                                                replaced))
+        # setup) and NAMES every plug it stepped around. Weight plugs too
+        # (#798): this producer pins them at its boundaries now.
+        warnings.extend(clip.cut_replaced_range(
+            cmds, target_joints, replaced, _weight_plugs(cmds, target_joints)))
         warnings.append(
             "re-retargeted clip %r: cleared its old frames %d-%d before "
             "baking the new range - no other clip's motion changed"
@@ -814,6 +895,10 @@ def _retarget_bvh(path: str, root_param: str, name: str,
         target_hips_height = float(cmds.xform(
             target_slot_joints["Hips"], query=True, worldSpace=True,
             translation=True)[1])
+        # #798: the rotation rest this take's channels will be pinned
+        # at, read at the same stance the hips height is - before the
+        # bake writes over them.
+        _rest_at_stance(cmds, root_long, target_slot_joints, rest)
     finally:
         _stance_restore(cmds, stance_snapshot)
     source_hips_height = _source_hips_height(
@@ -899,8 +984,10 @@ def _retarget_bvh(path: str, root_param: str, name: str,
     finally:
         _teardown_hik(cmds, mel, characters, ns, warnings)
 
-    clip.register_clip(cmds, root_long, name, bake_fps, target_start_frame,
-                       bake_end_frame, loop=False)
+    contained = _finish_take(cmds, root_long, target_joints,
+                             target_slot_joints, name, bake_fps,
+                             target_start_frame, bake_end_frame, kept, rest,
+                             warnings)
     measures = _fold_measures(cmds, root_long, name, warnings)
 
     return {
@@ -910,6 +997,9 @@ def _retarget_bvh(path: str, root_param: str, name: str,
         "fps": bake_fps,
         "source_joints": len(bvh["joints"]),
         "measures": measures,
+        "padded_channels": contained["padded_channels"],
+        "held_channels": contained["held_channels"],
+        "back_filled": contained["back_filled"],
         "warnings": warnings,
     }
 
@@ -1033,15 +1123,16 @@ def _retarget_fbx(path: str, root_param: str, name: str,
         # identical block for the full rationale. `kept` (not `records`)
         # is what the new bake's start frame is computed from below.
         replaced, kept = clipmath.drop_record(records, name)
-        warnings.append(not_self_contained_note(kept))
+        rest = _rest_before_cut(cmds, root_long, target_slot_joints)
 
         session.auto_checkpoint("retarget_clip")
         _set_bake_unit(cmds, bake_fps, warnings)
         if replaced is not None:
             # #796 review round 5 A: same partitioned cut as the BVH route
             # above - see that block.
-            warnings.extend(clip.cut_replaced_range(cmds, target_joints,
-                                                    replaced))
+            warnings.extend(clip.cut_replaced_range(
+                cmds, target_joints, replaced,
+                _weight_plugs(cmds, target_joints)))
             warnings.append(
                 "re-retargeted clip %r: cleared its old frames %d-%d before "
                 "baking the new range - no other clip's motion changed"
@@ -1053,6 +1144,9 @@ def _retarget_fbx(path: str, root_param: str, name: str,
             target_hips_height = float(cmds.xform(
                 target_slot_joints["Hips"], query=True, worldSpace=True,
                 translation=True)[1])
+            # #798: same as the BVH route - the rotation rest is read at
+            # stance, before the bake writes over these channels.
+            _rest_at_stance(cmds, root_long, target_slot_joints, rest)
         finally:
             _stance_restore(cmds, stance_snapshot)
         prev_time = cmds.currentTime(query=True)
@@ -1128,8 +1222,10 @@ def _retarget_fbx(path: str, root_param: str, name: str,
     finally:
         _teardown_hik(cmds, mel, characters, ns, warnings)
 
-    clip.register_clip(cmds, root_long, name, bake_fps, target_start_frame,
-                       bake_end_frame, loop=False)
+    contained = _finish_take(cmds, root_long, target_joints,
+                             target_slot_joints, name, bake_fps,
+                             target_start_frame, bake_end_frame, kept, rest,
+                             warnings)
     measures = _fold_measures(cmds, root_long, name, warnings)
 
     return {
@@ -1139,6 +1235,9 @@ def _retarget_fbx(path: str, root_param: str, name: str,
         "fps": bake_fps,
         "source_joints": len(imported_joints),
         "measures": measures,
+        "padded_channels": contained["padded_channels"],
+        "held_channels": contained["held_channels"],
+        "back_filled": contained["back_filled"],
         "warnings": warnings,
     }
 
