@@ -12,10 +12,10 @@ nodes and nothing else - the etch_text finally pattern from M1.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Tuple
 
 from ..dispatcher import HandlerError, refuse_inert, require_known_keys
-from . import material, naming, pbr
+from . import material, naming, orphans, pbr
 
 RECIPES = ("noise_bump", "ramp_gradient", "layered_mask", "file_texture")
 # Which semantic slot each recipe drives.
@@ -87,13 +87,20 @@ def _validate_number(name: str, value: Any) -> float:
     return float(value)
 
 
+def _node(cmds, tracker, node_type: str, base: str, **flags) -> str:
+    """Mint a recipe node under `base`, or the first free _NNN suffix. The
+    tracker records the node AND the name it wanted: after the previous
+    network on the slot is swept (#812) the base name is usually free
+    again, and the new node takes it back."""
+    return tracker(cmds.shadingNode(
+        node_type, name=naming.unique_name(cmds, base), **flags), base)
+
+
 def _noise_bump(cmds, tracker, shader, attr, params) -> None:
     scale = _validate_number("scale", params.get("scale", 1.0))
     depth = _validate_number("depth", params.get("depth", 0.4))
-    noise = tracker(cmds.shadingNode("noise", asTexture=True,
-                                     name=naming.unique_name(cmds, "mcpTex_noise")))
-    bump = tracker(cmds.shadingNode("bump2d", asUtility=True,
-                                    name=naming.unique_name(cmds, "mcpTex_bump")))
+    noise = _node(cmds, tracker, "noise", "mcpTex_noise", asTexture=True)
+    bump = _node(cmds, tracker, "bump2d", "mcpTex_bump", asUtility=True)
     cmds.setAttr(noise + ".frequency", 8.0 * scale)
     cmds.setAttr(bump + ".bumpDepth", depth)
     cmds.connectAttr(noise + ".outColorR", bump + ".bumpValue", force=True)
@@ -122,17 +129,14 @@ def _wire_color_output(cmds, node: str, shader: str, attr: str) -> None:
 
 
 def _ramp_gradient(cmds, tracker, shader, attr, params) -> None:
-    ramp = tracker(cmds.shadingNode("ramp", asTexture=True,
-                                    name=naming.unique_name(cmds, "mcpTex_ramp")))
+    ramp = _node(cmds, tracker, "ramp", "mcpTex_ramp", asTexture=True)
     _wire_color_output(cmds, ramp, shader, attr)
 
 
 def _layered_mask(cmds, tracker, shader, attr, params) -> None:
-    layered = tracker(cmds.shadingNode(
-        "layeredTexture", asTexture=True,
-        name=naming.unique_name(cmds, "mcpTex_layered")))
-    mask = tracker(cmds.shadingNode(
-        "noise", asTexture=True, name=naming.unique_name(cmds, "mcpTex_mask")))
+    layered = _node(cmds, tracker, "layeredTexture", "mcpTex_layered",
+                    asTexture=True)
+    mask = _node(cmds, tracker, "noise", "mcpTex_mask", asTexture=True)
     cmds.connectAttr(mask + ".outAlpha", layered + ".inputs[0].alpha", force=True)
     cmds.connectAttr(layered + ".outColor", "%s.%s" % (shader, attr), force=True)
 
@@ -144,8 +148,7 @@ def _file_texture(cmds, tracker, shader, attr, params) -> None:
             "the file_texture recipe requires file_path",
             hint="pass an absolute path to an image file",
         )
-    node = tracker(cmds.shadingNode("file", asTexture=True,
-                                    name=naming.unique_name(cmds, "mcpTex_file")))
+    node = _node(cmds, tracker, "file", "mcpTex_file", asTexture=True)
     cmds.setAttr(node + ".fileTextureName", str(path), type="string")
     _wire_color_output(cmds, node, shader, attr)
 
@@ -228,15 +231,46 @@ def apply_texture_recipe(params: Dict[str, Any]) -> Dict[str, Any]:
     attr = material.resolve_slot(shader_type, slot)
 
     created: List[str] = []
+    claims: List[Tuple[str, str]] = []
 
-    def tracker(node: str) -> str:
+    def tracker(node: str, wanted: str) -> str:
         created.append(node)
+        claims.append((node, wanted))
         return node
 
+    # What the slot wears NOW - an earlier recipe's ramp / noise+bump2d /
+    # layered+mask, or assign_pbr's file node and its place2dTexture two
+    # hops up. Captured before the builder's force-connect replaces the
+    # edge this walk follows. MEASURED (evals/recipe_orphans_probe.py, Maya
+    # 2027, #812): Maya never reaps what that connection displaces - the
+    # old node stays, wired only to defaultTextureList1 or
+    # defaultRenderUtilityList1, and the new one is minted as
+    # mcpTex_ramp_001. assign_pbr over a recipe slot already sweeps (#804);
+    # this is the other direction.
+    target = "%s.%s" % (shader, attr)
+    stale = orphans.upstream_network(cmds, target)
+
+    warnings: List[str] = []
     try:
         _BUILDERS[recipe](cmds, tracker, shader, attr, recipe_params)
+        # Sweep what nothing real uses any more - never anything this call
+        # built, and never a node something else still reads (a ramp the
+        # user wired into a second shader survives, and is named).
+        swept, survivors = orphans.sweep(
+            cmds, [n for n in stale if n not in created])
+        warnings.extend(orphans.survivor_warnings(
+            survivors, "re-applying %s on %s" % (recipe, target)))
+        # The swept nodes held the names the new ones were meant to have.
+        for node, wanted in claims:
+            if node != wanted and not cmds.objExists(wanted):
+                renamed = cmds.rename(node, wanted)
+                # `created` follows the rename at once: a raise on the next
+                # one must still let the failure sweep find this node.
+                created[:] = [renamed if n == node else n for n in created]
     except Exception:
-        # zero orphans: sweep exactly what this call built, nothing else
+        # zero orphans: sweep exactly what this call built, nothing else -
+        # the old network is untouched by a failure, whether or not the
+        # builder got as far as displacing it
         for node in reversed(created):
             if cmds.objExists(node):
                 try:
@@ -245,7 +279,6 @@ def apply_texture_recipe(params: Dict[str, Any]) -> Dict[str, Any]:
                     pass
         raise
 
-    warnings: List[str] = []
     if recipe != "file_texture":
         warnings.append(
             "this recipe builds a procedural network that Maya's FBX "
@@ -273,5 +306,6 @@ def apply_texture_recipe(params: Dict[str, Any]) -> Dict[str, Any]:
         "recipe": recipe,
         "slot": slot,
         "nodes": created,
+        "replaced": swept,
         "warnings": warnings,
     }

@@ -118,19 +118,51 @@ class FakeCmds:
             return "shadingEngine"
         return "transform"   # a DAG transform, e.g. |torso
 
-    def listConnections(self, plug, type=None, source=False,
+    def listConnections(self, plug, type=None, source=True,
                         destination=True, plugs=False, **kw):
+        # Maya's defaults are source=True AND destination=True, and the
+        # direction flags select which end of each edge is answered. Until
+        # #812 this fake answered SOURCES whatever the flags said, so
+        # orphans.real_outputs (source=False, destination=True) read a
+        # bump2d's noise as "something still using it" and the sweep it
+        # gates could never be modelled here.
         self._require(plug.split(".")[0])
         node = plug.split(".")[0]
         has_attr = "." in plug
-        if has_attr:
-            srcs = list(self.conns.get(plug) or [])
-        else:
-            srcs = [s for dst, lst in self.conns.items()
-                    if dst.split(".")[0] == node for s in lst]
-        if not srcs:
+        hits = []
+        if source:
+            if has_attr:
+                hits += list(self.conns.get(plug) or [])
+            else:
+                hits += [s for dst, lst in self.conns.items()
+                         if dst.split(".")[0] == node for s in lst]
+        if destination:
+            for dst, lst in self.conns.items():
+                for s in lst:
+                    if (s == plug) if has_attr else (s.split(".")[0] == node):
+                        hits.append(dst)
+        if not hits:
             return None
-        return srcs if plugs else [s.split(".")[0] for s in srcs]
+        return hits if plugs else list(dict.fromkeys(h.split(".")[0] for h in hits))
+
+    def rename(self, node, new):
+        # Maya suffixes on collision rather than refusing (the pbr fake's
+        # model) - the #812 name reclaim is caught by the name it gets back.
+        self._require(node)
+        if new in self.objects and new != node:
+            new = new + "1"
+        self.objects.discard(node)
+        self.objects.add(new)
+        self.types[new] = self.types.pop(node, "transform")
+        self.created = [new if c == node else c for c in self.created]
+
+        def fix(plug):
+            return new + plug[len(node):] if plug.split(".")[0] == node else plug
+        self.conns = {fix(dst): [fix(s) for s in srcs]
+                      for dst, srcs in self.conns.items()}
+        for key in [k for k in self.attrs if k.split(".")[0] == node]:
+            self.attrs[new + key[len(node):]] = self.attrs.pop(key)
+        return new
 
     def listSets(self, object=None, type=None):
         self._require(object)
@@ -658,3 +690,105 @@ class TestTheFakeRefusesWhatMayaRefuses:
         with pytest.raises(RuntimeError, match="No such attribute"):
             fake.attributeQuery("emissionColor", node="clay_mat",
                                 numberOfChildren=True)
+
+
+class TestReApplyingARecipeSweepsWhatItReplaces:
+    """#812. A recipe force-connects onto its slot, and Maya never reaps the
+    network that connection displaced (MEASURED, evals/recipe_orphans_probe.py
+    on Maya 2027): the old ramp / noise+bump2d / layered+mask / pbr file+p2d
+    stay in the scene wired only to defaultTextureList1 or
+    defaultRenderUtilityList1, and the new node is named `mcpTex_ramp_001`.
+    assign_pbr over a recipe slot already sweeps (#804); this is the other
+    direction.
+    """
+
+    @pytest.fixture
+    def fake(self, monkeypatch):
+        fake = FakeCmds()
+        monkeypatch.setattr(texture_recipes, "_cmds", lambda: fake)
+        return fake
+
+    def apply(self, recipe, **extra):
+        return texture_recipes.apply_texture_recipe(
+            {"mesh": "|torso", "recipe": recipe, **extra})
+
+    def test_a_first_recipe_on_a_free_slot_replaces_nothing(self, fake):
+        result = self.apply("ramp_gradient")
+        assert result["replaced"] == []
+        assert result["nodes"] == ["mcpTex_ramp"]
+
+    def test_a_second_ramp_deletes_the_first_and_takes_back_its_name(self, fake):
+        self.apply("ramp_gradient")
+        result = self.apply("ramp_gradient")
+        assert "mcpTex_ramp" in fake.deleted
+        assert result["replaced"] == ["mcpTex_ramp"]
+        # the survivor is the NEW ramp, under the base name, feeding the slot
+        assert result["nodes"] == ["mcpTex_ramp"]
+        assert not fake.objExists("mcpTex_ramp_001")
+        assert fake.conns["clay_mat.baseColor"] == ["mcpTex_ramp.outColor"]
+        assert fake.types["mcpTex_ramp"] == "ramp"
+
+    def test_noise_bump_twice_sweeps_the_old_bump_and_then_its_noise(self, fake):
+        # the noise is two hops up and loses its consumer only once the bump
+        # is gone - the fixpoint, not a single pass
+        self.apply("noise_bump")
+        result = self.apply("noise_bump", params={"scale": 2.0})
+        assert sorted(result["replaced"]) == ["mcpTex_bump", "mcpTex_noise"]
+        assert result["nodes"] == ["mcpTex_noise", "mcpTex_bump"]
+        assert fake.conns["clay_mat.normalCamera"] == ["mcpTex_bump.outNormal"]
+        assert fake.conns["mcpTex_bump.bumpValue"] == ["mcpTex_noise.outColorR"]
+        assert fake.attrs["mcpTex_noise.frequency"] == 16.0, "the NEW noise carries the new scale"
+
+    def test_layered_mask_twice_sweeps_the_layered_and_its_mask(self, fake):
+        self.apply("layered_mask")
+        result = self.apply("layered_mask")
+        assert sorted(result["replaced"]) == ["mcpTex_layered", "mcpTex_mask"]
+        assert result["nodes"] == ["mcpTex_layered", "mcpTex_mask"]
+
+    def test_a_recipe_over_a_pbr_slot_takes_the_file_node_and_its_place2d(self, fake):
+        # what assign_pbr leaves on the slot: file <- place2dTexture, and the
+        # colour-management singleton feeding the file (measured, #804) that
+        # the walk must never follow
+        for name, kind in (("clay_color_tex", "file"), ("clay_color_p2d", "place2dTexture"),
+                           ("defaultColorMgtGlobals", "colorManagementGlobals")):
+            fake.objects.add(name)
+            fake.types[name] = kind
+        fake.conns["clay_mat.baseColor"] = ["clay_color_tex.outColor"]
+        fake.conns["clay_color_tex.uvCoord"] = ["clay_color_p2d.outUV"]
+        fake.conns["clay_color_tex.colorManagementConfigFileEnabled"] = [
+            "defaultColorMgtGlobals.cmConfigFileEnabled"]
+        result = self.apply("ramp_gradient")
+        assert result["replaced"] == ["clay_color_tex", "clay_color_p2d"]
+        assert fake.objExists("defaultColorMgtGlobals")
+        assert fake.conns["clay_mat.baseColor"] == ["mcpTex_ramp.outColor"]
+
+    def test_an_old_node_something_else_still_uses_survives_and_is_named(self, fake):
+        self.apply("ramp_gradient")
+        fake.objects.add("other")
+        fake.types["other"] = "lambert"
+        fake.conns["other.color"] = ["mcpTex_ramp.outColor"]
+        result = self.apply("ramp_gradient")
+        assert result["replaced"] == []
+        assert fake.objExists("mcpTex_ramp")
+        assert fake.conns["other.color"] == ["mcpTex_ramp.outColor"]
+        assert any("mcpTex_ramp" in w and "still used by other" in w
+                   for w in result["warnings"]), result["warnings"]
+        # the base name was not free, so the new ramp keeps its suffix
+        assert result["nodes"] == ["mcpTex_ramp_001"]
+        assert fake.conns["clay_mat.baseColor"] == ["mcpTex_ramp_001.outColor"]
+
+    def test_a_different_slot_replaces_nothing(self, fake):
+        self.apply("ramp_gradient")
+        result = self.apply("noise_bump")
+        assert result["replaced"] == []
+        assert fake.objExists("mcpTex_ramp")
+
+    def test_a_failure_after_the_capture_leaves_the_old_network_wired(self, fake):
+        self.apply("noise_bump")
+        fake.fail_on = "bump2d"
+        with pytest.raises(RuntimeError):
+            self.apply("noise_bump")
+        assert fake.objExists("mcpTex_noise") and fake.objExists("mcpTex_bump")
+        assert fake.conns["clay_mat.normalCamera"] == ["mcpTex_bump.outNormal"]
+        assert "mcpTex_noise_001" in fake.deleted, "the failure sweep takes only what this call built"
+        assert "mcpTex_noise" not in fake.deleted

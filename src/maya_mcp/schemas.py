@@ -630,6 +630,15 @@ class TextureRecipeResult(BaseModel):
     recipe: str
     slot: str = Field(description="Semantic slot driven: color, roughness, or normal.")
     nodes: List[str] = Field(description="Texture nodes created by the recipe.")
+    replaced: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Nodes of the slot's PREVIOUS network deleted by this call - an "
+            "earlier recipe's or assign_pbr's - because nothing else used "
+            "them. A node something else still uses is kept and named in "
+            "warnings."
+        ),
+    )
     warnings: List[str] = Field(default_factory=list)
 
 
