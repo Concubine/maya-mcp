@@ -852,6 +852,20 @@ connection — instead of misdiagnosing anim-layer/expression sources):
   the blend weights — still lands and is still declared. Still a warning and not a refusal: what a key does through
   an intermediary is unmeasured, and the report just has to be true under
   both outcomes.
+- **`retarget_clip`'s bake writes six channels, never scale** (#810).
+  `bakeResults` with no `-attribute` flag keys every keyable channel of
+  the joints it is aimed at - MEASURED: 45 constant-1.0 scale curves per
+  retarget on the humanoid, exported as 15 "Lcl Scaling" curve nodes in
+  EVERY later take, and invisible to `delete_clip`, which walks rotate +
+  translate, reported 90 deleted, left the 45 standing and then refused
+  "no clip exists" on a rig still keyed. HIK writes rotation and root
+  translation only, so the bake is now aimed with `-attribute` at exactly
+  those (`retarget.BAKED_ATTRS`), and `delete_clip` reaps what earlier
+  bakes left: a scale curve whose every key is exactly 1.0 is the bake's
+  signature and is deleted and counted in `reaped_scale_curves`; a scale
+  curve carrying any other value is someone's squash-and-stretch and is
+  kept and named; a rig whose only keys are such leftovers no longer
+  refuses - it reaps them and says so.
 - `retarget_clip`'s `fps` is refused on the .fbx route (#797): an FBX's own
   rate is only readable from the scene's time unit after the import, the
   keyed range is read in THAT unit and the bake unit is set afterwards, so
@@ -934,7 +948,7 @@ Thresholds are all **relative to `rig_height`** and reported back in `thresholds
 `name` may be omitted when the rig carries exactly one clip. `contact_joints` defaults to the **leaf** joints — the ends of chains are what touches the ground. Perception only: no checkpoint, current time restored.
 
 What this deliberately is not: a score. Whether a peak speed is *too fast* is the caller's judgement; the tool's job is that nothing about the motion is invisible any more.
-| `delete_clip` | `{ root, name? }` | `{ root, clip, clips, deleted_curves, reaped_channels, max_displacement, warnings }` |
+| `delete_clip` | `{ root, name? }` | `{ root, clip, clips, deleted_curves, reaped_channels, reaped_scale_curves, max_displacement, warnings }` |
 
 `author_clip` keys the phase-1 pose map over time. **One rig carries as many
 named clips as the asset needs, laid end to end on ONE shared timeline** —

@@ -566,52 +566,47 @@ def _finish_take(cmds, root_long: str, target_joints: List[str],
 # The three channel groups with a COMPOUND: a connection can land on
 # `.rotate`/`.translate`/`.scale` itself (a rotation anim layer does), where
 # it covers all three children and a query on a child reports nothing.
+# #810: the channels the bake is AIMED at, and therefore the only ones it
+# writes. `bakeResults` with no `-attribute` flag keys every keyable channel
+# of its nodes - MEASURED (evals/scale_curves_probe.py): 45 constant-1.0
+# scale curves per retarget on the humanoid, exported as 15 "Lcl Scaling"
+# curve nodes per take of every later clip, and invisible to delete_clip,
+# which walks rotate + translate and then said "no clip exists" on a rig
+# still keyed. HIK writes rotation and root translation only, so scale was
+# pure waste; aiming the bake is the fix at the root. delete_clip reaps
+# what earlier bakes left (clip.stale_scale_curves).
+BAKED_ATTRS = clip.ROTATE_ATTRS + clip.TRANSLATE_ATTRS
 _TRIPLES = ((clip.ROTATE_ATTRS, "rotate"),
-            (clip.TRANSLATE_ATTRS, "translate"),
-            (clip.SCALE_ATTRS, "scale"))
-_TRIPLE_ATTRS = frozenset(
-    [a for attrs, _ in _TRIPLES for a in attrs]
-    + [compound for _, compound in _TRIPLES])
+            (clip.TRANSLATE_ATTRS, "translate"))
+
+
+def _bake_slot_joints(cmds, joints: List[str], start_frame: int,
+                      end_frame: int) -> None:
+    """The ONE bake site, both routes. `attribute` is the aim (#810);
+    `preserveOutsideKeys` is what keeps every OTHER take's keys (#780:
+    without it the bake erased the frames outside its own range)."""
+    cmds.bakeResults(list(joints), time=(start_frame, end_frame),
+                     sampleBy=1, simulation=True, preserveOutsideKeys=True,
+                     attribute=list(BAKED_ATTRS))
 
 
 def _baked_channel_groups(cmds, joints: List[str], warnings: List[str]
                           ) -> List[Tuple[str, Tuple[str, ...],
                                           Optional[str]]]:
-    """[(node, attrs, compound)] for every channel `bakeResults` writes on
-    `joints` - ASKED, not assumed (#796 review round 6 D).
+    """[(node, attrs, compound)] for every channel the bake writes on
+    `joints`: the rotate and translate triples it is aimed at (#810).
 
-    With no `-attribute` flag `bakeResults` bakes every KEYABLE channel of
-    each node it is aimed at. The guard used to ask about ROTATE and
-    TRANSLATE while its own comment claimed that was everything the bake
-    writes, so a squash-and-stretch set-driven key on a slot joint's
-    `.scaleY` - or on any keyable attribute a rigger added - was baked over
-    with nothing named. Maya is asked for the list rather than a hardcoded
-    guess, because a guess is exactly how the claim outgrew the guard the
-    first time.
-
-    The triples keep their compound fallback; everything else is a scalar
-    plug with no parent to ask about, which `_connected_channels` takes as
-    `compound=None`. A joint that cannot answer `listAttr` costs the
-    WIDENING and says so - the triples are still asked, the way the
-    write-side guards degrade rather than crash.
+    #796 review round 6 D widened this to `listAttr(keyable=True)` because
+    the bake then wrote every keyable channel; #810 aims the bake with
+    `-attribute` at BAKED_ATTRS, so the write set is that list and nothing
+    else, and asking Maya for more would name channels the bake never
+    touches - the #797 class of false claim. `warnings` is kept in the
+    signature for the call site; nothing here degrades any more.
     """
-    groups: List[Tuple[str, Tuple[str, ...], Optional[str]]] = []
-    for joint in sorted(set(joints)):
-        for attrs, compound in _TRIPLES:
-            groups.append((joint, attrs, compound))
-        try:
-            keyable = cmds.listAttr(joint, keyable=True) or []
-        except Exception as exc:  # noqa: BLE001 - one joint, not the guard
-            warnings.append(
-                "cannot list %s's keyable channels (%s) - retarget_clip "
-                "checked its rotate, translate and scale channels only, so "
-                "a user-defined keyable attribute this bake writes is "
-                "unchecked; check it after the call" % (joint, exc))
-            continue
-        extra = tuple(a for a in keyable if a not in _TRIPLE_ATTRS)
-        if extra:
-            groups.append((joint, extra, None))
-    return groups
+    del cmds, warnings  # the write set no longer depends on the scene
+    return [(joint, attrs, compound)
+            for joint in sorted(set(joints))
+            for attrs, compound in _TRIPLES]
 
 
 def _apply_shared_guards(cmds, root_long: str, target_joints: List[str],
@@ -660,12 +655,12 @@ def _apply_shared_guards(cmds, root_long: str, target_joints: List[str],
 
     # author_clip's per-channel treatment, on the channels this tool
     # actually writes: `bakeResults` is aimed at the HIK SLOT joints (both
-    # routes bake `target_slot_joints.values()`), and with no `-at` flag it
-    # writes every KEYABLE channel of each - which is what
-    # `_baked_channel_groups` asks Maya for, rather than the rotate and
-    # translate this comment used to claim was all of it (#796 review round
-    # 6 D). A driven key elsewhere on the rig is rig setup and none of this
-    # call's business, exactly as on the author side.
+    # routes bake `target_slot_joints.values()`) AND, since #810, at the
+    # rotate and translate triples only (`-attribute BAKED_ATTRS`) - so
+    # those six per slot joint are the whole write set, and
+    # `_baked_channel_groups` names exactly them. A driven key elsewhere on
+    # the rig is rig setup and none of this call's business, exactly as on
+    # the author side.
     #
     # WARNED, never refused, and that is the one deliberate difference from
     # author_clip: #771's "the write returns 0 and creates nothing" is a
@@ -1007,10 +1002,8 @@ def _retarget_bvh(path: str, root_param: str, name: str,
         # resamples that constant with a perfectly correct key COUNT (#780,
         # measured: pelvis_translateZ1 held 150 keys spanning 159-308 and
         # nothing else after the second retarget).
-        cmds.bakeResults(list(target_slot_joints.values()),
-                         time=(target_start_frame, bake_end_frame),
-                         sampleBy=1, simulation=True,
-                         preserveOutsideKeys=True)
+        _bake_slot_joints(cmds, target_slot_joints.values(),
+                          target_start_frame, bake_end_frame)
     except HandlerError:
         raise
     except Exception as exc:  # noqa: BLE001 - see module docstring / #774
@@ -1256,10 +1249,8 @@ def _retarget_fbx(path: str, root_param: str, name: str,
 
         # preserveOutsideKeys for the same reason as the BVH route above:
         # without it this bake erases every OTHER take's keys (#780).
-        cmds.bakeResults(list(target_slot_joints.values()),
-                         time=(target_start_frame, bake_end_frame),
-                         sampleBy=1, simulation=True,
-                         preserveOutsideKeys=True)
+        _bake_slot_joints(cmds, target_slot_joints.values(),
+                          target_start_frame, bake_end_frame)
     except HandlerError:
         raise
     except Exception as exc:  # noqa: BLE001 - see the BVH route's identical

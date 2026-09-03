@@ -344,33 +344,32 @@ class TestSharedGuards:
         self._guard(fake, warnings)
         assert warnings == []
 
-    def test_a_driven_scale_on_a_slot_joint_is_named(self):
-        # #796 review round 6 D: the guard asked ROTATE and TRANSLATE while
-        # its own comment (and protocol.md) claimed that was everything
-        # `bakeResults` writes. With no `-attribute` flag a bake writes
-        # every KEYABLE channel, so a squash-and-stretch set-driven key on
-        # a slot joint's .scaleY was baked over with nothing named.
+    def test_a_driven_scale_on_a_slot_joint_is_not_named(self):
+        # #810: the bake is aimed with `-attribute` at rotate and translate,
+        # so a squash-and-stretch set-driven key on a slot joint's .scaleY
+        # is no longer something this call writes over - and a warning
+        # naming a channel the bake never touches would be the #797 class
+        # of false claim. (#796 round 6 D named it because the bake DID
+        # write it then: with no `-attribute` flag it keyed every keyable
+        # channel, scale among them - 45 constant 1.0 curves per retarget,
+        # measured, shipped in every later take.)
         fake = FakeCmds()
         _plant_sdk_curve(fake, plug="|root|mid.scaleY",
                          curve="mid_sy_driven")
         warnings = []
         self._guard(fake, warnings)
-        assert any("|root|mid.scaleY" in w and "mid_sy_driven" in w
-                   for w in warnings)
+        assert warnings == []
 
-    def test_a_driven_user_keyable_attribute_is_named(self):
-        # ASKED, never guessed: the channel list comes from Maya
-        # (`listAttr(keyable=True)`), so an attribute a rigger added -
-        # which no hardcoded triple could have anticipated - is asked
-        # about like any other baked channel.
+    def test_a_driven_user_keyable_attribute_is_not_named(self):
+        # Same #810 rule: an attribute a rigger added is outside the six
+        # channels the bake is aimed at, so it is neither written nor named.
         fake = FakeCmds()
         fake.keyable_extras = {"|root|mid": ["stretch"]}
         _plant_sdk_curve(fake, plug="|root|mid.stretch",
                          curve="mid_stretch_driven")
         warnings = []
         self._guard(fake, warnings)
-        assert any("|root|mid.stretch" in w and "mid_stretch_driven" in w
-                   for w in warnings)
+        assert warnings == []
 
     def test_a_driven_scale_off_the_baked_joints_still_says_nothing(self):
         # Per channel, never per rig - the widening does not widen the
@@ -382,14 +381,17 @@ class TestSharedGuards:
         self._guard(fake, warnings)
         assert warnings == []
 
-    def test_a_joint_that_cannot_list_its_channels_says_so(self):
-        # The degrade rule: losing the widening costs a note, not the
-        # guard - the rotate and translate triples are still asked.
+    def test_the_guard_never_asks_for_keyable_channels(self):
+        # #810: the write set is the explicit `-attribute` list, so the
+        # guard no longer asks Maya `listAttr(keyable=True)` - the widening
+        # that existed only because the bake wrote every keyable channel.
+        # A joint that cannot answer that query costs nothing now: the six
+        # channels are still asked, and a driven rotate is still named.
         fake = FakeCmds()
 
         def refuse(plug, multi=False, keyable=False):
             if keyable:
-                raise RuntimeError("no such node: %s" % plug)
+                raise AssertionError("listAttr(keyable=True) asked: %s" % plug)
             return FakeCmds.listAttr(fake, plug, multi=multi)
 
         fake.listAttr = refuse
@@ -397,9 +399,9 @@ class TestSharedGuards:
                          curve="mid_rotZ_driven")
         warnings = []
         self._guard(fake, warnings)
-        assert any("keyable" in w and "|root|mid" in w for w in warnings)
         assert any("|root|mid.rotateZ" in w and "mid_rotZ_driven" in w
                    for w in warnings)
+        assert not any("keyable" in w for w in warnings)
 
     def test_the_note_is_the_one_author_clip_gives(self):
         # ONE scene, ONE diagnosis - the curve behind the intermediary is
@@ -1011,3 +1013,43 @@ class TestRetargetedTakesAreSelfContained:
         assert out["padded_channels"] == ["tip"]
         assert fake.keys["|root|mid|tip.rotateZ"][72.0] == 0.0
         assert clip.clip_meta(fake, "|root")[1]["joints"] == ["mid", "root"]
+
+
+class TestTheBakeIsAimedAtRotateAndTranslate:
+    """#810: `bakeResults` with no `-attribute` flag keys every keyable
+    channel of the joints it is aimed at. MEASURED (evals/
+    scale_curves_probe.py): 45 constant-1.0 scale curves per retarget on
+    the humanoid, shipped as 15 "Lcl Scaling" curve nodes per take of every
+    later export - and delete_clip, which walks rotate + translate, left
+    them standing and then said "no clip exists". HIK writes rotation and
+    root translation only, so the bake is aimed at exactly those six.
+    """
+
+    def test_the_helper_names_the_six_channels_and_keeps_the_flags(self):
+        calls = []
+
+        class Rec:
+            def bakeResults(self, joints, **kw):
+                calls.append((list(joints), kw))
+                return 0
+
+        retarget._bake_slot_joints(Rec(), ["|root", "|root|mid"], 5, 40)
+        (joints, kw), = calls
+        assert joints == ["|root", "|root|mid"]
+        assert kw["attribute"] == list(retarget.BAKED_ATTRS)
+        assert set(retarget.BAKED_ATTRS) == set(
+            clip.ROTATE_ATTRS + clip.TRANSLATE_ATTRS)
+        assert "scaleX" not in kw["attribute"]
+        # #780: preserveOutsideKeys is what keeps every OTHER take's keys;
+        # the aim must not have cost it.
+        assert kw["time"] == (5, 40)
+        assert kw["preserveOutsideKeys"] is True
+        assert kw["simulation"] is True
+        assert kw["sampleBy"] == 1
+
+    def test_both_routes_bake_through_the_helper(self):
+        # One bake site, so the aim cannot drift apart between BVH and FBX.
+        import inspect
+        src = inspect.getsource(retarget)
+        assert src.count("cmds.bakeResults(") == 1
+        assert src.count("_bake_slot_joints(") >= 3   # def + two routes

@@ -388,8 +388,12 @@ class FakeCmds:
         self.tangents.append(
             (node, attribute, time, inTangentType, outTangentType))
 
-    def keyframe(self, plug, query=False, **kw):
-        return sorted(self.keys.get(plug, {})) or None
+    def keyframe(self, plug, query=False, valueChange=False, **kw):
+        keys = self.keys.get(plug, {})
+        if valueChange:
+            # #810: values in time order, the way `keyframe -q -vc` answers.
+            return [keys[t] for t in sorted(keys)] or None
+        return sorted(keys) or None
 
     def cutKey(self, plug, time=None, clear=False, **kw):
         self.cut_plugs.append(plug)
@@ -2027,10 +2031,80 @@ class TestBindPoseRest:
         assert any("no readable bind pose" in w for w in out["warnings"])
 
 
+def _plant_scale_leftovers(fake, joints=("|root", "|root|mid"), value=1.0,
+                           frames=(0.0, 1.0, 2.0)):
+    """What retarget_clip's bake left before #810: one animCurve per scale
+    channel of every slot joint, every key exactly 1.0 (MEASURED: 45 on
+    the humanoid, all 1.0)."""
+    for j in joints:
+        for ax in "XYZ":
+            plug = "%s.scale%s" % (j, ax)
+            fake.curves[plug] = "%s_scale%s_baked" % (j.rsplit("|", 1)[-1], ax)
+            fake.keys[plug] = {float(f): value for f in frames}
+
+
 class TestDelete:
     def test_no_clip_refuses(self, fake):
         with pytest.raises(HandlerError, match="no clip"):
             clip.delete_clip({"root": "root"})
+
+    # #810: the bake's constant scale curves outlived every clip tool -
+    # delete_clip walked rotate + translate, reported 90 deleted, left 45
+    # scale curves standing, and then refused "no clip exists" on a rig
+    # still keyed; every later clip's export carried them as 15 "Lcl
+    # Scaling" nodes per take. The bake no longer writes them; the
+    # leftovers of earlier bakes are reaped here.
+    def test_delete_reaps_the_identity_scale_curves_an_earlier_bake_left(
+            self, fake):
+        _author(fake)
+        _plant_scale_leftovers(fake)
+        out = clip.delete_clip({"root": "root"})
+        assert not any(".scale" in p for p in fake.curves)
+        assert out["reaped_scale_curves"] == 6
+        assert any("6 constant" in w and "scale" in w for w in out["warnings"])
+
+    def test_a_rig_carrying_only_bake_leftovers_no_longer_refuses(self, fake):
+        _plant_scale_leftovers(fake)
+        out = clip.delete_clip({"root": "root"})
+        assert out["clip"] is None
+        assert out["reaped_scale_curves"] == 6
+        assert fake.curves == {}
+        assert fake.checkpoints == ["delete_clip"]
+
+    def test_a_non_identity_scale_curve_is_left_standing_and_named(self, fake):
+        # A rigger's squash-and-stretch is not clip motion, and nothing
+        # the bake wrote: this tool never deletes what it cannot prove is
+        # the bake's constant 1.0.
+        _author(fake)
+        _plant_scale_leftovers(fake, joints=("|root|mid",), value=1.3)
+        out = clip.delete_clip({"root": "root"})
+        assert "|root|mid.scaleX" in fake.curves
+        assert out["reaped_scale_curves"] == 0
+        assert any("scale" in w and "|root|mid.scaleX" in w and "kept" in w
+                   for w in out["warnings"])
+
+    def test_a_driven_scale_key_is_never_reaped(self, fake):
+        _author(fake)
+        _plant_sdk_curve(fake, plug="|root|mid.scaleY", curve="mid_sy_driven")
+        fake.keys["|root|mid.scaleY"] = {0.0: 1.0, 10.0: 1.0}
+        out = clip.delete_clip({"root": "root"})
+        assert "mid_sy_driven" not in fake.deleted
+        assert out["reaped_scale_curves"] == 0
+
+    def test_a_named_delete_reaps_the_leftovers_too(self, fake):
+        _author(fake, name="idle")
+        _author(fake, name="walk")
+        _plant_scale_leftovers(fake)
+        out = clip.delete_clip({"root": "root", "name": "idle"})
+        assert out["clips"] == ["walk"]
+        assert out["reaped_scale_curves"] == 6
+        assert not any(".scale" in p for p in fake.curves)
+
+    def test_no_leftovers_means_no_word_about_scale(self, fake):
+        _author(fake)
+        out = clip.delete_clip({"root": "root"})
+        assert out["reaped_scale_curves"] == 0
+        assert not any("scale" in w for w in out["warnings"])
 
     def test_deletes_curves_metadata_and_measures(self, fake):
         _author(fake)

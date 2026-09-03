@@ -145,6 +145,37 @@ def partition_driven_keys(cmds, curves) -> Tuple[List[str], List[str]]:
     return sorted(clip_curves), sorted(sdk_curves)
 
 
+def stale_scale_curves(cmds, joints: List[str]
+                       ) -> Tuple[List[str], List[str]]:
+    """(identity scale curves to reap, scale plugs left standing).
+
+    #810: retarget_clip's bake used to key SCALE on every slot joint
+    (`bakeResults` with no `-attribute` flag writes every keyable channel)
+    - 45 constant-1.0 curves per retarget on the humanoid, MEASURED - and
+    no clip tool walks scale, so delete_clip left them and then refused
+    "no clip exists" on a rig still keyed, while every later clip's export
+    carried them as 15 "Lcl Scaling" nodes per take. The bake is aimed
+    now; this reaps what earlier bakes left.
+
+    Reaped ONLY when every key is exactly 1.0: that is the bake's
+    signature, and deleting it changes nothing a viewer could see. A scale
+    curve carrying any other value is someone's squash-and-stretch and is
+    named, never touched; a driven key (U-typed) is rig setup and is
+    excluded before the values are even read.
+    """
+    driven = clip_curve_plugs(cmds, _anim_curves(
+        cmds, ["%s.%s" % (j, a) for j in joints for a in SCALE_ATTRS]))
+    identity: List[str] = []
+    kept: List[str] = []
+    for plug, curves in sorted(driven.items()):
+        values = cmds.keyframe(plug, query=True, valueChange=True) or []
+        if values and all(abs(float(v) - 1.0) < 1e-9 for v in values):
+            identity.extend(curves)
+        else:
+            kept.append(plug)
+    return sorted(set(identity)), kept
+
+
 def clip_curve_plugs(cmds, driven: Dict[str, List[str]]
                      ) -> Dict[str, List[str]]:
     """`driven` (an _anim_curves map) with the driven-key curves filtered
@@ -2165,7 +2196,10 @@ def delete_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     clip_driven = clip_curve_plugs(cmds, driven)
     before_curves, sdk_curves = partition_driven_keys(cmds, driven)
     sdk_named = ", ".join(sdk_curves)
-    if not clip_driven and not records:
+    # #810: what an earlier bake left on the scale channels. Classified
+    # here, with everything else, while every node still exists.
+    stale_scale, kept_scale = stale_scale_curves(cmds, joints)
+    if not clip_driven and not records and not stale_scale:
         raise HandlerError(
             "no clip exists on %s" % root_long,
             hint="author_clip creates one; this tool removes it"
@@ -2201,8 +2235,21 @@ def delete_clip(params: Dict[str, Any]) -> Dict[str, Any]:
         warnings.append(
             "no clip metadata on %s - deleting %d hand-authored curve "
             "channel(s)" % (_short(root_long), len(clip_driven)))
+    if stale_scale:
+        warnings.append(
+            "reaped %d constant (every key 1.0) scale curve(s) an earlier "
+            "retarget bake left on this rig - they animated nothing, and "
+            "every later take exported them (#810)" % len(stale_scale))
+    if kept_scale:
+        warnings.append(
+            "kept %d scale curve(s) that are not the bake's constant 1.0 "
+            "(%s) - a scale curve carrying real values is not clip motion "
+            "and this tool never deletes it" % (len(kept_scale),
+                                                 ", ".join(kept_scale[:4])))
 
     session.auto_checkpoint("delete_clip")
+    if stale_scale:
+        cmds.delete(*stale_scale)
     before = {m: _points(m) for m in meshes}
 
     deleted_curves = 0
@@ -2437,6 +2484,7 @@ def delete_clip(params: Dict[str, Any]) -> Dict[str, Any]:
         "clips": [r["name"] for r in kept],
         "deleted_curves": deleted_curves,
         "reaped_channels": reaped_channels,
+        "reaped_scale_curves": len(stale_scale),
         "max_displacement": max_disp,
         "warnings": warnings,
     }
