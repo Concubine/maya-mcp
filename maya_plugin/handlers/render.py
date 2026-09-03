@@ -21,7 +21,7 @@ import os
 import uuid
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from ..dispatcher import HandlerError, require_known_keys
+from ..dispatcher import HandlerError, refuse_inert, require_known_keys
 from . import capture, lighting, naming, plugwrite, pngprobe, session
 
 VALID_RENDERERS = ("arnold", "hw2")
@@ -407,6 +407,59 @@ def _arnold_render(cmds, camera, resolution) -> str:
     return str(predicted) if predicted and os.path.exists(str(predicted)) else ""
 
 
+def _ensure_arnold_samples(cmds, samples: int) -> Tuple[Optional[str], Any]:
+    """Write Arnold's AA sample count, building mtoa's globals node if needed.
+
+    MEASURED (#797, cold mtoa load): on a Maya that has only just loaded
+    mtoa, `defaultArnoldRenderOptions` does not exist yet - it is built lazily,
+    when the Render Settings window (or `mtoa.core.createOptions`) first
+    asks for it. The setAttr this code used to make therefore raised on a
+    cold load and landed in a bare `except: pass`, so the frame rendered at
+    Arnold's own default while the result reported the caller's `samples`
+    back to them: a param validated, echoed, and never applied - #797's
+    false claim in its purest form.
+
+    Returns `(warning, restore_value)`:
+
+      * `warning` when the count still could not be written, so the caller
+        can null the value rather than claim it.
+      * `restore_value` is the node's OWN default, read AFTER this call
+        built the node and BEFORE our write - and only then. The caller
+        hands it to `_RenderGlobalsState`, whose snapshot necessarily read
+        nothing, because the node did not exist when it was taken. Without
+        it a perception tool leaves the caller's AA count sitting in the
+        user's scene for every render they make afterwards.
+    """
+    restore_value = None
+    if not cmds.objExists("defaultArnoldRenderOptions"):
+        try:
+            from mtoa.core import createOptions  # noqa: PLC0415 - mtoa only
+
+            createOptions()
+        except Exception:  # noqa: BLE001 - mtoa build without the helper
+            try:
+                cmds.createNode("aiOptions", name="defaultArnoldRenderOptions",
+                                shared=True, skipSelect=True)
+            except Exception:  # noqa: BLE001 - reported by the write below
+                pass
+        # Asked rather than assumed: whichever route built it, Arnold's own
+        # default is whatever the fresh node carries, and hardcoding a
+        # number here would put OUR idea of a default into a user's scene.
+        try:
+            restore_value = cmds.getAttr("defaultArnoldRenderOptions.AASamples")
+        except Exception:  # noqa: BLE001 - nothing was built; nothing to restore
+            restore_value = None
+    try:
+        cmds.setAttr("defaultArnoldRenderOptions.AASamples", samples)
+    except Exception as exc:  # noqa: BLE001 - any failure is reportable
+        return ("arnold's AA sample count could not be set (%s), so this "
+                "render used Arnold's own default rather than the samples=%d "
+                "that was asked for - the result reports samples: null "
+                "rather than a number it did not apply" % (exc, samples),
+                restore_value)
+    return None, restore_value
+
+
 def _render_frame(cmds, camera, prefix, renderer, resolution, samples) -> str:
     """Render one frame and return the file it landed on.
 
@@ -423,10 +476,15 @@ def _render_frame(cmds, camera, prefix, renderer, resolution, samples) -> str:
     cmds.setAttr("defaultResolution.height", resolution)
     cmds.setAttr("defaultResolution.deviceAspectRatio", 1.0)
     if renderer == "arnold":
+        # A plain re-assert per frame. _run_shots ensures the options node
+        # exists and REPORTS what it could not write, once, before the loop -
+        # doing that work again here would build the node under the frame
+        # loop (outside the undo suppression the handler sets up) and throw
+        # away the warning it produced.
         try:
             cmds.setAttr("defaultArnoldRenderOptions.AASamples", samples)
-        except Exception:
-            pass  # mtoa exposes this only once its globals node exists
+        except Exception:  # noqa: BLE001 - already reported by _run_shots
+            pass
         # The display transform only reaches the file through mtoa's own render
         # command; cmds.render ignores the driver entirely (#615).
         display = _ArnoldDisplayState(cmds)
@@ -705,8 +763,20 @@ def _hide_non_targets(
             continue
         try:
             cmds.hide(name)
-        except Exception:  # noqa: BLE001 - see the docstring
-            continue       # unhideable for a reason the guard cannot name
+        except Exception as exc:  # noqa: BLE001 - see the docstring
+            # Unhideable for a reason plugwrite could not classify. It used
+            # to `continue` with nothing said, which is the #640 defect this
+            # function exists to prevent wearing a different coat: the rival
+            # stays in the cell and the sheet reports no warnings at all
+            # (#797 row 37). Deduped like the guarded note above - a sheet
+            # re-runs this pass once per cell.
+            if warnings is not None:
+                note = ("could not hide %s for the isolate pass (%s) - it "
+                        "stays in frame alongside the subject"
+                        % (name.split("|")[-1], exc))
+                if note not in warnings:
+                    warnings.append(note)
+            continue
         hidden.append(name)
     return hidden
 
@@ -804,6 +874,22 @@ def render_sheet(params: Dict[str, Any]) -> Dict[str, Any]:
             "unknown angle %r" % angle,
             hint="valid angles: %s" % ", ".join(capture.VALID_ANGLES),
         )
+    # #797 row 21: a sheet builds its OWN offscreen camera per cell, so
+    # there is no panel camera for "current" to mean. _run_shots degrades it
+    # to three_quarter and every cell came back labelled "current" - a label
+    # naming an angle that was not shot. render_scene's schema promises that
+    # degrade and this one does not, so here it is a refusal rather than a
+    # relabel.
+    if angle == "current":
+        refuse_inert(
+            "render_sheet", "angle", "when it is 'current'",
+            "a sheet renders offscreen with a camera it places per cell - "
+            "there is no viewport camera to keep, so 'current' would be "
+            "shot as three_quarter under the wrong label",
+            hint="name the angle you want (front, side, back, top, "
+                 "three_quarter); to shoot the panel as it stands use "
+                 "maya_capture_viewport",
+        )
     # Isolating is the POINT of a sheet: each cell must show one piece, not one
     # piece in front of forty others. Opting out is allowed for a subject that
     # needs its surroundings (a transmissive material refracts them).
@@ -870,6 +956,22 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
     fallback_light = bool(params.get("fallback_light", True))
     relight = bool(params.get("relight", True))
 
+    # #797 row 29: hw2 has no AA sample count - it draws the viewport's own
+    # image and _render_frame never even looks at `samples` there - so the
+    # value is validated and dropped. Echoing it back in the result was a
+    # false claim the caller had no way to check: they read samples: 6 and
+    # believe the frame was sampled six times. The result carries null
+    # instead, and says so ONCE when the caller actually asked for a count
+    # (the wrapper now defaults it to None, so "asked" is knowable).
+    reports_samples = renderer != "hw2"
+    setup_warnings: List[str] = []
+    if not reports_samples and params.get("samples") is not None:
+        setup_warnings.append(
+            "renderer 'hw2' has no AA sample count - it draws the viewport's "
+            "own image - so samples=%d was dropped and the result reports "
+            "samples: null. Use renderer='arnold' to control sampling."
+            % samples)
+
     maya_renderer = RENDERER_TO_MAYA[renderer]
     available = _ensure_renderer(cmds, maya_renderer)
     if available and maya_renderer not in available:
@@ -898,6 +1000,24 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
     prev_time = (cmds.currentTime(query=True)
                  if any(s.get("time") is not None for s in shots) else None)
     try:
+        # AFTER the snapshot, so the restore puts the user's own count back;
+        # after the undo suppression, because on a cold mtoa this BUILDS a
+        # node and render_scene/render_sheet are no_undo_chunk - a
+        # perception tool's createNode landing loose in the user's undo
+        # queue is exactly the pollution that suppression prevents; and
+        # inside the try, so a failure here still unwinds through the
+        # finally rather than leaving undo recording off.
+        if renderer == "arnold":
+            note, aa_restore = _ensure_arnold_samples(cmds, samples)
+            if aa_restore is not None:
+                # The snapshot above read nothing - the node did not exist
+                # yet - so hand it the fresh node's own default, or the
+                # caller's AA count outlives this render in their scene.
+                state.aa_samples = aa_restore
+            if note is not None:
+                setup_warnings.append(note)
+                reports_samples = False  # never claim a count not applied
+
         # Every name in every shot, checked before a single frame is rendered:
         # a sheet that dies on cell 30 has spent thirty frames' worth of seconds
         # to report a typo.
@@ -926,7 +1046,7 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
 
         images_out = []
         positions = []
-        framing_warnings: List[str] = []
+        framing_warnings: List[str] = list(setup_warnings)
         # Rig lights the relight pass could not swing, across every shot.
         # `relit_lights` used to be len(rig) - lights DISCOVERED - so a rig
         # whose every write was refused still reported that it had followed
@@ -939,6 +1059,24 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
             if shot.get("time") is not None:
                 cmds.currentTime(shot["time"])
             angle = shot["angle"]
+            # "current" has no meaning without a panel to read a camera
+            # from; it degrades to the default judging angle rather than
+            # failing a render the caller could not have known was
+            # panel-dependent - render_scene's schema PROMISES that. What it
+            # must not do is keep the old label: every frame came back
+            # named "current" while three_quarter was what was shot, and
+            # both the image and its camera_positions entry said so (#797
+            # row 30). The resolved name travels with the frame instead,
+            # and `requested_angle` records what was asked for.
+            resolved_angle = "three_quarter" if angle == "current" else angle
+            if angle != resolved_angle:
+                note = ("angle 'current' has no meaning offscreen - there is "
+                        "no panel camera to read - so this render used "
+                        "'%s', the default judging angle. The frames and "
+                        "camera_positions below are labelled with what was "
+                        "actually shot." % resolved_angle)
+                if note not in framing_warnings:
+                    framing_warnings.append(note)
             # Re-hide only when the visible set actually changes: render_scene
             # holds one isolate set across all its angles, and re-walking every
             # shape in a 45,000-renderer city per frame would cost more than the
@@ -974,11 +1112,6 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
                         cmds, shot["frame_on"],
                         visible_only=bool(shot.get("frame_visible_only"))
                     )
-                # "current" has no meaning without a panel to read a camera
-                # from; it degrades to the default judging angle rather than
-                # failing a render the caller could not have known was
-                # panel-dependent.
-                resolved_angle = "three_quarter" if angle == "current" else angle
                 position, rotation = capture.camera_placement(
                     resolved_angle, bbox_min, bbox_max
                 )
@@ -1022,7 +1155,7 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
                     framing_warnings.append(unfixable)
 
             path = _render_frame(
-                cmds, temp_camera, frame_prefix(call_id, index, angle),
+                cmds, temp_camera, frame_prefix(call_id, index, resolved_angle),
                 maya_renderer, resolution, samples,
             )
             if not path or not os.path.exists(path):
@@ -1051,23 +1184,32 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
                     os.unlink(path)  # the render lands in the project images dir
                 except OSError:
                     pass
-            images_out.append({
-                "angle": angle, "label": shot["label"],
+            image = {
+                "angle": resolved_angle, "label": shot["label"],
                 "png_b64": base64.b64encode(png).decode("ascii"),
-            })
+            }
             pos = cmds.getAttr(temp_camera + ".translate")[0]
             rot = cmds.getAttr(temp_camera + ".rotate")[0]
-            positions.append(
-                {"angle": angle, "label": shot["label"], "position": list(pos),
-                 "rotation": list(rot), "camera": temp_camera,
-                 "near_clip": cmds.getAttr(temp_camera + ".nearClipPlane")}
-            )
+            position_entry = {
+                "angle": resolved_angle, "label": shot["label"],
+                "position": list(pos), "rotation": list(rot),
+                "camera": temp_camera,
+                "near_clip": cmds.getAttr(temp_camera + ".nearClipPlane"),
+            }
+            if angle != resolved_angle:
+                # Only when they differ: an extra key on every ordinary
+                # frame is noise, and its absence is the honest signal that
+                # what was asked for is what was shot.
+                image["requested_angle"] = angle
+                position_entry["requested_angle"] = angle
+            images_out.append(image)
+            positions.append(position_entry)
 
         out = {
             "images": images_out,
             "camera_positions": positions,
             "renderer": renderer,
-            "samples": samples,
+            "samples": samples if reports_samples else None,
             "fallback_light": temp_light is not None,
             "zoom": zoom,
             "relit_lights": len(rig) - len(unswung),

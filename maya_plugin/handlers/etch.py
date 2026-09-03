@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List
 
-from ..dispatcher import HandlerError, require_known_keys
+from ..dispatcher import HandlerError, refuse_inert, require_known_keys
 from . import naming
 
 DEFAULT_WIDTH = 0.6
@@ -213,13 +213,63 @@ ETCH_TEXT_KEYS = ("mesh", "text", "face", "width", "depth", "font", "mirror",
 ETCH_TEXT_SYNONYMS = {"name": "new_name", "rotate": "rotate_deg", "a": "mesh"}
 
 
+def _size(params: Dict[str, Any], key: str, default: float) -> float:
+    """A positive scene-unit size, or the default when the key was not passed.
+
+    Replaces `float(params.get(key) or DEFAULT)` (#797 row 28). `or` cannot
+    tell "not passed" from "passed as zero": a caller who asked for depth=0 -
+    a carve of nothing - got DEFAULT_DEPTH carved into their mesh instead,
+    and a caller who passed a string got a bare ValueError through the MCP
+    boundary rather than a refusal with a hint. `None` alone means absent:
+    the MCP wrapper sends every declared param on every call.
+    """
+    value = params.get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise HandlerError(
+            "%s must be a positive number of scene units, got %r" % (key, value),
+            hint="e.g. %s=%g; omit it for the default" % (key, default),
+        )
+    if value <= 0:
+        raise HandlerError(
+            "%s must be positive, got %r" % (key, value),
+            hint="a %s of 0 carves nothing; omit %s for the default (%g)"
+            % (key, key, default),
+        )
+    return float(value)
+
+
+def _angle(params: Dict[str, Any], key: str, default: float) -> float:
+    """A rotation in degrees, or the default when the key was not passed.
+
+    `_size`'s reasoning minus the positivity test: 0 and negatives are both
+    meaningful angles, so only the TYPE is checked. The idiom it replaces,
+    `float(params.get(key) or 0.0)`, let a string through to `float()` and
+    raised a bare ValueError across the MCP boundary instead of a refusal
+    with a hint (#797 row 28, review fix round 1). `bool` is excluded for
+    the same reason as in `_size`: it is a subclass of int, so `True` would
+    otherwise read as a 1-degree rotation.
+    """
+    value = params.get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise HandlerError(
+            "%s must be a number of degrees, got %r" % (key, value),
+            hint="e.g. %s=180 to invert the glyph; omit it for %g"
+            % (key, default),
+        )
+    return float(value)
+
+
 def etch_text(params: Dict[str, Any]) -> Dict[str, Any]:
     require_known_keys(params, ETCH_TEXT_KEYS, "etch_text",
                        ETCH_TEXT_SYNONYMS)
-    cmds = _cmds()
-    from . import modeling, session  # noqa: PLC0415
-
-    mesh_long, _ = naming.require_mesh(cmds, str(params.get("mesh") or ""))
+    # Every check that needs no scene runs before `_cmds()` (#767/#797):
+    # after it come the auto-checkpoint, a Type-node glyph network and a
+    # boolean, so a refusal from down there is a refusal that already cost
+    # the caller a scene edit to unwind.
     text = params.get("text")
     if not isinstance(text, str) or not text.strip():
         raise HandlerError(
@@ -233,13 +283,37 @@ def etch_text(params: Dict[str, Any]) -> Dict[str, Any]:
             hint="pick the face to carve into; capture with wireframe_overlay "
             "to identify face ids",
         )
-    width = float(params.get("width") or DEFAULT_WIDTH)
-    depth = float(params.get("depth") or DEFAULT_DEPTH)
-    if width <= 0 or depth <= 0:
-        raise HandlerError("width and depth must be positive", hint="sizes are in scene units")
-    font = str(params.get("font") or DEFAULT_FONT)
+    width = _size(params, "width", DEFAULT_WIDTH)
+    depth = _size(params, "depth", DEFAULT_DEPTH)
+    font = params.get("font")
+    if font is None:
+        font = DEFAULT_FONT
+    elif not isinstance(font, str):
+        raise HandlerError(
+            "font must be a font name, got %r" % (font,),
+            hint="e.g. font='Arial'; omit it for the %s default" % DEFAULT_FONT,
+        )
+    elif not font.strip():
+        # #797 row 28: `str(params.get("font") or DEFAULT_FONT)` read an
+        # empty string as "Arial" - the caller named a font, the handler
+        # dropped the name, and the glyph came out in a typeface nobody
+        # asked for with nothing said. A blank is not a font.
+        refuse_inert(
+            "etch_text", "font", "when it is empty",
+            "an empty font would silently fall back to %s - the name the "
+            "caller passed is dropped and the carve comes out in a typeface "
+            "nobody asked for" % DEFAULT_FONT,
+            hint="name a font installed on this machine (e.g. 'Arial', "
+                 "'Times New Roman'), or omit `font` to take the %s default"
+                 % DEFAULT_FONT,
+        )
     mirror = bool(params.get("mirror", False))
-    rotate_deg = float(params.get("rotate_deg") or 0.0)
+    rotate_deg = _angle(params, "rotate_deg", 0.0)
+
+    cmds = _cmds()
+    from . import modeling, session  # noqa: PLC0415
+
+    mesh_long, _ = naming.require_mesh(cmds, str(params.get("mesh") or ""))
 
     center, normal = _face_center_normal(mesh_long, face)
     session.auto_checkpoint("etch")

@@ -281,14 +281,33 @@ def plan_bakes(cmds, shapes: List[str],
 def _refuse_if_nothing_to_bake(jobs: List[Dict[str, Any]],
                                skipped_file_backed: bool,
                                slots: Optional[List[str]]) -> None:
-    """The final refusal, isolated so its condition is a fact about `jobs`
-    and `skipped_file_backed` ONLY - never about the shape of `warnings`,
-    which other call sites are free to extend for unrelated reasons.
+    """The final refusal, isolated so its condition is a fact about `jobs`,
+    `skipped_file_backed` and `slots` ONLY - never about the shape of
+    `warnings`, which other call sites are free to extend for unrelated
+    reasons.
 
     A file-backed-only scene is NOT "nothing to bake": that already exits
     plan_bakes's loop with jobs=[] and skipped_file_backed=True, which is a
     legitimate no-op. Refuse only when neither fired at all.
+
+    `slots` was a message detail until #797 row 41 made it a condition too:
+    an EMPTY list is a malformed call rather than an empty scene, and it is
+    answered before either of the two facts above is consulted.
     """
+    # #797 row 41, BEFORE the jobs test: `slots=[]` is a valid list of slot
+    # names that names none of them, so plan_bakes filters every claim out
+    # and this refusal used to blame the SCENE ("no procedural texture
+    # network to bake") for a fault in the CALL - and it omitted the slot
+    # clause it prints for every non-empty list, because `if slots` is
+    # false for []. Nothing was skipped for being file-backed either, so
+    # the flag cannot excuse it: an empty selection is malformed either way.
+    if slots is not None and not slots:
+        raise HandlerError(
+            "bake_textures was asked for slots=[] - an empty slot list "
+            "selects NO slot, so nothing was even looked at; it does not "
+            "mean 'every slot', which is what omitting slots means",
+            hint="omit slots to bake every procedural slot, or name the "
+                 "ones you want: %s" % ", ".join(sorted(pbr.SLOTS)))
     if jobs or skipped_file_backed:
         return
     raise HandlerError(

@@ -20,7 +20,7 @@ import os
 import tempfile
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
-from ..dispatcher import HandlerError, require_known_keys
+from ..dispatcher import HandlerError, refuse_inert, require_known_keys
 from . import naming, pngprobe
 
 VALID_ANGLES = ("front", "side", "back", "top", "three_quarter", "current")
@@ -263,6 +263,79 @@ def blank_warnings(shot: Dict[str, Any], label: str) -> List[str]:
     return []
 
 
+# Shading modes VP2 cannot draw a shadow into: a shadow is darkening applied
+# to a shaded surface, and neither of these draws one. UNMEASURED - which is
+# why the notes below warn rather than refuse (#797 row 38). The frame that
+# comes back is still a frame; it just does not carry what was switched on.
+_NO_SHADOW_SHADING = ("flatShaded", "wireframe")
+
+
+def display_warnings(shading: str, shadows: bool,
+                     buffer: str = "beauty") -> List[str]:
+    """Flags VP2 accepts and then does nothing with.
+
+    Pure - it asks Maya nothing, so it runs before any capture and reports
+    once per CALL rather than once per frame. Said out loud for the same
+    reason render_scene reports `fallback_light`: a caller who switched
+    something on and reads a frame without it concludes the subject has no
+    self-shadowing, not that the mode they chose cannot show one.
+    """
+    out: List[str] = []
+    if shadows and shading in _NO_SHADOW_SHADING:
+        out.append(
+            "shadows=True under shading=%r: a shadow is darkening applied to "
+            "a shaded surface and this mode draws none, so the frame comes "
+            "back without them. Use shading='smoothShaded' to judge shadows."
+            % shading)
+    if buffer == "ssao" and shading == "wireframe":
+        out.append(
+            "buffer='ssao' under shading='wireframe': ambient occlusion "
+            "darkens the crevices of a drawn surface and a wireframe draws "
+            "none, so the frame is the same wireframe either way.")
+    return out
+
+
+def frame_warnings(shot: Dict[str, Any], label: str,
+                   resolution: int) -> List[str]:
+    """What this frame did NOT do, taken off the shot dict (#797).
+
+    Three notes, each about a request the frame silently dropped:
+
+      * `target` on a "current" angle framed nothing (row 20). The panel's
+        own camera is kept exactly where the user left it, so the subject
+        the caller named had no effect on what was photographed. Only ever
+        reached on a MIXED angle list - a current-only capture refuses.
+      * the playblast failed and the M3dView fallback drew at the PANEL's
+        size rather than the resolution asked for (row 36). Nothing said so
+        before, and a caller measuring pixels off the image had no way to
+        know its scale had changed under them.
+      * lighting='scene' in a scene holding no light (row 38): displayLights
+        'all' with nothing to light with draws the subject black on black,
+        and the blank check cannot catch it because the background still
+        renders.
+    """
+    out: List[str] = []
+    if shot.get("target_unframed"):
+        out.append(
+            "%s: 'target' did not frame this angle - 'current' looks through "
+            "the panel's own camera and moves nothing. The other angles in "
+            "this call were framed on it." % label)
+    drawn = shot.get("drawn_size")
+    if drawn:
+        out.append(
+            "%s was drawn at %dx%d, not %dx%d: the playblast failed and the "
+            "M3dView fallback reads the viewport's own framebuffer, whatever "
+            "size the panel happens to be. Measure pixels off it accordingly."
+            % (label, drawn[0], drawn[1], resolution, resolution))
+    if shot.get("unlit"):
+        out.append(
+            "lighting='scene' but this scene has no light: the subject is lit "
+            "by nothing and draws dark against the background. Call "
+            "maya_setup_lighting first, or use lighting='default' for Maya's "
+            "headlight.")
+    return out
+
+
 # Every top-level key capture_viewport reads. Anything else is refused rather
 # than ignored (#767): an unread key does not fail, it succeeds and does
 # something else.
@@ -311,10 +384,29 @@ def capture_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
     # object here was `isolate`, which also hides the rest - the very path #618
     # was about - and frame_all with no isolate framed the sky dome.
     target = _names(params, "target", "|golem|chest")
+    # #797 row 20: "current" keeps the panel's own camera exactly where the
+    # user left it - _capture_one places no camera and never calls
+    # _scene_bbox on that branch, so `target` is read, validated and
+    # dropped. It is a REFUSAL rather than a note because _scene_bbox is
+    # also the only existence check target ever gets: a typo'd target on a
+    # current-only capture came back a success, and the caller believes
+    # they photographed the object they named. A MIXED list still consumes
+    # target for its other angles, so that one is a per-frame note instead.
+    if target and all(a == "current" for a in angles):
+        refuse_inert(
+            "capture_viewport", "target", "when every angle is 'current'",
+            "the current angle looks through the panel's own camera and "
+            "frames nothing, so target is never read - not even to check "
+            "that the object exists",
+            hint="ask for an angle that places a camera (front, side, back, "
+                 "top, three_quarter), or drop target to shoot the panel as "
+                 "the user left it",
+        )
 
     images = []
     camera_positions = []
     warnings: List[str] = [w for w in [ensure_viewport_realized()] if w]
+    warnings.extend(display_warnings(shading, shadows, buffer))
     for angle in angles:
         shot = _capture_one(
             angle, shading, wireframe_overlay, buffer, isolate, frame_all, resolution,
@@ -323,6 +415,11 @@ def capture_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
         images.append({"angle": angle, "png_b64": shot["png_b64"],
                        "blank": shot.get("blank")})
         warnings.extend(blank_warnings(shot, angle))
+        # Deduped: the unlit note carries no label and is identical on every
+        # frame of the call, while the framing and size notes name theirs.
+        for note in frame_warnings(shot, angle, resolution):
+            if note not in warnings:
+                warnings.append(note)
         camera_positions.append(
             {
                 "angle": angle,
@@ -371,6 +468,19 @@ def capture_turntable(params: Dict[str, Any]) -> Dict[str, Any]:
             hint="the cap is grid legibility - the result is one contact sheet",
         )
     target = params.get("target")
+    # #797 row 26: `[str(target)] if target else None` reads an EMPTY string
+    # as "no target at all", so a call that named nothing quietly orbited
+    # the whole scene - sky dome included - and framed the subject as a
+    # speck. An empty name is a caller mistake, not a request for
+    # everything, and it is the one value that cannot mean what it says.
+    if isinstance(target, str) and not target.strip():
+        refuse_inert(
+            "capture_turntable", "target", "when it is empty",
+            "an empty name is falsey, so it was read as 'no target' and the "
+            "orbit framed the entire scene instead of an object",
+            hint="pass the object to orbit, or omit target entirely to frame "
+                 "the whole scene on purpose",
+        )
     isolate = [str(target)] if target else None
     shading = params.get("shading", "smoothShaded")
     if shading not in VALID_SHADING:
@@ -389,6 +499,7 @@ def capture_turntable(params: Dict[str, Any]) -> Dict[str, Any]:
 
     images_out = []
     warnings: List[str] = [w for w in [ensure_viewport_realized()] if w]
+    warnings.extend(display_warnings(shading, shadows))
     for i in range(n_frames):
         azimuth = 360.0 * i / n_frames
         shot = _capture_one(
@@ -399,7 +510,11 @@ def capture_turntable(params: Dict[str, Any]) -> Dict[str, Any]:
             {"index": i, "azimuth": azimuth, "png_b64": shot["png_b64"],
              "blank": shot.get("blank")}
         )
-        warnings.extend(blank_warnings(shot, "azimuth %.0f" % azimuth))
+        label = "azimuth %.0f" % azimuth
+        warnings.extend(blank_warnings(shot, label))
+        for note in frame_warnings(shot, label, resolution):
+            if note not in warnings:
+                warnings.append(note)
     return {"images": images_out, "n_frames": n_frames, "warnings": warnings}
 
 
@@ -431,6 +546,25 @@ def is_light_shape(cmds, shape: str) -> bool:
         return False
 
 
+def _scene_is_unlit(cmds) -> Optional[bool]:
+    """Will lighting='scene' light this frame with nothing? (#797 row 38)
+
+    Asked through lighting.light_shapes, which is the one place that knows
+    what a light is - Arnold's lights do not answer ls(lights=True), and a
+    scene lit entirely by a dome would otherwise read as unlit.
+
+    Never raises and never returns a guess: a capture must not fail because
+    the question could not be asked, and `None` says "not measured" rather
+    than "fine" (the blank_warnings discipline).
+    """
+    from . import lighting  # noqa: PLC0415 - lighting imports nothing here
+
+    try:
+        return not lighting.light_shapes(cmds)
+    except Exception:  # noqa: BLE001 - see docstring; never fail a capture
+        return None
+
+
 def framable_geometry(cmds) -> List[str]:
     """Every visible shape a camera should frame - which excludes the lights."""
     return [
@@ -439,8 +573,15 @@ def framable_geometry(cmds) -> List[str]:
     ]
 
 
-def _scene_bbox(cmds, isolate: Optional[List[str]], visible_only: bool = False):
+def _scene_bbox(cmds, isolate: Optional[List[str]], visible_only: bool = False,
+                param: str = "isolate"):
     """World bbox of the isolate set, or of all visible non-light geometry.
+
+    `param` names the caller's own key in the not-found refusal. This is the
+    only existence check either `isolate` or `target` gets, and it used to
+    say "isolate objects not found" for a mistyped TARGET - naming a param
+    the caller did not pass, which sends them looking in the wrong place
+    (#797 row 20's review).
 
     `visible_only` measures what will actually appear rather than what the
     target contains. `exactWorldBoundingBox` includes a transform's children
@@ -455,7 +596,7 @@ def _scene_bbox(cmds, isolate: Optional[List[str]], visible_only: bool = False):
         missing = [n for n in isolate if not cmds.objExists(n)]
         if missing:
             raise HandlerError(
-                "isolate objects not found: %s" % ", ".join(missing),
+                "%s objects not found: %s" % (param, ", ".join(missing)),
                 hint="call maya_get_scene_graph to list objects",
             )
         # A caller who names the dome means the dome: only the fallback filters.
@@ -643,6 +784,11 @@ def _capture_one(
     frame_on: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     cmds = _cmds()
+    # Asked HERE, where cmds exists: the handlers above must stay Maya-free
+    # until the capture itself, so their param refusals fire headless (#797
+    # row 20's contract). Reported once by the caller, not once per frame.
+    unlit = _scene_is_unlit(cmds) if lighting == "scene" else False
+    target_unframed = False
     panel = find_model_panel(cmds)
     state = _PanelState(cmds, panel)
     temp_camera = None
@@ -658,10 +804,21 @@ def _capture_one(
         # framing falls back to the isolate set - what a caller passing only
         # isolate means.
         framing = frame_on or isolate
+        # Which key the caller actually passed, so a not-found refusal names
+        # the word they typed rather than the one this function calls it.
+        framing_param = "target" if frame_on else "isolate"
         if angle == "current":
+            # Nothing is framed here - but the name still has to be REAL.
+            # _scene_bbox is the only existence check `target` ever gets, so
+            # skipping it let a typo'd target succeed against whatever the
+            # panel happened to hold (#797 row 20). The box is discarded;
+            # the refusal inside it is the point.
+            if framing:
+                _scene_bbox(cmds, framing, param=framing_param)
+            target_unframed = bool(frame_on)
             capture_cam = state.camera
         else:
-            bbox_min, bbox_max = _scene_bbox(cmds, framing)
+            bbox_min, bbox_max = _scene_bbox(cmds, framing, param=framing_param)
             if isinstance(angle, (tuple, list)) and angle[0] == "azimuth":
                 position, rotation = camera_placement_azimuth(
                     float(angle[1]), bbox_min, bbox_max
@@ -762,6 +919,10 @@ def _capture_one(
             "camera": camera_long,
             "blank": opacity.get("blank"),
             "blank_unmeasurable": opacity.get("unavailable_reason"),
+            # What this frame did NOT do, for frame_warnings above.
+            "drawn_size": opacity.get("drawn_size"),
+            "unlit": unlit,
+            "target_unframed": target_unframed,
         }
     finally:
         state.restore()
@@ -789,6 +950,7 @@ def _grab_pixels(cmds, panel: str, resolution: int):
     fd, path = tempfile.mkstemp(suffix=".png", prefix="maya_mcp_")
     os.close(fd)
     os.unlink(path)  # playblast wants to create the file itself
+    drawn: Optional[Tuple[int, int]] = None
     try:
         cmds.setFocus(panel)
         try:
@@ -808,13 +970,20 @@ def _grab_pixels(cmds, panel: str, resolution: int):
         except Exception:
             result = None
         if not result or not os.path.exists(path):
-            _read_color_buffer(path)
+            drawn = _read_color_buffer(path)
         if not os.path.exists(path):
             raise HandlerError(
                 "viewport capture produced no image (playblast and M3dView both failed)",
                 hint="make sure a viewport is visible and not minimized, then retry",
             )
-        opacity = pngprobe.opacity(path)
+        opacity = dict(pngprobe.opacity(path))
+        # Carried in the opacity dict rather than as a third return value:
+        # it is a per-frame MEASUREMENT of the file, exactly like `blank`,
+        # and every stand-in for this function returns the pair. Only set
+        # when the fallback actually changed the size - a playblast that
+        # honoured widthHeight has nothing to report (#797 row 36).
+        if drawn is not None and drawn != (resolution, resolution):
+            opacity["drawn_size"] = list(drawn)
         with open(path, "rb") as fh:
             return fh.read(), opacity
     finally:
@@ -822,8 +991,17 @@ def _grab_pixels(cmds, panel: str, resolution: int):
             os.unlink(path)
 
 
-def _read_color_buffer(path: str) -> None:
-    """Fallback capture: read the active 3d view's color buffer (GUI only)."""
+def _read_color_buffer(path: str) -> Optional[Tuple[int, int]]:
+    """Fallback capture: read the active 3d view's color buffer (GUI only).
+
+    Returns the size it actually DREW at, which is the panel's own, not the
+    resolution the caller asked for: playblast honours widthHeight, while
+    M3dView reads the framebuffer of a view that is whatever size the
+    user's window makes it. So this path silently changes the image's scale,
+    and until #797 row 36 no field said so - a caller measuring pixels off
+    the frame had no way to know. None when the fallback did not run or the
+    size could not be read.
+    """
     try:
         import maya.OpenMaya as om  # noqa: PLC0415
         import maya.OpenMayaUI as omui  # noqa: PLC0415
@@ -833,5 +1011,6 @@ def _read_color_buffer(path: str) -> None:
         image = om.MImage()
         view.readColorBuffer(image, True)
         image.writeToFile(path, "png")
+        return int(view.portWidth()), int(view.portHeight())
     except Exception:
-        pass  # caller reports the combined failure with a hint
+        return None  # caller reports the combined failure with a hint

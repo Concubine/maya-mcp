@@ -558,6 +558,31 @@ def plane_normal(start, target, pole) -> Optional[List[float]]:
     return [v / length for v in n]
 
 
+def pole_offline_distance(start, target, pole) -> float:
+    """How far `pole` sits off the start->target LINE (not the segment).
+
+    The measurement #797 row 22's refusal is made on. `plane_normal`
+    already answers None for a pole on that line and `prebend_rotations`
+    already returns {} for it - both SILENTLY, so pose_ik built a
+    degenerate poleVectorConstraint, skipped the pre-bend, and suppressed
+    its own straight-chain warning (the warning only fires when no pole
+    was given at all). A distance rather than a yes/no because "on the
+    line" is relative: a centimetre off is decisive on a finger and noise
+    on a leg, so the caller of this compares it against the chain's reach.
+
+    A target sitting ON the start joint leaves no line to be off - the
+    honest answer there is the distance to that one point, not a division
+    by zero.
+    """
+    axis = _sub(target, start)
+    length = math.sqrt(_dot(axis, axis))
+    offset = _sub(pole, start)
+    if length < 1e-12:
+        return math.sqrt(_dot(offset, offset))
+    perp = _cross(axis, offset)
+    return math.sqrt(_dot(perp, perp)) / length
+
+
 def local_components(vec, matrix16: List[float]) -> List[float]:
     """A world vector expressed in a joint's local frame. Maya's xform
     matrix is row-major with rows 0..2 = the local axes in world space;

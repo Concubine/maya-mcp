@@ -383,16 +383,21 @@ class TestModelingInMaya:
         # F2: octahedron/icosahedron have no subdivision flags in Maya - the
         # real face count must match projected_faces regardless of divisions,
         # proving the cap math (max_divisions_for) stays honest for them too.
+        # #797 row 1: a PASSED divisions on a platonic is now refused rather
+        # than range-checked and dropped, so the high arm asserts the refusal
+        # and nothing named gem_oct_b is ever built.
         import maya.cmds as cmds
 
+        from maya_plugin.dispatcher import HandlerError
         from maya_plugin.handlers import modeling
 
         oct_low = modeling.create_primitive({"kind": "octahedron", "name": "gem_oct_a"})
-        oct_high = modeling.create_primitive(
-            {"kind": "octahedron", "name": "gem_oct_b", "divisions": 50}
-        )
+        with pytest.raises(HandlerError, match="does not use 'divisions'"):
+            modeling.create_primitive(
+                {"kind": "octahedron", "name": "gem_oct_b", "divisions": 50}
+            )
+        assert not cmds.objExists("gem_oct_b")
         assert cmds.polyEvaluate(oct_low["name"], face=True) == 8
-        assert cmds.polyEvaluate(oct_high["name"], face=True) == 8
         assert modeling.projected_faces("octahedron", 50) == 8
 
         ico = modeling.create_primitive({"kind": "icosahedron", "name": "gem_ico"})
@@ -2076,10 +2081,16 @@ class TestLightingInMaya:
 
         monkeypatch.setattr(cmds, "connectAttr", _boom)
 
+        # #797 row 18: a non-existent absolute hdri_path is refused before
+        # anything is built, so the file has to exist for the failure under
+        # test (the forced connectAttr) to be reached at all.
+        sky = tmp_path / "sky.hdr"
+        sky.write_bytes(b"#?RADIANCE\n")
+
         with pytest.raises(RuntimeError, match="forced connectAttr failure"):
             lighting.setup_lighting({
                 "preset": "hdri",
-                "hdri_path": str(tmp_path / "sky.hdr"),
+                "hdri_path": str(sky),
                 "replace_existing": False,
             })
 

@@ -10,9 +10,10 @@ call never burns one (the correction M1 made to sculpt_ops/remesh).
 from __future__ import annotations
 
 import math
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..dispatcher import HandlerError, require_known_keys
+from ..dispatcher import HandlerError, refuse_inert, require_known_keys
 from . import naming, orphans
 
 PRESETS = ("three_point", "single_sun", "hdri", "environment")
@@ -157,7 +158,10 @@ SETUP_LIGHTING_SYNONYMS = {"brightness": "intensity"}
 def setup_lighting(params: Dict[str, Any]) -> Dict[str, Any]:
     require_known_keys(params, SETUP_LIGHTING_KEYS, "setup_lighting",
                        SETUP_LIGHTING_SYNONYMS)
-    cmds = _cmds()
+    # Everything down to `cmds = _cmds()` is PURE - it asks Maya nothing. A
+    # refusal that needs maya.cmds to fire is a refusal that arrives after
+    # the import, and #797's contract is that a param this branch drops is
+    # named before the call touches anything at all.
     preset = params.get("preset")
     if preset not in PRESETS:
         raise HandlerError(
@@ -174,14 +178,55 @@ def setup_lighting(params: Dict[str, Any]) -> Dict[str, Any]:
             hint="got %r; 1.0 is the neutral default" % (intensity,),
         )
     hdri_path = params.get("hdri_path")
-    if preset == "hdri" and not hdri_path:
-        raise HandlerError(
-            "the hdri preset requires hdri_path",
-            hint="maya-mcp bundles no HDRI (they are large and separately "
-            "licensed) - pass an absolute path to your own .hdr/.exr, or use "
-            "preset='environment' for a neutral studio dome that needs no file",
+    # `hdri_path` reaches _build_dome and nowhere else, so only the two dome
+    # presets can read it at all - and `environment` is the dome that reads
+    # it by NOT being handed it (#797 rows 18-19).
+    if hdri_path is not None and preset in ("three_point", "single_sun"):
+        refuse_inert(
+            "setup_lighting", "hdri_path", "with preset %s" % preset,
+            "the directional presets build lamps (key/fill/rim, or one sun) "
+            "and no dome - nothing on this branch opens a file, so the sky "
+            "you named would never have lit anything",
+            hint="use preset='hdri' to be lit BY that image, or drop "
+                 "hdri_path to keep the %s rig" % preset,
         )
+    if hdri_path is not None and preset == "environment":
+        refuse_inert(
+            "setup_lighting", "hdri_path", "with preset environment",
+            "environment is the dome that needs no file: its colour comes "
+            "from a built-in V ramp (ground below, sky above, a horizon "
+            "between them), which is what makes a mirror surface legible "
+            "as a mirror",
+            hint="use preset='hdri' to light from your own .hdr/.exr, or "
+                 "drop hdri_path for the neutral studio dome",
+        )
+    if preset == "hdri":
+        if not hdri_path:
+            raise HandlerError(
+                "the hdri preset requires hdri_path",
+                hint="maya-mcp bundles no HDRI (they are large and separately "
+                "licensed) - pass an absolute path to your own .hdr/.exr, or use "
+                "preset='environment' for a neutral studio dome that needs no file",
+            )
+        # A missing texture is not an error in Maya: the file node renders
+        # flat and the dome lights the scene an even grey, which reads as a
+        # dim HDRI rather than as a typo (the pbr.missing_files lesson).
+        # Checked HERE, before the replace_existing checkpoint below, so a
+        # mistyped path does not also cost the caller their lights.
+        # Relative paths are workspace-resolved and cannot be judged from
+        # here, so they are left to Maya rather than guessed at.
+        text = str(hdri_path)
+        if os.path.isabs(text) and not os.path.isfile(text):
+            raise HandlerError(
+                "hdri_path does not exist: %s" % text,
+                hint="Maya does not fail on a missing texture - the dome "
+                     "would light the scene flat grey and nothing would say "
+                     "so. Check the path, or use preset='environment' for a "
+                     "dome that needs no file.",
+            )
     replace_existing = params.get("replace_existing", True) is not False
+
+    cmds = _cmds()
 
     # Everything above is validation; only now is it safe to spend a
     # checkpoint or delete anything.

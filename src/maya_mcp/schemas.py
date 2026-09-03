@@ -433,7 +433,14 @@ class CleanupResult(BaseModel):
 class RenderedFrame(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    angle: str
+    angle: str = Field(description="The angle the frame was actually shot from.")
+    requested_angle: Optional[str] = Field(
+        default=None,
+        description=(
+            "Set only when it differs from `angle`: 'current' has no camera "
+            "offscreen and is shot as three_quarter (#797 row 30)."
+        ),
+    )
     opaque_px: int = Field(
         description="Pixels with a subject in them. Zero means the frame is empty."
     )
@@ -459,7 +466,10 @@ class RenderResult(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     renderer: str = Field(description="Renderer used: 'arnold' or 'hw2'.")
-    samples: int
+    samples: Optional[int] = Field(
+        default=None,
+        description="Arnold AA samples applied; null under hw2, which has none.",
+    )
     fallback_light: bool = Field(
         description="True if the scene had no light and a temporary key was added for the render."
     )
@@ -680,6 +690,18 @@ class UvAtlasResult(BaseModel):
             "read as another material's pixels bleeding onto the piece."
         )
     )
+    # #797 row 10: the APPLIED density, not the requested one. Undeclared
+    # here, `extra="ignore"` dropped it on the floor - the handler measured
+    # it, protocol.md's result row promised it, and no caller could read it.
+    uv_per_metre: Optional[float] = Field(
+        default=None,
+        description=(
+            "UV units per metre applied by world-scale packing; null when the "
+            "mesh was normalised to the patch instead."
+        ),
+    )
+    # #797 row 8: protocol.md promised this field; the handler now fills it.
+    warnings: List[str] = Field(default_factory=list)
 
 
 class SkinFacts(BaseModel):
@@ -704,6 +726,11 @@ class SkinFacts(BaseModel):
 
 class BlendshapeTargetSpec(BaseModel):
     """One morph target to wire: an ordinary same-topology mesh."""
+
+    # #797 row 40: a key the handler never reads is refused at the wire, not
+    # dropped by pydantic's default `extra="ignore"` - the #764 lesson at the
+    # nested level.
+    model_config = ConfigDict(extra="forbid")
 
     name: str = Field(description=(
         "Weight name - becomes the attribute alias, the "

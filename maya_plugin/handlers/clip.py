@@ -36,7 +36,7 @@ import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..dispatcher import HandlerError, require_known_keys
+from ..dispatcher import HandlerError, refuse_inert, require_known_keys
 from . import (capture, clipmath, naming, render, rigmath, sculpt,
               sculpt_math, session, units)
 
@@ -2444,8 +2444,12 @@ def delete_clip(params: Dict[str, Any]) -> Dict[str, Any]:
 
 # Every top-level key preview_clip reads; anything else is refused rather
 # than ignored.
+# `samples` is gone (#797 row 29): the wrapper never sent it, protocol.md
+# never listed it, and under the default hw2 renderer Arnold's AA count is
+# read by nothing - so the only caller who could pass it was one guessing
+# at the API, and the guess did nothing.
 PREVIEW_CLIP_KEYS = ("root", "name", "angle", "every_nth", "renderer",
-                     "resolution", "samples", "zoom")
+                     "resolution", "zoom")
 # `clip` is the word the result uses for the thing being previewed and the
 # input key clean_clip takes, so it is the first one a caller tries.
 # `stride` is the generic term for sampling every nth frame, which reads
@@ -2463,6 +2467,27 @@ def preview_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     """
     require_known_keys(params, PREVIEW_CLIP_KEYS, "preview_clip",
                        PREVIEW_CLIP_SYNONYMS)
+    # The angle is decided before Maya is touched at all: it needs no scene
+    # to judge, and #797's contract is that a param this tool cannot use is
+    # named before the call reaches the rig (the #767 pattern).
+    angle = params.get("angle") or "three_quarter"
+    if angle not in capture.VALID_ANGLES:
+        raise HandlerError("unknown angle %r" % angle,
+                           hint="valid angles: %s"
+                                % ", ".join(capture.VALID_ANGLES))
+    # #797 row 21: this tool places its OWN camera - one, held across every
+    # frame, because motion must read against a fixed frame - so there is
+    # no panel camera for "current" to mean. _run_shots degraded it to
+    # three_quarter and labelled every cell "current" anyway.
+    if angle == "current":
+        refuse_inert(
+            "preview_clip", "angle", "when it is 'current'",
+            "a preview places its own held camera and renders offscreen, so "
+            "there is no viewport camera to keep - 'current' would be shot "
+            "as three_quarter under the wrong label",
+            hint="name the angle that reads the motion: 'side' for a walk, "
+                 "'front' for a face",
+        )
     cmds = _cmds()
     from . import rigging  # noqa: PLC0415
 
@@ -2489,11 +2514,6 @@ def preview_clip(params: Dict[str, Any]) -> Dict[str, Any]:
                            hint="re-author it; this is a broken metadata "
                                 "state, not a render problem")
 
-    angle = params.get("angle") or "three_quarter"
-    if angle not in capture.VALID_ANGLES:
-        raise HandlerError("unknown angle %r" % angle,
-                           hint="valid angles: %s"
-                                % ", ".join(capture.VALID_ANGLES))
     every_nth = params.get("every_nth")
     if every_nth is None:
         # Simulate the ACTUAL frame list per candidate stride, not just the
@@ -2549,11 +2569,18 @@ def preview_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     # above must pass before this call is allowed to mutate the scene.
     cmds.currentUnit(time=clipmath.FPS_UNITS[fps])
 
+    renderer = params.get("renderer", "hw2")
     render_params = {
-        "renderer": params.get("renderer", "hw2"),
+        "renderer": renderer,
         "resolution": params.get("resolution",
                                  DEFAULT_PREVIEW_RESOLUTION),
-        "samples": params.get("samples", 1),
+        # One sample: a preview is many frames and motion does not need
+        # refraction. Handed over only on the renderer that READS it - hw2
+        # draws the viewport's own image, and _run_shots reports `samples:
+        # null` there and warns about any count it was asked for. Asking on
+        # a caller's behalf, when the caller cannot ask at all, would put
+        # that warning on every default preview (#797 row 29).
+        "samples": 1 if renderer == "arnold" else None,
         "zoom": params.get("zoom", 1.0),
     }
     # The held camera's framing box is the UNION of the meshes' bounds

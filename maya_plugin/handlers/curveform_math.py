@@ -20,7 +20,7 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from ..dispatcher import HandlerError
+from ..dispatcher import HandlerError, refuse_inert
 from .modeling import MAX_PRIMITIVE_FACES
 
 KINDS = ("sweep", "revolve", "loft")
@@ -397,6 +397,7 @@ def _validate_sweep(params: Dict[str, Any]) -> Dict[str, Any]:
             )
         twist = float(twist)
 
+    resolution = params.get("resolution")
     profile_sides = params.get("profile_sides")
     if profile_sides is not None:
         if (
@@ -421,10 +422,28 @@ def _validate_sweep(params: Dict[str, Any]) -> Dict[str, Any]:
                 % MAX_PROFILE_SIDES,
             )
 
+        # #797 row 14: on a sweep, `profile_sides` IS the cross-section.
+        # `curveform._build_sweep` reads `resolution.around` only on the
+        # branch where profile_sides is omitted (it then approximates a
+        # round tube with as many sides as `around` asks for) - so a caller
+        # who passes both gets the profile_sides ring and their `around`
+        # never reaches `.profilePolySides`. Refused HERE, before
+        # `_validate_resolution` fills a default in and makes "the caller
+        # asked for it" unknowable.
+        if isinstance(resolution, dict) and "around" in resolution:
+            refuse_inert(
+                "create_curve_form", "around", "on a sweep with profile_sides",
+                "profile_sides is the cross-section ring on a sweep - "
+                "resolution.around is only read when profile_sides is omitted",
+                hint="drop resolution.around (profile_sides=%r already sets the "
+                     "ring), or drop profile_sides for a round tube of "
+                     "`around` sides" % (profile_sides,),
+            )
+
     spec: Dict[str, Any] = {
         "kind": "sweep",
         "cap_ends": _validate_cap_ends(params.get("cap_ends", True)),
-        "resolution": _validate_resolution(params.get("resolution"), _SWEEP_DEFAULT_RESOLUTION),
+        "resolution": _validate_resolution(resolution, _SWEEP_DEFAULT_RESOLUTION),
         "path": path,
         "width": width,
         "twist": twist,
@@ -521,11 +540,12 @@ def predicted_faces(spec: Dict[str, Any]) -> int:
     A sweep bills differently (#768 review IMPORTANT 3): its cross-section
     is `profile_sides` when given (an explicit n-gon profile), not
     `resolution["around"]` - `_build_sweep` only falls back to `around` when
-    `profile_sides` is omitted (see its docstring). Billing a sweep by
-    `around` alone would silently under-count whenever a caller asks for a
-    fine profile (`profile_sides` up to MAX_PROFILE_SIDES=64) on a coarse
-    `around` resolution, so the ring width used here is
-    `max(around, profile_sides or 0)`.
+    `profile_sides` is omitted (see its docstring). The ring width is
+    therefore `profile_sides` outright, not `max(around, profile_sides)`:
+    since #797 row 14 the two cannot both be PASSED (`around` alongside
+    `profile_sides` is refused as inert), so `around` on a profile_sides
+    sweep is only ever the filled-in default, and maxing against it would
+    over-bill a deliberately coarse profile (a 4-sided tube billed as 16).
 
     For a spec that came from `validate_spec`, this branch is unreachable:
     `MAX_ALONG * max(MAX_AROUND, MAX_PROFILE_SIDES) + 2 = 131,074`, far under
@@ -537,8 +557,8 @@ def predicted_faces(spec: Dict[str, Any]) -> int:
     resolution = spec["resolution"]
     along = resolution["along"]
     around = resolution["around"]
-    if spec.get("kind") == "sweep":
-        around = max(around, spec.get("profile_sides") or 0)
+    if spec.get("kind") == "sweep" and spec.get("profile_sides"):
+        around = spec["profile_sides"]
     faces = along * around + (2 if spec.get("cap_ends") else 0)
     if faces > MAX_PRIMITIVE_FACES:
         raise HandlerError(

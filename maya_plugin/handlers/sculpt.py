@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List
 
-from ..dispatcher import HandlerError, require_known_keys
+from ..dispatcher import HandlerError, refuse_inert, require_known_keys
 from . import naming, sculpt_math, units
 
 MAX_OPS = 20
@@ -594,6 +594,30 @@ def _op_split(cmds, mesh_long: str, op: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# Every key each of the eight original ops actually READS (#797 row 16).
+# The four cage ops declared theirs from the start (INSERT_LOOP_KEYS and
+# friends above); these eight never did, so a key from a neighbouring op
+# went straight through and the op ran on its own defaults. Measured worst
+# case: `displace_noise` with center/radius/falloff reads none of the three
+# and displaces the WHOLE mesh - a call that reports success having done
+# something else entirely to every vertex the caller owns.
+#
+# `vertex_id` and `center` are alternatives, not a pair - both are listed
+# here as READ keys, and `validate_ops` below refuses the two together.
+SOFT_MOVE_KEYS = {"op", "vertex_id", "center", "radius", "falloff", "delta"}
+INFLATE_REGION_KEYS = {"op", "vertex_id", "center", "radius", "falloff", "amount"}
+DISPLACE_NOISE_KEYS = {"op", "amp", "freq", "octaves", "soften_angle"}
+SMOOTH_KEYS = {"op", "divisions"}
+EXTRUDE_FACES_KEYS = {"op", "faces", "distance", "keep_together"}
+BEVEL_EDGES_KEYS = {"op", "edges", "segments", "width"}
+CREASE_EDGES_KEYS = {"op", "edges", "amount"}
+BRIDGE_KEYS = {"op", "edges_a", "edges_b"}
+
+# The two ops whose region can be addressed either way. `_resolve_center`
+# returns on `vertex_id` before it ever looks at `center`.
+CENTERED_OPS = ("soft_move", "inflate_region")
+
+
 _OPS: Dict[str, Callable] = {
     "soft_move": _op_soft_move,
     "inflate_region": _op_inflate_region,
@@ -610,28 +634,45 @@ _OPS: Dict[str, Callable] = {
 }
 
 
-# Every top-level key sculpt_ops reads (#767). Per-op dicts are validated
-# separately (INSERT_LOOP_KEYS and friends) - that is a different question
-# from what arrived at the top level.
-SCULPT_OPS_KEYS = ("mesh", "ops")
-SCULPT_OPS_SYNONYMS = {"operations": "ops"}
+# op tag -> the keys that op reads. Every registered op appears here; a new
+# op without an entry is a KeyError in validate_ops, which is the point -
+# an op with no declared key set accepts anything.
+_OP_KEYS: Dict[str, set] = {
+    "soft_move": SOFT_MOVE_KEYS,
+    "inflate_region": INFLATE_REGION_KEYS,
+    "displace_noise": DISPLACE_NOISE_KEYS,
+    "smooth": SMOOTH_KEYS,
+    "extrude_faces": EXTRUDE_FACES_KEYS,
+    "bevel_edges": BEVEL_EDGES_KEYS,
+    "crease_edges": CREASE_EDGES_KEYS,
+    "bridge": BRIDGE_KEYS,
+    "insert_loop": INSERT_LOOP_KEYS,
+    "extrude_edges": EXTRUDE_EDGES_KEYS,
+    "mirror_topology": MIRROR_TOPOLOGY_KEYS,
+    "split": SPLIT_KEYS,
+}
 
 
-def sculpt_ops(params: Dict[str, Any]) -> Dict[str, Any]:
-    require_known_keys(params, SCULPT_OPS_KEYS, "sculpt_ops",
-                       SCULPT_OPS_SYNONYMS)
-    cmds = _cmds()
-    mesh_long, _ = naming.require_mesh(cmds, str(params.get("mesh") or ""))
-    ops = params.get("ops")
+def validate_ops(ops: Any) -> List[str]:
+    """Every op's tag and key set, checked with no Maya anywhere.
+
+    Pure on purpose (#797): sculpt_ops auto-checkpoints before it applies
+    anything, and three of its ops write vertices through the API where
+    maya_undo cannot follow. A refusal that arrives after that checkpoint is
+    a refusal after the cost. So the whole answerable-without-a-scene half
+    of validation - the op tag, the keys each op reads, and the
+    vertex_id/center either-or - runs here, before the handler asks for
+    `cmds` at all. Per-op VALUE validation (ranges, component strings,
+    falloff names) still lives inside each op function: it is the half that
+    needs the mesh.
+
+    Returns the op tags in order, which is what sculpt_ops dispatches on.
+    """
     if not isinstance(ops, list) or not ops or len(ops) > MAX_OPS:
         raise HandlerError(
             "ops must be a list of 1..%d operations" % MAX_OPS,
             hint='e.g. ops=[{"op": "displace_noise", "amp": 0.06, "freq": 2.6}]',
         )
-    # Validate every op tag up front, before applying anything, so an
-    # invalid list never burns an auto-checkpoint. Per-op param validation
-    # (numbers, components, falloff names, ...) stays inside each op
-    # function and still runs at apply time below.
     kinds: List[str] = []
     for index, op in enumerate(ops):
         kind = op.get("op") if isinstance(op, dict) else None
@@ -640,7 +681,41 @@ def sculpt_ops(params: Dict[str, Any]) -> Dict[str, Any]:
                 "op %d: unknown op %r" % (index, kind),
                 hint="valid ops: %s" % ", ".join(sorted(_OPS)),
             )
+        require_known_keys(op, _OP_KEYS[kind], "sculpt_ops op %r" % kind)
+        if kind in CENTERED_OPS and "vertex_id" in op and "center" in op:
+            # #797 row 15: `_resolve_center` returns the vertex's own world
+            # position the moment `vertex_id` is present and never reads
+            # `center` - so a caller who passes both had their coordinates
+            # dropped and got a region centred somewhere else, with nothing
+            # said. They are alternatives, and the call has to pick one.
+            refuse_inert(
+                "sculpt_ops", "center", "when vertex_id is given",
+                "vertex_id resolves the region centre to that vertex's own "
+                "world position and center is never read",
+                hint="drop 'center' to centre on vertex %r, or drop "
+                     "'vertex_id' to centre on the coordinates"
+                     % (op.get("vertex_id"),),
+            )
         kinds.append(kind)
+    return kinds
+
+
+# Every top-level key sculpt_ops reads (#767). Per-op dicts are validated
+# separately (validate_ops above) - that is a different question from what
+# arrived at the top level.
+SCULPT_OPS_KEYS = ("mesh", "ops")
+SCULPT_OPS_SYNONYMS = {"operations": "ops"}
+
+
+def sculpt_ops(params: Dict[str, Any]) -> Dict[str, Any]:
+    require_known_keys(params, SCULPT_OPS_KEYS, "sculpt_ops",
+                       SCULPT_OPS_SYNONYMS)
+    # Everything answerable without a scene, before the mesh lookup and
+    # before the auto-checkpoint below - see validate_ops' docstring.
+    ops = params.get("ops")
+    kinds = validate_ops(ops)
+    cmds = _cmds()
+    mesh_long, _ = naming.require_mesh(cmds, str(params.get("mesh") or ""))
 
     checkpoint_info = None
     if any(kind in VERTEX_OPS for kind in kinds):
@@ -754,6 +829,18 @@ _INERT_HINTS = {
                "call only builds it",
 }
 
+# The lattice hint above is for the LIVE case ("nothing has moved it yet").
+# A BAKED lattice cannot be in that state: #797 row 27 refuses the bake with
+# no handle move, so the only bake that reaches the inert warning is one
+# whose handle moved and whose mesh barely followed - a different diagnosis,
+# and a different next step.
+_BAKED_LATTICE_HINT = (
+    "the handle moved but the mesh barely followed - check `divisions` "
+    "(too few and the mesh has no points near the handle to follow it) and "
+    "the size of the handle offset, or drop `delete_history_after` and "
+    "shape the lattice live"
+)
+
 
 def vertex_positions(cmds, mesh_long: str) -> List[float]:
     """World-space vertex positions, flat [x,y,z,x,y,z,...].
@@ -792,8 +879,9 @@ DEFORM_SYNONYMS = {"type": "deformer", "bake": "delete_history_after",
 
 def deform(params: Dict[str, Any]) -> Dict[str, Any]:
     require_known_keys(params, DEFORM_KEYS, "deform", DEFORM_SYNONYMS)
-    cmds = _cmds()
-    mesh_long, _ = naming.require_mesh(cmds, str(params.get("mesh") or ""))
+    # Everything answerable without a scene runs first: deform
+    # auto-checkpoints nothing, but it BUILDS a deformer, and a refusal that
+    # arrives after the build is a refusal that left nodes behind (#797).
     deformer = params.get("deformer")
     if deformer not in DEFORMER_WHITELIST:
         raise HandlerError(
@@ -809,6 +897,27 @@ def deform(params: Dict[str, Any]) -> Dict[str, Any]:
             hint="valid params: %s" % ", ".join(sorted(DEFORMER_WHITELIST[deformer])),
         )
     handle_xform = {k: dparams.pop(k) for k in ("translate", "rotate") if k in dparams}
+    baked = bool(params.get("delete_history_after"))
+    if deformer == "lattice" and baked and not handle_xform:
+        # #797 row 27. A lattice deforms nothing until its points move, and
+        # `delete_history_after` deletes the lattice along with its handles -
+        # so this combination builds a lattice, moves nothing with it, and
+        # deletes it again. The observed result was
+        # {deformer_nodes: [], baked: true, warnings: [], max_displacement: 0}:
+        # a success report for a call in which the mesh was never touched.
+        # lattice + translate/rotate + bake is a real bake and stays legal.
+        refuse_inert(
+            "deform", "delete_history_after", "on a lattice whose handle was not moved",
+            "a lattice deforms nothing until its points move, and the bake "
+            "deletes the lattice and its handles - so the mesh ends up "
+            "exactly as it started",
+            hint="pass params.translate (or params.rotate) to move the lattice "
+                 "handle before the bake, or drop delete_history_after and "
+                 "keep the lattice live to shape by hand",
+        )
+
+    cmds = _cmds()
+    mesh_long, _ = naming.require_mesh(cmds, str(params.get("mesh") or ""))
     # Measured before anything is built, compared at the very end - after the
     # attributes, after the handle placement, after any bake. #636 shipped a
     # bend that reported success and moved the mesh by 0.1% of its own height;
@@ -862,8 +971,9 @@ def deform(params: Dict[str, Any]) -> Dict[str, Any]:
     if "rotate" in handle_xform:
         cmds.xform(handle, rotation=handle_xform["rotate"], worldSpace=True)
     moved = sculpt_math.max_displacement(before, vertex_positions(cmds, mesh_long))
-    warnings = _inert_warnings(deformer, moved, sculpt_math.bbox_extent(before))
-    if params.get("delete_history_after"):
+    warnings = _inert_warnings(deformer, moved, sculpt_math.bbox_extent(before),
+                               baked=baked)
+    if baked:
         cmds.delete(mesh_long, constructionHistory=True)
         # constructionHistory delete only removes the deformer DG node, not
         # the handle transforms the deformer command created (ffd1Lattice/
@@ -883,19 +993,34 @@ def deform(params: Dict[str, Any]) -> Dict[str, Any]:
             "max_displacement": moved}
 
 
-def _inert_warnings(deformer: str, moved: float, extent: float) -> List[str]:
+def _inert_warnings(deformer: str, moved: float, extent: float,
+                    baked: bool = False) -> List[str]:
     """One warning when the mesh did not visibly move. The measured number goes
     out either way, in max_displacement - the warning is for the case an agent
     would otherwise read `baked: true` as "the shape changed".
 
-    lattice is exempt: a freshly built lattice deforms nothing until its points
-    are moved, so warning on it would fire on every correct call and teach
-    readers to skip the one warning that matters.
+    A LIVE lattice is exempt: a freshly built lattice deforms nothing until
+    its points are moved, so warning on it would fire on every correct call
+    and teach readers to skip the one warning that matters. A BAKED one is
+    not (#797 row 27): once history is deleted there are no lattice points
+    left to move, so "it has not been shaped yet" stops being true and a
+    lattice that moved nothing is as inert as any other deformer. The
+    zero-displacement bake is refused outright in `deform`; this covers the
+    bake whose handle DID move and still changed nothing measurable.
     """
     threshold = extent * NOOP_DISPLACEMENT_RATIO if extent > 0 else 1e-9
-    if deformer == "lattice" or moved > threshold:
+    if (deformer == "lattice" and not baked) or moved > threshold:
         return []
+    hint = _INERT_HINTS[deformer]
+    if deformer == "lattice":
+        # _INERT_HINTS["lattice"] says "this call only builds it", which is
+        # true of a LIVE lattice and false here: since #797 row 27 refuses
+        # the bake with no handle move, the only way to reach this warning
+        # is a bake whose handle DID move and whose mesh barely followed.
+        # Sending the build-only hint would send the reader looking for a
+        # step they already took.
+        hint = _BAKED_LATTICE_HINT
     return [
         "%s moved the mesh by %.6g (mesh extent %.6g) - that is not a visible "
-        "deformation. %s" % (deformer, moved, extent, _INERT_HINTS[deformer])
+        "deformation. %s" % (deformer, moved, extent, hint)
     ]

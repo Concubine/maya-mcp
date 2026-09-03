@@ -150,6 +150,51 @@ class TestSmoothTrack:
             mm.smooth_track([1.0] * 10, window=3)
 
 
+class TestTheWindowThatActuallyFits:
+    """#797 rows 24/42: `smooth_track`'s window SHRINKS per sample, so a
+    window wider than the track is not an error and not a wider filter -
+    it is the same filter as the widest window that fits, silently. The
+    number clean_clip needs in order to say so.
+    """
+
+    def test_the_widest_window_is_the_track_on_an_odd_length(self):
+        assert mm.largest_smoothing_window(31) == 31
+
+    def test_an_even_length_loses_its_last_sample_to_centering(self):
+        # a centered odd window cannot span 30 - 29 is the widest that can
+        # sit on the middle sample.
+        assert mm.largest_smoothing_window(30) == 29
+
+    def test_a_track_too_short_for_any_legal_window_answers_zero(self):
+        # smooth_track's own floor is 5; below that no window is legal.
+        assert mm.largest_smoothing_window(4) == 0
+        assert mm.largest_smoothing_window(1) == 0
+        assert mm.largest_smoothing_window(0) == 0
+
+    def test_the_floor_is_smooth_tracks_own(self):
+        assert mm.largest_smoothing_window(5) == 5
+        assert mm.MIN_SMOOTHING_SAMPLES == 5
+
+    def test_every_window_past_the_fit_is_the_same_filter(self):
+        # The measured claim the refusal is built on (#797 row 24): on a
+        # 30-sample track, window 31 and window 101 both produce EXACTLY
+        # what window 29 produces.
+        track = [float(i % 3) for i in range(30)]
+        fit = mm.smooth_track(track, window=29)
+        assert mm.smooth_track(track, window=31) == pytest.approx(fit)
+        assert mm.smooth_track(track, window=101) == pytest.approx(fit)
+
+    def test_a_track_below_the_floor_is_returned_unchanged(self):
+        # identity for n <= 4: every shrunk fit spans <= its own order, so
+        # the polynomial passes through every sample exactly.
+        for n in (1, 2, 3, 4):
+            track = [float(i % 3) for i in range(n)]
+            assert mm.smooth_track(track, window=5) == pytest.approx(track)
+        # and at 5 it finally moves a value
+        five = [0.0, 1.0, 0.0, 1.0, 0.0]
+        assert mm.smooth_track(five, window=5) != pytest.approx(five)
+
+
 class TestBlendWeights:
     def test_ramps_zero_to_one_to_zero(self):
         w = mm.blend_weights(10, edge=3)

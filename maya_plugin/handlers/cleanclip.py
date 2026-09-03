@@ -31,7 +31,7 @@ from __future__ import annotations
 import statistics
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..dispatcher import HandlerError, require_known_keys
+from ..dispatcher import HandlerError, refuse_inert, require_known_keys
 from . import clip, mocapmath, motionmath, rigging, session
 
 CLEAN_CLIP_KEYS = ("root", "clip", "filter", "lock_contacts")
@@ -61,13 +61,18 @@ def _cmds():
 # ---------------------------------------------------------------------------
 
 
-def _validate_filter(value: Any) -> Tuple[bool, int]:
-    """(enabled, window). `None`/`True` take the default window; `False`
-    disables the pass; a dict overrides the window only."""
+def _validate_filter(value: Any) -> Tuple[bool, int, bool]:
+    """(enabled, window, chosen). `None`/`True` take the default window;
+    `False` disables the pass; a dict overrides the window only.
+
+    `chosen` is #797's "did the caller PASS it": only a dict that names
+    `window` chose one. The refusal below is for a window the CALLER
+    picked - a default the handler picked is nothing to refuse them for.
+    """
     if value is None or value is True:
-        return True, DEFAULT_FILTER_WINDOW
+        return True, DEFAULT_FILTER_WINDOW, False
     if value is False:
-        return False, DEFAULT_FILTER_WINDOW
+        return False, DEFAULT_FILTER_WINDOW, False
     if isinstance(value, dict):
         unknown = sorted(set(value) - {"window"})
         if unknown:
@@ -75,7 +80,9 @@ def _validate_filter(value: Any) -> Tuple[bool, int]:
                 "filter dict does not take %s"
                 % ", ".join(repr(k) for k in unknown),
                 hint="filter={'window': <odd int, at least 5>}")
-        window = value.get("window", DEFAULT_FILTER_WINDOW)
+        if "window" not in value:
+            return True, DEFAULT_FILTER_WINDOW, False
+        window = value["window"]
         if (isinstance(window, bool) or not isinstance(window, int)
                 or window < 5 or window % 2 == 0):
             raise HandlerError(
@@ -83,12 +90,62 @@ def _validate_filter(value: Any) -> Tuple[bool, int]:
                 "5, got %r" % (window,),
                 hint="e.g. filter={'window': 5} - mocapmath.smooth_track "
                      "needs a centered odd Savitzky-Golay window")
-        return True, window
+        return True, window, True
     raise HandlerError(
         "filter must be true, false, or {'window': <odd int, at least 5>}, "
         "got %r" % (value,),
         hint="true smooths every keyed channel with the default window "
              "(%d); false skips the filter pass" % DEFAULT_FILTER_WINDOW)
+
+
+def _filter_window_note(chosen: bool, window: int,
+                        n_frames: int) -> Optional[str]:
+    """The window's verdict against the clip's own length (#797 rows 24
+    and 42): a refusal for a CHOSEN window the clip cannot hold, a
+    warning for a clip no window can smooth, None otherwise.
+
+    `smooth_track` shrinks its window per sample rather than refusing one
+    that overruns the track, so MEASURED (tests/test_mocapmath.py
+    ::TestTheWindowThatActuallyFits) window 31 and window 101 on a
+    30-frame clip are byte-for-byte window 29 - and the pass then reported
+    "smoothed N channel(s) with window=31", naming a filter that never
+    ran. Below 5 frames the shrink goes all the way to identity: every
+    fit passes exactly through its own samples, so the "smoothed" claim
+    is false for the whole clip however the window was chosen.
+
+    Pure - the clip's frame count is the only scene fact it needs, and the
+    caller has that before the checkpoint.
+    """
+    fits = mocapmath.largest_smoothing_window(n_frames)
+    if chosen and window > n_frames:
+        # Two different facts, so two different sentences: on a clip that
+        # CAN be smoothed the caller's window collapses onto the widest
+        # one that fits, and on a clip too short for any window it
+        # collapses onto nothing at all. Naming "the largest odd window
+        # that fits (0)" in the second case would be a refusal that states
+        # something untrue - no window fits, and the filter is identity.
+        why = ("smooth_track shrinks the window per sample, so any window "
+               "past the clip length is the same filter as the largest odd "
+               "window that fits (%d), and the warning would still claim "
+               "window=%d" % (fits, window)) if fits else (
+              "smooth_track shrinks the window per sample and no window "
+              "fits a clip this short at all - every fit passes exactly "
+              "through its own samples, so the filter is the identity and "
+              "the warning would still claim window=%d" % window)
+        refuse_inert(
+            "clean_clip", "window", "on a %d-frame clip" % n_frames, why,
+            hint=("pass an odd window of at most %d, or leave filter=true "
+                  "for the default window (%d)"
+                  % (fits, DEFAULT_FILTER_WINDOW)) if fits else
+                 ("a clip this short cannot be smoothed at all - drop the "
+                  "filter pass with filter=false"))
+    if not fits:
+        return ("filter: a %d-frame clip is too short to smooth - "
+                "smooth_track's window shrinks to what fits each sample, "
+                "and below %d frames every fit passes exactly through its "
+                "own samples, so the pass returns the clip unchanged"
+                % (n_frames, mocapmath.MIN_SMOOTHING_SAMPLES))
+    return None
 
 
 def _validate_lock_contacts(value: Any) -> Tuple[bool, Optional[List[str]]]:
@@ -302,6 +359,17 @@ def _run_contact_lock_pass(cmds, joints: List[str],
             edge = max(0, min(DEFAULT_EDGE_FRAMES, first, n_track - 1 - last))
             ext_first, ext_last = first - edge, last + edge
             weights = mocapmath.blend_weights(ext_last - ext_first + 1, edge)
+            span = ext_last - ext_first + 1
+            # #797 row 39 / #798's observed-writes rule at this module's
+            # SECOND setKeyframe site. MEASURED: a key on a locked plug
+            # returns 0 - no curve, no key, no error - so the pass used to
+            # append "locked contact run frames A-B" over a run where not
+            # one key was written. A frame counts as pinned only when the
+            # WHOLE solved pose landed on it: eight of nine channels keyed
+            # is not the pose the solve produced, and calling that a
+            # locked contact is the same false claim in a smaller size.
+            pinned = 0
+            lost: Dict[str, int] = {}
             for idx, frame_local in enumerate(range(ext_first, ext_last + 1)):
                 w = weights[idx]
                 original = track[frame_local]
@@ -311,14 +379,42 @@ def _run_contact_lock_pass(cmds, joints: List[str],
                 cmds.currentTime(frame)
                 solved = rigging.solve_ik_chain(cmds, chain, target)
                 warnings.extend(solved.get("warnings", []))
+                missed = 0
                 for j in chain:
                     for attr in clip.ROTATE_ATTRS:
-                        cmds.setKeyframe(j, attribute=attr, time=frame)
-            warnings.append(
-                "%s: locked contact run frames %d-%d (eased %d frame(s) "
-                "each side) to its median plant position"
-                % (clip._short(ankle), start_frame + first,
-                   start_frame + last, edge))
+                        if not clip.key_landed(cmds.setKeyframe(
+                                j, attribute=attr, time=frame)):
+                            plug = "%s.%s" % (j, attr)
+                            lost[plug] = lost.get(plug, 0) + 1
+                            missed += 1
+                if not missed:
+                    pinned += 1
+            for plug in sorted(lost):
+                warnings.append(clip._lost_write_note(
+                    "clean_clip's contact-lock pass", plug, lost[plug],
+                    clip.swallowed_by(cmds, plug)))
+            if pinned == span:
+                warnings.append(
+                    "%s: locked contact run frames %d-%d (eased %d frame(s) "
+                    "each side) to its median plant position"
+                    % (clip._short(ankle), start_frame + first,
+                       start_frame + last, edge))
+            elif pinned:
+                # `span` counts the EASED extent, not the run - naming the
+                # run's own frames beside it made "4 of 12 frame(s)" of a
+                # 6-frame run, two true numbers that cannot both be about
+                # the same thing. The eased range is spelled out so the
+                # denominator has a range to belong to.
+                warnings.append(
+                    "%s: locked contact run frames %d-%d (eased %d frame(s) "
+                    "each side, so frames %d-%d) to its median plant "
+                    "position on %d of those %d frame(s) - the rest kept "
+                    "the pose they had, for the reason named above"
+                    % (clip._short(ankle), start_frame + first,
+                       start_frame + last, edge, start_frame + ext_first,
+                       start_frame + ext_last, pinned, span))
+            # and a run with NO fully-keyed frame claims nothing at all -
+            # the lost-write notes above are then the whole story.
 
 
 def _regression_warnings(before: Dict[str, Any],
@@ -349,7 +445,8 @@ def _regression_warnings(before: Dict[str, Any],
 
 def clean_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     require_known_keys(params, CLEAN_CLIP_KEYS, "clean_clip", CLEAN_CLIP_SYNONYMS)
-    filter_enabled, filter_window = _validate_filter(params.get("filter"))
+    filter_enabled, filter_window, window_chosen = _validate_filter(
+        params.get("filter"))
     lock_enabled, lock_joints_param = _validate_lock_contacts(
         params.get("lock_contacts"))
     if not filter_enabled and not lock_enabled:
@@ -392,6 +489,16 @@ def clean_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     start_frame = int(meta["start_frame"])
     end_frame = int(meta["end_frame"])
 
+    # #797 rows 24/42: the window can only be judged now - the clip's own
+    # length is the thing it has to fit inside - but this is still ahead of
+    # the checkpoint, the measure, and every write, so a refused window
+    # leaves the scene exactly as it found it. Skipped entirely when the
+    # filter pass is off: there is then no window to be inert.
+    short_clip_note = (
+        _filter_window_note(window_chosen, filter_window,
+                            end_frame - start_frame + 1)
+        if filter_enabled else None)
+
     # Resolved regardless of `lock_enabled`: before/after both measure the
     # SAME contact joints either way, so disabling the pass still reports a
     # comparable (unchanged, if genuinely untouched) slide number rather
@@ -428,13 +535,18 @@ def clean_clip(params: Dict[str, Any]) -> Dict[str, Any]:
         filtered = _run_filter_pass(cmds, joints, start_frame, end_frame,
                                     filter_window, warnings)
         passes.append("filter")
-        if filtered:
+        if not filtered:
+            warnings.append("filter: no keyed channel found on this rig")
+        elif short_clip_note is not None:
+            # #797 row 42: the pass ran and re-keyed, but on a clip this
+            # short every value came back its own - calling that "smoothed"
+            # is the false claim, so the measured fact goes out instead.
+            warnings.append(short_clip_note)
+        else:
             warnings.append(
                 "filter: smoothed %d channel(s) with window=%d over "
                 "frames %d-%d"
                 % (len(filtered), filter_window, start_frame, end_frame))
-        else:
-            warnings.append("filter: no keyed channel found on this rig")
 
     if lock_enabled and contact_joints:
         _run_contact_lock_pass(cmds, joints, contact_joints, chains,

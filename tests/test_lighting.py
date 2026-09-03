@@ -516,12 +516,26 @@ def test_build_hdri_sweeps_orphans_on_forced_connect_failure(monkeypatch, tmp_pa
     with pytest.raises(RuntimeError, match="forced connectAttr failure"):
         lighting.setup_lighting({
             "preset": "hdri",
-            "hdri_path": str(tmp_path / "sky.hdr"),
+            "hdri_path": _studio_hdr(tmp_path),
             "replace_existing": False,
         })
 
     assert fake.objects == before, \
         "the orphaned light + file texture must be swept on failure"
+
+
+def _studio_hdr(tmp_path) -> str:
+    """A real file on disk for the hdri preset.
+
+    setup_lighting checks that an ABSOLUTE hdri_path exists before it
+    deletes anything (#797 row 18): a missing texture is not an error in
+    Maya, so a typo used to cost the caller their lights and light the
+    scene flat grey. Tests of the dome itself need a path that survives
+    that check.
+    """
+    path = tmp_path / "studio.hdr"
+    path.write_bytes(b"#?RADIANCE\n")
+    return str(path)
 
 
 class TestEnvironmentDome:
@@ -571,11 +585,12 @@ class TestEnvironmentDome:
             "produces a dome that renders as background and lights nothing"
         )
 
-    def test_an_hdri_dome_is_a_light_too(self, monkeypatch):
+    def test_an_hdri_dome_is_a_light_too(self, monkeypatch, tmp_path):
         """Same defect, same fix: hdri and environment share _build_dome, so an
         HDRI dome was equally inert."""
         fake = self._fake(monkeypatch)
-        lighting.setup_lighting({"preset": "hdri", "hdri_path": "D:/studio.hdr"})
+        lighting.setup_lighting({"preset": "hdri",
+                                 "hdri_path": _studio_hdr(tmp_path)})
         assert [c for c in fake.as_light if c[0] == "aiSkyDomeLight"]
 
     def test_it_loads_mtoa_rather_than_making_the_caller_do_it(self, monkeypatch):
@@ -597,12 +612,13 @@ class TestEnvironmentDome:
         assert fake.attrs[ramp + ".colorEntryList[0].color"] == lighting.DEFAULT_GROUND
         assert fake.attrs[ramp + ".colorEntryList[3].color"] == lighting.DEFAULT_SKY
 
-    def test_an_hdri_is_read_raw_and_mapped_latlong(self, monkeypatch):
+    def test_an_hdri_is_read_raw_and_mapped_latlong(self, monkeypatch, tmp_path):
         """An HDRI is lighting DATA: an sRGB curve on it changes every
         reflection and every bounce. And the dome's default projection is not
         the one every HDRI a caller owns is authored in."""
         fake = self._fake(monkeypatch)
-        lighting.setup_lighting({"preset": "hdri", "hdri_path": "D:/studio.hdr"})
+        lighting.setup_lighting({"preset": "hdri",
+                                 "hdri_path": _studio_hdr(tmp_path)})
         tex = "|mcpLight_domeTex"
         assert fake.attrs[tex + ".colorSpace"] == ("Raw",)
         assert fake.attrs[tex + ".ignoreColorSpaceFileRules"] == (True,)
@@ -907,3 +923,119 @@ class TestTheFakeRefusesWhatMayaRefuses:
             fake.pluginInfo("mtoa", query=True, version=True)
         with pytest.raises(AssertionError, match="unmodelled xform query"):
             fake.xform("|key", query=True, translation=True, worldSpace=True)
+
+
+class TestHdriPathIsRefusedWhereNothingReadsIt:
+    """#797 rows 18-19: a param the branch drops is refused, not kept.
+
+    `hdri_path` reaches _build_dome and nowhere else. On three_point and
+    single_sun it is validated as a string and then discarded - the caller
+    asked to be lit by their own sky and got three grey lamps, with nothing
+    said. On `environment` it is worse than dropped: the schema promises a
+    dome "that needs no file" and the handler quietly built an HDRI dome
+    from it instead, so the preset the caller chose is not the preset they
+    got.
+
+    Every refusal here is PURE - `maya.cmds` is never imported. The fake is
+    installed anyway, so a regression that reaches Maya shows up as a
+    created light rather than as an ImportError that could be read as an
+    environment problem.
+    """
+
+    @staticmethod
+    def _fake(monkeypatch):
+        fake = FakeCmds(existing_lights=["oldKeyShape"])
+        monkeypatch.setattr(lighting, "_cmds", lambda: fake)
+        monkeypatch.setattr(
+            lighting, "_auto_checkpoint",
+            lambda reason: pytest.fail("a refused call burned a checkpoint"))
+        return fake
+
+    @pytest.mark.parametrize("preset", ["three_point", "single_sun"])
+    def test_a_directional_preset_refuses_hdri_path(self, monkeypatch, preset):
+        fake = self._fake(monkeypatch)
+        with pytest.raises(HandlerError) as exc:
+            lighting.setup_lighting({"preset": preset,
+                                     "hdri_path": "C:/sky.hdr"})
+        message = str(exc.value)
+        assert "does not use 'hdri_path'" in message, message
+        assert preset in message, message
+        assert "hdri" in exc.value.hint
+        # and nothing was touched on the way to saying so
+        assert fake.deleted == [] and fake.created == []
+
+    def test_environment_refuses_the_file_it_promises_not_to_need(
+            self, monkeypatch):
+        fake = self._fake(monkeypatch)
+        with pytest.raises(HandlerError) as exc:
+            lighting.setup_lighting({"preset": "environment",
+                                     "hdri_path": "C:/sky.hdr"})
+        message = str(exc.value)
+        assert "does not use 'hdri_path'" in message, message
+        assert "environment" in message, message
+        # the fix is named: the caller wanted image-based lighting, and there
+        # IS a preset for that
+        assert "hdri" in exc.value.hint
+        assert fake.deleted == [] and fake.created == []
+
+    def test_the_dome_presets_still_build(self, monkeypatch):
+        """The branch that DOES read it is untouched - the refusal is about
+        the presets that drop it, not about hdri_path."""
+        fake = FakeCmds()
+        monkeypatch.setattr(lighting, "_cmds", lambda: fake)
+        monkeypatch.setattr(lighting, "_auto_checkpoint", lambda reason: None)
+        result = lighting.setup_lighting({"preset": "environment"})
+        assert len(result["lights"]) == 1
+        result = lighting.setup_lighting({"preset": "three_point"})
+        assert len(result["lights"]) == 3
+
+
+class TestAMissingHdriRefusesBeforeAnythingIsDeleted:
+    """#797 row 18: a missing texture is not an error in Maya.
+
+    The file node renders flat and the dome lights the scene an even grey -
+    which reads as a dim HDRI, not as a typo. Same failure class as
+    pbr.missing_files, and until now setup_lighting had no `exists` check
+    anywhere. It has to fire before the replace_existing checkpoint, or a
+    typo'd path costs the caller their lights AND a checkpoint.
+    """
+
+    @staticmethod
+    def _fake(monkeypatch, burned):
+        fake = FakeCmds(existing_lights=["oldKeyShape"])
+        monkeypatch.setattr(lighting, "_cmds", lambda: fake)
+        monkeypatch.setattr(lighting, "_auto_checkpoint",
+                            lambda reason: burned.append(reason))
+        return fake
+
+    def test_a_nonexistent_absolute_path_refuses(self, monkeypatch, tmp_path):
+        burned = []
+        fake = self._fake(monkeypatch, burned)
+        missing = str(tmp_path / "no_such_sky.hdr")
+        with pytest.raises(HandlerError) as exc:
+            lighting.setup_lighting({"preset": "hdri", "hdri_path": missing})
+        assert missing in str(exc.value)
+        assert "environment" in exc.value.hint
+        assert burned == [], "a refused call must not burn a checkpoint"
+        assert fake.deleted == [], "the user's lights outlived the refusal"
+
+    def test_a_file_that_exists_is_built_from(self, monkeypatch, tmp_path):
+        burned = []
+        fake = self._fake(monkeypatch, burned)
+        sky = tmp_path / "sky.hdr"
+        sky.write_bytes(b"#?RADIANCE\n")
+        result = lighting.setup_lighting({"preset": "hdri",
+                                          "hdri_path": str(sky)})
+        assert len(result["lights"]) == 1
+        assert fake.attrs["|mcpLight_domeTex.fileTextureName"] == (str(sky),)
+
+    def test_a_relative_path_is_left_to_maya(self, monkeypatch):
+        """A relative path is workspace-resolved, so this handler cannot
+        tell a missing one from a present one - guessing would refuse a
+        legitimate call (the pbr.missing_files rule)."""
+        fake = FakeCmds()
+        monkeypatch.setattr(lighting, "_cmds", lambda: fake)
+        monkeypatch.setattr(lighting, "_auto_checkpoint", lambda reason: None)
+        result = lighting.setup_lighting({"preset": "hdri",
+                                          "hdri_path": "sourceimages/sky.hdr"})
+        assert len(result["lights"]) == 1

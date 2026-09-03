@@ -22,12 +22,24 @@ Two behaviours are inherited from hard-won lessons elsewhere in this codebase:
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ..dispatcher import HandlerError, require_known_keys
 from . import meshcheck, naming, session
 
 PIVOT_MODES = ("center", "origin", "keep")
+
+# The note `keep` earns on a UNITED result, as a named constant so a bulk
+# builder can recognise its own copies EXACTLY rather than by substring. One
+# line per result is right for combine (one call, one result); assemble unites
+# a chunk at a time - 2,034 of them in the delivery this repo was written for -
+# so it drops these and states the count once instead.
+KEEP_PIVOT_NOTE = (
+    "pivot='keep' on a combined result keeps the pivot polyUnite gives it, "
+    "which is the world ORIGIN (measured) - the same place pivot='origin' "
+    "writes. Nothing of the inputs' pivots survives the unite; use 'center' "
+    "for the bounding-box centre, or place it yourself afterwards."
+)
 
 
 def _cmds():
@@ -81,8 +93,19 @@ def _resolve_inputs(cmds, params: Dict[str, Any]) -> List[str]:
     return longs
 
 
-def _place_pivot(cmds, node: str, mode: str) -> List[float]:
+def _place_pivot(cmds, node: str, mode: str,
+                 warnings: Optional[List[str]] = None) -> List[float]:
     if mode == "keep":
+        # Not refused - the value is legal, and assemble's single-part branch
+        # keeps a pivot a primitive genuinely built. But on a UNITED result
+        # there is no prior pivot to keep: MEASURED on a live probe
+        # (2026-09-03, pid 33088) a fresh polyUnite transform answers
+        # rotatePivot, scalePivot AND translate as (0, 0, 0) whatever `ch`
+        # says, so `keep` keeps the ORIGIN and is `origin` under another
+        # name. A caller asking for keep is asking to preserve something,
+        # and nothing said there was nothing to preserve.
+        if warnings is not None:
+            warnings.append(KEEP_PIVOT_NOTE)
         return list(cmds.xform(node, query=True, worldSpace=True, rotatePivot=True))
     if mode == "origin":
         target = [0.0, 0.0, 0.0]
@@ -167,7 +190,7 @@ def unite(
                 "name %r is held by another object; the result is %s"
                 % (requested, _short(node)))
 
-    _place_pivot(cmds, node, pivot_mode)
+    _place_pivot(cmds, node, pivot_mode, warnings)
     if freeze:
         cmds.makeIdentity(node, apply=True, translate=True, rotate=True, scale=True)
     # Report where Maya HAS the pivot, never the value that was written.

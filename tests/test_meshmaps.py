@@ -474,6 +474,67 @@ class TestValidation:
                               fake)
 
 
+class TestCurvatureSettingsWithoutACurvatureBake:
+    """#797 row 11: the two curvature params are read by ONE branch.
+
+    `_make_bake_shader` reads curvature_radius and curvature_output for the
+    "curvature" map and for nothing else, so a caller who tunes the radius
+    and asks for maps=["ao"] gets an AO bake that ignores both - the same
+    shape as apply_ao without "ao" in maps, which this module has always
+    refused.
+    """
+
+    def test_curvature_radius_refuses_when_curvature_is_not_baked(
+            self, fake, tmp_path):
+        with pytest.raises(HandlerError) as exc:
+            meshmaps.validate(_params(tmp_path, maps=["ao"],
+                                      curvature_radius=0.2), fake)
+        assert "does not use 'curvature_radius'" in str(exc.value)
+        assert "curvature" in str(exc.value)
+        assert "maps" in (exc.value.hint or "")
+
+    def test_curvature_output_refuses_when_curvature_is_not_baked(
+            self, fake, tmp_path):
+        with pytest.raises(HandlerError) as exc:
+            meshmaps.validate(_params(tmp_path, maps=["world_normal"],
+                                      curvature_output="concave"), fake)
+        assert "does not use 'curvature_output'" in str(exc.value)
+        assert "curvature" in str(exc.value)
+
+    def test_the_branch_that_reads_them_keeps_them(self, fake, tmp_path):
+        out = meshmaps.validate(
+            _params(tmp_path, maps=["curvature"], curvature_radius=0.25,
+                    curvature_output="both"), fake)
+        assert out["curvature_radius"] == 0.25
+        assert out["curvature_output"] == "both"
+
+    def test_none_is_not_passed_and_the_settings_report_the_applied_value(
+            self, fake, tmp_path):
+        """The MCP wrapper now defaults both to None (#797). None is a
+        PRESENT key, so `params.get(key, DEFAULT)` would have returned it
+        unchanged and the type/enum checks would have refused it outright -
+        "curvature_radius must be a positive number" on EVERY wrapper call,
+        curvature bake or not. The bake shader was never in danger; the
+        command was."""
+        out = meshmaps.validate(
+            _params(tmp_path, maps=["ao"], curvature_radius=None,
+                    curvature_output=None), fake)
+        assert out["curvature_radius"] == meshmaps.DEFAULT_CURVATURE_RADIUS
+        assert out["curvature_output"] == "convex"
+
+    def test_the_refusal_fires_before_maya_is_imported(self, tmp_path):
+        """#767's proof, kept here as well as in the contract test: no fake
+        is installed, so anything that reaches `_cmds()` raises
+        ModuleNotFoundError instead - a refusal after the checkpoint is a
+        refusal after the damage."""
+        with pytest.raises(HandlerError) as exc:
+            meshmaps.bake_mesh_maps({"meshes": ["|limb"],
+                                     "out_dir": str(tmp_path),
+                                     "maps": ["ao"],
+                                     "curvature_radius": 0.2})
+        assert "does not use 'curvature_radius'" in str(exc.value)
+
+
 class TestRequireSoleWearers:
     """The material-level guard, factored out of plan_apply so the callers
     that rewire a SHADER rather than a colour slot run it too (#767 minor

@@ -169,6 +169,23 @@ class TestChunkCollection:
         assert any("excluded" in w and "tracer" in w
                    for w in out["warnings"])
 
+    def test_exclude_entry_matching_no_chunk_warns_by_name(self, fake):
+        """#797 row 32: the substring filter is deliberately forgiving (a
+        typo just excludes nothing), so a dead entry is a WARNING, not a
+        refusal - but server.py's maya_author_physics promises 'every
+        exclusion is warned by name', and an entry that dropped nothing
+        said nothing at all."""
+        _scene(fake)
+        out = physics.author_physics({"root": "golem",
+                                      "exclude": ["tracer", "nope"]})
+        assert all("tracer" not in b["chunk"] for b in out["bodies"])
+        # the entry that DID match still gets the existing "excluded" line
+        assert any("excluded" in w and "tracer" in w
+                   for w in out["warnings"])
+        # the entry that matched nothing gets its OWN warning, naming it
+        assert any("nope" in w and "matched no chunk" in w
+                   for w in out["warnings"])
+
     def test_refusals(self, fake):
         _scene(fake)
         with pytest.raises(HandlerError, match="exactly one"):
@@ -487,6 +504,51 @@ class TestUndeliverableOverrideRefuses:
         tracer = [b for b in out["bodies"] if b["chunk"] == "|golem|tracer"][0]
         assert tracer["parent"] == "|golem|pelvis"
         assert tracer["joint"]["source"] == "override"
+
+
+class TestSkippedChunkExcludedFromParentResolution:
+    """#797 row 33: chunk_set/by_short used to be built BEFORE the skip
+    loop (mesh unreadable / no triangles), so a skipped chunk still
+    answered as a valid parent - both from an explicit override's
+    `parent` and from the DAG walk - and a joint got emitted against a
+    body that was never created. Read-only command, no checkpoint."""
+
+    def test_override_on_a_skipped_chunk_is_dropped_with_a_warning(
+            self, fake):
+        _scene(fake)
+        fake.geoms["belly"] = ([], [])   # empty triangles -> SKIPPED
+        out = physics.author_physics({
+            "root": "golem",
+            "overrides": {"belly": {"hinge_axis": [1, 0, 0],
+                                    "hinge_range_deg": [0, 90]}}})
+        assert "belly" not in [b["chunk"].split("|")[-1]
+                               for b in out["bodies"]]
+        assert any("overrides" in w and "belly" in w and "dropped" in w
+                   for w in out["warnings"])
+
+    def test_explicit_parent_override_falls_back_to_dag_when_named_parent_is_skipped(
+            self, fake):
+        _scene(fake)
+        fake.geoms["belly"] = ([], [])   # empty triangles -> SKIPPED
+        out = physics.author_physics({
+            "root": "golem",
+            "overrides": {"thigh": {"parent": "belly"}}})
+        by = {b["chunk"].split("|")[-1]: b for b in out["bodies"]}
+        # belly is gone; thigh's DAG ancestor (pelvis) is used instead of
+        # silently pointing a joint at a body that was never created
+        assert by["thigh"]["parent"] == "|golem|pelvis"
+        assert any("belly" in w and "thigh" in w and "parent" in w
+                   for w in out["warnings"])
+
+    def test_dag_parent_resolution_skips_a_skipped_chunk(self, fake):
+        n = _joint_scene(fake)
+        fake.geoms["torso_plates"] = ([], [])   # empty triangles -> SKIPPED
+        out = physics.author_physics({"root": "golem"})
+        parents = {b["chunk"]: b["parent"] for b in out["bodies"]}
+        assert n["torso"] not in out["bodies"] and n["torso"] not in parents
+        assert parents[n["arm"]] == n["pelvis"]
+        assert any("no triangles" in w and "torso_plates" in w
+                   for w in out["warnings"])
 
 
 class TestTheFakeRefusesWhatMayaRefuses:

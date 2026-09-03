@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..dispatcher import HandlerError, require_known_keys
+from ..dispatcher import HandlerError, refuse_inert, require_known_keys
 from . import ledger, naming, plugwrite, uvmath
 
 PRIMITIVE_KINDS = (
@@ -154,6 +154,22 @@ def _axis_list(kind: str) -> str:
     return ", ".join(name for name, _ in SUBDIVISION_AXES[kind])
 
 
+def _refuse_inert_here(prefix: str, *args, **kwargs) -> None:
+    """`refuse_inert`, with a part's `where` prefix kept on the message.
+
+    assemble shares this module's validators and passes `where="part 3"`, so
+    a refusal that dropped the prefix would name none of twenty parts. The
+    wording after the prefix is byte-identical to the standalone one - it is
+    what tests/test_branch_contract.py recognises every #797 refusal by.
+    """
+    try:
+        refuse_inert(*args, **kwargs)
+    except HandlerError as exc:
+        if not prefix:
+            raise
+        raise HandlerError(prefix + str(exc), hint=exc.hint) from None
+
+
 def resolve_subdivisions(
     kind: str, params: Dict[str, Any], where: str = ""
 ) -> Tuple[int, ...]:
@@ -185,6 +201,24 @@ def resolve_subdivisions(
             "(a cylinder spends it 20 around per 1 along), `subdivisions` is "
             "the literal count per axis. Guessing which one you meant is "
             "exactly the silent substitution this refuses.",
+        )
+
+    if divisions is not None and not axes_spec:
+        # #797 row 1, the instance the ticket is named after. `divisions` was
+        # range-checked here exactly like a cylinder's and then discarded,
+        # because axes_for_divisions returns () for a platonic solid:
+        # polyPlatonicSolid takes radius and axis and has no subdivision flag
+        # at all. The caller asked for a denser solid, got the same 8 or 20
+        # faces, and nothing said so. Refusing is the only honest answer -
+        # there is no denser icosahedron to build.
+        _refuse_inert_here(
+            prefix, "create_primitive", "divisions", "on a%s %s"
+            % ("n" if kind[0] in "aeiou" else "", kind),
+            "polyPlatonicSolid takes radius and axis only - an octahedron is "
+            "always 8 faces and an icosahedron always 20, at every value of "
+            "divisions",
+            hint="drop divisions, or refine the solid afterwards with "
+            "maya_sculpt_ops op 'smooth'",
         )
 
     if subdivisions is None:
@@ -1037,6 +1071,21 @@ def remesh_retopo(params: Dict[str, Any]) -> Dict[str, Any]:
             try:
                 cmds.polyRemesh(mesh_long)
                 method = "polyRemesh"
+                # #797 row 31, Tier 2: a WARNING, not a refusal -
+                # target_polycount is required by the schema, so refusing it
+                # would refuse the whole command on a Maya that simply lacks
+                # polyRetopo. polyRemesh takes no face-count target at all
+                # (it is called above with none): it remeshes to its own
+                # uniform edge length, so the count that comes back is
+                # whatever that produces, in the same way polyReduce's
+                # branch says when it cannot reduce.
+                warnings.append(
+                    "polyRemesh cannot honour target_polycount %d: unlike "
+                    "polyRetopo it takes no face-count target, so it remeshed "
+                    "to its own uniform edge length - read `tris` for what "
+                    "was actually built rather than assuming %d"
+                    % (target, target)
+                )
             except Exception:
                 warnings.append("polyRemesh raised at runtime; fell back to polyReduce")
         else:

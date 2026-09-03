@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from ..dispatcher import HandlerError, require_known_keys
+from ..dispatcher import HandlerError, refuse_inert, require_known_keys
 from . import naming, units, uvmath
 
 PROJECTIONS = ("box", "planar", "keep")
@@ -176,8 +176,11 @@ UV_ATLAS_SYNONYMS = {"projection": "project", "mode": "project",
 
 def uv_atlas(params: Dict[str, Any]) -> Dict[str, Any]:
     require_known_keys(params, UV_ATLAS_KEYS, "uv_atlas", UV_ATLAS_SYNONYMS)
-    cmds = _cmds()
-
+    # Everything down to the refusals below is PURE - no Maya, no scene - and
+    # it stays that way deliberately (#797): a param this branch drops must be
+    # refused before the first cmds call, not after the UVs have been
+    # reprojected. `cmds = _cmds()` is taken further down, right before the
+    # first thing that needs it.
     names = params.get("names")
     if not isinstance(names, list) or not names:
         raise HandlerError(
@@ -190,14 +193,24 @@ def uv_atlas(params: Dict[str, Any]) -> Dict[str, Any]:
     col, row = uvmath.resolve_cell(params.get("patch", 0), cols, rows)
     rect = uvmath.patch_rect(cols, rows, col, row, margin=margin)
 
-    project = params.get("project") or "box"
+    # RAW, so the refusal below can tell "the caller asked for keep" from
+    # "the wrapper filled the key in": since #797 maya_uv_atlas defaults
+    # project to None on every call.
+    requested_project = params.get("project")
+    project = requested_project or "box"
     if project not in PROJECTIONS:
         raise HandlerError(
             "project must be one of %s, got %r" % (", ".join(PROJECTIONS), project),
             hint="'box' suits primitives and hard-surface parts; 'keep' preserves "
                  "a layout you already authored",
         )
-    normalize = params.get("normalize", True)
+    # None is the wrapper's "not passed", not a value to type-check: reading it
+    # with params.get("normalize", True) would leave the default unapplied
+    # (None is a PRESENT key) and the isinstance check below would then refuse
+    # every call the wrapper makes.
+    normalize = params.get("normalize")
+    if normalize is None:
+        normalize = True
     if not isinstance(normalize, bool):
         raise HandlerError("normalize must be true or false, got %r" % (normalize,))
 
@@ -222,6 +235,35 @@ def uv_atlas(params: Dict[str, Any]) -> Dict[str, Any]:
                 "uv_per_metre must be positive, got %r" % (uv_per_metre,))
         uv_per_metre = float(uv_per_metre)
 
+    # --- what this branch will not use (#797) ----------------------------
+    if world_scale is not None and requested_project in ("keep", "planar"):
+        # Not merely ignored - DESTRUCTIVE. pack_shape's world branch calls
+        # polyAutoProjection(scaleMode=0) unconditionally, so an authored
+        # layout asked to be kept is box-projected over and the call still
+        # reports success.
+        refuse_inert(
+            "uv_atlas", "project", "with world_scale",
+            "world-scale packing box-autoprojects every shape "
+            "(polyAutoProjection scaleMode=0) to get UVs proportional to world "
+            "size, so %r would be overwritten, not preserved" % requested_project,
+            hint="drop world_scale to keep an authored layout, or drop project "
+                 "- 'box' is what world mode already does",
+        )
+    if uv_per_metre is not None and world_scale is None:
+        # uv_per_metre is the UV units polyAutoProjection(scaleMode=0) emits
+        # per metre of world size, and only the world branch projects that
+        # way; the normalising branch fits the mesh to the patch, where no
+        # density constant is read at all.
+        refuse_inert(
+            "uv_atlas", "uv_per_metre", "without world_scale",
+            "it scales the world-proportional projection, and without "
+            "world_scale the UVs are normalised to fill the patch instead - "
+            "the density then follows each mesh's size, not a constant",
+            hint="pass world_scale (the metres one patch represents), or drop "
+                 "uv_per_metre",
+        )
+
+    cmds = _cmds()
     targets = [naming.require_object(cmds, n) for n in names]
     shapes = [_require_mesh(cmds, t) for t in targets]
 
@@ -242,8 +284,18 @@ def uv_atlas(params: Dict[str, Any]) -> Dict[str, Any]:
         "projection": "world" if world_scale is not None else project,
         "normalized": bool(normalize) and world_scale is None,
         "world_scale": world_scale,
+        # What was APPLIED, not what was asked for (#797): outside world mode
+        # nothing reads a density constant, so reporting one was a stated
+        # texel density for a pack that gave every mesh a different one.
         "uv_per_metre": (
-            autoproj_uv_per_metre(cmds) if uv_per_metre is None else uv_per_metre
+            None if world_scale is None
+            else (autoproj_uv_per_metre(cmds) if uv_per_metre is None
+                  else uv_per_metre)
         ),
         "all_inside": all(m["inside_patch"] for m in out),
+        # Documented in protocol.md's result row since M2.3 and never
+        # actually sent. Empty today - every condition this handler can spot
+        # is a refusal or the per-mesh inside_patch flag - but a promised
+        # field that is absent is a field no caller can read.
+        "warnings": [],
     }

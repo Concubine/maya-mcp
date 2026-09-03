@@ -458,6 +458,55 @@ class TestRefusals:
             pbr.assign_pbr({"mesh": "|torso", "maps": {}})
         assert "assign_material" in exc.value.hint
 
+    def test_a_key_a_map_spec_never_reads_is_refused(self, fake, atlas):
+        """#797 row 17: the #767 defect one level down. `maps` is a known
+        top-level key, so every key INSIDE a slot's spec used to be
+        accepted and dropped - a 'chanel' typo left the scalar reading the
+        default channel r, silently, and the result reported success."""
+        with pytest.raises(HandlerError) as exc:
+            pbr.assign_pbr({"mesh": "|torso",
+                            "maps": {"metalness": {"path": atlas["mask"],
+                                                   "chanel": "g"}}})
+        assert "does not take" in str(exc.value)
+        assert "chanel" in str(exc.value)
+        assert "metalness" in str(exc.value)
+        assert "channel" in (exc.value.hint or "")
+        assert fake.created == []
+
+    def test_the_keys_a_map_spec_does_read_still_work(self, fake, atlas):
+        specs = pbr.validate_maps(
+            {"roughness": {"path": atlas["mask"], "channel": "g",
+                           "invert": True, "raw": False,
+                           "mip_filter": False}})
+        assert specs[0]["channel"] == "g"
+        assert specs[0]["invert"] is True
+        assert specs[0]["raw"] is False
+        assert specs[0]["mip_filter"] is False
+
+    def test_the_nested_refusal_names_the_slot_it_belongs_to(self, fake,
+                                                             atlas):
+        """Two slots, one bad key: the message must say WHICH."""
+        with pytest.raises(HandlerError) as exc:
+            pbr.assign_pbr({"mesh": "|torso",
+                            "maps": {"color": atlas["albedo"],
+                                     "normal": {"path": atlas["normal"],
+                                                "flip_green": True}}})
+        assert "normal" in str(exc.value)
+        assert "flip_green" in str(exc.value)
+
+    def test_every_refusal_fires_before_maya_is_imported(self, tmp_path):
+        """#767's proof, without the fake: `_cmds()` used to run before a
+        single map was looked at, so a typo was answered only after the
+        scene had been reached."""
+        with pytest.raises(HandlerError) as exc:
+            pbr.assign_pbr({"mesh": "|torso",
+                            "maps": {"metalness": {"path": "m.png",
+                                                   "chanel": "g"}}})
+        assert "does not take" in str(exc.value)
+        with pytest.raises(HandlerError, match="not found"):
+            pbr.assign_pbr({"mesh": "|torso",
+                            "maps": {"color": str(tmp_path / "absent.png")}})
+
     def test_every_refusal_happens_before_a_single_node_is_built(self, fake, atlas):
         before = set(fake.objects)
         for bad in (

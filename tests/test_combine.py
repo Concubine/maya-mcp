@@ -356,6 +356,29 @@ class TestCombine:
         _run(fake, names=["|a", "|b"], name="p", pivot="origin")
         assert fake.pivot_writes == [("|p", (0.0, 0.0, 0.0))]
 
+    def test_pivot_keep_warns_that_it_kept_the_origin(self):
+        """#797 / live probe 2026-09-03 (pid 33088): a FRESH polyUnite result
+        has rotatePivot, scalePivot and translate all at (0, 0, 0) regardless
+        of `ch`, so there is no prior pivot to keep - `keep` on a combine
+        result is `origin` under another name. Not refused: the value is
+        legal, and assemble's single-part branch does keep a real pivot."""
+        fake = FakeCmds()
+        fake.bboxes["|p"] = [1.0, 2.0, 3.0, 3.0, 4.0, 5.0]
+        out = _run(fake, names=["|a", "|b"], name="p", pivot="keep")
+        assert out["pivot_mode"] == "keep"
+        # `keep` writes nothing - it reads the pivot polyUnite gave the node.
+        assert fake.pivot_writes == []
+        note = [w for w in out["warnings"] if "keep" in w]
+        assert note, out["warnings"]
+        assert "origin" in note[0]
+
+    def test_the_other_pivot_modes_do_not_carry_the_keep_warning(self):
+        for mode in ("center", "origin"):
+            fake = FakeCmds()
+            fake.bboxes["|p"] = [1.0, 2.0, 3.0, 3.0, 4.0, 5.0]
+            out = _run(fake, names=["|a", "|b"], name="p", pivot=mode)
+            assert not [w for w in out["warnings"] if "polyUnite gives" in w], mode
+
     def test_the_reported_pivot_is_where_maya_actually_has_it(self):
         # #803: the report is the QUERY after the freeze, never the value
         # written. Measured, the two coincide (a freeze leaves the pivot in

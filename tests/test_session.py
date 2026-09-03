@@ -289,6 +289,84 @@ class TestCheckpointIdsSurviveASceneChange:
         assert "not found" in str(exc.value)
 
 
+class TestAPathNamesItsOwnCheckpoint:
+    """#797 row 23: `path` wins outright - it overwrites `checkpoint_id`
+    with its own stem and restores the file it names. A caller who passes
+    BOTH and means two different checkpoints gets the path's one, with the
+    id they typed echoed back as `restored` only because the handler
+    rewrote it first. Refused now, before Maya is even imported, unless the
+    id IS the path's stem (the wrapper's documented "both accepted" case).
+    """
+
+    MISMATCH = {"checkpoint_id": "003_other", "path": "C:/cp/007_pre.ma"}
+
+    def test_an_id_that_is_not_the_paths_stem_refuses(self, fake):
+        with pytest.raises(HandlerError) as exc:
+            session.restore_checkpoint(dict(self.MISMATCH))
+        message = str(exc.value)
+        assert "restore_checkpoint does not use 'checkpoint_id'" in message
+        assert "when path is also given" in message
+        assert "007_pre" in message
+        assert exc.value.hint
+
+    def test_the_refusal_precedes_the_isfile_check(self, fake):
+        # The contract entry names a path that does not exist: a "not
+        # found" refusal here would be answering a question the caller
+        # never asked, and would flip to a silent overwrite the moment the
+        # file DID exist.
+        with pytest.raises(HandlerError, match="does not use 'checkpoint_id'"):
+            session.restore_checkpoint(dict(self.MISMATCH))
+        assert fake.opened == [] and fake.saved_to == []
+
+    def test_the_refusal_precedes_maya_itself(self, monkeypatch):
+        # No `fake` fixture: `_cmds()` here is the real `import maya.cmds`,
+        # which does not exist in this process. Reaching it is an
+        # ImportError, and that ImportError is the #767 proof - the same
+        # assertion tests/test_branch_contract.py makes.
+        def boom():
+            raise AssertionError("restore_checkpoint reached Maya")
+        monkeypatch.setattr(session, "_cmds", boom)
+        with pytest.raises(HandlerError, match="does not use 'checkpoint_id'"):
+            session.restore_checkpoint(dict(self.MISMATCH))
+
+    def test_an_id_that_matches_the_paths_stem_proceeds(self, fake, tmp_path):
+        target = tmp_path / "elsewhere" / "007_far.ma"
+        target.parent.mkdir()
+        target.write_text("x")
+        result = session.restore_checkpoint({"checkpoint_id": "007_far",
+                                             "path": str(target)})
+        assert result["restored"] == "007_far"
+        assert fake.opened[-1] == str(target)
+
+    def test_the_wrappers_none_for_the_absent_one_is_not_a_conflict(
+            self, fake, tmp_path):
+        # server.py sends BOTH keys on every call, None for whichever the
+        # caller left unset (#797 wrapper-default change). Neither shape
+        # may look like "both given".
+        target = tmp_path / "008_bypath.ma"
+        target.write_text("x")
+        assert session.restore_checkpoint(
+            {"checkpoint_id": None, "path": str(target)})["restored"] == \
+            "008_bypath"
+        # the first restore's own auto_pre_restore already made this dir
+        cp_dir = tmp_path / "checkpoints"
+        cp_dir.mkdir(exist_ok=True)
+        (cp_dir / "003_target.ma").write_text("x")
+        assert session.restore_checkpoint(
+            {"checkpoint_id": "003_target", "path": None})["restored"] == \
+            "003_target"
+
+    def test_an_empty_string_for_either_is_not_a_conflict_either(
+            self, fake, tmp_path):
+        # The pre-#797 wrapper sent "" rather than None, and a session
+        # resumed against an older server still does.
+        target = tmp_path / "009_bypath.ma"
+        target.write_text("x")
+        assert session.restore_checkpoint(
+            {"checkpoint_id": "", "path": str(target)})["restored"] == \
+            "009_bypath"
+
+
 def test_undo_counts_steps_and_stops_at_queue_end(fake):
     fake.undo_fail_after = 2
     result = session.undo({"steps": 5})

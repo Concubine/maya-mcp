@@ -53,7 +53,7 @@ import math
 import os
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from ..dispatcher import HandlerError, require_known_keys
+from ..dispatcher import HandlerError, refuse_inert, require_known_keys
 from . import clip, clipmath, mocapmath, naming, rigging, session, units
 
 RETARGET_CLIP_KEYS = ("file", "root", "clip", "start", "end", "fps")
@@ -796,7 +796,47 @@ def _validate_common(params: Dict[str, Any]) -> Tuple[str, str, str, Optional[fl
                  "to bake at whichever of those is nearest the source's own "
                  "capture rate")
 
+    # #797 row 25: on the .fbx route fps selects a bake rate that nothing
+    # resamples TO. The FBX's own rate is only knowable from the SCENE's
+    # time unit after the import; the keyed range is then read in that
+    # unit (`cmds.keyframe`), start/end are clamped against it, and
+    # `_set_bake_unit` changes the unit only afterwards - so the range and
+    # the bake speak different rates whenever fps differs from the file's.
+    # The BVH route has no such gap (its rate comes from the file header,
+    # before anything is imported) and keeps fps. This route has never run
+    # live either - every eval in this repo feeds it BVH - so the claim
+    # "fps resamples an FBX correctly" is not measured, and #797's rule is
+    # that an unmeasured effect is refused, not shipped.
+    if ext == ".fbx" and fps is not None:
+        refuse_inert(
+            "retarget_clip", "fps", "on the .fbx route",
+            "the keyed range is read in the file's own time unit and the "
+            "bake unit is set after it, so a different fps has not been "
+            "measured to resample correctly",
+            hint="omit fps for an FBX source - it bakes at the file's own "
+                 "rate - or convert the clip to BVH, whose route reads its "
+                 "rate from the file header and does resample")
+
     return path, ext, name, start, end, fps
+
+
+def _source_row(label: str, value: float, notes: List[str]) -> int:
+    """A SOURCE ROW INDEX from the caller's `start`/`end` number.
+
+    Both routes have always taken `int(round())` here and said nothing, so
+    `start=10.6` trimmed at row 11 and reported 10.6 back to nobody -
+    #797's "never a silent echo of an unused value" at its smallest. The
+    schema types these `Optional[float]` (server.py), so a refusal would
+    refuse a call the wrapper is entitled to send; #797's schema exception
+    is a WARNING naming the value actually APPLIED instead.
+    """
+    row = int(round(value))
+    if row != value:
+        notes.append(
+            "%s=%r is not a whole source row - the trim used row %d. "
+            "start/end are row INDICES into the source file, so the "
+            "fractional part selects nothing" % (label, value, row))
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -818,8 +858,13 @@ def _retarget_bvh(path: str, root_param: str, name: str,
         _channel_rotate_order(j["channels"])  # validated for its own sake
 
     frames = bvh["frames"]
-    start_row = int(round(start_param)) if start_param is not None else 0
-    end_row = int(round(end_param)) if end_param is not None else frames - 1
+    # `warnings` does not exist until the Maya phase below, so the rounding
+    # notes are collected here and folded into it there.
+    range_notes: List[str] = []
+    start_row = (_source_row("start", start_param, range_notes)
+                 if start_param is not None else 0)
+    end_row = (_source_row("end", end_param, range_notes)
+               if end_param is not None else frames - 1)
     for label, row in (("start", start_row), ("end", end_row)):
         if not 0 <= row < frames:
             raise HandlerError(
@@ -849,7 +894,7 @@ def _retarget_bvh(path: str, root_param: str, name: str,
     mel = _mel()
     root_long, target_joints, target_slot_joints = _resolve_target(cmds, root_param)
 
-    warnings: List[str] = []
+    warnings: List[str] = list(range_notes)
     for action in session.stop_idle_ipr(cmds):
         warnings.append(
             action + " before keyframe/bake work - an idle IPR re-renders "
@@ -1010,19 +1055,25 @@ def _retarget_bvh(path: str, root_param: str, name: str,
 
 
 def _retarget_fbx(path: str, root_param: str, name: str,
-                  start_param: Optional[float], end_param: Optional[float],
-                  fps_param: Optional[int]) -> Dict[str, Any]:
+                  start_param: Optional[float],
+                  end_param: Optional[float]) -> Dict[str, Any]:
     """The other accepted extension, per the spec - imported via Maya's
     native FBX path rather than parsed by hand.
+
+    Takes no fps: `_validate_common` refuses one on this route (#797 row
+    25), so the bake rate here is ALWAYS the file's own, read back from
+    the scene's time unit after the import. The BVH route still takes one
+    - it knows the source rate from the file header, before importing
+    anything, and can resample against it.
 
     UNTESTED beyond headless param validation: no FBX mocap fixture ships
     with this repo (only the CMU .bvh fixtures, #774 Task 2), so this route
     has never run against a real file, in mayapy or otherwise. It follows
     the same characterize/retarget/bake/teardown shape the BVH route was
     measured against Route A's confirmed HIK invocations, but the joint-name
-    resolution, frame-range reading, and fps recovery below are reasoned
-    from the FBX import API's documented behavior, not measured. Verify
-    against a real humanoid FBX mocap file before relying on this path.
+    resolution and frame-range reading below are reasoned from the FBX
+    import API's documented behavior, not measured. Verify against a real
+    humanoid FBX mocap file before relying on this path.
     """
     cmds = _cmds()
     mel = _mel()
@@ -1097,12 +1148,15 @@ def _retarget_fbx(path: str, root_param: str, name: str,
                 "this tool recognizes" % (time_unit, path),
                 hint="one of: %s"
                      % ", ".join(str(f) for f in sorted(clipmath.FPS_UNITS)))
-        bake_fps = fps_param if fps_param is not None else source_fps
+        # The file's own rate, always: a caller-given fps cannot reach
+        # here (#797 row 25 refuses it in _validate_common), and a branch
+        # that can only take one side is a claim the code does not make.
+        bake_fps = source_fps
 
-        row_start = (int(round(start_param)) if start_param is not None
-                    else int(round(src_start)))
-        row_end = (int(round(end_param)) if end_param is not None
-                  else int(round(src_end)))
+        row_start = (_source_row("start", start_param, warnings)
+                     if start_param is not None else int(round(src_start)))
+        row_end = (_source_row("end", end_param, warnings)
+                   if end_param is not None else int(round(src_end)))
         if row_start < src_start or row_end > src_end or row_end <= row_start:
             raise HandlerError(
                 "start/end (%r/%r) is outside %r's keyed range (%g-%g)"
@@ -1252,4 +1306,6 @@ def retarget_clip(params: Dict[str, Any]) -> Dict[str, Any]:
     root_param = params.get("root")
     if ext == ".bvh":
         return _retarget_bvh(path, root_param, name, start, end, fps)
-    return _retarget_fbx(path, root_param, name, start, end, fps)
+    # fps is not passed on: _validate_common has already refused one for
+    # this route, so the only value it could carry is None (#797 row 25).
+    return _retarget_fbx(path, root_param, name, start, end)

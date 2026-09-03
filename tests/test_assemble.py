@@ -8,7 +8,7 @@ BUDGET, and both are only visible in the sequence of calls it makes.
 import pytest
 
 from maya_plugin.dispatcher import HandlerError
-from maya_plugin.handlers import assemble, ledger
+from maya_plugin.handlers import assemble, combine, ledger, uvatlas
 
 
 class FakeCmds:
@@ -1006,7 +1006,11 @@ class TestTheFakeRefusesWhatMayaRefuses:
                 {"kind": "cube", "pos": [0, 2, 0], "dim": [1, 1, 1], "chunk": "arm"},
             ],
         })
-        assert result["warnings"] == []
+        # Narrowed from `warnings == []` (#797): this build names no part
+        # "golem", so it now also carries the tier-2 warning that the base
+        # name went unused. The subject here is the SHADING collapse, and
+        # the collapse warning is what must be absent.
+        assert not any("shading" in w for w in result["warnings"])
         assert fake.set_members == {"blinn1SG": ["|armShape"]}
         assert "initialShadingGroup" not in fake.dg_nodes
 
@@ -1022,3 +1026,284 @@ class TestTheFakeRefusesWhatMayaRefuses:
         out = combine_mod.unite(fake, ["|a", "|b"], "merged")
         assert out["shading"] == {"sg": "initialShadingGroup", "repaired": True}
         assert fake.set_members["initialShadingGroup"] == ["|mergedShape"]
+
+
+class TestTheBranchDropsIt:
+    """#797: a param this call's branch never consumes is REFUSED, not kept.
+
+    The refusals here all fire before assemble touches Maya, which is what
+    the `_no_maya` fixture pins: `_cmds` raises, so a refusal moved back
+    below it fails here with that AssertionError instead of a HandlerError.
+    A refusal after `cmds = _cmds()` is a refusal after the checkpoint, and
+    the checkpoint is the expensive half of the call.
+    """
+
+    @pytest.fixture
+    def _no_maya(self, monkeypatch):
+        def boom():
+            raise AssertionError(
+                "assemble reached Maya before refusing the inert param")
+
+        monkeypatch.setattr(assemble, "_cmds", boom)
+
+    # --- row 6: the pivot mode is a property of the combine ---------------
+
+    def test_pivot_mode_is_refused_when_combine_is_false(self, _no_maya):
+        with pytest.raises(HandlerError) as exc:
+            assemble.assemble({"name": "kit", "parts": _parts(2),
+                               "combine": False, "pivot": "origin"})
+        assert "does not use 'pivot'" in str(exc.value)
+        assert "combine" in str(exc.value)
+
+    def test_pivot_mode_is_refused_when_every_chunk_holds_one_part(self, _no_maya):
+        with pytest.raises(HandlerError) as exc:
+            assemble.assemble({"name": "kit", "parts": _parts(1),
+                               "pivot": "keep"})
+        assert "does not use 'pivot'" in str(exc.value)
+        assert "single" in str(exc.value)
+
+    def test_center_is_what_a_lone_part_already_has_so_it_stands(self, fake):
+        """The discrimination the plan measured: a primitive's own pivot IS
+        its bbox centre, so `center` is observably honoured on a chunk that
+        never goes through unite. Only origin/keep ask for a write that
+        never happens."""
+        result = assemble.assemble({"name": "kit", "atlas": None,
+                                    "parts": _parts(1), "pivot": "center"})
+        assert result["objects"][0]["parts"] == 1
+
+    def test_an_unpassed_pivot_is_not_a_passed_one(self, fake):
+        """The wrapper now sends pivot=None on every call (#797), so a
+        handler that keyed the refusal on the KEY rather than the VALUE
+        would refuse every single-part build ever made."""
+        result = assemble.assemble({"name": "kit", "atlas": None,
+                                    "parts": _parts(1), "pivot": None})
+        assert result["objects"][0]["parts"] == 1
+
+    def test_a_mixed_build_keeps_the_mode_and_names_the_chunks_that_lose_it(
+        self, fake
+    ):
+        """With one multi-part chunk the mode IS consumed - refusing would
+        refuse a working call. The single-part chunks still get no mode, and
+        saying which ones is the honest half of that."""
+        result = assemble.assemble({
+            "name": "kit", "atlas": None, "pivot": "origin",
+            "parts": (_parts(2, chunk="body") + _parts(1, chunk="stud")),
+        })
+        assert [o["combined"] for o in result["objects"]] == [True, False]
+        assert any("stud" in w and "pivot" in w for w in result["warnings"])
+
+    # --- row 7: a patch is a cell of an atlas that does not exist ---------
+
+    def test_a_patch_without_an_atlas_is_refused_naming_the_part(self, _no_maya):
+        with pytest.raises(HandlerError) as exc:
+            assemble.assemble({"name": "kit", "parts": _parts(1, patch=3)})
+        message = str(exc.value)
+        assert "does not use 'patch'" in message
+        assert "atlas" in message
+        assert "parts[0]" in message
+
+    def test_a_patch_index_off_a_phantom_grid_is_not_range_checked(self, _no_maya):
+        """The defect: with no atlas the cell was resolved against a 4x4
+        grid that does not exist, so `patch: 16` came back "outside a 4x4
+        atlas" - a refusal naming a grid the caller never asked for."""
+        with pytest.raises(HandlerError) as exc:
+            assemble.assemble({"name": "kit", "parts": _parts(1, patch=16)})
+        assert "does not use 'patch'" in str(exc.value)
+        assert "4x4" not in str(exc.value)
+
+    def test_a_patch_with_an_atlas_still_resolves(self, fake):
+        result = assemble.assemble({
+            "name": "kit", "atlas": {"cols": 4, "rows": 4},
+            "parts": _parts(1, patch=5),
+        })
+        assert result["atlas"] == [4, 4]
+
+    # --- rows 8 and 9: world_scale box-projects and never normalises ------
+
+    def test_atlas_project_keep_is_refused_under_world_scale(self, _no_maya):
+        with pytest.raises(HandlerError) as exc:
+            assemble.assemble({"name": "kit", "parts": _parts(1),
+                               "atlas": {"world_scale": 2.0, "project": "keep"}})
+        assert "does not use 'project'" in str(exc.value)
+        assert "world_scale" in str(exc.value)
+
+    def test_atlas_project_planar_is_refused_under_world_scale(self, _no_maya):
+        with pytest.raises(HandlerError) as exc:
+            assemble.assemble({"name": "kit", "parts": _parts(1),
+                               "atlas": {"world_scale": 2.0,
+                                         "project": "planar"}})
+        assert "does not use 'project'" in str(exc.value)
+
+    def test_atlas_project_box_is_what_world_mode_does_so_it_stands(self, fake):
+        result = assemble.assemble({
+            "name": "kit", "parts": _parts(1),
+            "atlas": {"world_scale": 2.0, "project": "box"},
+        })
+        assert result["parts"] == 1
+
+    def test_atlas_project_keep_without_world_scale_still_works(self, fake):
+        result = assemble.assemble({
+            "name": "kit", "parts": _parts(1),
+            "atlas": {"cols": 2, "rows": 2, "project": "keep"},
+        })
+        assert result["parts"] == 1
+
+    def test_atlas_normalize_true_is_refused_under_world_scale(self, _no_maya):
+        with pytest.raises(HandlerError) as exc:
+            assemble.assemble({"name": "kit", "parts": _parts(1),
+                               "atlas": {"world_scale": 2.0,
+                                         "normalize": True}})
+        assert "does not use 'normalize'" in str(exc.value)
+        assert "world_scale" in str(exc.value)
+
+    def test_atlas_normalize_false_is_what_world_mode_does_so_it_stands(self, fake):
+        """The same rule as `project: box`: world mode normalises nothing, so
+        a caller who asked for nothing got what they asked for."""
+        result = assemble.assemble({
+            "name": "kit", "parts": _parts(1),
+            "atlas": {"world_scale": 2.0, "normalize": False},
+        })
+        assert result["parts"] == 1
+
+    def test_the_default_normalize_is_untouched_without_world_scale(self, fake):
+        result = assemble.assemble({"name": "kit", "parts": _parts(1),
+                                    "atlas": {"cols": 2, "rows": 2}})
+        assert result["parts"] == 1
+
+    def test_an_explicit_null_normalize_reads_as_the_default_not_as_false(
+        self, fake, monkeypatch
+    ):
+        """`bool(atlas.get("normalize", True))` cannot see a TCP caller's
+        explicit null: the key is PRESENT, so the True default never applies
+        and None collapses to False - an un-normalised pack, silently, from a
+        caller who said nothing. uvatlas.py reads None as the default; this
+        is the same read."""
+        packed = []
+        real_pack = uvatlas.pack_shape
+
+        def spy(cmds, shape, rect, **kwargs):
+            packed.append(kwargs)
+            return real_pack(cmds, shape, rect, **kwargs)
+
+        monkeypatch.setattr(uvatlas, "pack_shape", spy)
+        assemble.assemble({"name": "kit", "parts": _parts(1),
+                           "atlas": {"cols": 2, "rows": 2,
+                                     "normalize": None}})
+        assert packed and packed[0]["normalize"] is True
+
+    # --- the keep warning: a united result has no prior pivot -------------
+
+    def test_pivot_keep_on_a_united_chunk_warns_that_keep_is_origin(self, fake):
+        """#797 / live probe 2026-09-03 (pid 33088): polyUnite hands back a
+        transform whose rotatePivot, scalePivot and translate are all
+        (0, 0, 0) whatever `ch` says, so `keep` on the merged object keeps
+        the ORIGIN - it is `origin` under another name. combine.unite raises
+        the note per result and assemble sums it into one."""
+        result = assemble.assemble({
+            "name": "kit", "atlas": None, "pivot": "keep",
+            "parts": _parts(2, chunk="body"),
+        })
+        note = [w for w in result["warnings"] if "keep" in w and "origin" in w]
+        assert note, result["warnings"]
+
+    def test_the_keep_note_is_summed_once_per_call_not_once_per_chunk(
+        self, fake
+    ):
+        """The delivery this module was written for is 8,000 parts over 2,034
+        chunks: combine.unite raises the note on every united result, so
+        carrying them up verbatim would bury every other warning under two
+        thousand identical lines. assemble drops the per-result copies and
+        states the COUNT instead."""
+        result = assemble.assemble({
+            "name": "kit", "atlas": None, "pivot": "keep",
+            "parts": (_parts(2, chunk="body") + _parts(2, chunk="head")),
+        })
+        assert combine.KEEP_PIVOT_NOTE not in result["warnings"]
+        note = [w for w in result["warnings"] if "keep" in w and "origin" in w]
+        assert len(note) == 1, result["warnings"]
+        assert "2 combined chunk(s)" in note[0]
+
+    def test_no_keep_note_when_nothing_asked_to_keep(self, fake):
+        result = assemble.assemble({
+            "name": "kit", "atlas": None, "pivot": "origin",
+            "parts": (_parts(2, chunk="body") + _parts(2, chunk="head")),
+        })
+        assert not [w for w in result["warnings"] if "polyUnite gives" in w]
+
+
+class TestWarnedNotRefused:
+    """Tier 2 (#797): the schema or the wrapper makes refusing impossible, so
+    the call runs and says what it did with the value instead."""
+
+    # --- row 34: `name` is required, and may name nothing at all ----------
+
+    def test_a_base_name_no_part_used_is_reported(self, fake):
+        result = assemble.assemble({
+            "name": "kit", "atlas": None,
+            "parts": _parts(2, chunk="body") + _parts(2, chunk="head"),
+        })
+        assert any("no part used the base name" in w for w in result["warnings"])
+        assert any("kit" in w for w in result["warnings"])
+
+    def test_a_base_name_a_part_defaulted_to_is_not_warned_about(self, fake):
+        result = assemble.assemble({"name": "kit", "atlas": None,
+                                    "parts": _parts(2)})
+        assert result["warnings"] == []
+
+    def test_a_chunk_that_spells_the_base_name_out_counts_as_using_it(self, fake):
+        result = assemble.assemble({"name": "kit", "atlas": None,
+                                    "parts": _parts(2, chunk="kit")})
+        assert result["warnings"] == []
+
+    def test_a_part_named_after_the_base_is_not_said_to_be_missing(self, fake):
+        """The warning must not claim more than it measured. A part that asks
+        for the base name as its OWN name, in a chunk nothing unites, KEEPS
+        that name - so the scene really does contain a node called 'kit', and
+        "nothing is called 'kit'" would be exactly the false claim #797
+        exists to remove. The true half - that `name` was only ever the
+        default chunk - still stands and is still said."""
+        result = assemble.assemble({
+            "name": "kit", "atlas": None,
+            "parts": [{"pos": [0, 0, 0], "dim": [1, 1, 1], "chunk": "body",
+                       "name": "kit"}],
+        })
+        assert any(o["name"] == "|kit" for o in result["objects"])
+        assert any("no part used the base name" in w for w in result["warnings"])
+        assert not any("nothing is called" in w for w in result["warnings"])
+
+    def test_a_part_name_the_unite_eats_leaves_the_base_name_unclaimed(self, fake):
+        """The other half: in a chunk of two the part named 'kit' is consumed
+        by polyUnite and the result is called after the chunk, so nothing IS
+        called 'kit' and the claim is true."""
+        result = assemble.assemble({
+            "name": "kit", "atlas": None,
+            "parts": [
+                {"pos": [0, 0, 0], "dim": [1, 1, 1], "chunk": "body",
+                 "name": "kit"},
+                {"pos": [2, 0, 0], "dim": [1, 1, 1], "chunk": "body"},
+            ],
+        })
+        assert not any(o["name"] == "|kit" for o in result["objects"])
+        assert any("nothing is called" in w for w in result["warnings"])
+
+    # --- row 35: a part name the unite eats -------------------------------
+
+    def test_a_part_name_eaten_by_the_unite_is_reported(self, fake):
+        result = assemble.assemble({
+            "name": "kit", "atlas": None,
+            "parts": [
+                {"pos": [0, 0, 0], "dim": [1, 1, 1], "chunk": "body",
+                 "name": "brick_a"},
+                {"pos": [2, 0, 0], "dim": [1, 1, 1], "chunk": "body"},
+            ],
+        })
+        assert any("brick_a" in w and "polyUnite" in w
+                   for w in result["warnings"])
+
+    def test_a_part_name_that_survives_is_not_warned_about(self, fake):
+        result = assemble.assemble({
+            "name": "kit", "atlas": None, "combine": False,
+            "parts": [{"pos": [0, 0, 0], "dim": [1, 1, 1], "chunk": "body",
+                       "name": "brick_a"}],
+        })
+        assert not any("brick_a" in w for w in result["warnings"])

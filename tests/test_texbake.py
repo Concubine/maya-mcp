@@ -847,6 +847,33 @@ class TestGuardStructure:
         texbake._refuse_if_nothing_to_bake(
             [{"material": "m"}], False, None)  # must not raise
 
+    def test_an_empty_slot_list_is_named_as_the_reason(self):
+        """#797 row 41. `slots=[]` passes validate (it is a list of slot
+        names, all of them valid), then filters EVERY slot out at
+        plan_bakes - so the caller who meant "all of them" was told "no
+        procedural texture network to bake", which points at the scene
+        when the fault is in the call. The clause was already there for a
+        non-empty list and silently omitted for the empty one, because
+        `if slots` is false for [].
+        """
+        with pytest.raises(HandlerError) as exc:
+            texbake._refuse_if_nothing_to_bake([], False, [])
+        assert "slots" in str(exc.value)
+        assert "empty" in str(exc.value)
+        assert "omit" in (exc.value.hint or "")
+
+    def test_a_named_slot_still_appears_in_the_refusal(self):
+        with pytest.raises(HandlerError, match="roughness"):
+            texbake._refuse_if_nothing_to_bake([], False, ["roughness"])
+
+    def test_an_empty_slot_list_refuses_even_when_a_file_backed_slot_was_skipped(
+            self):
+        """The file-backed skip is a legitimate no-op for a real slot
+        selection, but `slots=[]` selected nothing to skip in the first
+        place - the call is malformed either way."""
+        with pytest.raises(HandlerError, match="empty"):
+            texbake._refuse_if_nothing_to_bake([], True, [])
+
 
 class TestUnknownSlotRefuses:
     def test_an_unknown_slot_on_the_claim_refuses_rather_than_guessing(

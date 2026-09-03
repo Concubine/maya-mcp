@@ -14,8 +14,8 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List
 
-from ..dispatcher import HandlerError, require_known_keys
-from . import material, naming
+from ..dispatcher import HandlerError, refuse_inert, require_known_keys
+from . import material, naming, pbr
 
 RECIPES = ("noise_bump", "ramp_gradient", "layered_mask", "file_texture")
 # Which semantic slot each recipe drives.
@@ -24,6 +24,28 @@ RECIPE_SLOT = {
     "ramp_gradient": "color",
     "layered_mask": "color",
     "file_texture": "color",
+}
+
+# Which nested `params` keys each recipe's builder actually READS - #797
+# rows 12-13. `params` is a known TOP-level key, so require_known_keys let
+# every nested key through: the #767 defect one level down, where the value
+# is validated by nobody and dropped by the builder. Two of the four
+# recipes read nothing at all (`_ramp_gradient` and `_layered_mask` take
+# the argument and never look at it), so for them any non-empty dict is
+# inert - the caller asks for a scaled ramp, gets Maya's default one, and
+# is told nothing.
+RECIPE_PARAM_KEYS: Dict[str, tuple] = {
+    "noise_bump": ("scale", "depth"),
+    "ramp_gradient": (),
+    "layered_mask": (),
+    "file_texture": ("file_path",),
+}
+# What the two param-less recipes build instead, said in the caller's terms.
+_PARAMLESS_WHY = {
+    "ramp_gradient": "the builder wires a ramp with Maya's own defaults and "
+                     "reads nothing from params",
+    "layered_mask": "the builder wires a layeredTexture fed by a noise mask "
+                    "and reads nothing from params",
 }
 
 
@@ -142,17 +164,65 @@ _BUILDERS: Dict[str, Callable] = {
 APPLY_TEXTURE_RECIPE_KEYS = ("mesh", "recipe", "params", "slot")
 
 
+def validate_recipe_params(recipe: str, nested: Any) -> Dict[str, Any]:
+    """The nested `params` dict, checked against the recipe that will read
+    it - pure, so the whole call is refused before a node exists (#797).
+
+    None and {} are "not passed": the MCP wrapper used to send `params={}`
+    on every call, so refusing an empty dict would refuse the command.
+    """
+    if nested is None:
+        nested = {}
+    if not isinstance(nested, dict):
+        raise HandlerError(
+            "params must be an object of recipe settings",
+            hint="e.g. params={'scale': 2.0} for noise_bump; got %r"
+                 % (nested,))
+    if not nested:
+        return {}
+
+    allowed = RECIPE_PARAM_KEYS[recipe]
+    if not allowed:
+        refuse_inert(
+            "apply_texture_recipe", "params",
+            "for the %s recipe" % recipe, _PARAMLESS_WHY[recipe],
+            hint="drop params; maya_assign_pbr wires an authored image, and "
+                 "maya_bake_textures flattens what a recipe builds")
+    require_known_keys(nested, allowed,
+                       "apply_texture_recipe params for %s" % recipe)
+
+    # pbr.missing_files's rule, reused rather than re-derived: absolute,
+    # non-pattern paths only. A missing map is not an error in Maya - the
+    # file node renders flat and the material merely looks wrong, which is
+    # the failure class this project keeps paying for.
+    path = nested.get("file_path")
+    if isinstance(path, str) and path.strip():
+        absent = pbr.missing_files([{"path": path.strip()}])
+        if absent:
+            raise HandlerError(
+                "texture file not found: %s" % absent[0],
+                hint="Maya renders a missing file as flat colour and reports "
+                     "nothing. Paths are resolved on the MACHINE RUNNING "
+                     "MAYA.")
+    return dict(nested)
+
+
 def apply_texture_recipe(params: Dict[str, Any]) -> Dict[str, Any]:
+    # Ahead of _cmds(): an unknown key (#767) and a key this recipe's
+    # builder never reads (#797) both need Maya for nothing, and a refusal
+    # after the scene is touched is a refusal after the damage.
     require_known_keys(params, APPLY_TEXTURE_RECIPE_KEYS,
                        "apply_texture_recipe")
-    cmds = _cmds()
-    mesh_long, shape = naming.require_mesh(cmds, str(params.get("mesh") or ""))
     recipe = params.get("recipe")
     if recipe not in RECIPES:
         raise HandlerError(
             "unknown recipe %r" % recipe,
             hint="valid recipes: %s" % ", ".join(RECIPES),
         )
+    recipe_params = validate_recipe_params(recipe, params.get("params"))
+
+    cmds = _cmds()
+    mesh_long, shape = naming.require_mesh(cmds, str(params.get("mesh") or ""))
     shader, shader_type = _shader_of(cmds, shape)
     slot = params.get("slot") or RECIPE_SLOT[recipe]
     attr = material.resolve_slot(shader_type, slot)
@@ -164,7 +234,7 @@ def apply_texture_recipe(params: Dict[str, Any]) -> Dict[str, Any]:
         return node
 
     try:
-        _BUILDERS[recipe](cmds, tracker, shader, attr, params.get("params") or {})
+        _BUILDERS[recipe](cmds, tracker, shader, attr, recipe_params)
     except Exception:
         # zero orphans: sweep exactly what this call built, nothing else
         for node in reversed(created):

@@ -58,6 +58,158 @@ class TestValidation:
         with pytest.raises(HandlerError):
             arraymath.resolve_vec3(None, "offset")
 
+    def test_count_of_none_says_it_is_missing_not_malformed(self):
+        # #797: the wrapper now sends count=None on every call, so None is
+        # "the caller said nothing", not "the caller said something odd".
+        # "count must be a whole number, got None" sent the caller looking
+        # for a type error in a value they never wrote.
+        with pytest.raises(HandlerError) as exc:
+            arraymath.resolve_count(None)
+        assert "missing required param 'count'" in str(exc.value)
+        assert "radial" in exc.value.hint and "linear" in exc.value.hint
+
+
+class TestForeignParamsPerMode:
+    """#797 rows 2-5: a param the chosen mode never reads is refused.
+
+    Before this, nothing on the wrong mode was even validated - a probe
+    passed `center=[1, 2]` (two numbers), `angle=720` and `offset="garbage"`
+    through a mirror call and all three succeeded, because `_mirror` reads
+    neither. The caller's arc, their taper and their spacing were accepted
+    and dropped on the floor.
+    """
+
+    def test_every_mode_declares_what_it_reads(self):
+        # The table and the mode list must not drift: a new mode with no row
+        # here would KeyError inside the refusal instead of being checked.
+        assert set(arraymath.MODE_PARAMS) == set(arraymath.MODES)
+
+    def test_mirror_refuses_a_count(self):
+        with pytest.raises(HandlerError) as exc:
+            arraymath.refuse_foreign_params(
+                "mirror", {"axis": "x", "count": 9})
+        assert "array does not use 'count' in mirror mode" in str(exc.value)
+
+    def test_mirror_refuses_every_placement_param_it_never_reads(self):
+        for key, value in [("count", 9), ("center", [1, 2, 3]), ("angle", 720),
+                           ("offset", [1, 0, 0]), ("step_rotate", [0, 1, 0]),
+                           ("step_scale", [1, 1, 1])]:
+            with pytest.raises(HandlerError) as exc:
+                arraymath.refuse_foreign_params("mirror", {"axis": "x", key: value})
+            assert "does not use %r in mirror mode" % key in str(exc.value)
+
+    def test_radial_refuses_the_linear_and_mirror_params(self):
+        for key, value in [("pivot", [0, 0, 0]), ("offset", [1, 0, 0]),
+                           ("step_rotate", [0, 1, 0]), ("step_scale", [1, 1, 1])]:
+            with pytest.raises(HandlerError) as exc:
+                arraymath.refuse_foreign_params("radial", {"count": 3, key: value})
+            assert "does not use %r in radial mode" % key in str(exc.value)
+
+    def test_linear_refuses_the_radial_and_mirror_params(self):
+        for key, value in [("axis", "y"), ("center", [0, 0, 0]), ("angle", 90),
+                           ("pivot", [0, 0, 0])]:
+            with pytest.raises(HandlerError) as exc:
+                arraymath.refuse_foreign_params(
+                    "linear", {"count": 3, "offset": [1, 0, 0], key: value})
+            assert "does not use %r in linear mode" % key in str(exc.value)
+
+    def test_each_mode_accepts_what_it_actually_reads(self):
+        arraymath.refuse_foreign_params("mirror", {"axis": "x", "pivot": [0, 1, 0]})
+        arraymath.refuse_foreign_params(
+            "radial", {"count": 3, "axis": "y", "center": [0, 0, 0], "angle": 180})
+        arraymath.refuse_foreign_params(
+            "linear", {"count": 3, "offset": [1, 0, 0],
+                       "step_rotate": [0, 5, 0], "step_scale": [0.9, 0.9, 0.9]})
+
+    def test_the_common_params_are_never_foreign(self):
+        arraymath.refuse_foreign_params(
+            "mirror", {"name": "|tooth", "mode": "mirror", "axis": "x",
+                       "name_prefix": "L_arm", "group_name": "arms"})
+
+    def test_a_none_value_is_not_a_passed_param(self):
+        # The wrapper sends every key on every call. Only `is not None` can
+        # mean "the caller said this" - a key present and None must pass.
+        arraymath.refuse_foreign_params(
+            "mirror", {"axis": "x", "count": None, "angle": None,
+                       "center": None, "offset": None, "step_rotate": None,
+                       "step_scale": None})
+
+    def test_the_named_offender_is_the_first_in_sorted_order(self):
+        # Deterministic: two foreign params must not name a different one
+        # run to run, or the same call refuses differently under dict order.
+        with pytest.raises(HandlerError) as exc:
+            arraymath.refuse_foreign_params(
+                "mirror", {"axis": "x", "step_scale": [1, 1, 1], "angle": 90})
+        assert "'angle'" in str(exc.value)
+
+    def test_the_hint_names_what_the_mode_does_read(self):
+        with pytest.raises(HandlerError) as exc:
+            arraymath.refuse_foreign_params("mirror", {"axis": "x", "offset": [1, 0, 0]})
+        assert "axis" in exc.value.hint and "pivot" in exc.value.hint
+        assert "linear" in exc.value.hint
+
+
+class TestZeroLinearOffset:
+    def test_a_zero_offset_with_no_steps_is_refused(self):
+        # #797 row 5, the value-level twin of radial's angle=0 refusal: with
+        # nothing else varying per copy, every copy lands exactly on the
+        # source and the array reads as a no-op.
+        with pytest.raises(HandlerError) as exc:
+            arraymath.refuse_zero_linear_offset({"offset": [0, 0, 0]})
+        assert "array does not use 'offset' in linear mode" in str(exc.value)
+        assert "on the source" in str(exc.value)
+
+    def test_a_nonzero_offset_passes(self):
+        arraymath.refuse_zero_linear_offset({"offset": [0, 0, 0.001]})
+
+    def test_an_absent_offset_is_left_to_the_required_check(self):
+        # Missing is a different failure with a different message; this
+        # check must not pre-empt it.
+        arraymath.refuse_zero_linear_offset({})
+        arraymath.refuse_zero_linear_offset({"offset": None})
+
+    def test_a_zero_offset_with_a_step_scale_builds_nested_shells(self):
+        # NOT a no-op, and not reachable through any other mode: linear_steps
+        # COMPOUNDS scale, so copy i is 0.8**i of the source, all sharing one
+        # centre - concentric shells. Refusing this would refuse a real
+        # request on the strength of a reason that does not apply to it.
+        arraymath.refuse_zero_linear_offset(
+            {"offset": [0, 0, 0], "step_scale": [0.8, 0.8, 0.8]})
+
+    def test_a_zero_offset_with_a_step_rotate_builds_a_turning_stack(self):
+        # linear_steps ACCUMULATES rotation, so the copies differ by angle
+        # about their shared origin.
+        arraymath.refuse_zero_linear_offset(
+            {"offset": [0, 0, 0], "step_rotate": [0, 15, 0]})
+
+    def test_the_neutral_steps_do_not_rescue_a_zero_offset(self):
+        # step_rotate=[0,0,0] and step_scale=[1,1,1] are the identity: they
+        # are what linear_steps defaults to, and they distinguish nothing.
+        # Passing them explicitly must not buy a coincident array.
+        for steps in [
+            {"step_rotate": [0, 0, 0]},
+            {"step_scale": [1, 1, 1]},
+            {"step_rotate": [0, 0, 0], "step_scale": [1.0, 1.0, 1.0]},
+            {"step_rotate": None, "step_scale": None},
+        ]:
+            with pytest.raises(HandlerError):
+                arraymath.refuse_zero_linear_offset(
+                    dict({"offset": [0, 0, 0]}, **steps))
+
+    def test_the_message_says_which_steps_would_make_it_meaningful(self):
+        with pytest.raises(HandlerError) as exc:
+            arraymath.refuse_zero_linear_offset({"offset": [0, 0, 0]})
+        assert "step_rotate" in str(exc.value) and "step_scale" in str(exc.value)
+        assert "step_scale" in exc.value.hint
+
+    def test_a_malformed_step_is_left_to_its_own_validator(self):
+        # resolve_vec3 owns "step_scale must be three numbers". Refusing the
+        # offset here would report the wrong param.
+        arraymath.refuse_zero_linear_offset(
+            {"offset": [0, 0, 0], "step_scale": "garbage"})
+        arraymath.refuse_zero_linear_offset(
+            {"offset": [0, 0, 0], "step_rotate": [0, 15]})
+
 
 class TestRadialAngles:
     def test_full_circle_divides_by_count(self):

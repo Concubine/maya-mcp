@@ -170,7 +170,7 @@ Checkpoints go to `<dir of the open scene>/checkpoints/`, so a `checkpoint_id`
 `open_scene` and `restore_checkpoint` all change which directory that is. Ids
 issued during the session are resolved against where they were actually
 written, and every id comes back with its `path`; pass `path` instead of
-`checkpoint_id` for an id from an earlier session (#649).
+`checkpoint_id` for an id from an earlier session (#649). Passing BOTH is refused unless the id is the path's own stem: `path` overwrote `checkpoint_id` and restored its own file, so two different checkpoints in one call silently became one (#797).
 
 Scene ops:
 
@@ -199,7 +199,7 @@ Scene ops:
 | `cylinder`, `cone` | `[around, along]` | 3, 1 |
 | `torus` | `[ring, tube]` | 3, 3 |
 | `prism`, `pyramid` | `[along]` | 1 |
-| `octahedron`, `icosahedron` | none — `polyPlatonicSolid` has no subdivision flag, so passing `subdivisions` is **refused** rather than ignored | — |
+| `octahedron`, `icosahedron` | none — `polyPlatonicSolid` has no subdivision flag, so passing **either** `subdivisions` or `divisions` is **refused** rather than ignored (#797) | — |
 
 The reason this exists: `divisions` on a cylinder or cone buys **20 around for every 1 along**. A long thin limb needs rows along its length and almost nothing around it, so the only way to get them was to pay for a circumference no shape needed — measured, 16 rows along a cylinder costs **5122 faces** that way against **194** with a 12-sided tube, and both bend identically (`evals/divisions_live.py`).
 
@@ -207,9 +207,21 @@ The reason this exists: `divisions` on a cylinder or cone buys **20 around for e
 
 The result reports **`subdivisions`** (the per-axis counts as built) and **`faces`**, because the multiplier's per-kind meaning is invisible from the call site: `divisions: 4` on a cylinder buys 80 around and 4 along, and nothing else in the result said so.
 
+**`divisions` on a platonic solid is refused too** (#797). It used to be range-checked exactly like a cylinder's and then discarded, because there is no axis to spend it on: the caller asked for a denser icosahedron, got the same 20 faces, and nothing said so. The refusal names the kind — `create_primitive does not use 'divisions' on an icosahedron: polyPlatonicSolid takes radius and axis only …` — and inside `assemble` it is prefixed with the part, so one bad part out of twenty is identified. Refine a platonic solid afterwards with `maya_sculpt_ops` op `smooth` instead.
+
 The face projection those counts are budgeted against was **wrong for cylinder and cone** until #669: it charged a fan of triangles per end cap, where Maya closes each with a single n-gon, so a default cylinder was predicted at 60 faces and builds 22. It survived because the only real-Maya face-count assertions covered the platonic solids, prism and pyramid — the mayapy suite now checks every kind.
 
 `assemble` parts take the same two keys with the same meanings and the same refusals.
+
+**`combine` and `assemble`: `pivot='keep'` on a combined result keeps the ORIGIN, and says so** (#797). MEASURED on a live probe (2026-09-03, pid 33088): a fresh `polyUnite` transform answers `rotatePivot`, `scalePivot` **and** `translate` as `(0, 0, 0)` whatever `ch` is set to, so there is no inherited pivot for `keep` to preserve — it is `origin` under another name. It is not refused, because the value is legal and `assemble`'s single-part branch does keep a pivot a primitive genuinely built; instead `warnings` carries one line saying the unite gave the result the world origin and that `center` is what asks for the bounding-box centre. A caller who asked to keep something and got the origin used to have no way to tell that from a `keep` that worked. `assemble` unites a chunk at a time, so it does **not** carry that line up per chunk — 2,034 identical copies would bury every per-chunk finding beside them; it drops them and states the count once (`pivot='keep' on 12 combined chunk(s) kept …`), and every other warning `combine` raises about a specific chunk is still carried up verbatim.
+
+**`assemble`'s `pivot` is applied by `combine.unite` and by nothing else** (#797), so `origin` and `keep` are REFUSED when nothing in the call is united: with `combine=false`, or when every chunk holds exactly one part. Each part then keeps the pivot its primitive was built with, and `freeze` (on by default) writes over the transform afterwards — the mode was validated and dropped. `center` is the exception the plan measured: a primitive's own pivot already sits at its bounding-box centre, so asking for it is honoured whether or not anything writes it. A MIXED build (at least one multi-part chunk) is not refused — the multi-part chunks really do consume the mode — but `warnings` names how many chunks it reached and which single-part ones it never touched. Use `pivots` (`{chunk: [x, y, z]}`) to place a pivot on a chunk of one; that path reaches loose parts.
+
+**A part's `patch` is a cell of an atlas, so with `atlas: null` it is refused** (#797). With no atlas nothing projects or packs UVs at all, and the cell used to be resolved against a phantom 4×4 grid the caller never asked for — so `patch: 16` came back "outside a 4x4 atlas", a refusal naming a grid that does not exist. The refusal now names the part (`parts[0]`) and the real cause: pass an `atlas` for the patch to address, or drop the patch.
+
+**`atlas.world_scale` box-projects and never normalises** (#797), the same rule `uv_atlas` enforces one level down, because it is literally the same packer: `atlas.project` of `keep` or `planar` is refused with `world_scale` (world mode calls `polyAutoProjection(scaleMode=0)` on every part, so an authored layout is overwritten, not kept), and an explicit `atlas.normalize: true` is refused with it too (normalising makes every part fill its patch, which is the opposite of a fixed texel density; the world branch never calls `polyNormalizeUV`). `project: box` and `normalize: false` are exactly what world mode does and stand. An explicit `null` for `normalize` is read as "not passed" — it takes the default `true` — rather than as `false`, which is what `bool(None)` used to make of it for a raw-TCP caller who meant nothing by it.
+
+**Two things `assemble` cannot refuse, and therefore warns about** (#797). `name` is required by the schema and is read in exactly one place — as the DEFAULT chunk — so a build whose every part names its own chunk never uses it; `warnings` then says the base name went unused, names the chunks the objects are actually called after, and says whether anything in the scene is called that name at all (a part may still ask for the base name as its own). And a part's own `name` survives only as long as the part does: in a chunk that gets united, the transient node is built under that name and then consumed by `polyUnite`, which names the RESULT after the chunk — so `warnings` counts and names the part names that were eaten. Neither is an error; both were silent.
 
 Modeling and sculpting:
 
@@ -221,6 +233,16 @@ Modeling and sculpting:
 | `deform` | `{ mesh, deformer, params?, delete_history_after? }` | `{ deformer_nodes: [...], baked, warnings, max_displacement }` |
 | `remesh_retopo` | `{ mesh, target_polycount, keep_original? }` | `{ name, tris, method, warnings }` |
 | `mesh_cleanup` | `{ mesh, merge_verts_threshold?, delete_history?, freeze_transforms?, conform_normals? }` | `{ name, before, after, warnings }` |
+
+**An empty `font` is refused, not silently Arial** (#797), and `width`/`depth` of `0` are refused rather than replaced by the defaults. All three used the `value or DEFAULT` idiom, which cannot tell "not passed" from "passed as zero/blank": a caller who named a font got a carve in Arial, and a caller who asked for `depth=0` got a 0.1 recess. Omit the param for the default; passing it now means it is used.
+
+**Each `sculpt_ops` op declares the keys it reads** (#797). The four cage ops always did; the eight original ops did not, so a key belonging to a neighbouring op went straight through and the op ran on its own defaults — `displace_noise` with `center`/`radius`/`falloff` reads none of the three and displaces the WHOLE mesh, reporting success. Every op now refuses a foreign key (`sculpt_ops op 'displace_noise' does not take 'center', 'radius'`), and the whole check runs before the auto-checkpoint. `soft_move` and `inflate_region` take `vertex_id` **or** `center`, never both: `vertex_id` resolves the region centre to that vertex's own world position and `center` is never read, so passing both is refused rather than silently centring somewhere else.
+
+**A lattice bake with no handle move is refused** (#797). `deform` with `deformer="lattice"`, `delete_history_after=true` and no `params.translate`/`params.rotate` built a lattice, deformed nothing with it (a lattice deforms nothing until its points move), deleted it again and returned `{deformer_nodes: [], baked: true, max_displacement: 0.0}` — a success report for a call in which the mesh was never touched. Move the handle before the bake, or drop `delete_history_after` and shape the lattice live. Relatedly, the "a lattice never warns about zero displacement" exemption now applies only while the lattice SURVIVES: once history is deleted there are no points left to move, so a baked lattice that moved nothing warns like any other deformer.
+
+**`create_curve_form`: `resolution.around` is refused on a sweep that gives `profile_sides`** (#797). A sweep's cross-section ring is `profile_sides` when it is given — that is the number that reaches `.profilePolySides`, and `resolution.around` is read on exactly one branch: the one where `profile_sides` is omitted and a round tube is approximated with as many sides as `around` asks for. A caller who passed both got the n-gon and had their `around` dropped silently. Pass `resolution={"along": N}` alongside `profile_sides` — `along` drives `interpolationSteps` and is read on every sweep branch — or drop `profile_sides` for a round tube of `around` sides. The face bill follows the same rule: `predicted_faces` on a sweep is `along * profile_sides` when the n-gon is given, `along * around` when it is not.
+
+`remesh_retopo`'s `method` says which of the three commands actually ran, and it matters: `polyRetopo` takes a `targetFaceCount` and honours `target_polycount`; `polyRemesh` takes no face-count target at all and remeshes to its own uniform edge length, so on that fallback `warnings` says the target could not be honoured and `tris` is the only truth about what was built (#797).
 
 A boolean builds a **new object**, so everything that is not vertices has to be carried across deliberately (#638). `boolean_op` and `etch_text` take three things off `a` before it is consumed and put them back on the result, reporting each one:
 
@@ -252,6 +274,8 @@ Perception:
 | `get_object_info` | `{ name, include? }` | `{ name, transform?, mesh_stats?, uvs?, shading?, history? }` |
 | `capture_turntable` | `{ target?, n_frames?, resolution?, shading?, lighting?, shadows? }` | `{ images: [{index, azimuth, png_b64, blank}], n_frames, warnings }` |
 
+An empty `capture_turntable` `target` is REFUSED rather than read as "no target" (#797) — it used to orbit the whole scene under a name the caller thought was honoured.
+
 Lighting and materials:
 
 | cmd | params | result |
@@ -260,6 +284,8 @@ Lighting and materials:
 | `assign_material` | `{ mesh, shader?, params?, name? }` | `{ mesh, material, shading_group, shader, warnings }` |
 | `assign_pbr` | `{ mesh, maps, params?, name? }` | `{ mesh, material, shading_group, shader, maps, warnings }` |
 
+`hdri_path` is read by the `hdri` preset and by nothing else (#797). Passing it with `three_point`, `single_sun` or `environment` is REFUSED, naming the preset: the directional presets build no dome, and `environment` is the dome that needs no file (a built-in V ramp). A non-existent ABSOLUTE `hdri_path` is refused before the `replace_existing` checkpoint — Maya does not fail on a missing texture, it lights the scene flat grey.
+
 `assign_material` **refuses a top-level param it does not read** (#764), naming the key that was meant: `material` is called `name` here. It is the result field that gets called `material`, which is exactly why callers reached for it as the input key — and it was silently ignored, so the material quietly got the mesh-derived default name instead. Eleven tests in this repo passed `material=`; every one created a differently-named material than it believed it was creating, and every one passed, because they read the name back out of the result rather than pinning it. An unread key does not fail — it succeeds and does something else.
 
 Since #767 this is not a special case: **every command refuses a top-level param it does not read**, and does so before touching Maya at all. See "The unknown-key contract" below.
@@ -267,11 +293,15 @@ Since #767 this is not a special case: **every command refuses a top-level param
 **What an earlier call built is respected, not trampled (#804).** `assign_pbr` re-texturing a slot deletes the previous file node, its place2dTexture and any reverse/bump2d in front of it — but only what nothing else uses: a file node another slot or material still reads survives, and a warning names what still uses it. The swept names are reported per slot as `maps[slot].replaced`, and the new nodes take back the names the swept ones held. A `params` entry aimed at a plug a map already drives (this call's map or an earlier call's) is **refused before anything is built or moved**, naming the plug and the map — Maya raises "locked or connected" on that write, on a child of a fed compound, and on a compound with one fed child (measured). `assign_material` reusing an existing shader applies the same guard before the mesh is moved into the shading group. `setup_lighting` with `replace_existing` takes the old dome's ramp or hdri file node with the light (Maya never reaps a disconnected shading node), listing them in `removed` beside the transforms; a feed something else still uses is kept and named in `warnings`. `bake_textures` refuses a normal slot whose bump2d does not feed it directly (a reverse in between), before any bake, checkpoint or commit.
 | `apply_texture_recipe` | `{ mesh, recipe, params?, slot? }` | `{ mesh, recipe, slot, nodes: [...], warnings }` |
 
+**A key INSIDE an `assign_pbr` slot spec is checked like a top-level one** (#797). `maps` is a known top-level key, so until now anything inside one of its per-slot objects went straight through: MEASURED on a probe, a `chanel` typo left the scalar reading the default channel `r` while the result reported success — the #764 failure exactly, an unread key that does not fail but succeeds and does something else. Each spec now takes `path`, `channel`, `invert`, `raw`, `mip_filter` and nothing else, and a foreign key is refused naming the slot (`assign_pbr map 'roughness' does not take 'chanel'`).
+
+**Each `apply_texture_recipe` recipe declares the nested `params` keys it reads** (#797), which is the same gap one level down again. `noise_bump` reads `{scale, depth}` and `file_texture` reads `{file_path}`; anything else inside `params` is refused naming the recipe. `ramp_gradient` and `layered_mask` read **nothing at all** — their builders take the argument and never look at it — so any non-empty `params` is refused for them outright, rather than wiring Maya's default ramp and reporting success to a caller who asked for a scaled one. An empty `params` (or `null`) is "not passed" and is never refused: the MCP wrapper used to send `{}` on every call. A `file_texture` whose `file_path` is an absolute path that does not exist is refused **before any node is created**, by `assign_pbr`'s own rule — Maya does not fail on a missing map, it renders the file node flat and the material merely looks wrong, and paths resolve on the machine running Maya.
+
 ## Commands (M2.2)
 
 | cmd | params | result |
 |---|---|---|
-| `render_scene` | `{ angles?, renderer?, resolution?, isolate?, target?, zoom?, relight?, samples?, fallback_light? }` | `{ images: [{angle, png_b64}], camera_positions: [{angle, label, position, rotation, camera, near_clip}], renderer, samples, fallback_light, warnings }` |
+| `render_scene` | `{ angles?, renderer?, resolution?, isolate?, target?, zoom?, relight?, samples?, fallback_light? }` | `{ images: [{angle, requested_angle?, png_b64}], camera_positions: [{angle, requested_angle?, label, position, rotation, camera, near_clip}], renderer, samples (null under hw2), fallback_light, warnings }` |
 
 ### A frame that draws nothing says so (#765)
 
@@ -306,7 +336,10 @@ Two details worth knowing before calling it:
 
 | cmd | params | result |
 |---|---|---|
-| `render_sheet` | `{ subjects, angle?, renderer?, resolution?, isolate?, samples?, zoom?, relight?, fallback_light? }` | `{ images: [{angle, label, png_b64}], camera_positions: [...], renderer, samples, fallback_light, warnings }` |
+| `render_sheet` | `{ subjects, angle?, renderer?, resolution?, isolate?, samples?, zoom?, relight?, fallback_light? }` | `{ images: [{angle, label, png_b64}], camera_positions: [...], renderer, samples (null under hw2), fallback_light, warnings }` |
+
+`angle='current'` is REFUSED on `render_sheet` and `preview_clip` (#797): each places its own camera per cell / per frame, so there is no viewport camera to keep, and the cells would have been shot as `three_quarter` under the wrong label. `render_scene`'s `angles: ["current"]` still degrades to `three_quarter` offscreen (its schema promises it), but the frame and its `camera_positions` entry are labelled with the angle that was actually SHOT, with `requested_angle: "current"` alongside and one warning. `samples` is `null` under `hw2`, which has no AA sample count; asking for one there is answered with a warning rather than an echo of the number.
+
 
 `render_sheet` is one frame per subject sharing one renderer, camera and set of
 render globals; the server composites the cells into a single sheet image. It is
@@ -384,6 +417,12 @@ by asking Maya (`getClassification(type, satisfies='light')`), not from a list,
 so a renderer this code has never heard of is covered too; a caller who names a
 light in `target` or `isolate` still gets it framed.
 
+`target` is REFUSED by `capture_viewport` when every requested angle is `current` (#797): the current angle keeps the panel's own camera and frames nothing, so the name was read, validated and dropped — and `_scene_bbox`, the only existence check `target` gets, never ran, so a typo came back a success. On a MIXED list `target` is kept (the other angles consume it), the name is existence-checked on the current frame too, and a warning says that frame was not framed on it.
+
+**A frame drawn by the M3dView fallback says what size it really is** (#797). `capture_viewport`, `capture_turntable` and `compare_to_reference` all pass `resolution` to `playblast`, which honours `widthHeight` — but when the playblast fails, the fallback reads the active view's own colour buffer, and that is whatever size the user's panel happens to be. Nothing said so, so a caller measuring pixels off the image had no way to know its scale had changed under them. `warnings` now names the drawn size against the requested one, per frame, and only when the two actually differ.
+
+**Three viewport flags VP2 accepts and then does nothing with are WARNED, not refused** (#797), because the underlying VP2 behaviour is unmeasured and a frame that comes back is still a frame — it just does not carry what was switched on. `lighting='scene'` in a scene holding no light draws the subject dark against a background that still renders, so the blank guard cannot catch it (the question is asked through `lighting.light_shapes`, the one place that knows Arnold's lights are lights, and a scene lit only by a dome does not read as unlit). `shadows=true` under `shading='flatShaded'` or `'wireframe'` comes back without them — a shadow is darkening applied to a shaded surface and neither mode draws one. `buffer='ssao'` under `shading='wireframe'` is the same argument: ambient occlusion darkens the crevices of a drawn surface, and a wireframe draws none, so the frame is identical either way. This is the discipline `render_scene`'s `fallback_light` already followed: a caller who switched something on and reads a frame without it concludes the subject has no self-shadowing, not that the mode they chose cannot show one.
+
 **`path` writes the image.** All four image tools — `maya_capture_viewport`,
 `maya_capture_turntable`, `maya_render_scene`, `maya_render_sheet` — take an
 optional `path`, and this is a *server-side* parameter: no plugin command sees
@@ -417,7 +456,7 @@ match — reconcile them by the two lists here, not by assuming a 1:1 tool-to-co
 
 | cmd | params | result |
 |---|---|---|
-| `uv_atlas` | `{ names, patch?, cols?, rows?, margin?, project?, normalize?, world_scale?, uv_per_metre? }` | `{ meshes: [{name, uv_bounds, inside_patch}], atlas, patch, patch_rect, margin, projection, normalized, world_scale, all_inside, warnings }` |
+| `uv_atlas` | `{ names, patch?, cols?, rows?, margin?, project?, normalize?, world_scale?, uv_per_metre? }` | `{ meshes: [{name, uv_bounds, inside_patch}], atlas, patch, patch_rect, margin, projection, normalized, world_scale, uv_per_metre, all_inside, warnings }` |
 
 **`patch` is an integer index or an explicit `[col, row]`** — index 0 is the
 top-left patch and the index counts along the row first, the way the atlas image
@@ -429,6 +468,10 @@ now declares a real `int | [int, int]` union, and the handler reads a numeric
 string as the integer it is, since the plugin is reachable over raw TCP where
 nothing validates at all. Non-numeric text, floats and booleans are still refused.
 
+**`project` of `keep` or `planar` is REFUSED with `world_scale`** (#797), and this one was destructive rather than merely ignored: the world branch calls `polyAutoProjection(scaleMode=0)` on every shape unconditionally, so a layout the caller asked to KEEP was box-projected over and the call still reported success. `box` is what world mode already does and is never refused. Drop `world_scale` to preserve an authored layout, or drop `project`. (`normalize` under `world_scale` is a different case and stands: the result reports `normalized: false`, so nothing is claimed that was not done.)
+
+**`uv_per_metre` is the world branch's density constant, so it is REFUSED without `world_scale`** (#797) — it scales a world-proportional projection, and the normalising branch fits each mesh to the patch instead, where no density constant is read at all. It is a raw-TCP/generator key the MCP wrapper never sends. The result field is now the APPLIED value, never the requested one: `null` outside world mode, and inside it either the caller's number or the constant derived from the scene's linear unit. It used to echo a value back on every call, world mode or not, which stated a texel density for a pack that gave every mesh a different one. `warnings` is real too — protocol.md has listed it in this row since M2.3 and the handler never sent it, so `UvAtlasResult` dropped it on the floor.
+
 ## Commands (M2.4)
 
 | cmd | params | result |
@@ -436,6 +479,8 @@ nothing validates at all. Non-numeric text, floats and booleans are still refuse
 | `array` | `{ name, mode, count?, axis?, center?, angle?, offset?, step_rotate?, step_scale?, pivot?, name_prefix?, group_name? }` | `{ names: [...], mode, group, signed_volume, warnings }` |
 
 **`name_prefix` is a prefix for `radial` and `linear`, and the NAME for `mirror`** (#640). An array of 12 needs 12 distinct names, so those two append `_1`..`_N`. A mirror makes exactly **one** copy, so numbering it was never collision avoidance — it cost the #601 golem run 11 renames, one per mirrored chunk, and nothing in the scene held any of the un-suffixed names. Pass `name_prefix='golem_R_arm'` to a mirror and the copy is called `golem_R_arm`. If that name really is taken, a suffix is added *and* `warnings` says so, because a silent rename is what made the caller check all eleven by hand. Omitting `name_prefix` still gives `<source>_1`: the fallback stem is the source's own name, which is by definition taken.
+
+**Every placement param belongs to a mode, and the wrong mode refuses it** (#797). `mirror` reads `axis` and `pivot`; `radial` reads `count`, `axis`, `center`, `angle`; `linear` reads `count`, `offset`, `step_rotate`, `step_scale`. `name`, `mode`, `name_prefix` and `group_name` are common to all three. Before this, nothing on the wrong mode was even validated — a probe pushed `center=[1, 2]` (two numbers, not three), `angle=720` and `offset='garbage'` through a mirror call and all three succeeded, because `_mirror` never looks at any of them. `count` on a mirror was the same lie the other way: documented as ignored, so a caller asking for 9 got 1 and was told nothing. A `linear` `offset` of `[0, 0, 0]` with no `step_rotate` and no `step_scale` is refused as well — every copy would land exactly on the source, the same reason `radial` refuses `angle=0`; with a step the copies genuinely differ (nested shells, a turning stack) and the call proceeds.
 
 ## Commands (rigging phase 1 / #602)
 
@@ -537,7 +582,7 @@ omitted, a bent chain keeps its own bend plane; a perfectly straight chain
 has no plane, so the fold direction is Maya's guess and a warning says so —
 pass `pole` to make it deterministic (a straight chain is quietly pre-bent
 a few degrees toward the pole so the RP solver can fold at all; the solve
-overwrites the nudge).
+overwrites the nudge). A `pole` that lies ON the start→target line is refused: the pole vector is then parallel to the handle vector, so there is no bend plane — Maya builds a degenerate constraint, the pre-bend is skipped, and the straight-chain warning cannot fire because a pole WAS given (#797). "On the line" is measured against the chain's own reach.
 
 `keep=false` solves, measures everything, then restores the pose the call
 found — a dry-run for "what would this pose take". `achieved_position` and
@@ -591,6 +636,10 @@ for a chunk that resolves parentless REFUSES** — a limit with no joint to
 attach to used to be dropped silently, leaving a manifest that looked
 complete with no limits in it (#722).
 
+**An `exclude` entry that matched no chunk is warned BY NAME** (#797). The filter is a deliberately forgiving substring match — a typo excludes nothing rather than refusing the call — but `maya_author_physics` promises that every exclusion is warned by name, and a dead entry that dropped nothing used to say nothing at all. The warning quotes the entry verbatim (not the lowered form it was matched with), names the root it was matched under, and offers the closest chunk short names as a "did you mean".
+
+**A SKIPPED chunk is not a valid parent** (#797). A chunk whose mesh cannot be read, or which carries no triangles, is skipped with a warning and never becomes a body — but the parent lookup maps were built from the requested chunk list *before* anything had been read, so a skipped chunk still answered as a valid parent on both paths, and a joint was emitted against a body that does not appear in `bodies` at all. Every chunk's geometry is now read FIRST, so the skip set is fully known before any parent resolves against it: an `overrides` entry naming a skipped chunk as its own subject is dropped with a warning saying which chunk was skipped and why; an override naming a skipped chunk as `parent` warns and falls back to the DAG ancestor, exactly as an unnamed parent would resolve; and the DAG walk itself now steps past skipped chunks to the next real body.
+
 Validation is ANALYTIC, not simulated (#675): degenerate volumes,
 rest-pose-excluding ranges, multiple parentless bodies and every override
 problem are warnings or refusals. Collider interpenetration at bind is
@@ -617,6 +666,8 @@ nothing. Each target's `name` becomes the weight alias, the
 measuring (near-)identical to the base warns. Creating again on the same
 mesh ADDS targets to its one blendShape node — stacking a second deformer
 is refused by construction.
+
+**A `targets[i]` entry takes `name` and `target_mesh` and nothing else** (#797). `targets` is a known top-level key, so a key inside one entry used to go straight through — the #764 shape one level down, where an unread key does not fail but succeeds and does something else, here by wiring a target the caller believed they had configured. The check is a plain dict-key comparison, so it runs with the rest of the pure validation, before `_cmds()` matters and well before the checkpoint, and the refusal names the index (`create_blendshape targets[1] does not take …`). The MCP schema forbids the same keys at the wire (`BlendshapeTargetSpec` is `extra="forbid"`), so an MCP caller is answered by the schema and a raw-TCP caller by the handler.
 
 `set_blendshape_weights` drives the named weights (0..1, absolute), lands
 them sequentially in call order, and measures per step; the returned
@@ -769,7 +820,15 @@ connection — instead of misdiagnosing anim-layer/expression sources):
   nothing. It now reads `setKeyframe`'s return too: a channel whose re-keys
   vanished (a plug locked after it was keyed) is named with its cause; one
   whose every re-key vanished is not counted, one that partly landed is
-  counted and named.
+  counted and named. The contact-lock pass reads that return too (#797): a
+  run whose keys did not land is named with its cause and never reported
+  as locked, and a frame counts as pinned only when the whole solved pose
+  landed on it. An explicit `filter['window']` longer than the clip is
+  refused — `smooth_track` shrinks its window per sample, so window 31 on
+  a 30-frame clip IS window 29 and the warning would still say
+  `window=31`. A clip of 4 frames or fewer cannot be smoothed at all (every
+  shrunk fit is exact); the pass says so instead of claiming it smoothed
+  anything.
 - **What the result says is what the writes REPORTED** (#796).
   `cmds.setKeyframe` returns the number of keys it set, and #771 measured 0
   as the tell on a connection-fed plug — no curve, no key, no error. Every
@@ -793,6 +852,12 @@ connection — instead of misdiagnosing anim-layer/expression sources):
   the blend weights — still lands and is still declared. Still a warning and not a refusal: what a key does through
   an intermediary is unmeasured, and the report just has to be true under
   both outcomes.
+- `retarget_clip`'s `fps` is refused on the .fbx route (#797): an FBX's own
+  rate is only readable from the scene's time unit after the import, the
+  keyed range is read in THAT unit and the bake unit is set afterwards, so
+  a different `fps` has not been measured to resample correctly. BVH keeps
+  it. Fractional `start`/`end` are rounded to whole source rows, with a
+  warning naming the row used.
 - `retarget_clip` shares the same rules for the channels IT writes (#796):
   the "hand-authored curves" refusal counts clip curves only (a driven key
   on the target no longer masquerades as hand-authored animation and sends
@@ -1217,7 +1282,13 @@ rule `export_fbx` follows: a guessed or auto-made location is how bake
 files get lost from a delivery. `resolution` is one of `256`, `512`,
 `1024`, `2048`, `4096` (default `1024`); `slots` restricts the bake to
 the named PBR slots and defaults to every procedural one the mesh(es)
-carry. The rewire is persistent — the next render, and the next
+carry. **`slots: []` is refused naming the slot clause** (#797): an empty
+list is a valid list of slot names that selects NO slot, so every
+candidate job was filtered out and the refusal blamed the SCENE ("no
+procedural texture network to bake") for a fault in the CALL — and it
+dropped the "for slot(s) …" clause it prints for every non-empty list,
+because an empty list is falsy. An empty selection is malformed whichever
+way the scene is shaped, so it is answered before the job list is consulted; omit `slots` to mean "every procedural slot". The rewire is persistent — the next render, and the next
 `maya_export_fbx`, show exactly what the bake produced, so re-judge the
 render before exporting rather than trusting the bake blind.
 
@@ -1272,6 +1343,8 @@ that tool flattens procedural *shader networks*; this one bakes what only
 the *geometry* knows — where parts meet (AO sees **other meshes** as
 occluders, measured), where edges are (curvature), which way surfaces face
 (world normal; its G channel is an up-facing dust mask).
+
+**`curvature_radius` and `curvature_output` are refused when `curvature` is not in `maps`** (#797) — the same shape as `apply_ao=true` without `"ao"`, one level down. Both are read by the curvature shader and by nothing else, so on any other map list they were range-checked and then dropped: the caller tuned a radius, got the same AO, and was told nothing. The refusal names the map list that ignores them. Omitting either means "not passed", and the handler applies its own default (`0.1` and `convex`) — the MCP wrapper sends `null` for both on every call rather than a filled-in default, precisely so a value in the params is a value the caller chose.
 
 The bake phase mutates nothing: the map shaders render via
 `arnoldRenderToTexture`'s `-shader` flag and are **never assigned** to the

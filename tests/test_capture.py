@@ -528,6 +528,10 @@ class FakeCaptureCmds:
         # default, which is why _capture_one's frame_all branch has only
         # ever taken its `viewFit(allObjects=True)` fallback here (#799).
         self.geometry = []
+        # Light SHAPES cmds.ls(type="light") reports. Empty by default, so
+        # lighting='scene' has nothing to light with - which is the state
+        # #797 row 38 makes the handler say out loud.
+        self.lights = []
         self.node_types = {"|persp": "transform", "|persp|perspShape": "camera"}
         self.boxes = {}
         self.view_selected = False
@@ -671,6 +675,12 @@ class FakeCaptureCmds:
         return None
 
     def ls(self, *args, **kw):
+        if kw.get("type"):
+            # lighting.light_shapes asks for "light" and then for each
+            # Arnold light type BY NAME. This fake models Maya's own only;
+            # an unknown type answers nothing rather than raising, which is
+            # what a Maya without mtoa does through light_shapes' guard.
+            return list(self.lights) if kw["type"] == "light" else []
         if args and kw.get("long"):
             name = str(args[0])
             if self.ambiguous_name and name.lstrip("|") == self.ambiguous_name:
@@ -1574,3 +1584,287 @@ class TestTheFakesRefuseWhatMayaRefuses:
         assert fake.exactWorldBoundingBox(
             *fake.shapes, ignoreInvisible=True) == [1e20, 1e20, 1e20,
                                                    -1e20, -1e20, -1e20]
+
+
+class TestTargetOnACurrentAngle:
+    """#797 row 20: "current" frames nothing, so `target` is dropped.
+
+    The current angle looks through the PANEL's own camera and leaves it
+    exactly where the user left it - _capture_one never places a camera and
+    never calls _scene_bbox on that branch. _scene_bbox is also the only
+    existence check `target` ever gets, so a typo'd target on a current-only
+    capture came back a SUCCESS: the caller believes they photographed
+    |golem|chest and photographed whatever the panel happened to hold.
+    """
+
+    def _spy(self, monkeypatch, shot=None):
+        seen = []
+
+        def fake_capture_one(angle, *args, **kwargs):
+            seen.append(angle)
+            # _capture_one sets target_unframed on the "current" branch
+            # only - every other angle really does frame on the target.
+            extra = dict(shot or {}) if angle == "current" else {}
+            return dict(extra, png_b64="x", camera_position=[0, 0, 0],
+                        camera_rotation=[0, 0, 0], camera="|cam",
+                        blank=False, blank_unmeasurable=None)
+
+        monkeypatch.setattr(capture, "_capture_one", fake_capture_one)
+        return seen
+
+    def test_a_current_only_capture_refuses_target(self, monkeypatch):
+        self._spy(monkeypatch)
+        monkeypatch.setattr(
+            capture, "ensure_viewport_realized",
+            lambda: pytest.fail("the refusal must come first - showing the "
+                                "window is a visible side effect"))
+        with pytest.raises(HandlerError) as exc:
+            capture.capture_viewport({"angles": ["current"],
+                                      "target": ["|golem"]})
+        message = str(exc.value)
+        assert "does not use 'target'" in message, message
+        assert "current" in message, message
+
+    def test_isolate_is_not_refused_alongside_it(self, monkeypatch):
+        """`isolate` HIDES, and hiding works on any angle - only framing is
+        inapplicable to 'current'."""
+        seen = self._spy(monkeypatch)
+        capture.capture_viewport({"angles": ["current"],
+                                  "isolate": ["|golem"]})
+        assert seen == ["current"]
+
+    def test_a_mixed_list_keeps_target_and_names_the_current_frame(
+            self, monkeypatch):
+        """`target` IS consumed by the other angles, so refusing the call
+        would refuse a legitimate one. The current frame says it was not
+        framed instead."""
+        self._spy(monkeypatch, shot={"target_unframed": True})
+        result = capture.capture_viewport(
+            {"angles": ["current", "front"], "target": ["|golem|chest"]})
+        notes = [w for w in result["warnings"] if "target" in w]
+        assert len(notes) == 1, result["warnings"]
+        assert "current" in notes[0]
+
+
+class TestAnEmptyTurntableTargetIsRefused:
+    """#797 row 26: `target=""` was read as "no target at all".
+
+    `[str(target)] if target else None` - an empty string is falsey, so the
+    call silently orbited the WHOLE SCENE (dome included) instead of the
+    object the caller meant to name. The wrapper had no min_length, so an
+    empty string reached the handler.
+    """
+
+    def test_it_refuses_before_anything_is_captured(self, monkeypatch):
+        monkeypatch.setattr(
+            capture, "_capture_one",
+            lambda *a, **k: pytest.fail("orbited despite an empty target"))
+        monkeypatch.setattr(
+            capture, "ensure_viewport_realized",
+            lambda: pytest.fail("the refusal must come first"))
+        with pytest.raises(HandlerError) as exc:
+            capture.capture_turntable({"target": ""})
+        message = str(exc.value)
+        assert "does not use 'target'" in message, message
+        assert "empty" in message, message
+
+    def test_omitting_it_still_frames_the_whole_scene(self, monkeypatch):
+        seen = []
+
+        def fake_capture_one(*args, **kwargs):
+            seen.append(args[4])
+            return {"png_b64": "x", "camera_position": [0, 0, 0],
+                    "camera_rotation": [0, 0, 0], "camera": "|cam"}
+
+        monkeypatch.setattr(capture, "_capture_one", fake_capture_one)
+        capture.capture_turntable({"n_frames": 2})
+        assert seen == [None, None]
+
+
+class TestTheFallbackSaysWhatSizeItDrew:
+    """#797 row 36: the M3dView fallback draws at the PANEL's size.
+
+    playblast honours widthHeight; M3dView.readColorBuffer reads whatever
+    the user's viewport happens to be. So a 768-px request could come back
+    as a 412-px image with a success status and no field saying so - and
+    the caller measures pixels off it.
+    """
+
+    def _shot(self, drawn):
+        return {"png_b64": "ZmFrZQ==", "camera_position": [0, 0, 1],
+                "camera_rotation": [0, 0, 0], "camera": "|cam",
+                "blank": False, "blank_unmeasurable": None,
+                "drawn_size": drawn}
+
+    def test_a_smaller_frame_is_named_with_its_size(self, monkeypatch):
+        monkeypatch.setattr(capture, "_capture_one",
+                            lambda *a, **k: self._shot([412, 380]))
+        result = capture.capture_viewport({"angles": ["front"],
+                                           "resolution": 768})
+        assert len(result["warnings"]) == 1, result["warnings"]
+        note = result["warnings"][0]
+        assert "412x380" in note and "768" in note, note
+
+    def test_a_playblast_that_honoured_the_request_says_nothing(
+            self, monkeypatch):
+        monkeypatch.setattr(capture, "_capture_one",
+                            lambda *a, **k: self._shot(None))
+        result = capture.capture_viewport({"angles": ["front"],
+                                           "resolution": 768})
+        assert result["warnings"] == []
+
+    def test_a_turntable_cell_names_it_too(self, monkeypatch):
+        monkeypatch.setattr(capture, "_capture_one",
+                            lambda *a, **k: self._shot([100, 100]))
+        result = capture.capture_turntable({"n_frames": 2})
+        assert len([w for w in result["warnings"] if "100x100" in w]) == 2
+
+
+class TestVP2CannotDrawWhatWasAsked:
+    """#797 row 38: flags VP2 accepts and then does nothing with.
+
+    Warnings, not refusals: the VP2 behaviour is UNMEASURED (the plan says
+    so), and the frame that comes back is still a frame - it just does not
+    carry the thing the caller switched on. render_scene already reports
+    `fallback_light` for the same class of surprise.
+    """
+
+    def _flat(self, monkeypatch, **shot):
+        monkeypatch.setattr(
+            capture, "_capture_one",
+            lambda *a, **k: dict(
+                {"png_b64": "x", "camera_position": [0, 0, 1],
+                 "camera_rotation": [0, 0, 0], "camera": "|cam",
+                 "blank": False, "blank_unmeasurable": None}, **shot))
+
+    def test_shadows_under_a_wireframe_are_named(self, monkeypatch):
+        self._flat(monkeypatch)
+        result = capture.capture_viewport(
+            {"angles": ["front"], "shading": "wireframe", "shadows": True})
+        assert any("shadows" in w for w in result["warnings"]), result
+
+    def test_shadows_under_flat_shading_are_named(self, monkeypatch):
+        self._flat(monkeypatch)
+        result = capture.capture_viewport(
+            {"angles": ["front"], "shading": "flatShaded", "shadows": True})
+        assert any("shadows" in w for w in result["warnings"]), result
+
+    def test_shadows_on_a_shaded_frame_say_nothing(self, monkeypatch):
+        self._flat(monkeypatch)
+        result = capture.capture_viewport(
+            {"angles": ["front"], "shading": "smoothShaded", "shadows": True})
+        assert result["warnings"] == []
+
+    def test_ssao_under_a_wireframe_is_named(self, monkeypatch):
+        self._flat(monkeypatch)
+        result = capture.capture_viewport(
+            {"angles": ["front"], "shading": "wireframe", "buffer": "ssao"})
+        assert any("ssao" in w for w in result["warnings"]), result
+
+    def test_a_turntable_names_its_shadows_too(self, monkeypatch):
+        self._flat(monkeypatch)
+        result = capture.capture_turntable(
+            {"n_frames": 2, "shading": "wireframe", "shadows": True})
+        # once for the call, not once per cell
+        assert len([w for w in result["warnings"] if "shadows" in w]) == 1
+
+    def test_scene_lighting_with_no_light_is_named_once(self, monkeypatch):
+        self._flat(monkeypatch, unlit=True)
+        result = capture.capture_viewport(
+            {"angles": ["front", "side"], "lighting": "scene"})
+        notes = [w for w in result["warnings"] if "no light" in w]
+        assert len(notes) == 1, result["warnings"]
+
+    def test_a_lit_scene_says_nothing(self, monkeypatch):
+        self._flat(monkeypatch, unlit=False)
+        result = capture.capture_viewport(
+            {"angles": ["front"], "lighting": "scene"})
+        assert result["warnings"] == []
+
+    def test_the_real_capture_asks_maya_whether_the_scene_is_lit(
+            self, monkeypatch):
+        """The `unlit` flag is measured inside _capture_one, where cmds
+        exists - capture_viewport itself must stay Maya-free until the
+        capture, so the row-20 refusal can fire headless."""
+        fake = FakeCaptureCmds()
+        monkeypatch.setattr(capture, "_cmds", lambda: fake)
+        monkeypatch.setattr(capture, "_grab_pixels",
+                            lambda *a, **k: (b"fakepng",
+                                             {"blank": False,
+                                              "unavailable_reason": None}))
+        shot = capture._capture_one(
+            "current", "smoothShaded", True, "beauty", None, False, 256,
+            "scene", False)
+        assert shot["unlit"] is True
+        fake.lights.append("|key|keyShape")
+        shot = capture._capture_one(
+            "current", "smoothShaded", True, "beauty", None, False, 256,
+            "scene", False)
+        assert shot["unlit"] is False
+
+
+class TestATypoTargetRefusesOnAMixedList:
+    """#797 row 20, second half: the existence check on the current branch.
+
+    The refusal itself is only worth anything if it runs against a real
+    scene, so this drives `_capture_one` through FakeCaptureCmds rather
+    than standing it in - the monkeypatched version in
+    TestTargetOnACurrentAngle can only pin what the handler does with the
+    shot it gets back.
+
+    And the message has to name the key the CALLER typed: `_scene_bbox`
+    called every list it was handed "isolate", so a mistyped `target` sent
+    the caller looking at a param they never passed.
+    """
+
+    def _fake(self, monkeypatch):
+        fake = FakeCaptureCmds()
+        monkeypatch.setattr(capture, "_cmds", lambda: fake)
+        monkeypatch.setattr(
+            capture, "_grab_pixels",
+            lambda *a, **k: (b"fakepng", {"blank": False,
+                                          "unavailable_reason": None}))
+        return fake
+
+    def test_a_typo_target_refuses_naming_target(self, monkeypatch):
+        self._fake(monkeypatch)
+        with pytest.raises(HandlerError) as exc:
+            capture.capture_viewport({"angles": ["current", "front"],
+                                      "target": ["|nosuchthing"]})
+        message = str(exc.value)
+        assert "target objects not found" in message, message
+        assert "nosuchthing" in message, message
+
+    def test_a_typo_isolate_still_says_isolate(self, monkeypatch):
+        self._fake(monkeypatch)
+        with pytest.raises(HandlerError) as exc:
+            capture.capture_viewport({"angles": ["current"],
+                                      "isolate": ["|nosuchthing"]})
+        assert "isolate objects not found" in str(exc.value)
+
+    def test_a_real_target_gets_through_and_is_named_unframed(self,
+                                                              monkeypatch):
+        fake = self._fake(monkeypatch)
+        fake.nodes["|golem"] = "|golem|golemShape"
+        fake.node_types["|golem"] = "transform"
+        fake.node_types["|golem|golemShape"] = "mesh"
+        fake.geometry = ["|golem|golemShape"]
+        fake.boxes["|golem"] = [-1.0, -1.0, -1.0, 1.0, 1.0, 1.0]
+        result = capture.capture_viewport({"angles": ["current", "front"],
+                                           "target": ["|golem"]})
+        assert len(result["images"]) == 2
+        notes = [w for w in result["warnings"] if "'target' did not frame" in w]
+        assert len(notes) == 1, result["warnings"]
+        assert notes[0].startswith("current"), notes[0]
+
+    def test_the_current_branch_itself_checks_the_name(self, monkeypatch):
+        """The decisive one: a MIXED list would refuse on its other angle
+        anyway, so only calling the current branch on its own proves the
+        check is there. Before #797 this capture SUCCEEDED - it photographed
+        whatever the panel held and called it |nosuchthing."""
+        self._fake(monkeypatch)
+        with pytest.raises(HandlerError) as exc:
+            capture._capture_one("current", "smoothShaded", True, "beauty",
+                                 None, False, 256, "default", False,
+                                 frame_on=["|nosuchthing"])
+        assert "target objects not found" in str(exc.value)

@@ -538,6 +538,27 @@ def _savgol_weights(window: int, order: int) -> List[float]:
     return m[0]
 
 
+# `smooth_track`'s own window floor: below 5 samples every shrunk fit
+# spans no more points than its own polynomial order, so the fit passes
+# through each sample exactly and the filter is the identity. MEASURED in
+# tests/test_mocapmath.py::TestTheWindowThatActuallyFits.
+MIN_SMOOTHING_SAMPLES = 5
+
+
+def largest_smoothing_window(n_samples: int) -> int:
+    """The widest window `smooth_track` can actually CENTRE on a track of
+    `n_samples` - 0 when the track is too short for any legal window.
+
+    The per-sample shrink below is what makes this the number that
+    matters (#797 row 24): a window wider than the track is neither an
+    error nor a wider filter, it is the SAME filter as this one, silently.
+    A centered odd window cannot span an even length, so a 30-frame clip
+    tops out at 29 - window 29, 31 and 101 all produce the same output.
+    """
+    widest = n_samples if n_samples % 2 else n_samples - 1
+    return widest if widest >= MIN_SMOOTHING_SAMPLES else 0
+
+
 def smooth_track(values: List[float], window: int, order: int = 2) -> List[float]:
     """Savitzky-Golay smoothing: a local polynomial fit re-evaluated at each
     point, which (unlike a plain moving average) preserves a signal that is

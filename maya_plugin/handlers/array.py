@@ -51,7 +51,12 @@ def _radial(cmds, source: str, prefix: str, params: Dict[str, Any]) -> List[str]
     axis = params.get("axis") or "y"
     idx = arraymath.axis_index(axis)
     center = arraymath.resolve_vec3(params.get("center"), "center", [0.0, 0.0, 0.0])
-    angle = params.get("angle", 360.0)
+    # `params.get("angle", 360.0)` was not enough once the wrapper started
+    # sending angle=None on every call (#797): None is a PRESENT key, so the
+    # default never applied and every radial call refused its own angle.
+    angle = params.get("angle")
+    if angle is None:
+        angle = 360.0
     if isinstance(angle, bool) or not isinstance(angle, (int, float)):
         raise HandlerError(
             "angle must be a number of degrees, got %r" % (angle,),
@@ -113,14 +118,24 @@ ARRAY_SYNONYMS = {
 
 def array(params: Dict[str, Any]) -> Dict[str, Any]:
     require_known_keys(params, ARRAY_KEYS, "array", ARRAY_SYNONYMS)
-    cmds = _cmds()
-    source = naming.require_object(cmds, str(params.get("name") or ""))
+    # Everything the caller's own words can settle is settled BEFORE the first
+    # Maya touch (#797): the mode check moved above `_cmds()` so the per-mode
+    # refusals can know which branch they are on, and both refusals are pure.
+    # A refusal that fired after the duplicate would be a refusal after the
+    # damage - and the branch contract test proves the ordering by calling
+    # this handler with no Maya importable at all.
     mode = params.get("mode")
     if mode not in arraymath.MODES:
         raise HandlerError(
             "unknown mode %r" % (mode,),
             hint="valid modes: %s" % ", ".join(arraymath.MODES),
         )
+    arraymath.refuse_foreign_params(mode, params)
+    if mode == "linear":
+        arraymath.refuse_zero_linear_offset(params)
+
+    cmds = _cmds()
+    source = naming.require_object(cmds, str(params.get("name") or ""))
     warnings = [w for w in [ledger.check(cmds, source)] if w]
 
     requested_prefix = params.get("name_prefix")
@@ -257,8 +272,10 @@ def _mirror(
     normals are reversed after the freeze (never before - doing it first just
     gets undone), and the result is MEASURED rather than assumed.
 
-    `count` is ignored: a mirror produces exactly one image, so there is
-    nothing for it to control.
+    `count` is REFUSED before this function is reached, along with every
+    other placement param a mirror never reads: a mirror produces exactly one
+    image, so there is nothing for count to control, and accepting it in
+    silence told a caller who asked for 9 nothing at all (#797).
 
     Requires a single-shape polygon mesh: `cmds.polyNormal` below and the
     signed-volume winding check both assume one mesh shape, and radial/linear

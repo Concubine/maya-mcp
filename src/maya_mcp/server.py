@@ -341,7 +341,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 "Frame ON these objects without hiding anything else — use this "
                 "to close in on one part while its surroundings stay in shot. "
                 "With neither target nor isolate the whole scene is framed, "
-                "lights excluded."
+                "lights excluded. Refused when every angle is 'current' (nothing "
+                "is framed then); on a mixed list it frames the other angles and "
+                "the current frame says it was not framed on it."
             )),
         ] = None,
         frame_all: Annotated[
@@ -412,8 +414,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         ),
     )
     def maya_capture_turntable(
-        target: Annotated[Optional[str], Field(description=(
-            "Object to orbit and frame; omit to frame the whole scene."
+        target: Annotated[Optional[str], Field(min_length=1, description=(
+            "Object to orbit and frame; omit to frame the whole scene. An "
+            "empty string is refused rather than read as 'no target'."
         ))] = None,
         n_frames: Annotated[int, Field(ge=2, le=16, description=(
             "Views around the subject. Returns ONE contact sheet regardless."
@@ -520,10 +523,11 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "and back angles are not rendered nearly black by a world-locked "
             "key light. Lights you authored yourself are never touched."
         ))] = True,
-        samples: Annotated[int, Field(ge=1, le=8, description=(
-            "Arnold AA samples. 3 is judgeable, 1 is fast and noisy. Ignored "
-            "by hw2."
-        ))] = 3,
+        samples: Annotated[Optional[int], Field(ge=1, le=8, description=(
+            "Arnold AA samples; defaults to 3, which is judgeable - 1 is fast "
+            "and noisy. hw2 has no sample count: passing one under hw2 is "
+            "warned and the result reports samples=null."
+        ))] = None,
         fallback_light: Annotated[bool, Field(description=(
             "Add a temporary key light when the scene has none, so an unlit "
             "scene does not come back as an indistinguishable black frame."
@@ -563,6 +567,7 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             frames.append(
                 RenderedFrame(
                     angle=shot["angle"],
+                    requested_angle=shot.get("requested_angle"),
                     opaque_px=stats["opaque_px"],
                     total_px=stats["total_px"],
                     distinct_colors=stats["distinct_colors"],
@@ -617,9 +622,14 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "One rendered cell per object, each isolated and framed on itself. "
             "For several ANGLES of one object use maya_render_scene."
         ))],
-        angle: Annotated[Angle, Field(description=(
-            "The single angle every cell is rendered from."
-        ))] = "three_quarter",
+        angle: Annotated[
+            Literal["front", "side", "back", "top", "three_quarter"],
+            Field(description=(
+                "The single angle every cell is rendered from. 'current' is not "
+                "offered: a sheet places its own camera per cell, so there is no "
+                "viewport camera to keep."
+            )),
+        ] = "three_quarter",
         renderer: Annotated[
             Literal["arnold", "hw2"],
             Field(description=(
@@ -636,10 +646,12 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "a sheet; pass false for transmissive pieces, which need the "
             "surroundings they refract."
         ))] = True,
-        samples: Annotated[int, Field(ge=1, le=8, description=(
-            "Arnold AA samples per cell. Cells are small - 1 or 2 is usually "
-            "enough, and this multiplies by the number of subjects."
-        ))] = 2,
+        samples: Annotated[Optional[int], Field(ge=1, le=8, description=(
+            "Arnold AA samples per cell; defaults to 2. Cells are small - 1 or "
+            "2 is usually enough, and this multiplies by the number of "
+            "subjects. hw2 has no sample count: passing one under hw2 is "
+            "warned and the result reports samples=null."
+        ))] = None,
         cols: Annotated[Optional[int], Field(ge=1, le=12, description=(
             "Grid columns; defaults to a roughly square layout."
         ))] = None,
@@ -765,10 +777,17 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         composite = images.decode_and_downscale(
             base64.b64encode(images.side_by_side(reference, current)).decode("ascii")
         )
-        return [
+        content: List[Union[Image, str]] = [
             Image(data=composite, format="png"),
             "left: reference %r | right: viewport %s" % (ref_id, angle),
         ]
+        # #797 rows 36/38: the capture's own notes (a fallback that drew at
+        # the panel's size, an unlit 'scene' capture) used to be discarded
+        # here, so this tool's caller never learned the right-hand panel was
+        # not what they asked for.
+        for warning in result.get("warnings", []):
+            content.append("note: " + warning)
+        return content
 
     SESSION_TIMEOUT_S = 60.0  # checkpoint saves of heavy scenes take a while
 
@@ -797,15 +816,17 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         ),
     )
     def maya_restore_checkpoint(
-        checkpoint_id: Annotated[str, Field(description=(
+        checkpoint_id: Annotated[Optional[str], Field(min_length=1, description=(
             "Id returned by maya_checkpoint (NNN_label). Ids are unique only "
             "within one directory, so prefer path= for an id issued before a "
             "new_scene/open_scene/restore."
-        ))] = "",
-        path: Annotated[str, Field(description=(
+        ))] = None,
+        path: Annotated[Optional[str], Field(min_length=1, description=(
             "Absolute path to the checkpoint .ma, as returned alongside every "
-            "checkpoint_id. Unambiguous - use it when the scene has changed since."
-        ))] = "",
+            "checkpoint_id. Unambiguous - use it when the scene has changed "
+            "since. Pass one of checkpoint_id/path; both are accepted only "
+            "when the id is the path's own stem."
+        ))] = None,
     ) -> RestoreResult:
         """Replace the current scene with a checkpoint, by id or by path. An
         auto-checkpoint of the current state is taken first (its own path comes
@@ -1010,7 +1031,8 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         slots: Annotated[Optional[List[str]], Field(description=(
             "Limit the bake to these slots (color, emission_color, "
             "metalness, roughness, normal). Omit to bake every procedural "
-            "slot found."
+            "slot found. An EMPTY list is refused, not read as 'all': it "
+            "selects no slot."
         ))] = None,
     ) -> BakeTexturesResult:
         """Turn procedural texture networks into file textures the FBX can carry.
@@ -1075,16 +1097,17 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "must be a plain value or a readable PNG; procedural slots "
             "refuse (maya_bake_textures flattens them first)."
         ))] = False,
-        curvature_radius: Annotated[float, Field(description=(
-            "Sampling radius in scene units; 0.1 suits metre-scale assets."
-        ))] = 0.1,
+        curvature_radius: Annotated[Optional[float], Field(gt=0.0, description=(
+            "Sampling radius in scene units; defaults to 0.1, which suits "
+            "metre-scale assets. Refused unless 'curvature' is in maps."
+        ))] = None,
         curvature_output: Annotated[
-            Literal["convex", "concave", "both"], Field(description=(
-                "convex = edges/wear, concave = crevices/grime, both = "
+            Optional[Literal["convex", "concave", "both"]], Field(description=(
+                "convex (default) = edges/wear, concave = crevices/grime, both = "
                 "signed around mid-grey. Concave is honestly all-black on "
                 "convex-only geometry (measured) - that ships with a "
-                "warning, not a refusal."
-            ))] = "convex",
+                "warning, not a refusal. Refused unless 'curvature' is in maps."
+            ))] = None,
     ) -> BakeMeshMapsResult:
         """Bake geometry-derived maps - AO, curvature, world-normal - per mesh.
 
@@ -1221,7 +1244,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             ],
             Field(description=(
                 "Primitive type. octahedron/icosahedron are platonic solids "
-                "with a fixed face count (divisions has no effect); prism is "
+                "with a fixed face count (divisions and subdivisions are refused "
+                "rather than ignored - refine with maya_sculpt_ops op 'smooth'); "
+                "prism is "
                 "a 3-sided, pyramid a 4-sided low-poly faceted form (divisions "
                 "sets height subdivisions). Use these for cut-gem/crystalline "
                 "forms - a bevelled cube is not the only faceted primitive. "
@@ -1303,7 +1328,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         ))] = None,
         profile_sides: Annotated[Optional[int], Field(ge=3, le=64, description=(
             "sweep only. Cross-section as an n-gon instead of a circle: 4 = "
-            "square strap, 6 = hex bolt shaft."))] = None,
+            "square strap, 6 = hex bolt shaft. This IS the cross-section ring "
+            "when given, so `resolution.around` is refused alongside it - pass "
+            "one or the other, never both."))] = None,
         profile: Annotated[Optional[List[List[float]]], Field(description=(
             "revolve only. [radius, height] pairs of the silhouette in the "
             "half-plane, interpolated - [[0.3,0],[0.5,0.4],[0.2,1.2]] is a "
@@ -1320,8 +1347,12 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "count per ring (3-64), matched index-to-index."))] = None,
         resolution: Annotated[Optional[dict], Field(description=(
             "{along, around} tessellation. Defaults: sweep {32,16}, "
-            "revolve/loft {24,24}. along*around is the face bill (1M cap). "
-            "Raise it when worst_station_deviation comes back high."))] = None,
+            "revolve/loft {24,24}. along*around is the face bill (1M cap), "
+            "except on a sweep with `profile_sides`, which bills "
+            "along*profile_sides. Raise it when worst_station_deviation comes "
+            "back high. `around` is REFUSED on a sweep that also passes "
+            "`profile_sides` - the n-gon is the ring there and `around` would "
+            "be dropped; pass {'along': N} alone in that case."))] = None,
         cap_ends: Annotated[bool, Field(description=(
             "Close open borders (tube ends, loft ends, partial revolves) so "
             "the result is watertight. Default true."))] = True,
@@ -1402,11 +1433,11 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 "petals. 'linear' runs copies along a vector: stairs, ribs, fence posts."
             )),
         ],
-        count: Annotated[int, Field(ge=2, le=200, description=(
+        count: Annotated[Optional[int], Field(ge=2, le=200, description=(
             "TOTAL elements in the finished array, INCLUDING the source - count=12 "
-            "on a gear tooth gives a 12-tooth gear. Ignored by mirror, which "
-            "always makes exactly one copy."
-        ))] = 2,
+            "on a gear tooth gives a 12-tooth gear. Required by radial and "
+            "linear; refused by mirror, which always makes exactly one copy."
+        ))] = None,
         axis: Annotated[
             Optional[Literal["x", "y", "z"]],
             Field(description=(
@@ -1421,12 +1452,12 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "parameter - the source's existing distance from this point IS the "
             "radius, so place one element where it belongs and ask for N of them."
         ))] = None,
-        angle: Annotated[float, Field(ge=-360.0, le=360.0, description=(
+        angle: Annotated[Optional[float], Field(ge=-360.0, le=360.0, description=(
             "radial only: total sweep in degrees. At 360 (the default) the step is "
             "angle/count, because the seam is where the source already sits. At any "
             "other value the step is angle/(count-1), so the first and last "
-            "elements land on the arc's endpoints."
-        ))] = 360.0,
+            "elements land on the arc's endpoints. Refused by the other modes."
+        ))] = None,
         offset: Annotated[Optional[List[float]], Field(description=(
             "linear only, required: world displacement between consecutive copies."
         ))] = None,
@@ -1666,7 +1697,10 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         pivot: Annotated[Literal["center", "origin", "keep"], Field(description=(
             "Where the result's pivot lands. 'center' (default) is the bounding "
             "box centre - what a chunk of debris rotates about. 'origin' is the "
-            "world origin, which is what a kit piece authored around 0,0,0 wants."
+            "world origin, which is what a kit piece authored around 0,0,0 wants. "
+            "'keep' on a combined result keeps the pivot polyUnite gives it, "
+            "which is the world origin (measured) - the same as 'origin', and "
+            "warned as such."
         ))] = "center",
         freeze: Annotated[bool, Field(description=(
             "Freeze transforms on the result, leaving scale (1,1,1)."
@@ -1725,15 +1759,22 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "UV packing applied to each part before merging: {cols, rows, "
             "margin, world_scale, project, normalize}. world_scale is the metres "
             "one patch represents, which is what makes texel density equal "
-            "across parts of different sizes. Pass null to leave UVs untouched."
+            "across parts of different sizes. world_scale always box-projects "
+            "and never normalises, so project 'planar'/'keep' and an explicit "
+            "normalize: true are refused with it. Pass null to leave UVs "
+            "untouched."
         ))] = None,
         combine: Annotated[bool, Field(description=(
             "Unite each chunk's parts into one object. False leaves every part "
             "as its own object."
         ))] = True,
-        pivot: Annotated[Literal["center", "origin", "keep"], Field(description=(
-            "Pivot for each combined object, as in maya_combine."
-        ))] = "center",
+        pivot: Annotated[Optional[Literal["center", "origin", "keep"]], Field(description=(
+            "Pivot for each combined object; defaults to 'center'. 'origin' "
+            "and 'keep' are refused with combine=false or on a single-part "
+            "chunk, where nothing is combined. 'keep' on a combined result "
+            "keeps the pivot polyUnite gives it, which is the world origin "
+            "(measured) - the same as 'origin', and warned as such."
+        ))] = None,
         pivots: Annotated[Optional[Dict[str, Vec3]], Field(description=(
             "Chunk name -> world-space pivot. What an omitted chunk keeps "
             "depends on its shape: a MULTI-part chunk still gets the global "
@@ -1801,17 +1842,19 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "so bilinear filtering cannot drag in the neighbouring patch's "
             "pixels. Default 0.02. Use 0.0 only when the patch has no neighbours."
         ))] = 0.02,
-        project: Annotated[Literal["box", "planar", "keep"], Field(description=(
+        project: Annotated[Optional[Literal["box", "planar", "keep"]], Field(description=(
             "'box' (default) re-projects with automatic projection, which suits "
             "primitives and hard-surface parts. 'planar' projects down -z. "
-            "'keep' preserves an existing layout and only moves it into the patch."
-        ))] = "box",
-        normalize: Annotated[bool, Field(description=(
-            "Normalise UVs to 0..1 collectively before fitting. Leave this on: "
-            "Maya's primitives do not share a UV convention, so without it each "
-            "primitive kind lands in the patch at a different scale. Ignored "
-            "when world_scale is given."
-        ))] = True,
+            "'keep' preserves an existing layout and only moves it into the patch. "
+            "world_scale always box-projects, so 'planar' and 'keep' are refused "
+            "with it."
+        ))] = None,
+        normalize: Annotated[Optional[bool], Field(description=(
+            "Normalise UVs to 0..1 collectively before fitting; defaults to on. "
+            "Leave it on: Maya's primitives do not share a UV convention, so "
+            "without it each primitive kind lands in the patch at a different "
+            "scale. Ignored when world_scale is given."
+        ))] = None,
         world_scale: Annotated[Optional[float], Field(gt=0.0, description=(
             "Metres of real geometry that map across one patch. Setting it "
             "switches from 'make this object fill the patch' to a FIXED TEXEL "
@@ -1860,7 +1903,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         ))],
         width: Annotated[float, Field(gt=0, description="Carve width, scene units.")] = 0.6,
         depth: Annotated[float, Field(gt=0, description="Recess depth, scene units.")] = 0.1,
-        font: Annotated[str, Field(description="Font for the Type node.")] = "Arial",
+        font: Annotated[str, Field(min_length=1, description=(
+            "Font for the Type node. An empty string is refused rather than "
+            "silently read as Arial."))] = "Arial",
         mirror: Annotated[bool, Field(description=(
             "Mirror the glyph horizontally (e.g. the golem's inverted-mirrored aleph)."
         ))] = False,
@@ -2179,7 +2224,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         ))] = 1.0,
         hdri_path: Annotated[Optional[str], Field(description=(
             "Absolute path to an .hdr/.exr. Required for preset='hdri' - no HDRI "
-            "is bundled. Use preset='environment' for a dome without a file."
+            "is bundled. Use preset='environment' for a dome without a file. "
+            "Refused with any preset but 'hdri'; a non-existent absolute path is "
+            "refused before anything is deleted."
         ))] = None,
         replace_existing: Annotated[bool, Field(description=(
             "Delete existing lights first. Auto-checkpoints before doing so. "
@@ -2269,7 +2316,10 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         ))],
         maps: Annotated[dict, Field(description=(
             "Slot -> image. A bare string is the path; an object takes "
-            "{path, channel, invert, raw, mip_filter}.\n"
+            "{path, channel, invert, raw, mip_filter}. Any other key in a spec "
+            "is refused rather than dropped - a 'chanel' typo used to leave the "
+            "scalar reading the default channel r while the result reported "
+            "success.\n"
             "Slots: color, emission_color (colour, whole image), metalness, "
             "roughness (scalar, one channel), normal (tangent-space normal map "
             "via bump2d).\n"
@@ -2332,10 +2382,10 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 "image file. Requires a material on the mesh first."
             )),
         ],
-        params: Annotated[dict, Field(description=(
+        params: Annotated[Optional[dict], Field(description=(
             "noise_bump: scale, depth. file_texture: file_path (required). "
-            "Others take no params yet."
-        ))] = {},
+            "ramp_gradient and layered_mask take no params, and refuse any."
+        ))] = None,
         slot: Annotated[
             Optional[Literal["color", "roughness", "normal"]],
             Field(description=(
@@ -2506,7 +2556,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         pole: Annotated[Optional[List[float]], Field(description=(
             "World position the knee/elbow should face. Default: the "
             "chain's own bend plane when it has one; a STRAIGHT chain "
-            "without a pole leaves the fold direction to Maya and warns."
+            "without a pole leaves the fold direction to Maya and warns. A "
+            "pole that lies ON the start-target line is refused - it is "
+            "parallel to the handle vector, so there is no bend plane."
         ))] = None,
         start: Annotated[Optional[str], Field(description=(
             "Chain start joint. Default: two joints above `joint` - the "
@@ -2889,11 +2941,15 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "Which clip to render - a rig carries several. Refused with "
             "the names present if it carries no clip by this name."
         ))],
-        angle: Annotated[Angle, Field(description=(
-            "One angle for every frame. 'side' reads a walk; 'front' reads "
-            "a face. The camera is placed at frame 0 and HELD - motion is "
-            "judged against a fixed frame."
-        ))] = "three_quarter",
+        angle: Annotated[
+            Literal["front", "side", "back", "top", "three_quarter"],
+            Field(description=(
+                "One angle for every frame. 'side' reads a walk; 'front' reads "
+                "a face. The camera is placed at frame 0 and HELD - motion is "
+                "judged against a fixed frame. 'current' is not offered: the "
+                "preview places its own camera."
+            )),
+        ] = "three_quarter",
         every_nth: Annotated[Optional[int], Field(ge=1, description=(
             "Render every nth frame (first and last always included). Omit "
             "for the densest sheet that fits 16 cells."
@@ -2967,15 +3023,18 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         ))],
         start: Annotated[Optional[float], Field(ge=0, description=(
             "Trim the SOURCE file's frame range (row index), before any "
-            "bake-rate resampling. Omit for the file's first frame."
+            "bake-rate resampling. Omit for the file's first frame. A "
+            "fraction is rounded to a whole row and named in warnings."
         ))] = None,
         end: Annotated[Optional[float], Field(ge=0, description=(
             "End of the source trim range (row index). Omit for the "
-            "file's last frame."
+            "file's last frame. A fraction is rounded to a whole row and "
+            "named in warnings."
         ))] = None,
         fps: Annotated[Optional[int], Field(description=(
-            "One of 24, 25, 30, 48, 50, 60 to bake at. Omit to bake at "
-            "whichever of those is nearest the source capture's own rate."
+            "One of 24, 25, 30, 48, 50, 60 to bake at - BVH sources only; an "
+            ".fbx source refuses fps and bakes at the file's own rate. Omit to "
+            "bake at whichever of those is nearest the source capture's own rate."
         ))] = None,
     ) -> RetargetClipResult:
         """Get a mocap file's motion onto this rig via HumanIK retargeting.
@@ -3013,8 +3072,11 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         filter: Annotated[Union[bool, dict], Field(description=(
             "Savitzky-Golay smooth every currently-keyed joint channel. "
             "true (default) smooths with the gentlest legal window (5); "
-            "{'window': <odd int, at least 5>} raises it; false skips this "
-            "pass. filter and lock_contacts cannot both be false."
+            "{'window': <odd int, at least 5>} raises it, up to the clip's "
+            "own frame count - a wider window is refused, because the "
+            "Savitzky-Golay window shrinks per sample and would be the same "
+            "filter under a different name; false skips this pass. filter "
+            "and lock_contacts cannot both be false."
         ))] = True,
         lock_contacts: Annotated[Union[bool, dict], Field(description=(
             "Pin each inferred ground-contact run to its own median plant "

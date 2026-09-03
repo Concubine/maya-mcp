@@ -267,6 +267,79 @@ class TestValidation:
         with pytest.raises(HandlerError):
             array.array({"name": "|tooth", "mode": "radial", "count": 1})
 
+    def test_a_foreign_param_refuses_before_the_source_is_even_resolved(self, fake):
+        # #797: the refusal is pure, so it fires before `_cmds()` and before
+        # naming.require_object. A refusal after the duplicate is a refusal
+        # after the damage - and the contract test proves it by calling this
+        # handler with no Maya importable at all.
+        with pytest.raises(HandlerError) as exc:
+            array.array({"name": "|tooth", "mode": "radial", "count": 3,
+                         "offset": [1, 0, 0]})
+        assert "does not use 'offset' in radial mode" in str(exc.value)
+        assert fake.calls == []
+
+    def test_an_unknown_mode_refuses_before_touching_maya(self, fake):
+        # The mode check moved above `_cmds()` so the per-mode refusal can
+        # know which mode it is in. It must still refuse the same way.
+        with pytest.raises(HandlerError) as exc:
+            array.array({"name": "|tooth", "mode": "spiral", "count": 4})
+        assert "unknown mode" in str(exc.value)
+        assert fake.calls == []
+
+    def test_a_zero_linear_offset_is_refused(self, fake):
+        with pytest.raises(HandlerError) as exc:
+            array.array({"name": "|tooth", "mode": "linear", "count": 3,
+                         "offset": [0, 0, 0]})
+        assert "does not use 'offset' in linear mode" in str(exc.value)
+        assert fake.calls == []
+
+    def test_a_zero_offset_with_a_step_scale_builds_nested_shells(self, fake):
+        # The refusal above is about copies that cannot be told apart. A
+        # compounding step_scale tells them apart: concentric shells sharing
+        # one centre, which no other mode can build. It must go through.
+        result = array.array(
+            {"name": "|tooth", "mode": "linear", "count": 4,
+             "offset": [0, 0, 0], "step_scale": [0.8, 0.8, 0.8]}
+        )
+        assert len(result["names"]) == 3
+        scales = sorted(
+            entry["scale"][0]
+            for name in fake.xforms for entry in fake.xforms[name]
+            if "scale" in entry
+        )
+        assert scales == pytest.approx([0.512, 0.64, 0.8])
+
+    def test_the_wrapper_none_flood_still_builds(self, fake):
+        # The MCP wrapper sends EVERY key on every call, filling the ones the
+        # caller left alone with None. A handler that read a present-and-None
+        # key as "passed" would refuse every single radial call (#797).
+        result = array.array(
+            {"name": "|tooth", "mode": "radial", "count": 4, "axis": None,
+             "center": None, "angle": None, "offset": None,
+             "step_rotate": None, "step_scale": None, "pivot": None,
+             "name_prefix": None, "group_name": None}
+        )
+        assert len(result["names"]) == 3
+
+    def test_radial_angle_of_none_is_the_360_default(self, fake):
+        # `params.get("angle", 360.0)` returns None for a PRESENT None key,
+        # and None is not a number - the wrapper's default change would have
+        # made every radial call refuse on its own angle.
+        array.array({"name": "|tooth", "mode": "radial", "count": 4,
+                     "axis": "y", "angle": None})
+        rotations = [
+            fake.xforms[c[1]][-1]["rotate"][1]
+            for c in fake.calls if c[0] == "rotate"
+        ]
+        assert rotations == pytest.approx([90.0, 180.0, 270.0])
+
+    def test_a_missing_count_says_missing(self, fake):
+        for mode, extra in [("radial", {}), ("linear", {"offset": [1, 0, 0]})]:
+            with pytest.raises(HandlerError) as exc:
+                array.array(dict({"name": "|tooth", "mode": mode,
+                                  "count": None}, **extra))
+            assert "missing required param 'count'" in str(exc.value)
+
 
 class TestRadial:
     def test_makes_count_minus_one_copies(self, fake):
@@ -474,14 +547,17 @@ class TestMirror:
         result = array.array({"name": "|tooth", "mode": "mirror", "axis": "x"})
         assert len(result["names"]) == 1
 
-    def test_count_is_ignored(self, fake):
-        # A mirror has one image. Accepting count and quietly ignoring it would
-        # be worse than either honouring or rejecting it, so it is documented
-        # as ignored and this test pins that.
-        result = array.array(
-            {"name": "|tooth", "mode": "mirror", "axis": "x", "count": 9}
-        )
-        assert len(result["names"]) == 1
+    def test_count_is_refused_not_ignored(self, fake):
+        # A mirror has one image. This test used to PIN the silent ignore -
+        # "documented as ignored" was the whole #797 defect: a caller who
+        # asked for 9 got 1 and was told nothing. It is refused now, and
+        # refused BEFORE anything is duplicated.
+        with pytest.raises(HandlerError) as exc:
+            array.array(
+                {"name": "|tooth", "mode": "mirror", "axis": "x", "count": 9}
+            )
+        assert "does not use 'count' in mirror mode" in str(exc.value)
+        assert fake.calls == []
 
     def test_negative_scale_goes_on_a_group_not_on_the_copy(self, fake):
         # THE correctness test. Negating scale on the object composes as

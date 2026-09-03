@@ -51,6 +51,11 @@ _PARAM_FOR_SLOT = {
 
 _CHANNEL_PLUG = {"r": "outColorR", "g": "outColorG", "b": "outColorB", "a": "outAlpha"}
 
+# Every key ONE map's spec is read for, below. The near-miss hint
+# require_known_keys builds is the point of naming them here: the probe's
+# 'chanel' reaches 'channel' by the three-letter prefix rule.
+MAP_SPEC_KEYS = ("path", "channel", "invert", "raw", "mip_filter")
+
 # Data, not colour: these must be read linearly or the render is quietly wrong.
 _RAW_BY_DEFAULT = {"metalness", "roughness", "normal"}
 
@@ -131,6 +136,13 @@ def validate_maps(maps: Any) -> List[Dict[str, Any]]:
                 hint="e.g. 'D:/mask.png' or {'path': 'D:/mask.png', "
                 "'channel': 'g', 'invert': true}",
             )
+        # #797 row 17: the #764/#767 rule one level down. `maps` is a known
+        # top-level key, so a key INSIDE a slot's spec was accepted and
+        # dropped - MEASURED on the probe, a 'chanel' typo left the scalar
+        # reading the default channel r while the result reported success,
+        # which is the #764 failure exactly (an unread key does not fail,
+        # it succeeds and does something else).
+        require_known_keys(spec, MAP_SPEC_KEYS, "assign_pbr map %r" % slot)
         attr, kind = SLOTS[slot]
         path = spec.get("path")
         if not isinstance(path, str) or not path.strip():
@@ -301,7 +313,6 @@ ASSIGN_PBR_SYNONYMS = {"material": "name", "textures": "maps"}
 def assign_pbr(params: Dict[str, Any]) -> Dict[str, Any]:
     require_known_keys(params, ASSIGN_PBR_KEYS, "assign_pbr",
                        ASSIGN_PBR_SYNONYMS)
-    cmds = _cmds()
     meshes = _mesh_names(params)
     specs = validate_maps(params.get("maps"))
     values = dict(params.get("params") or {})
@@ -325,6 +336,10 @@ def assign_pbr(params: Dict[str, Any]) -> Dict[str, Any]:
             "flat and the material just looks wrong. Paths are resolved on the "
             "MACHINE RUNNING MAYA.",
         )
+
+    # Only now: every check above is PURE (#767/#797), and a refusal that
+    # waits for Maya is a refusal after the scene has been reached.
+    cmds = _cmds()
 
     # Every mesh resolved BEFORE anything is built: the second mesh used to
     # be resolved inside assign_material after the maps were wired, and a

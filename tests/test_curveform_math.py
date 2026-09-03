@@ -89,6 +89,46 @@ class TestValidateSpec:
         assert spec["profile_sides"] == cm.MAX_PROFILE_SIDES
 
 
+class TestAroundIsInertUnderProfileSides:
+    """#797 row 14: on a sweep, `profile_sides` IS the cross-section.
+
+    `curveform._build_sweep` reads `resolution.around` only on the branch
+    where `profile_sides` is omitted ("approximate a round tube with as many
+    sides as the around tessellation asks for"), so a caller who asks for
+    both gets the profile_sides ring and their `around` never reaches Maya.
+    """
+
+    def test_around_with_profile_sides_refused(self):
+        with pytest.raises(HandlerError) as exc:
+            cm.validate_spec(sweep_params(
+                profile_sides=12, resolution={"along": 10, "around": 8}))
+        message = str(exc.value)
+        assert "does not use" in message
+        assert "around" in message
+        assert "profile_sides" in message
+
+    def test_along_alone_still_accepted_with_profile_sides(self):
+        # Only `around` is inert - `along` drives interpolationSteps and is
+        # read on every sweep branch.
+        spec = cm.validate_spec(sweep_params(
+            profile_sides=12, resolution={"along": 10}))
+        assert spec["resolution"]["along"] == 10
+        assert spec["resolution"]["around"] == 16  # the sweep default, unused
+
+    def test_around_alone_still_accepted_without_profile_sides(self):
+        spec = cm.validate_spec(sweep_params(
+            resolution={"along": 10, "around": 8}))
+        assert spec["resolution"]["around"] == 8
+
+    def test_around_on_a_revolve_with_no_profile_sides_is_untouched(self):
+        # profile_sides is a sweep-only param; revolve/loft bill `around`
+        # directly, so nothing changes for them.
+        spec = cm.validate_spec({"kind": "revolve", "name": "vase",
+                                 "profile": [[0.5, 0], [0.3, 1]],
+                                 "resolution": {"along": 8, "around": 20}})
+        assert spec["resolution"]["around"] == 20
+
+
 class TestWireShapedParams:
     """The MCP server (src/maya_mcp/server.py) sends EVERY declared param on
     EVERY call, `None` for whichever ones the caller left unset - it never
@@ -188,11 +228,25 @@ class TestFaceBudget:
         # #768 review IMPORTANT 3: a sweep's actual cross-section ring width
         # is `profile_sides` when given, not `resolution.around` -
         # `_build_sweep` only falls back to `around` when profile_sides is
-        # omitted. Billing by `around` alone (16) here would under-count a
-        # 32-sided profile's real face total.
+        # omitted. Billing by the sweep default `around` (16) here would
+        # under-count a 32-sided profile's real face total.
+        #
+        # #797 row 14: `around` can no longer be PASSED alongside
+        # profile_sides (it is refused as inert), so the `around` this bills
+        # against is the filled-in default, never a caller's number.
         spec = cm.validate_spec(sweep_params(
-            resolution={"along": 10, "around": 16}, profile_sides=32))
+            resolution={"along": 10}, profile_sides=32))
+        assert spec["resolution"]["around"] == 16
         assert cm.predicted_faces(spec) == 10 * 32 + 2
+
+    def test_predicted_faces_sweep_bills_profile_sides_below_around(self):
+        # The pre-#797 `max(around, profile_sides)` billing over-counted here:
+        # a 4-sided tube on the default 16-around resolution builds 4 rings
+        # per span, not 16. Now that the two cannot both be passed, the bill
+        # is `profile_sides` outright.
+        spec = cm.validate_spec(sweep_params(
+            resolution={"along": 10}, profile_sides=4))
+        assert cm.predicted_faces(spec) == 10 * 4 + 2
 
     def test_predicted_faces_sweep_without_profile_sides_uses_around(self):
         spec = cm.validate_spec(sweep_params(

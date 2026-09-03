@@ -247,8 +247,10 @@ check("4a. two environment lights in a row: ONE ramp in the scene",
 check("4b. ... the replaced ramp is named in `removed`, the new dome is fed",
       "mcpLight_domeRamp" in relit["removed"] and dome_src == ["mcpLight_domeRamp"],
       "removed %r dome<- %r" % (relit["removed"], dome_src))
-ok("setup_lighting", {"preset": "environment", "hdri_path": HDR})
-ok("setup_lighting", {"preset": "environment", "hdri_path": HDR})
+# #797 row 19: `environment` is the dome that needs no file and now refuses
+# an hdri_path; the file-driven dome is the `hdri` preset.
+ok("setup_lighting", {"preset": "hdri", "hdri_path": HDR})
+ok("setup_lighting", {"preset": "hdri", "hdri_path": HDR})
 s8 = state()
 check("4c. hdri domes: one file node, no ramp left",
       s8["files"] == ["mcpLight_domeTex"] and s8["ramps"] == [],

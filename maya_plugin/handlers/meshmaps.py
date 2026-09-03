@@ -40,7 +40,7 @@ import shutil
 import tempfile
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from ..dispatcher import HandlerError, require_known_keys
+from ..dispatcher import HandlerError, refuse_inert, require_known_keys
 from . import material as material_mod
 from . import naming, pbr, pngprobe, pngwrite, session, texbake, texclaim
 
@@ -84,8 +84,15 @@ def _ensure_mtoa(cmds) -> None:
                  "without Arnold there is nothing honest to fall back to")
 
 
-def validate(params: Dict[str, Any], cmds) -> Dict[str, Any]:
-    """Everything checkable before a single node is touched."""
+def validate_pure(params: Dict[str, Any]) -> Dict[str, Any]:
+    """The half of validate() that needs no Maya at all (#797).
+
+    Split out so `bake_mesh_maps` can run it BEFORE `_cmds()`: the #767
+    rule is that a param this call will never read is answered before the
+    scene is touched, and the curvature refusal below is exactly that
+    answer. Returns the resolved settings minus `meshes`, which only a
+    scene can turn from names into (transform, shape) pairs.
+    """
     require_known_keys(params, BAKE_MESH_MAPS_KEYS, "bake_mesh_maps",
                        BAKE_MESH_MAPS_SYNONYMS)
 
@@ -102,33 +109,6 @@ def validate(params: Dict[str, Any], cmds) -> Dict[str, Any]:
         raise HandlerError("missing required param 'meshes'", hint=_hint)
     if not names or not all(isinstance(n, str) and n.strip() for n in names):
         raise HandlerError("missing required param 'meshes'", hint=_hint)
-
-    meshes: List[Tuple[str, str]] = []
-    for name in names:
-        transform, shape = naming.require_mesh(cmds, name)
-        if (transform, shape) not in meshes:
-            meshes.append((transform, shape))
-
-    for transform, shape in meshes:
-        if _uv_count(cmds, shape) == 0:
-            raise HandlerError(
-                "%s has no UVs - a bake renders through UV space, and Maya "
-                "does NOT refuse this: arnoldRenderToTexture returns "
-                "normally and writes a CORRUPT file that only fails later, "
-                "at read (MEASURED, #770 probe Q5)" % shape,
-                hint="maya_uv_atlas creates UVs; bake after that")
-
-    shorts: Dict[str, str] = {}
-    for transform, _shape in meshes:
-        short = transform.split("|")[-1]
-        if short in shorts:
-            raise HandlerError(
-                "%s and %s share the short name %r - baked files are named "
-                "by it, and Arnold renames colliding outputs by a rule this "
-                "tool refuses to guess (MEASURED, #770 probe Q4)"
-                % (shorts[short], transform, short),
-                hint="maya_rename one of them, then bake")
-        shorts[short] = transform
 
     out_dir = params.get("out_dir")
     if not isinstance(out_dir, str) or not out_dir.strip():
@@ -184,7 +164,30 @@ def validate(params: Dict[str, Any], cmds) -> Dict[str, Any]:
             hint="the composite needs the AO bake; add 'ao' to maps or "
                  "drop apply_ao")
 
-    radius = params.get("curvature_radius", DEFAULT_CURVATURE_RADIUS)
+    # #797 row 11, the apply_ao-without-"ao" shape one level down: BOTH
+    # curvature params are read by `_make_bake_shader` for the "curvature"
+    # map and by nothing else, so on any other map list they are validated
+    # and then dropped - the caller tunes a radius, gets the same AO, and
+    # is told nothing. None is "not passed": the MCP wrapper defaults both
+    # to None, and `params.get(key, DEFAULT)` would not see that (None is a
+    # PRESENT key) - it would hand None straight to the type checks two
+    # lines below, which refuse it ("curvature_radius must be a positive
+    # number", "curvature_output must be one of ..."). The shader is never
+    # reached: EVERY wrapper call, curvature or not, would be refused. So
+    # the None-means-the-default reads below are what makes the wrapper's
+    # None defaults usable at all, not a nicety.
+    curvature = "curvature" in maps
+    radius = params.get("curvature_radius")
+    if radius is not None and not curvature:
+        refuse_inert(
+            "bake_mesh_maps", "curvature_radius",
+            "when 'curvature' is not in maps",
+            "the radius is the curvature shader's sampling distance and "
+            "nothing else reads it - the requested maps (%s) ignore it in "
+            "silence" % ", ".join(maps),
+            hint="add 'curvature' to maps, or drop curvature_radius")
+    if radius is None:
+        radius = DEFAULT_CURVATURE_RADIUS
     if (isinstance(radius, bool) or not isinstance(radius, (int, float))
             or radius <= 0):
         raise HandlerError("curvature_radius must be a positive number "
@@ -192,7 +195,16 @@ def validate(params: Dict[str, Any], cmds) -> Dict[str, Any]:
                            hint="the sampling radius around each point; "
                                 "0.1 suits metre-scale assets")
 
-    curvature_output = params.get("curvature_output", "convex")
+    curvature_output = params.get("curvature_output")
+    if curvature_output is not None and not curvature:
+        refuse_inert(
+            "bake_mesh_maps", "curvature_output",
+            "when 'curvature' is not in maps",
+            "convex/concave/both selects which curvature map is written, "
+            "and only the curvature bake reads it",
+            hint="add 'curvature' to maps, or drop curvature_output")
+    if curvature_output is None:
+        curvature_output = "convex"
     if curvature_output not in CURVATURE_OUTPUTS:
         raise HandlerError(
             "curvature_output must be one of %s"
@@ -200,10 +212,47 @@ def validate(params: Dict[str, Any], cmds) -> Dict[str, Any]:
             hint="convex is the edge-wear mask; concave marks crevices and "
                  "is HONESTLY all-black on convex-only geometry (measured)")
 
-    return {"meshes": meshes, "out_dir": out_dir, "maps": maps,
+    # The APPLIED values, never the requested ones: a settings dict that
+    # echoed a dropped request back is the false claim #797 is about.
+    return {"names": names, "out_dir": out_dir, "maps": maps,
             "resolution": resolution, "apply_ao": apply_ao,
             "curvature_radius": float(radius),
             "curvature_output": curvature_output}
+
+
+def validate(params: Dict[str, Any], cmds) -> Dict[str, Any]:
+    """Everything checkable before a single node is touched."""
+    settings = validate_pure(params)
+
+    meshes: List[Tuple[str, str]] = []
+    for name in settings.pop("names"):
+        transform, shape = naming.require_mesh(cmds, name)
+        if (transform, shape) not in meshes:
+            meshes.append((transform, shape))
+
+    for transform, shape in meshes:
+        if _uv_count(cmds, shape) == 0:
+            raise HandlerError(
+                "%s has no UVs - a bake renders through UV space, and Maya "
+                "does NOT refuse this: arnoldRenderToTexture returns "
+                "normally and writes a CORRUPT file that only fails later, "
+                "at read (MEASURED, #770 probe Q5)" % shape,
+                hint="maya_uv_atlas creates UVs; bake after that")
+
+    shorts: Dict[str, str] = {}
+    for transform, _shape in meshes:
+        short = transform.split("|")[-1]
+        if short in shorts:
+            raise HandlerError(
+                "%s and %s share the short name %r - baked files are named "
+                "by it, and Arnold renames colliding outputs by a rule this "
+                "tool refuses to guess (MEASURED, #770 probe Q4)"
+                % (shorts[short], transform, short),
+                hint="maya_rename one of them, then bake")
+        shorts[short] = transform
+
+    settings["meshes"] = meshes
+    return settings
 
 
 def _uv_count(cmds, shape: str) -> int:
@@ -730,10 +779,10 @@ def _rewire_color(cmds, job: Dict[str, Any], final_path: str,
 
 
 def bake_mesh_maps(params: Dict[str, Any]) -> Dict[str, Any]:
-    # Ahead of _cmds(): an unknown key needs no Maya to answer (#767).
-    # validate() guards again - it is the seam the headless tests drive.
-    require_known_keys(params, BAKE_MESH_MAPS_KEYS, "bake_mesh_maps",
-                       BAKE_MESH_MAPS_SYNONYMS)
+    # Ahead of _cmds(): an unknown key needs no Maya to answer (#767), and
+    # neither does a param the requested map list drops (#797). validate()
+    # runs the same pass again - it is the seam the headless tests drive.
+    validate_pure(params)
     cmds = _cmds()
     settings = validate(params, cmds)
     apply_jobs: List[Dict[str, Any]] = []

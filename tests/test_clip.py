@@ -3051,3 +3051,78 @@ class TestClipsElsewherePredicate:
         out = _author(fake)
         assert any("another skeleton carries clips" in w
                    for w in out["warnings"])
+
+
+class TestPreviewClipDropsWhatItCannotUse:
+    """#797 rows 21 and 29 on preview_clip.
+
+    The sheet places its OWN camera - one, held across every frame, because
+    motion has to read against a fixed frame - so "current" names a camera
+    this tool never looks through. _run_shots degraded it to three_quarter
+    and every cell came back labelled "current".
+
+    `samples` was worse than dropped: the key was accepted, its wrapper
+    never sends it, and its protocol row omits it, so the only caller who
+    could ever pass it was one guessing at the API - and under the default
+    hw2 renderer Arnold's sample count means nothing anyway.
+    """
+
+    def _wire(self, fake, monkeypatch):
+        _author(fake, name="idle", fps=30, keys=[
+            {"time_s": 0.0, "rotations": {"mid": [0, 0, 0]}},
+            {"time_s": 1.0, "rotations": {"mid": [0, 0, 45]}}])
+        calls = {}
+
+        def run_shots(cmds, shots, params):
+            calls["params"] = params
+            return {"images": [{"label": s["label"], "angle": s["angle"],
+                                "png_b64": "x"} for s in shots],
+                    "renderer": params["renderer"], "samples": None,
+                    "fallback_light": False, "zoom": 1.0, "relit_lights": 0}
+
+        monkeypatch.setattr(clip.render, "_run_shots", run_shots)
+        return calls
+
+    def test_the_current_angle_refuses_before_any_maya_call(self, monkeypatch):
+        monkeypatch.setattr(
+            clip, "_cmds",
+            lambda: pytest.fail("preview_clip reached Maya despite an angle "
+                                "it cannot shoot"))
+        with pytest.raises(HandlerError) as exc:
+            clip.preview_clip({"root": "|pelvis", "name": "walk",
+                               "angle": "current"})
+        message = str(exc.value)
+        assert "does not use 'angle'" in message, message
+        assert "current" in message, message
+
+    def test_samples_is_no_longer_a_key_it_accepts(self, fake, monkeypatch):
+        self._wire(fake, monkeypatch)
+        with pytest.raises(HandlerError) as exc:
+            clip.preview_clip({"root": "root", "name": "idle", "samples": 4})
+        assert "does not take 'samples'" in str(exc.value)
+        assert "samples" not in clip.PREVIEW_CLIP_KEYS
+
+    def test_hw2_is_handed_no_sample_count_to_report(self, fake, monkeypatch):
+        """_run_shots reports `samples: null` under hw2 and warns when a
+        count was actually asked for - so preview_clip, whose caller cannot
+        ask, must not ask on their behalf."""
+        calls = self._wire(fake, monkeypatch)
+        clip.preview_clip({"root": "root", "name": "idle"})
+        assert calls["params"]["renderer"] == "hw2"
+        assert calls["params"]["samples"] is None
+
+    def test_arnold_still_gets_the_cheap_single_sample(self, fake, monkeypatch):
+        """A preview is many frames and motion does not need refraction, so
+        the one sample it always used stands - on the renderer that reads
+        it."""
+        calls = self._wire(fake, monkeypatch)
+        clip.preview_clip({"root": "root", "name": "idle",
+                           "renderer": "arnold"})
+        assert calls["params"]["samples"] == 1
+
+    def test_a_named_angle_still_previews(self, fake, monkeypatch):
+        calls = self._wire(fake, monkeypatch)
+        out = clip.preview_clip({"root": "root", "name": "idle",
+                                 "angle": "side"})
+        assert calls["params"]["renderer"] == "hw2"
+        assert all(i["angle"] == "side" for i in out["images"])

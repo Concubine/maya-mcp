@@ -94,6 +94,30 @@ def require_known_keys(params, allowed, command: str, synonyms=None) -> None:
     )
 
 
+def refuse_inert(command: str, param: str, branch: str, why: str,
+                 hint: Optional[str] = None) -> None:
+    """Refuse a param the caller PASSED that this branch of the command drops.
+
+    The level below require_known_keys (#797): a key the handler knows,
+    accepts, validates, and then never consumes on the branch another
+    param's value selects. #797's confirmed instance is `divisions` on an
+    icosahedron - range-checked like every other primitive's, then discarded
+    because polyPlatonicSolid has no subdivision flag, so the caller asked
+    for a denser solid and got the same 20 faces with no word said.
+
+    The wording is shared so tests/test_branch_contract.py can recognise
+    every instance generically: `<command> does not use '<param>' <branch>:
+    <why>`. `branch` names the branch in the caller's own terms ("on an
+    icosahedron", "in mirror mode", "when atlas is null"); `why` says what
+    Maya or the handler actually does there, so the caller can tell a
+    refusal of their intent from a refusal of their spelling.
+    """
+    raise HandlerError(
+        "%s does not use '%s' %s: %s" % (command, param, branch, why),
+        hint=hint,
+    )
+
+
 class Dispatcher:
     def __init__(
         self,

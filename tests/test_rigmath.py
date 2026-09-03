@@ -422,6 +422,48 @@ class TestPoseIkChainGeometry:
         assert out == {}
 
 
+class TestPoleOfflineDistance:
+    """#797 row 22: the measurement pose_ik refuses a degenerate pole on.
+
+    `prebend_rotations` already returns {} for such a pole and
+    `plane_normal` already answers None - both silently. The handler needs
+    a NUMBER to compare against the chain's reach, because "on the line"
+    is a relative question: a centimetre off the line is decisive on a
+    finger and noise on a leg.
+    """
+
+    def test_a_pole_on_the_line_measures_zero(self):
+        assert rigmath.pole_offline_distance(
+            [0, 0, 0], [0, 2, 0], [0, 5, 0]) == pytest.approx(0.0)
+
+    def test_a_pole_behind_the_start_is_still_on_the_line(self):
+        # the LINE, not the segment: extending backwards is just as
+        # parallel to the handle vector, and the solver is just as blind.
+        assert rigmath.pole_offline_distance(
+            [0, 0, 0], [0, 2, 0], [0, -7, 0]) == pytest.approx(0.0)
+
+    def test_the_distance_is_the_perpendicular_leg(self):
+        # pole 0.3 off in X and 0.4 in Z of a line running up +Y: 0.5.
+        assert rigmath.pole_offline_distance(
+            [0, 0, 0], [0, 2, 0], [0.3, 5.0, 0.4]) == pytest.approx(0.5)
+
+    def test_a_target_on_the_start_joint_measures_to_the_point(self):
+        # No line exists at all; the honest answer is the distance to the
+        # one point there is, not a division by zero.
+        assert rigmath.pole_offline_distance(
+            [1, 1, 1], [1, 1, 1], [1, 4, 1]) == pytest.approx(3.0)
+
+    def test_it_agrees_with_plane_normal_about_degeneracy(self):
+        start, target = [0.1, 0.95, 0.0], [0.1, 0.60, 0.2]
+        on_line = [0.1, 0.775, 0.1]
+        off_line = [0.1, 0.50, 0.5]
+        assert rigmath.plane_normal(start, target, on_line) is None
+        assert rigmath.pole_offline_distance(
+            start, target, on_line) == pytest.approx(0.0, abs=1e-12)
+        assert rigmath.plane_normal(start, target, off_line) is not None
+        assert rigmath.pole_offline_distance(start, target, off_line) > 0.2
+
+
 # --- #732: bind-pose rotation decomposition ---------------------------------
 
 

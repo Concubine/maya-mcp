@@ -275,7 +275,10 @@ class TestRenderScene:
         params = conn.calls[0]["params"]
         assert params["renderer"] == "arnold"
         assert params["resolution"] == 512
-        assert params["samples"] == 3
+        # #797: samples is the handler's default (3), not the wrapper's -
+        # a wrapper that filled it made every hw2 call look like a caller
+        # asking for a sample count hw2 has no use for.
+        assert params["samples"] is None
 
     def test_rejects_a_fifth_angle_before_reaching_maya(self):
         conn = FakeConn(responses=self._response([]))
@@ -710,7 +713,10 @@ class TestModelingTools:
         assert conn.calls[0]["cmd"] == "array"
         assert conn.calls[0]["params"] == {
             "name": "|tooth", "mode": "radial", "count": 6, "axis": None,
-            "center": None, "angle": 360.0, "offset": None,
+            # #797: the wrapper no longer fills angle=360. The handler refuses
+            # angle on the modes that never read it, and a filled default made
+            # "the caller passed it" unknowable.
+            "center": None, "angle": None, "offset": None,
             "step_rotate": None, "step_scale": None, "pivot": None,
             "name_prefix": None, "group_name": None,
         }
@@ -1839,7 +1845,8 @@ class TestUvAtlasPatchAcceptsAnInteger:
         return FakeConn(responses={"uv_atlas": {
             "meshes": [], "atlas": [4, 4], "patch": [0, 0],
             "patch_rect": [0.0, 0.75, 0.25, 1.0], "margin": 0.02,
-            "projection": "auto", "normalized": True, "all_inside": True,
+            "projection": "world", "normalized": False, "all_inside": True,
+            "world_scale": 3.0, "uv_per_metre": 2.5, "warnings": [],
         }})
 
     def test_a_bare_integer_index_reaches_maya(self):
@@ -1871,6 +1878,46 @@ class TestUvAtlasPatchAcceptsAnInteger:
         assert schema != {}, "patch has no type constraint at all"
         declared = json.dumps(schema)
         assert "integer" in declared
+
+
+class TestUvAtlasResultCarriesTheAppliedDensity:
+    """#797 row 10: the handler stopped ECHOING `uv_per_metre` and started
+    reporting the constant it APPLIED (null outside world mode), and
+    protocol.md's result row lists it - but `UvAtlasResult` had no such
+    field, and `extra="ignore"` drops what it does not declare. The number
+    reached the wrapper and never reached the caller."""
+
+    @staticmethod
+    def _conn(**overrides):
+        response = {
+            "meshes": [], "atlas": [4, 4], "patch": [0, 0],
+            "patch_rect": [0.0, 0.75, 0.25, 1.0], "margin": 0.02,
+            "projection": "world", "normalized": False, "all_inside": True,
+            "world_scale": 3.0, "uv_per_metre": 2.5, "warnings": ["packed"],
+        }
+        response.update(overrides)
+        return FakeConn(responses={"uv_atlas": response})
+
+    def test_the_applied_constant_round_trips(self):
+        mcp = server_mod.create_server(self._conn())
+        result = run(mcp.call_tool("maya_uv_atlas", {
+            "names": ["|chunk"], "patch": 0, "world_scale": 3.0,
+        }))
+        assert result.structured_content["uv_per_metre"] == 2.5
+        assert result.structured_content["warnings"] == ["packed"]
+
+    def test_null_outside_world_mode_round_trips_as_null(self):
+        """The normalising branch reads no density constant at all, so the
+        handler sends null - which must arrive as null, not as an absent key
+        a caller cannot tell from 'the field was dropped'."""
+        mcp = server_mod.create_server(self._conn(
+            projection="box", normalized=True, world_scale=None,
+            uv_per_metre=None))
+        result = run(mcp.call_tool("maya_uv_atlas", {
+            "names": ["|chunk"], "patch": 0,
+        }))
+        assert "uv_per_metre" in result.structured_content
+        assert result.structured_content["uv_per_metre"] is None
 
 
 class TestCaptureViewportTargetReachesMaya:

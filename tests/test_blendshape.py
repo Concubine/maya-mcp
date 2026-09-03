@@ -314,6 +314,17 @@ class TestCreateValidation:
         # nothing above reached the checkpoint - a bad call costs nothing
         assert fake.checkpoints == []
 
+    def test_targets_entry_extra_key_refused(self, fake):
+        """#797 row 40: an unread key on one targets[i] entry succeeds and
+        does something else instead of failing - the same #764 shape as
+        the top-level key guard, one level down. Must fire before the
+        checkpoint, same as every other targets[] refusal above."""
+        _scene(fake)
+        with pytest.raises(HandlerError, match="does not take"):
+            _create(fake, [{"name": "a", "target_mesh": "brow",
+                           "weight": 1.0}])
+        assert fake.checkpoints == []
+
     def test_topology_mismatch_refused_with_both_counts(self, fake):
         _scene(fake)
         fake.vertex_counts["|brow"] = 3

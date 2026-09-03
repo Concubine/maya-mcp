@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..dispatcher import HandlerError, require_known_keys
+from ..dispatcher import HandlerError, refuse_inert, require_known_keys
 from . import (clip, naming, plugwrite, rigmath, sculpt, sculpt_math,
                session, units)
 
@@ -1216,6 +1216,30 @@ def pose_ik(params: Dict[str, Any]) -> Dict[str, Any]:
                  "pose_skeleton, or pass a higher start")
 
     plan = solve_ik_plan(cmds, chain, target, pole)
+
+    # #797 row 22: a pole the caller PASSED that lies on the start->target
+    # line selects no bend plane, and every part of the solve drops it
+    # silently - `rigmath.plane_normal` is None, so `prebend_rotations`
+    # returns {} and the pre-bend never runs; Maya still builds the
+    # poleVectorConstraint, degenerate; and `solve_ik_plan`'s straight-chain
+    # warning cannot fire because it asks whether a pole was given, and one
+    # WAS. So the caller named a bend direction, got Maya's guess, and was
+    # told nothing. Measured against the chain's own reach (COLLINEAR_RATIO,
+    # the same relative tie-break `default_pole` uses) because a centimetre
+    # off the line is decisive on a finger and noise on a leg. Refused HERE:
+    # `solve_ik_plan` is read-only, so this still precedes plugwrite.guard
+    # and the checkpoint below. A DEFAULT pole is never refused - the caller
+    # passed nothing to refuse, and the straight-chain warning still speaks.
+    if pole is not None and rigmath.pole_offline_distance(
+            plan["positions"][0], target, pole) < COLLINEAR_RATIO * plan["reach"]:
+        refuse_inert(
+            "pose_ik", "pole", "when it lies on the start-target line",
+            "the pole vector is then parallel to the handle vector and has "
+            "no bend plane - Maya builds a degenerate constraint and the "
+            "straight-chain warning is silenced",
+            hint="move the pole off the line, to the world side the "
+                 "knee/elbow should face")
+
     warnings: List[str] = list(plan["warnings"])
     pole_used = plan["pole_used"]
 

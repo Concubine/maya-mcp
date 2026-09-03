@@ -12,7 +12,7 @@ import os
 import re
 from typing import Any, Dict, Optional
 
-from ..dispatcher import HandlerError, require_known_keys
+from ..dispatcher import HandlerError, refuse_inert, require_known_keys
 from . import ledger, units
 
 KEEP_CHECKPOINTS = 20
@@ -144,9 +144,37 @@ RESTORE_CHECKPOINT_SYNONYMS = {"id": "checkpoint_id"}
 def restore_checkpoint(params: Dict[str, Any]) -> Dict[str, Any]:
     require_known_keys(params, RESTORE_CHECKPOINT_KEYS, "restore_checkpoint",
                        RESTORE_CHECKPOINT_SYNONYMS)
-    cmds = _cmds()
     explicit = params.get("path")
     checkpoint_id = str(params.get("checkpoint_id") or "")
+
+    # #797 row 23: `path` wins outright below - it overwrites checkpoint_id
+    # with its own stem, so a caller who passed BOTH and meant two
+    # different checkpoints restored the path's one and got the id they
+    # typed echoed back as `restored`, rewritten before it was ever
+    # reported. The id is inert on this branch, so it is refused rather
+    # than overwritten. BEFORE the isfile check on purpose: "that file does
+    # not exist" answers a question the caller never asked, and the moment
+    # the file DID exist the conflict would go silent again. Both must be
+    # NON-EMPTY to be a conflict: server.py sends both keys on every call,
+    # None for the one the caller left unset (and "" from an older wrapper).
+    if explicit and checkpoint_id:
+        # Derived exactly the way the overwrite below derives it, off the
+        # SAME abspath - so the stem this refusal names is the id that
+        # would have replaced theirs, not an approximation of it.
+        stem = os.path.splitext(
+            os.path.basename(os.path.abspath(str(explicit))))[0]
+        if checkpoint_id != stem:
+            refuse_inert(
+                "restore_checkpoint", "checkpoint_id",
+                "when path is also given",
+                "the path names its own checkpoint (%s) and the id would be "
+                "overwritten by it" % stem,
+                hint="pass ONE of them - path=%r to restore that file, or "
+                     "checkpoint_id=%r on its own to resolve the id against "
+                     "this session's checkpoint directory"
+                     % (str(explicit), checkpoint_id))
+
+    cmds = _cmds()
 
     if explicit:
         path = os.path.abspath(str(explicit))

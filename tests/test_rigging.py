@@ -1172,6 +1172,88 @@ class TestPoseIk:
                              "target": [0, 0, 0]})
 
 
+class TestAPoleOnTheStartTargetLineIsRefused:
+    """#797 row 22 (the branch contract's scene row for pose_ik).
+
+    A pole ON the start->target line is a pole with no bend plane, and
+    every part of the solve quietly drops it: `plane_normal` is None so
+    `prebend_rotations` returns {} and the pre-bend never happens, Maya
+    still builds the poleVectorConstraint (a degenerate one), and the
+    straight-chain warning - which only fires when NO pole was given -
+    stays silent because a pole WAS given. The caller therefore asked for
+    a bend direction, got Maya's guess, and was told nothing.
+    """
+
+    _rig = TestPoseIk._rig
+    # midway along hip[0.1, 0.95, 0] -> target[0.1, 0.6, 0.2]
+    ON_LINE = [0.1, 0.775, 0.1]
+
+    def test_a_collinear_pole_refuses_naming_the_branch(self, fake):
+        self._rig(fake, bent=False)
+        with pytest.raises(HandlerError) as exc:
+            rigging.pose_ik({"root": "pelvis", "joint": "ankle",
+                             "target": [0.1, 0.6, 0.2], "pole": self.ON_LINE})
+        message = str(exc.value)
+        assert "pose_ik does not use 'pole'" in message
+        assert "start-target line" in message
+        assert "bend plane" in message
+        assert "knee/elbow" in exc.value.hint
+
+    def test_a_collinear_pole_on_a_BENT_chain_refuses_too(self, fake):
+        # The pole's own geometry decides this, not the chain's: a bent
+        # chain takes the same degenerate constraint.
+        self._rig(fake, bent=True)
+        with pytest.raises(HandlerError, match="does not use 'pole'"):
+            rigging.pose_ik({"root": "pelvis", "joint": "ankle",
+                             "target": [0.1, 0.6, 0.2], "pole": self.ON_LINE})
+
+    def test_the_refusal_precedes_the_checkpoint_and_every_write(
+            self, fake, monkeypatch):
+        self._rig(fake, bent=False)
+        events = []
+        monkeypatch.setattr(session, "auto_checkpoint",
+                            lambda reason: events.append(reason) or
+                            {"checkpoint_id": "001_" + reason, "path": "x.ma"})
+        with pytest.raises(HandlerError, match="does not use 'pole'"):
+            rigging.pose_ik({"root": "pelvis", "joint": "ankle",
+                             "target": [0.1, 0.6, 0.2], "pole": self.ON_LINE})
+        assert events == []
+        assert not any(c[0] in ("setAttr", "ikHandle", "spaceLocator",
+                                "poleVectorConstraint") for c in fake.calls)
+
+    def test_a_pole_off_the_line_is_untouched(self, fake):
+        # The negative: the pre-bend path this refusal sits in front of
+        # still runs for a pole that HAS a bend plane.
+        self._rig(fake, bent=False)
+        out = rigging.pose_ik({"root": "pelvis", "joint": "ankle",
+                               "target": [0.1, 0.6, 0.2],
+                               "pole": [0.1, 0.5, 0.5]})
+        assert out["pole_used"] == [0.1, 0.5, 0.5]
+        assert any(c[0] == "poleVectorConstraint" for c in fake.calls)
+
+    def test_a_chain_with_no_pole_is_untouched(self, fake):
+        # The default pole (or none at all, on a straight chain) is never
+        # a param the caller passed - there is nothing to refuse.
+        self._rig(fake, bent=False)
+        out = rigging.pose_ik({"root": "pelvis", "joint": "ankle",
+                               "target": [0.1, 0.6, 0.2]})
+        assert out["pole_used"] is None
+        assert any("STRAIGHT" in w for w in out["warnings"])
+
+    def test_a_pole_just_off_the_line_scales_with_the_chain(self, fake):
+        # The threshold is a FRACTION of reach (COLLINEAR_RATIO), so this
+        # ~0.87-long leg accepts a pole 1cm off the line and refuses one
+        # a tenth of that.
+        self._rig(fake, bent=False)
+        accepted = [self.ON_LINE[0] + 0.01, self.ON_LINE[1], self.ON_LINE[2]]
+        rigging.pose_ik({"root": "pelvis", "joint": "ankle",
+                         "target": [0.1, 0.6, 0.2], "pole": accepted})
+        refused = [self.ON_LINE[0] + 0.001, self.ON_LINE[1], self.ON_LINE[2]]
+        with pytest.raises(HandlerError, match="does not use 'pole'"):
+            rigging.pose_ik({"root": "pelvis", "joint": "ankle",
+                             "target": [0.1, 0.6, 0.2], "pole": refused})
+
+
 class TestClipGuard:
     """#695: while animation curves drive the skeleton, static pose writes
     refuse - a value a curve overrides on the next frame change is the

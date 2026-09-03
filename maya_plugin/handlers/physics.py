@@ -16,6 +16,7 @@ warnings with numbers. Validation is ANALYTIC - nothing simulates (#675).
 
 from __future__ import annotations
 
+import difflib
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..dispatcher import HandlerError, require_known_keys
@@ -124,12 +125,37 @@ def _collect_chunks(cmds, params: Dict[str, Any],
                 or not all(isinstance(e, str) for e in exclude)):
             raise HandlerError("exclude must be a list of name substrings")
         lowered = [e.lower() for e in exclude]
-        dropped = [n for n in found
-                   if any(e in _short(n).lower() for e in lowered)]
+        # #797 row 32: the substring filter is deliberately forgiving (a
+        # typo excludes nothing rather than refusing), so a caller who
+        # asked to drop a chunk that was never there gets no error - but
+        # maya_author_physics promises "every exclusion is warned by
+        # name", and a dead entry that dropped nothing said nothing at
+        # all. matched[] tracks each ORIGINAL entry, not the lowered
+        # form, so the warning below can name it verbatim.
+        matched = [False] * len(exclude)
+        dropped = []
+        for n in found:
+            short_lower = _short(n).lower()
+            hit = False
+            for i, e in enumerate(lowered):
+                if e in short_lower:
+                    matched[i] = True
+                    hit = True
+            if hit:
+                dropped.append(n)
         if dropped:
             warnings.append(
                 "excluded %d chunk(s) by name: %s"
                 % (len(dropped), ", ".join(_short(n) for n in dropped)))
+        all_shorts = [_short(n) for n in found]
+        for orig, hit in zip(exclude, matched):
+            if hit:
+                continue
+            near = difflib.get_close_matches(orig, all_shorts, n=3, cutoff=0.4)
+            hint = (" - did you mean %s?" % ", ".join(near)) if near else ""
+            warnings.append(
+                "exclude entry %r matched no chunk name under %s%s"
+                % (orig, root_long, hint))
         found = [n for n in found if n not in dropped]
     if not found:
         raise HandlerError(
@@ -303,25 +329,55 @@ def author_physics(params: Dict[str, Any]) -> Dict[str, Any]:
             hint="overrides and parents key by short name - rename the "
                  "duplicates first")
     overrides = _validated_overrides(params, shorts, warnings)
-    chunk_set = set(chunks)
-    by_short = {_short(c): c for c in chunks}
+
+    # #797 row 33: read every chunk's geometry FIRST, so the skip set
+    # (mesh unreadable / no triangles) is fully known before anything
+    # resolves a PARENT against it. chunk_set/by_short used to be built
+    # here from the full requested `chunks` - before any chunk had been
+    # read - so a chunk that turned out unreadable a few lines later
+    # still answered as a valid parent on both the explicit-override and
+    # the DAG-walk path, and a joint got emitted against a body that was
+    # never created (and never appears in `bodies` at all).
+    geoms: Dict[str, Tuple[Any, Any]] = {}
+    skip_reason: Dict[str, str] = {}
+    for chunk in chunks:
+        short = _short(chunk)
+        try:
+            points, triangles = _points_and_triangles(chunk)
+        except Exception as exc:  # OpenMaya read failed on a valid node
+            skip_reason[short] = "mesh unreadable (%s)" % exc
+            warnings.append(
+                "%s: %s - chunk SKIPPED" % (chunk, skip_reason[short]))
+            continue
+        if not triangles:
+            skip_reason[short] = "no triangles"
+            warnings.append("%s: no triangles - chunk SKIPPED" % chunk)
+            continue
+        geoms[short] = (points, triangles)
+
+    skipped_shorts = shorts - set(geoms)
+    for short in sorted(skipped_shorts):
+        if short in overrides:
+            warnings.append(
+                "overrides[%r] dropped: chunk %r was skipped (%s) and "
+                "never became a body to attach it to"
+                % (short, short, skip_reason[short]))
+
+    # A skipped chunk is never a valid parent, explicit or DAG-resolved -
+    # both maps exclude it below.
+    chunk_set = {c for c in chunks if _short(c) not in skipped_shorts}
+    by_short = {_short(c): c for c in chunks
+               if _short(c) not in skipped_shorts}
 
     bodies: List[Dict[str, Any]] = []
     total_volume = 0.0
     parentless: List[str] = []
     for chunk in chunks:
         short = _short(chunk)
+        if short not in geoms:
+            continue
+        points, triangles = geoms[short]
         spec = overrides.get(short, {})
-        try:
-            points, triangles = _points_and_triangles(chunk)
-        except Exception as exc:  # OpenMaya read failed on a valid node
-            warnings.append(
-                "%s: mesh unreadable (%s) - chunk SKIPPED" % (chunk, exc))
-            continue
-        if not triangles:
-            warnings.append(
-                "%s: no triangles - chunk SKIPPED" % chunk)
-            continue
         flat = [v for p in points for v in p]
         extent = sculpt_math.bbox_extent(flat)
         signed, com = physmath.solid_com(points, triangles)
@@ -366,13 +422,24 @@ def author_physics(params: Dict[str, Any]) -> Dict[str, Any]:
 
         if "parent" in spec:
             parent_short = _short(spec["parent"])
-            if parent_short == short or parent_short not in by_short:
+            if parent_short in skipped_shorts:
+                # #797 row 33: the named parent WAS in this call, but it
+                # never became a body - pointing a joint at it would name
+                # a chunk absent from `bodies`. Warn and fall back to the
+                # DAG ancestor, same as an unnamed parent would resolve.
+                warnings.append(
+                    "override for %r: parent %r was skipped (%s) - "
+                    "falling back to the DAG ancestor instead"
+                    % (short, spec["parent"], skip_reason[parent_short]))
+                parent = _parent_of(cmds, chunk, chunk_set, warnings)
+            elif parent_short == short or parent_short not in by_short:
                 raise HandlerError(
                     "override for %r: parent %r is not another chunk in "
                     "this call" % (short, spec["parent"]),
                     hint="parents must be measured bodies too - include "
                          "the parent in root/chunks")
-            parent = by_short[parent_short]
+            else:
+                parent = by_short[parent_short]
         else:
             parent = _parent_of(cmds, chunk, chunk_set, warnings)
         if parent is None:

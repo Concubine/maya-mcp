@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..dispatcher import HandlerError, require_known_keys
+from ..dispatcher import HandlerError, refuse_inert, require_known_keys
 from . import combine, ledger, modeling, naming, session, uvatlas, uvmath
 
 # A ceiling on the CALL, not on ambition: one assemble runs on Maya's main
@@ -102,13 +102,17 @@ def _taper(value, what: str) -> Optional[Dict[str, float]]:
 
 
 def validate_parts(
-    parts: Any, cols: int, rows: int, default_chunk: str
+    parts: Any, cols: int, rows: int, default_chunk: str, has_atlas: bool = True
 ) -> List[Dict[str, Any]]:
     """Resolve every part, or refuse the whole call. Pure - no Maya, no scene.
 
     Whole-call validation matters more here than anywhere else in this codebase:
     a build that dies on part 6,000 leaves six thousand orphans behind, and the
     scene it half-built is worth less than no scene at all.
+
+    `has_atlas` is what says whether `patch` means anything: with no atlas
+    nothing projects or packs UVs, so a patch is a cell of a grid that does
+    not exist and is refused rather than resolved (#797).
     """
     if not isinstance(parts, list) or not parts:
         raise HandlerError(
@@ -175,6 +179,25 @@ def validate_parts(
         if not isinstance(chunk, str) or not chunk.strip():
             raise HandlerError("%s.chunk must be a non-empty string" % where)
 
+        # A patch addresses a cell of the atlas this call packs into. With no
+        # atlas there is no packing at all - and the cell was still being
+        # resolved against the placeholder grid below, so an index this build
+        # never had could come back "outside" a grid the caller never asked
+        # for (#797).
+        cell = (0, 0)
+        if has_atlas:
+            cell = uvmath.resolve_cell(part.get("patch", 0), cols, rows)
+        elif "patch" in part:
+            refuse_inert(
+                "assemble", "patch", "when atlas is null",
+                "%s asks for patch %r, but with atlas null this call leaves "
+                "every part's UVs exactly as its primitive was built - "
+                "nothing is projected and nothing is packed, so there is no "
+                "grid for the cell to name" % (where, part["patch"]),
+                hint="pass atlas={'cols': .., 'rows': ..} to pack the parts "
+                "into one, or drop the patch",
+            )
+
         resolved.append({
             "index": index,
             "kind": kind,
@@ -183,7 +206,7 @@ def validate_parts(
             "dim": dim,
             "rotate": _vec3(part.get("rotate"), where + ".rotate"),
             "taper": _taper(part.get("taper"), where + ".taper"),
-            "cell": uvmath.resolve_cell(part.get("patch", 0), cols, rows),
+            "cell": cell,
             "chunk": chunk.strip(),
             "name": part.get("name"),
         })
@@ -222,13 +245,50 @@ def _atlas_settings(atlas: Any) -> Optional[Dict[str, Any]]:
         if float(world_scale) <= 0.0:
             raise HandlerError("atlas.world_scale must be positive")
         world_scale = float(world_scale)
+
+    # What the world branch of uvatlas.pack_shape does NOT read (#797). The two
+    # are keyed differently, because their defaults differ: `project` is keyed
+    # on the VALUE - absent reads as None, which is neither of the two modes
+    # refused - while `normalize` needs the VALUE to be non-None AND true,
+    # because its default is True and a bare truthiness test therefore cannot
+    # tell an explicit true from a caller who said nothing - and an explicit
+    # null, which a TCP caller may send, IS saying nothing. Either way a
+    # caller who said nothing is not a
+    # caller who asked for the wrong thing. `project: box` and
+    # `normalize: false` are exactly what world mode does, so they are
+    # honoured rather than refused.
+    if world_scale is not None:
+        if atlas.get("project") in ("keep", "planar"):
+            refuse_inert(
+                "assemble", "project", "in atlas with world_scale",
+                "world-scale packing calls polyAutoProjection(scaleMode=0) on "
+                "every part to size its UVs by world size, so an authored "
+                "%r layout is overwritten rather than kept" % atlas["project"],
+                hint="drop atlas.world_scale to keep an authored layout, or "
+                "drop atlas.project - 'box' is what world mode already does",
+            )
+        if atlas.get("normalize") is not None and bool(atlas["normalize"]):
+            refuse_inert(
+                "assemble", "normalize", "in atlas with world_scale",
+                "normalising makes every part fill its patch, which is the "
+                "opposite of a fixed texel density - the world branch never "
+                "calls polyNormalizeUV, so the flag decides nothing here",
+                hint="drop atlas.normalize, or drop atlas.world_scale to pack "
+                "by normalising instead",
+            )
     return {
         "cols": int(atlas.get("cols", 4)),
         "rows": int(atlas.get("rows", 4)),
         "margin": float(atlas.get("margin", 0.02)),
         "world_scale": world_scale,
         "project": project,
-        "normalize": bool(atlas.get("normalize", True)),
+        # None is "not passed", not False. `atlas.get("normalize", True)` sees
+        # a PRESENT key when a TCP caller sends an explicit null, so the True
+        # default never applied and bool(None) handed pack_shape False - an
+        # un-normalised pack, silently, for a caller who said nothing.
+        # uvatlas.py reads its own `normalize` the same way.
+        "normalize": True if atlas.get("normalize") is None
+        else bool(atlas["normalize"]),
     }
 
 
@@ -277,7 +337,11 @@ ASSEMBLE_SYNONYMS = {"merge": "combine"}
 
 def assemble(params: Dict[str, Any]) -> Dict[str, Any]:
     require_known_keys(params, ASSEMBLE_KEYS, "assemble", ASSEMBLE_SYNONYMS)
-    cmds = _cmds()
+    # EVERYTHING down to the checkpoint below is pure - no Maya, no scene -
+    # and `cmds = _cmds()` is taken only once nothing is left to refuse. That
+    # was always the intent (a whole-call validation, so a build cannot die on
+    # part 6,000 and leave orphans), but the import sat at the top, which put
+    # the branch refusals below the checkpoint they exist to precede (#797).
     base = params.get("name")
     if not isinstance(base, str) or not base.strip():
         raise HandlerError(
@@ -290,16 +354,109 @@ def assemble(params: Dict[str, Any]) -> Dict[str, Any]:
     atlas = _atlas_settings(params.get("atlas"))
     cols = atlas["cols"] if atlas else 4
     rows = atlas["rows"] if atlas else 4
-    resolved = validate_parts(params.get("parts"), cols, rows, base)
+    resolved = validate_parts(params.get("parts"), cols, rows, base,
+                              has_atlas=atlas is not None)
 
     merge = params.get("combine", True)
     if not isinstance(merge, bool):
         raise HandlerError("combine must be true or false, got %r" % (merge,))
-    pivot_mode = params.get("pivot") or "center"
+    # RAW, so the refusal below can tell "the caller asked for origin" from
+    # "the wrapper filled the key in": since #797 maya_assemble sends
+    # pivot=None on every call it makes.
+    requested_pivot = params.get("pivot")
+    pivot_mode = requested_pivot or "center"
     if pivot_mode not in combine.PIVOT_MODES:
         raise HandlerError(
             "pivot must be one of %s, got %r"
             % (", ".join(combine.PIVOT_MODES), pivot_mode)
+        )
+
+    warnings: List[str] = []
+    # The pivot MODE is a property of the unite: combine.unite is the only
+    # caller of _place_pivot, so a chunk that never goes through it - because
+    # combine is false, or because it holds one part - gets no mode applied at
+    # all. `center` is the exception the plan measured: a primitive's own
+    # pivot already sits at its bbox centre, so asking for `center` is
+    # honoured whether or not anything writes it.
+    sizes: Dict[str, int] = {}
+    for part in resolved:
+        sizes[part["chunk"]] = sizes.get(part["chunk"], 0) + 1
+    united = [chunk for chunk, count in sizes.items() if merge and count > 1]
+    loose = [chunk for chunk, count in sizes.items() if not (merge and count > 1)]
+    # Hoisted, not rebuilt inside the comprehensions below: those run once per
+    # part, and the delivery this module was written for is 8,000 parts over
+    # 2,034 chunks.
+    united_set = set(united)
+
+    if requested_pivot in ("origin", "keep") and not united:
+        if not merge:
+            refuse_inert(
+                "assemble", "pivot", "when combine is false",
+                "the mode is applied by the unite, and with combine=false no "
+                "chunk is united - every part keeps the pivot its primitive "
+                "was built with, then freeze (if on) writes over the transform",
+                hint="set combine=true, or name the pivots you want with "
+                "`pivots` ({chunk: [x, y, z]}), which reaches loose parts too",
+            )
+        refuse_inert(
+            "assemble", "pivot", "on a single-part chunk",
+            "every chunk in this call holds one part, and a chunk of one is "
+            "never united - combine.unite is what applies the mode, so the "
+            "part keeps the pivot its primitive was built with",
+            hint="`pivots` ({chunk: [x, y, z]}) places a pivot on a "
+            "single-part chunk; 'center' is where a primitive's pivot "
+            "already is",
+        )
+    if requested_pivot in ("origin", "keep") and loose:
+        # Not refused: the multi-part chunks DO consume the mode, so refusing
+        # would refuse a working call. Saying which chunks it never reached is
+        # the honest half.
+        shown = loose[:3]
+        warnings.append(
+            "pivot=%r reached %d of %d chunks: %s%s hold one part each, and a "
+            "chunk of one is never united, so no pivot mode is applied to it"
+            % (requested_pivot, len(united), len(sizes), ", ".join(shown),
+               " (and %d more)" % (len(loose) - len(shown))
+               if len(loose) > len(shown) else "")
+        )
+
+    # `name` is required by the schema, so it cannot be refused (#797 tier 2).
+    # It is read in exactly one place - as the default chunk - so a build whose
+    # every part names its own chunk never uses it.
+    if base not in sizes:
+        shown = list(sizes)[:3]
+        # ...but a PART may still ask for the base name as its own, and an
+        # explicitly named part in a chunk nothing unites keeps it (the rename
+        # below is skipped for explicit names), so the scene would then hold a
+        # node called exactly that. Only a name no surviving part claims is
+        # absent from the scene - claiming otherwise would be the same
+        # unmeasured-report defect this ticket removes.
+        claimed = any(part["name"] == base and part["chunk"] not in united_set
+                      for part in resolved)
+        warnings.append(
+            "no part used the base name %r: 'name' is only the DEFAULT chunk, "
+            "and every part here names its own, so the objects are called "
+            "after the chunks (%s%s)%s"
+            % (base, ", ".join(shown),
+               ", and %d more" % (len(sizes) - len(shown))
+               if len(sizes) > len(shown) else "",
+               "" if claimed else " and nothing is called %r" % base)
+        )
+
+    # A part's own `name` survives only as long as the part does. In a chunk
+    # that gets united the transient node is built under that name and then
+    # consumed by polyUnite, which names the RESULT after the chunk.
+    eaten = [part["name"] for part in resolved
+             if part["name"] and part["chunk"] in united_set]
+    if eaten:
+        shown = eaten[:3]
+        warnings.append(
+            "%d part name(s) are consumed by polyUnite: %s%s name nodes that "
+            "exist only until their chunk is united, and the merged object is "
+            "named after the chunk instead"
+            % (len(eaten), ", ".join(repr(n) for n in shown),
+               " (and %d more)" % (len(eaten) - len(shown))
+               if len(eaten) > len(shown) else "")
         )
 
     explicit_pivots: Dict[str, List[float]] = {}
@@ -331,12 +488,15 @@ def assemble(params: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(freeze, bool):
         raise HandlerError("freeze must be true or false, got %r" % (freeze,))
 
+    # Nothing above this line has touched Maya, and nothing below it can
+    # refuse the call.
+    cmds = _cmds()
+
     # ONE checkpoint for the whole run. Per-object would evict the ring many
     # times over on a real delivery and turn the safety net into a delay.
     session.auto_checkpoint("assemble")
 
     built: List[Tuple[str, Dict[str, Any], Dict[str, Any]]] = []
-    warnings: List[str] = []
     outside_patch = 0
     for part in resolved:
         requested = part["name"] or "%s_p%04d" % (part["chunk"], part["index"])
@@ -380,6 +540,7 @@ def assemble(params: Dict[str, Any]) -> Dict[str, Any]:
         explicit[part["chunk"]] |= bool(part["name"])
 
     objects: List[Dict[str, Any]] = []
+    kept_origin = 0
     for chunk in chunks:
         nodes = members[chunk]
         wanted = explicit_pivots.get(chunk)
@@ -400,7 +561,19 @@ def assemble(params: Dict[str, Any]) -> Dict[str, Any]:
                 "faces": result["faces"], "shells": result["shells"],
                 "pivot": placed, "combined": True,
             })
-            warnings.extend(result["warnings"])
+            # Every other warning combine.unite raises is about THIS chunk
+            # (a stolen name, a shading-group collapse) and must be carried up
+            # verbatim. The keep note is the one that is identical for every
+            # united result, so 2,034 chunks would bury the per-chunk findings
+            # under 2,034 copies of it; it is counted here and stated once
+            # below. Matched against the constant, not by substring - a
+            # substring filter would eat a future warning that happened to
+            # mention the word.
+            for note in result["warnings"]:
+                if note == combine.KEEP_PIVOT_NOTE:
+                    kept_origin += 1
+                else:
+                    warnings.append(note)
             ledger.record(cmds, result["name"])
         else:
             # A chunk of one is still that chunk: a caller who labelled it
@@ -455,6 +628,16 @@ def assemble(params: Dict[str, Any]) -> Dict[str, Any]:
                     "combined": False,
                 })
                 ledger.record(cmds, node)
+
+    if kept_origin:
+        warnings.append(
+            "pivot='keep' on %d combined chunk(s) kept the pivot polyUnite "
+            "gives a united result - the world ORIGIN (measured) - which is "
+            "the same place pivot='origin' writes. Nothing of the parts' own "
+            "pivots survives the unite; use 'center' for each chunk's "
+            "bounding-box centre, or name the pivots with `pivots`."
+            % kept_origin
+        )
 
     if outside_patch:
         warnings.append(

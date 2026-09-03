@@ -125,6 +125,93 @@ class TestCleanClipParamGate:
             cleanclip.clean_clip(p)
 
 
+class TestTheFbxRouteDropsFps:
+    """#797 row 25: on the .fbx route `fps` is validated and then never
+    resamples anything.
+
+    The FBX's own rate is only readable from the SCENE's time unit after
+    the import, the keyed range is read in THAT unit
+    (retarget.py's `cmds.keyframe` query), and `_set_bake_unit` changes the
+    unit only afterwards - so `start`/`end` were compared against a range
+    measured in the file's rate while the bake ran at the caller's. The
+    route has never run live either (every eval feeds BVH), so nothing
+    about that combination is measured. Refused until it is, rather than
+    shipped as a resample that may or may not exist.
+    """
+
+    def _fbx(self, tmp_path):
+        path = tmp_path / "walk.fbx"
+        path.write_bytes(b"Kaydara FBX Binary  \x00")
+        return str(path)
+
+    def test_fps_on_the_fbx_route_refuses(self, tmp_path):
+        with pytest.raises(HandlerError) as exc:
+            retarget.retarget_clip(base(file=self._fbx(tmp_path), fps=30))
+        message = str(exc.value)
+        assert "retarget_clip does not use 'fps'" in message
+        assert ".fbx" in message
+        assert "time unit" in message
+        assert "BVH" in exc.value.hint
+
+    def test_the_refusal_is_pure_and_beats_the_maya_import(self, tmp_path):
+        # This whole file runs in a process with no `maya.cmds`: reaching
+        # the import would be an ImportError, not a HandlerError. Same
+        # #767 proof tests/test_branch_contract.py makes for this row.
+        with pytest.raises(HandlerError, match="does not use 'fps'"):
+            retarget._validate_common(base(file=self._fbx(tmp_path), fps=30))
+
+    def test_omitting_fps_on_the_fbx_route_is_accepted(self, tmp_path):
+        path = self._fbx(tmp_path)
+        assert retarget._validate_common(base(file=path)) == (
+            path, ".fbx", "walk01", None, None, None)
+
+    def test_the_wrappers_none_is_not_a_passed_fps(self, tmp_path):
+        # server.py sends fps on every call, None when unset (#797).
+        path = self._fbx(tmp_path)
+        params = base(file=path, start=None, end=None, fps=None)
+        assert retarget._validate_common(params)[5] is None
+
+    def test_fps_on_the_bvh_route_is_untouched(self):
+        # The BVH route reads its rate from the file's own header before
+        # any import, so a bake fps there is a real resample - the branch
+        # this refusal must not touch.
+        assert retarget._validate_common(base(fps=60))[5] == 60
+
+    def test_an_unsupported_fps_still_refuses_for_its_own_reason(self,
+                                                                tmp_path):
+        # The value gate comes first: 37 is not a rate Maya has a unit
+        # for, on either route, and that is the more specific answer.
+        with pytest.raises(HandlerError, match="fps must be one of"):
+            retarget._validate_common(base(file=self._fbx(tmp_path), fps=37))
+
+
+class TestAFractionalSourceRow:
+    """#797 row 25's second half: `start`/`end` are SOURCE ROW INDICES and
+    both routes take `int(round())` of them silently, so start=10.6 trims
+    at row 11 and says nothing. The schema types them `Optional[float]`
+    (server.py), so refusing a float would refuse the command the wrapper
+    is entitled to send - #797's schema exception, which is a WARNING
+    naming the value actually applied.
+    """
+
+    def test_a_whole_number_says_nothing(self):
+        notes = []
+        assert retarget._source_row("start", 10, notes) == 10
+        assert retarget._source_row("end", 30.0, notes) == 30
+        assert notes == []
+
+    def test_a_fraction_is_rounded_and_named(self):
+        notes = []
+        assert retarget._source_row("start", 10.6, notes) == 11
+        assert len(notes) == 1
+        assert "start" in notes[0] and "10.6" in notes[0]
+        assert "row 11" in notes[0]
+
+    def test_it_rounds_the_same_way_the_routes_always_did(self):
+        notes = []
+        assert retarget._source_row("end", 29.4, notes) == 29
+
+
 class TestWireShapedParams:
     """The MCP server (src/maya_mcp/server.py) sends EVERY declared param on
     EVERY call, `None` for whichever ones the caller left unset - it never
@@ -325,6 +412,120 @@ class TestSharedGuards:
         assert any("%s behind mid_pairBlend" % curve in w for w in warnings)
 
 
+class TestAWindowWiderThanTheClip:
+    """#797 rows 24 and 42: `filter['window']` past the clip's own length
+    is not a wider filter and not an error - `mocapmath.smooth_track`
+    shrinks its window per sample, so window 31 and window 101 on a
+    30-frame clip are EXACTLY window 29, and the pass still reported
+    "smoothed N channel(s) with window=31". A refusal for the window the
+    caller CHOSE; a warning for the default one on a clip too short for
+    any smoothing to move a value.
+    """
+
+    def test_an_explicit_window_past_the_clip_refuses(self):
+        with pytest.raises(HandlerError) as exc:
+            cleanclip._filter_window_note(True, 31, 30)
+        message = str(exc.value)
+        assert "clean_clip does not use 'window'" in message
+        assert "on a 30-frame clip" in message
+        assert "29" in message and "window=31" in message
+        assert "29" in exc.value.hint
+
+    def test_the_widest_window_that_fits_is_accepted(self):
+        assert cleanclip._filter_window_note(True, 29, 30) is None
+        assert cleanclip._filter_window_note(True, 5, 30) is None
+
+    def test_the_default_window_is_never_refused_for_being_too_wide(self):
+        # The caller chose nothing here - there is no param to refuse, and
+        # a clip of 5..DEFAULT-1 frames simply gets the shrunk window.
+        assert cleanclip._filter_window_note(False, 5, 30) is None
+
+    def test_a_clip_too_short_to_smooth_warns_instead(self):
+        note = cleanclip._filter_window_note(False, 5, 4)
+        assert note is not None
+        assert "too short to smooth" in note
+        assert "smoothed" not in note
+        assert "4-frame" in note
+
+    def test_an_explicit_window_on_a_too_short_clip_refuses_first(self):
+        # 5 is already wider than a 4-frame clip, so the caller's own
+        # number is the specific answer.
+        with pytest.raises(HandlerError) as exc:
+            cleanclip._filter_window_note(True, 5, 4)
+        message = str(exc.value)
+        assert "does not use 'window'" in message
+        # ...and it must not name a window that fits, because none does:
+        # "the largest odd window that fits (0)" is a refusal stating
+        # something untrue.
+        assert "window that fits" not in message
+        assert "no window fits a clip this short at all" in message
+        assert "identity" in message
+        assert "filter=false" in exc.value.hint
+
+    def test_the_validator_reports_whether_the_window_was_chosen(self):
+        assert cleanclip._validate_filter(True) == (
+            True, cleanclip.DEFAULT_FILTER_WINDOW, False)
+        assert cleanclip._validate_filter(None) == (
+            True, cleanclip.DEFAULT_FILTER_WINDOW, False)
+        assert cleanclip._validate_filter(False) == (
+            False, cleanclip.DEFAULT_FILTER_WINDOW, False)
+        assert cleanclip._validate_filter({"window": 9}) == (True, 9, True)
+        # a dict that names no window has chosen no window
+        assert cleanclip._validate_filter({}) == (
+            True, cleanclip.DEFAULT_FILTER_WINDOW, False)
+
+
+class TestTheWindowRefusalRunsBeforeTheCheckpoint:
+    """Row 24 is the branch contract's `scene=True` entry for clean_clip -
+    the clip's own length decides it, so it is pinned here with test_clip's
+    FakeCmds rather than headless. What matters is WHERE: after the clip
+    record resolves its frame range, and before the checkpoint or any
+    pass mutates a key.
+    """
+
+    def _rig(self, fake, start, end, monkeypatch):
+        monkeypatch.setattr(cleanclip, "_cmds", lambda: fake)
+        fake.curves["|root|mid.rotateZ"] = "mid_rotZ_crv"
+        fake.keys["|root|mid.rotateZ"] = {float(f): float(f % 3)
+                                          for f in range(start, end + 1)}
+        clip.register_clip(fake, "|root", "walk01", 30, start, end)
+        return fake
+
+    def test_a_window_past_the_clip_refuses_naming_the_clips_length(
+            self, monkeypatch):
+        fake = self._rig(FakeCmds(), 0, 29, monkeypatch)
+        with pytest.raises(HandlerError) as exc:
+            cleanclip.clean_clip({**clean_base(root="root"),
+                                  "filter": {"window": 31}})
+        assert "does not use 'window'" in str(exc.value)
+        assert "30-frame clip" in str(exc.value)
+
+    def test_nothing_was_checkpointed_or_written(self, monkeypatch):
+        fake = self._rig(FakeCmds(), 0, 29, monkeypatch)
+        events = []
+        monkeypatch.setattr(cleanclip.session, "auto_checkpoint",
+                            lambda reason: events.append(reason) or
+                            {"checkpoint_id": "cp"})
+        before = dict(fake.keys["|root|mid.rotateZ"])
+        with pytest.raises(HandlerError, match="does not use 'window'"):
+            cleanclip.clean_clip({**clean_base(root="root"),
+                                  "filter": {"window": 31}})
+        assert events == []
+        assert fake.keys["|root|mid.rotateZ"] == before
+
+    def test_the_widest_fitting_window_is_not_refused(self, monkeypatch):
+        # The negative: 29 on the same 30-frame clip gets PAST this gate
+        # and on into the Maya phase. `clip.measure_clip` has its own
+        # `_cmds()` and this process has no `maya` module, so reaching a
+        # ModuleNotFoundError is exactly the proof that the window gate
+        # let the call through (the same house pattern the headless
+        # refusal tests above use in reverse).
+        self._rig(FakeCmds(), 0, 29, monkeypatch)
+        with pytest.raises(ModuleNotFoundError, match="maya"):
+            cleanclip.clean_clip({**clean_base(root="root"),
+                                  "filter": {"window": 29}})
+
+
 class TestReplaceCut:
     """#796 review round 5 A: both retarget routes call
     `clip.cut_replaced_range` to vacate a re-retargeted clip's old frames,
@@ -407,6 +608,201 @@ class TestFilterPassPartition:
         assert filtered == ["|root|mid.rotateZ"]
         assert any("|root|mid.rotateY" in w and "did NOT land" in w
                    and "locked" in w for w in warnings), warnings
+
+
+class ContactLockCmds(FakeCmds):
+    """test_clip's FakeCmds plus the ONE call shape only the contact-lock
+    pass makes: `setKeyframe` with no `value`, which in Maya keys the
+    plug's CURRENT value (author_clip always has a value, so that fake
+    never needed it and would crash on float(None) here).
+
+    Everything the row is about - a locked plug returning 0 keys, no
+    curve, no error - is inherited unchanged: it is the thing under test.
+
+    Two test-only controls on top:
+
+    * `tracks` - per-joint {frame: [x, y, z]}, so `_sample_track` can read
+      a joint that MOVES. The inherited `xform` answers from `attrs` and
+      ignores time, which makes every track constant, every run the whole
+      clip, and `edge` therefore always 0.
+    * `lost_frames` - frames at which every `setKeyframe` returns 0.
+      SYNTHETIC: no measured Maya mechanism loses a write per FRAME (a
+      lock is per plug). It exists only because the graded claim has a
+      partially-pinned case and there is no other way to reach it.
+    """
+
+    def __init__(self, *args, **kwargs):
+        FakeCmds.__init__(self, *args, **kwargs)
+        self.tracks = {}
+        self.lost_frames = set()
+
+    def xform(self, node, query=False, worldSpace=False, translation=None,
+              **kwargs):
+        if query and node in self.tracks:
+            at = self.tracks[node].get(float(self.time))
+            if at is not None:
+                return list(at)
+        return FakeCmds.xform(self, node, query=query, worldSpace=worldSpace,
+                              translation=translation, **kwargs)
+
+    def setKeyframe(self, node, attribute=None, time=None, value=None):
+        if float(time) in self.lost_frames:
+            return 0
+        if value is None:
+            value = self.attrs.get("%s.%s" % (node, attribute), 0.0)
+        return FakeCmds.setKeyframe(self, node, attribute=attribute,
+                                    time=time, value=value)
+
+
+class TestTheContactLockClaimsOnlyWhatKeyed:
+    """#797 row 39: `_run_contact_lock_pass` discarded setKeyframe's
+    return and then appended "locked contact run frames A-B" no matter
+    what came back.
+
+    MEASURED (#798, evals/clip_edges_probe_798): setKeyframe on a locked
+    plug returns 0 - no curve, no key, no error. So a rigger who locked a
+    leg channel got a clean result claiming the plant was pinned, on a
+    scene where not one key was written. The filter pass one function up
+    already reads that return (`clip.key_landed`); this was the site that
+    never asked.
+    """
+
+    JOINTS = TestSharedGuards.JOINTS
+    CHAIN = ["|root", "|root|mid", "|root|mid|tip"]
+    ANKLE = "|root|mid|tip"
+    PLUGS = ["%s.%s" % (j, a) for j in CHAIN for a in clip.ROTATE_ATTRS]
+
+    def _run(self, fake, monkeypatch, warnings):
+        # The analytic solve needs a real ikHandle; it is #671's, tested
+        # in tests/test_rigging.py and mayapy. What this row is about is
+        # what happens to the keys AFTER it.
+        monkeypatch.setattr(cleanclip.rigging, "solve_ik_chain",
+                            lambda cmds, chain, target: {"warnings": []})
+        cleanclip._run_contact_lock_pass(
+            fake, self.JOINTS, [self.ANKLE], {self.ANKLE: self.CHAIN},
+            0, 5, 30.0, warnings)
+
+    def test_a_run_whose_keys_all_land_is_claimed_as_before(self, monkeypatch):
+        # The fake's joints never move, so the whole 6-frame track reads
+        # as one plant - contact_runs' own low-and-slow rule.
+        fake = ContactLockCmds()
+        warnings = []
+        self._run(fake, monkeypatch, warnings)
+        assert any("locked contact run frames 0-5" in w for w in warnings), \
+            warnings
+        assert not any("did NOT land" in w for w in warnings)
+        # 6 frames x 3 joints x 3 rotate channels
+        assert sum(len(fake.keys[p]) for p in self.PLUGS) == 54
+
+    def test_a_locked_channel_is_named_and_the_lock_is_never_claimed(
+            self, monkeypatch):
+        fake = ContactLockCmds()
+        for plug in self.PLUGS:
+            fake.locked.add(plug)
+        warnings = []
+        self._run(fake, monkeypatch, warnings)
+        assert not any("locked contact run" in w for w in warnings), warnings
+        notes = [w for w in warnings if "did NOT land" in w]
+        assert len(notes) == len(self.PLUGS)
+        assert all("locked" in n for n in notes)
+        assert any("|root|mid|tip.rotateX" in n for n in notes)
+        assert not fake.keys
+
+    def test_one_lost_channel_is_enough_to_drop_the_claim(self, monkeypatch):
+        # A frame is only pinned if the WHOLE solved pose landed on it:
+        # eight of nine channels keyed is a pose that is not the one the
+        # solve produced, and calling that a locked contact is the same
+        # false claim in a smaller size.
+        fake = ContactLockCmds()
+        fake.locked.add("|root|mid|tip.rotateZ")
+        warnings = []
+        self._run(fake, monkeypatch, warnings)
+        assert not any("locked contact run" in w for w in warnings), warnings
+        notes = [w for w in warnings if "did NOT land" in w]
+        assert len(notes) == 1
+        assert "|root|mid|tip.rotateZ" in notes[0]
+        assert "6 frame(s)" in notes[0]
+        # the eight channels that DID key are still keyed - the pass is
+        # reported honestly, not rolled back
+        assert len(fake.keys["|root|mid.rotateZ"]) == 6
+
+    def test_the_note_is_the_one_the_filter_pass_uses(self, monkeypatch):
+        # One wording for one fact (clip._lost_write_note's own rule) -
+        # a second sentence for the same thing is how a reader concludes
+        # they are two problems.
+        fake = ContactLockCmds()
+        fake.locked.add("|root|mid.rotateX")
+        warnings = []
+        self._run(fake, monkeypatch, warnings)
+        note = next(w for w in warnings if "did NOT land" in w)
+        assert note == clip._lost_write_note(
+            "clean_clip's contact-lock pass", "|root|mid.rotateX", 6,
+            clip.swallowed_by(fake, "|root|mid.rotateX"))
+
+    def _eased_rig(self, fake):
+        """A track whose plant sits AWAY from the clip's own bounds, so
+        the pass eases into it and `edge` is non-zero: 8 frames, the foot
+        down (y=0) over 2..5 and up (y=0.5) either side. The constant
+        track every other test in this class uses can only ever produce a
+        run flush against both bounds, where edge is 0 and the eased span
+        and the run are the same frames - the one case where the claim's
+        numbers agree by accident.
+        """
+        down = [(0.5 if f < 2 or f > 5 else 0.0) for f in range(8)]
+        fake.tracks[self.ANKLE] = {float(f): [0.0, down[f], 0.0]
+                                   for f in range(8)}
+        return fake
+
+    def _run_eased(self, fake, monkeypatch, warnings):
+        monkeypatch.setattr(cleanclip.rigging, "solve_ik_chain",
+                            lambda cmds, chain, target: {"warnings": []})
+        cleanclip._run_contact_lock_pass(
+            fake, self.JOINTS, [self.ANKLE], {self.ANKLE: self.CHAIN},
+            0, 7, 30.0, warnings)
+
+    def test_an_eased_run_keys_the_margin_too(self, monkeypatch):
+        fake = self._eased_rig(ContactLockCmds())
+        warnings = []
+        self._run_eased(fake, monkeypatch, warnings)
+        assert any("locked contact run frames 2-5 (eased 2 frame(s) each "
+                   "side)" in w for w in warnings), warnings
+        # the eased extent, not the run: 8 frames x 3 joints x 3 channels
+        assert sum(len(fake.keys[p]) for p in self.PLUGS) == 72
+        assert sorted(fake.keys[self.PLUGS[0]]) == [float(f)
+                                                    for f in range(8)]
+
+    def test_a_partial_eased_run_names_the_span_its_count_belongs_to(
+            self, monkeypatch):
+        # The claim used to name the RUN's frames (2-5, six numbers apart
+        # from the count) beside a denominator counting the EASED span (8)
+        # - two true numbers that cannot both be about the same thing.
+        fake = self._eased_rig(ContactLockCmds())
+        fake.lost_frames = {0.0, 7.0}
+        warnings = []
+        self._run_eased(fake, monkeypatch, warnings)
+        claim = next(w for w in warnings if "locked contact run" in w)
+        assert "frames 2-5" in claim              # the run itself
+        assert "eased 2 frame(s) each side, so frames 0-7" in claim
+        assert "on 6 of those 8 frame(s)" in claim
+        # and the frames that did not take are named with their cause
+        assert len([w for w in warnings if "did NOT land" in w]) == 9
+        assert all("2 frame(s)" in w for w in warnings
+                   if "did NOT land" in w)
+
+    def test_a_joint_with_no_contact_run_still_says_so(self, monkeypatch):
+        # The pre-existing "nothing to lock" path must not have grown a
+        # lost-write note out of nowhere.
+        fake = ContactLockCmds()
+        fake.attrs["|root|mid|tip.translateY"] = 5.0
+        warnings = []
+        monkeypatch.setattr(cleanclip.motionmath, "contact_runs",
+                            lambda track, fps, height: [])
+        monkeypatch.setattr(cleanclip.rigging, "solve_ik_chain",
+                            lambda cmds, chain, target: {"warnings": []})
+        cleanclip._run_contact_lock_pass(
+            fake, self.JOINTS, [self.ANKLE], {self.ANKLE: self.CHAIN},
+            0, 5, 30.0, warnings)
+        assert warnings == ["tip: no contact run detected - nothing to lock"]
 
 
 class TestRetargetedTakesAreSelfContained:

@@ -87,6 +87,13 @@ def _validated_targets(cmds, mesh_long: str, targets,
     for i, entry in enumerate(targets):
         if not isinstance(entry, dict):
             raise HandlerError("targets[%d] must be {name, target_mesh}" % i)
+        # #797 row 40: an unread key on one entry succeeds and does
+        # something else instead of failing - the #764 shape, one level
+        # down from the top-level key guard. Pure (a dict-key check), so
+        # it runs with the rest of this validation, before _cmds() would
+        # matter and well before the checkpoint.
+        require_known_keys(entry, ("name", "target_mesh"),
+                           "create_blendshape targets[%d]" % i)
         name = entry.get("name")
         if (not isinstance(name, str) or not name
                 or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)):

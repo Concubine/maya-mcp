@@ -332,14 +332,154 @@ def test_uv_probe_raising_does_not_crash_an_already_succeeded_recipe(monkeypatch
     assert not any("no UVs" in w for w in result["warnings"])
 
 
-def test_the_file_texture_recipe_does_not_warn(monkeypatch):
+def test_the_file_texture_recipe_does_not_warn(monkeypatch, tmp_path):
+    # The path is a REAL file now (#797 row 13): an absolute path to
+    # nothing is refused up front, the way assign_pbr refuses it, because
+    # Maya renders a missing file as flat colour and says nothing.
+    image = tmp_path / "t.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
     fake = FakeCmds()
     monkeypatch.setattr(texture_recipes, "_cmds", lambda: fake)
     result = texture_recipes.apply_texture_recipe(
         {"mesh": "|torso", "recipe": "file_texture",
-         "params": {"file_path": "C:/t/t.png"}}
+         "params": {"file_path": str(image)}}
     )
     assert result["warnings"] == []
+
+
+class TestTheParamsARecipeActuallyReads:
+    """#797 rows 12-13: a recipe's `params` are per-recipe, and two recipes
+    read none at all.
+
+    `_ramp_gradient` and `_layered_mask` take the `params` argument and
+    never look at it - a caller who passes {"scale": 2} to ramp_gradient
+    gets Maya's default ramp and is told nothing. `_noise_bump` reads
+    {scale, depth} and `_file_texture` reads {file_path}; every other
+    nested key is the #767 defect one level down, where the key is
+    accepted because the TOP-level `params` key is known.
+    """
+
+    def _fake(self, monkeypatch):
+        fake = FakeCmds()
+        monkeypatch.setattr(texture_recipes, "_cmds", lambda: fake)
+        return fake
+
+    def test_ramp_gradient_reads_no_params_at_all(self, monkeypatch):
+        fake = self._fake(monkeypatch)
+        with pytest.raises(HandlerError) as exc:
+            texture_recipes.apply_texture_recipe(
+                {"mesh": "|torso", "recipe": "ramp_gradient",
+                 "params": {"scale": 2}})
+        assert "does not use 'params'" in str(exc.value)
+        assert "ramp_gradient" in str(exc.value)
+        assert fake.created == []
+
+    def test_layered_mask_reads_no_params_at_all(self, monkeypatch):
+        fake = self._fake(monkeypatch)
+        with pytest.raises(HandlerError) as exc:
+            texture_recipes.apply_texture_recipe(
+                {"mesh": "|torso", "recipe": "layered_mask",
+                 "params": {"depth": 1}})
+        assert "does not use 'params'" in str(exc.value)
+        assert "layered_mask" in str(exc.value)
+        assert fake.created == []
+
+    def test_an_empty_params_dict_is_not_a_passed_value(self, monkeypatch):
+        """The wrapper used to send params={} on every call - refusing that
+        would refuse the command itself."""
+        self._fake(monkeypatch)
+        result = texture_recipes.apply_texture_recipe(
+            {"mesh": "|torso", "recipe": "ramp_gradient", "params": {}})
+        assert result["recipe"] == "ramp_gradient"
+
+    def test_params_none_is_not_a_passed_value(self, monkeypatch):
+        self._fake(monkeypatch)
+        result = texture_recipes.apply_texture_recipe(
+            {"mesh": "|torso", "recipe": "layered_mask", "params": None})
+        assert result["recipe"] == "layered_mask"
+
+    def test_a_key_noise_bump_never_reads_is_refused(self, monkeypatch):
+        fake = self._fake(monkeypatch)
+        with pytest.raises(HandlerError) as exc:
+            texture_recipes.apply_texture_recipe(
+                {"mesh": "|torso", "recipe": "noise_bump",
+                 "params": {"scale": 2, "octaves": 3}})
+        assert "does not take" in str(exc.value)
+        assert "octaves" in str(exc.value)
+        assert "noise_bump" in str(exc.value)
+        assert fake.created == []
+
+    def test_a_key_file_texture_never_reads_is_refused(self, monkeypatch):
+        fake = self._fake(monkeypatch)
+        with pytest.raises(HandlerError) as exc:
+            texture_recipes.apply_texture_recipe(
+                {"mesh": "|torso", "recipe": "file_texture",
+                 "params": {"file_path": "x.png", "scale": 2}})
+        assert "does not take" in str(exc.value)
+        assert "scale" in str(exc.value)
+        assert "file_texture" in str(exc.value)
+        assert fake.created == []
+
+    def test_the_keys_a_recipe_does_read_still_work(self, monkeypatch):
+        self._fake(monkeypatch)
+        result = texture_recipes.apply_texture_recipe(
+            {"mesh": "|torso", "recipe": "noise_bump",
+             "params": {"scale": 2.0, "depth": 0.2}})
+        assert len(result["nodes"]) == 2
+
+    def test_params_must_be_an_object(self, monkeypatch):
+        self._fake(monkeypatch)
+        with pytest.raises(HandlerError) as exc:
+            texture_recipes.apply_texture_recipe(
+                {"mesh": "|torso", "recipe": "noise_bump", "params": [2]})
+        assert "params" in str(exc.value)
+
+    def test_an_absolute_file_path_to_nothing_is_refused(self, monkeypatch,
+                                                        tmp_path):
+        """pbr.missing_files's rule, reused: a missing map is not an error
+        in Maya - the file node renders flat and the material merely looks
+        wrong."""
+        fake = self._fake(monkeypatch)
+        absent = tmp_path / "never_baked.png"
+        with pytest.raises(HandlerError) as exc:
+            texture_recipes.apply_texture_recipe(
+                {"mesh": "|torso", "recipe": "file_texture",
+                 "params": {"file_path": str(absent)}})
+        assert "never_baked.png" in str(exc.value)
+        assert fake.created == []
+
+    def test_a_relative_or_udim_path_is_not_second_guessed(self, monkeypatch):
+        self._fake(monkeypatch)
+        for path in ("sourceimages/kit.png", "D:/kit/atlas.<UDIM>.png"):
+            result = texture_recipes.apply_texture_recipe(
+                {"mesh": "|torso", "recipe": "file_texture",
+                 "params": {"file_path": path}})
+            assert result["recipe"] == "file_texture"
+
+    def test_every_recipe_appears_in_every_table(self):
+        """A recipe added to RECIPES but not to RECIPE_PARAM_KEYS would
+        KeyError inside the validator instead of refusing - and one added
+        to the key table but not to _BUILDERS would validate params for a
+        recipe that cannot be built. The four tables are one table."""
+        recipes = set(texture_recipes.RECIPES)
+        assert recipes == set(texture_recipes.RECIPE_PARAM_KEYS)
+        assert recipes == set(texture_recipes._BUILDERS)
+        assert recipes == set(texture_recipes.RECIPE_SLOT)
+        # And the "why" a param-less recipe refuses exists for exactly the
+        # recipes that are param-less - refuse_inert would KeyError, after
+        # deciding to refuse, on any other split.
+        assert set(texture_recipes._PARAMLESS_WHY) == {
+            name for name, keys in texture_recipes.RECIPE_PARAM_KEYS.items()
+            if not keys}
+
+    def test_the_refusal_fires_before_maya_is_imported(self):
+        """#767's proof: no fake is installed here, so anything reaching
+        `_cmds()` raises ModuleNotFoundError instead."""
+        with pytest.raises(HandlerError) as exc:
+            texture_recipes.apply_texture_recipe(
+                {"mesh": "|torso", "recipe": "ramp_gradient",
+                 "params": {"scale": 2}})
+        assert "does not use 'params'" in str(exc.value)
 
 
 class TestTheFakeRefusesWhatMayaRefuses:

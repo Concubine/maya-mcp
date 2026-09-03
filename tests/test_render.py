@@ -132,7 +132,19 @@ class FakeCmds:
                  "defaultArnoldRenderOptions", "defaultArnoldDriver",
                  "hardwareRenderingGlobals")
 
-    def __init__(self, lights=(), geometry=("|ball|ballShape", "|floor|floorShape")):
+    def __init__(self, lights=(), geometry=("|ball|ballShape", "|floor|floorShape"),
+                 arnold_options=True):
+        # mtoa builds `defaultArnoldRenderOptions` LAZILY: on a Maya that has
+        # only just loaded the plugin it does not exist yet, and a setAttr
+        # against it raises. `arnold_options=False` is that cold Maya - the
+        # state in which the AA sample count the caller asked for silently
+        # became Arnold's own default (#797). Modelled here because the fake
+        # used to accept the write unconditionally, so the swallow could not
+        # be seen from a test.
+        self.dg_nodes = set(self._DG_NODES)
+        if not arnold_options:
+            self.dg_nodes.discard("defaultArnoldRenderOptions")
+        self.made_nodes = []
         self.attrs = {
             "defaultRenderGlobals.imageFormat": 7,
             "defaultRenderGlobals.imageFilePrefix": "",
@@ -140,8 +152,9 @@ class FakeCmds:
             "defaultResolution.width": 960,
             "defaultResolution.height": 540,
             "defaultResolution.deviceAspectRatio": 1.777,
-            "defaultArnoldRenderOptions.AASamples": 1,
         }
+        if arnold_options:
+            self.attrs["defaultArnoldRenderOptions.AASamples"] = 1
         self.created = []
         self.deleted = []
         self.hidden = []
@@ -239,7 +252,7 @@ class FakeCmds:
         `finally`, and anything that asks about either afterwards gets this
         rather than a plausible default (#796's blocking-defect class).
         """
-        if str(name) in self._DG_NODES:
+        if str(name) in self.dg_nodes:
             return str(name)
         resolved = self._resolve(name)
         if resolved is None:
@@ -285,7 +298,21 @@ class FakeCmds:
         return []
 
     def objExists(self, name):
+        if str(name) in self.dg_nodes:
+            return True
         return self._resolve(name) is not None
+
+    def createNode(self, node_type, name=None, **kwargs):
+        """Build a DG node. Used for mtoa's lazy options node.
+
+        Registers it, so the setAttr that follows stops raising - the
+        ensure-then-write sequence is only worth anything if the fake can
+        tell "the node was created" from "the write was accepted anyway".
+        """
+        made = name or (node_type + "1")
+        self.made_nodes.append((node_type, made))
+        self.dg_nodes.add(made)
+        return made
 
     def exactWorldBoundingBox(self, *targets, **kwargs):
         """A transform's box INCLUDES its descendants - and, unless
@@ -1705,3 +1732,259 @@ class TestIsolateSparesLights:
         fake = self._fake()
         hidden = render._hide_non_targets(fake, ["|ball"])
         assert hidden == ["|floor|floorShape"]
+
+
+class TestASheetRefusesTheCurrentAngle:
+    """#797 row 21: a sheet places its own camera, so 'current' means nothing.
+
+    _run_shots degrades "current" to three_quarter, and every cell came back
+    labelled "current" - a label naming an angle that was not shot.
+    render_scene's schema promises that degrade (see below); render_sheet's
+    does not, so here the honest answer is a refusal.
+    """
+
+    def test_it_refuses_before_any_maya_call(self, monkeypatch):
+        monkeypatch.setattr(
+            render, "_cmds",
+            lambda: pytest.fail("render_sheet reached Maya despite the "
+                                "inapplicable angle"))
+        with pytest.raises(HandlerError) as exc:
+            render.render_sheet({"subjects": ["|ball"], "angle": "current"})
+        message = str(exc.value)
+        assert "does not use 'angle'" in message, message
+        assert "current" in message, message
+        assert "three_quarter" in exc.value.hint
+
+    def test_a_named_angle_still_renders(self, fake_maya):
+        out = render.render_sheet({"subjects": ["|ball"], "angle": "side"})
+        assert [i["angle"] for i in out["images"]] == ["side"]
+
+
+class TestSamplesUnderHw2:
+    """#797 row 29: hw2 has no AA sample count, and the result said it did.
+
+    _render_frame reads `samples` only on the arnold branch - hw2 draws the
+    viewport's own image - so the value was validated, dropped, and then
+    echoed back in the result. A caller reading `samples: 6` believes the
+    frame was sampled six times, and nothing in the payload could tell them
+    otherwise.
+    """
+
+    def test_hw2_reports_null_and_says_the_count_was_dropped(self, fake_maya):
+        out = render.render_scene(
+            {"angles": ["front"], "renderer": "hw2", "samples": 6})
+        assert out["samples"] is None
+        notes = [w for w in out["warnings"] if "samples" in w]
+        assert len(notes) == 1, out["warnings"]
+        assert "hw2" in notes[0] and "arnold" in notes[0]
+
+    def test_hw2_without_a_request_reports_null_and_says_nothing(
+            self, fake_maya):
+        out = render.render_scene({"angles": ["front"], "renderer": "hw2"})
+        assert out["samples"] is None
+        assert [w for w in out["warnings"] if "samples" in w] == []
+
+    def test_arnold_still_reports_the_count_it_applied(self, fake_maya):
+        out = render.render_scene(
+            {"angles": ["front"], "renderer": "arnold", "samples": 6})
+        assert out["samples"] == 6
+        assert [w for w in out["warnings"] if "samples" in w] == []
+
+    def test_a_sheet_under_hw2_says_it_once(self, fake_maya):
+        out = render.render_sheet(
+            {"subjects": ["|ball", "|floor"], "renderer": "hw2", "samples": 4})
+        assert out["samples"] is None
+        assert len([w for w in out["warnings"] if "samples" in w]) == 1
+
+
+class TestArnoldSamplesReallyReachArnold:
+    """The AA write used to sit in a bare `except: pass`.
+
+    MEASURED: on a Maya that has only just loaded mtoa,
+    `defaultArnoldRenderOptions` does not exist yet - mtoa builds it lazily -
+    so the setAttr raised, was swallowed, and the frame rendered at Arnold's
+    own default while the result reported the caller's number. Same false
+    claim as the hw2 echo above, one layer down.
+    """
+
+    def test_a_cold_mtoa_gets_its_options_node_built(self, monkeypatch,
+                                                     tmp_path):
+        fake = FakeCmds(lights=["|keyLightShape"], arnold_options=False)
+        monkeypatch.setattr(render, "_cmds", lambda: fake)
+        monkeypatch.setattr(render, "_render_frame",
+                            _stub_render_frame(tmp_path, fake))
+        out = render.render_scene(
+            {"angles": ["front"], "renderer": "arnold", "samples": 5})
+        assert ("aiOptions", "defaultArnoldRenderOptions") in fake.made_nodes
+        assert fake.attrs["defaultArnoldRenderOptions.AASamples"] == 5
+        assert out["samples"] == 5
+        assert [w for w in out["warnings"] if "AA sample" in w] == []
+
+    def test_a_count_that_cannot_be_written_is_never_claimed(self, monkeypatch,
+                                                             tmp_path):
+        fake = FakeCmds(lights=["|keyLightShape"], arnold_options=False)
+
+        def _no_options(*args, **kwargs):
+            raise RuntimeError("aiOptions is not a registered node type")
+
+        monkeypatch.setattr(fake, "createNode", _no_options)
+        monkeypatch.setattr(render, "_cmds", lambda: fake)
+        monkeypatch.setattr(render, "_render_frame",
+                            _stub_render_frame(tmp_path, fake))
+        out = render.render_scene(
+            {"angles": ["front"], "renderer": "arnold", "samples": 5})
+        assert out["samples"] is None, "a count that was not applied is a lie"
+        assert len([w for w in out["warnings"] if "AA sample" in w]) == 1
+
+
+class TestCurrentIsLabelledWithWhatWasShot:
+    """#797 row 30: the degrade is promised; the LABEL was not.
+
+    render_scene's schema says "current" falls back to three_quarter
+    offscreen, and _run_shots does exactly that - then labelled the image
+    and its camera_positions entry "current" anyway. The frame, the camera
+    it was shot from, and the name on both have to agree.
+    """
+
+    def test_the_frame_carries_the_angle_it_was_shot_from(self, fake_maya):
+        out = render.render_scene({"angles": ["current"]})
+        assert out["images"][0]["angle"] == "three_quarter"
+        assert out["images"][0]["requested_angle"] == "current"
+        assert out["camera_positions"][0]["angle"] == "three_quarter"
+        assert out["camera_positions"][0]["requested_angle"] == "current"
+        notes = [w for w in out["warnings"] if "three_quarter" in w]
+        assert len(notes) == 1, out["warnings"]
+
+    def test_an_ordinary_angle_carries_no_extra_key(self, fake_maya):
+        out = render.render_scene({"angles": ["side"]})
+        assert out["images"][0]["angle"] == "side"
+        assert "requested_angle" not in out["images"][0]
+        assert "requested_angle" not in out["camera_positions"][0]
+        assert out["warnings"] == []
+
+    def test_the_camera_really_is_the_three_quarter_one(self, fake_maya):
+        current = render.render_scene({"angles": ["current"]})
+        three_q = render.render_scene({"angles": ["three_quarter"]})
+        assert (current["camera_positions"][0]["position"]
+                == pytest.approx(three_q["camera_positions"][0]["position"]))
+
+
+class TestAHideThatRefusesIsNamed:
+    """#797 row 37: `except Exception: continue` after a failed hide.
+
+    The plugwrite guard classifies the refusals it can (a keyed or
+    driven .visibility); anything it cannot lands here. Continuing silently
+    leaves a rival subject in the cell and reports no warning at all - the
+    #640 defect this pass exists to prevent, wearing a different coat.
+    """
+
+    def test_the_shape_that_stayed_in_frame_is_named(self, monkeypatch,
+                                                     tmp_path):
+        fake = FakeCmds(lights=["|keyLightShape"])
+        real_hide = fake.hide
+
+        def _flaky_hide(name):
+            if name.endswith("floorShape"):
+                raise RuntimeError("hide: unknown VP2 refusal")
+            return real_hide(name)
+
+        monkeypatch.setattr(fake, "hide", _flaky_hide)
+        monkeypatch.setattr(render, "_cmds", lambda: fake)
+        monkeypatch.setattr(render, "_render_frame",
+                            _stub_render_frame(tmp_path, fake))
+        out = render.render_scene({"angles": ["front"], "isolate": ["|ball"]})
+        notes = [w for w in out["warnings"] if "floorShape" in w]
+        assert len(notes) == 1, out["warnings"]
+        assert "stays in frame" in notes[0]
+        # and the render still happened - a rival in the cell is a warning,
+        # not a reason to refuse the frame
+        assert len(out["images"]) == 1
+
+    def test_a_sheet_says_it_once_not_once_per_cell(self, monkeypatch,
+                                                    tmp_path):
+        fake = FakeCmds(lights=["|keyLightShape"])
+        real_hide = fake.hide
+
+        def _flaky_hide(name):
+            if name.endswith("floorShape"):
+                raise RuntimeError("hide: unknown VP2 refusal")
+            return real_hide(name)
+
+        monkeypatch.setattr(fake, "hide", _flaky_hide)
+        monkeypatch.setattr(render, "_cmds", lambda: fake)
+        monkeypatch.setattr(render, "_render_frame",
+                            _stub_render_frame(tmp_path, fake))
+        out = render.render_sheet({"subjects": ["|ball", "|floor"]})
+        assert len([w for w in out["warnings"] if "floorShape" in w]) == 1
+
+
+class TestTheColdArnoldOptionsNodeIsNotLeftDirty:
+    """Review round 1 on the cold-mtoa fix: building the node is a WRITE.
+
+    Two ways a perception tool leaked through it:
+
+      * `_RenderGlobalsState` snapshots AASamples before the node exists, so
+        it records None and its restore skips - and the caller's AA count
+        then sat in the user's scene for every render they made afterwards.
+      * the createNode ran before `undoInfo(stateWithoutFlush=False)`, so a
+        no_undo_chunk tool put a node creation in the user's undo queue.
+    """
+
+    def _cold(self, monkeypatch, tmp_path):
+        fake = FakeCmds(lights=["|keyLightShape"], arnold_options=False)
+        monkeypatch.setattr(render, "_cmds", lambda: fake)
+        monkeypatch.setattr(render, "_render_frame",
+                            _stub_render_frame(tmp_path, fake))
+        return fake
+
+    def test_the_fresh_node_keeps_its_own_default_afterwards(self, monkeypatch,
+                                                             tmp_path):
+        fake = self._cold(monkeypatch, tmp_path)
+        real_create = fake.createNode
+
+        def _create_with_arnolds_default(node_type, name=None, **kwargs):
+            made = real_create(node_type, name=name, **kwargs)
+            # A fresh aiOptions carries Arnold's own AA default, not ours.
+            fake.attrs[made + ".AASamples"] = 3
+            return made
+
+        monkeypatch.setattr(fake, "createNode", _create_with_arnolds_default)
+        out = render.render_scene(
+            {"angles": ["front"], "renderer": "arnold", "samples": 7})
+        assert out["samples"] == 7, "the count still has to REACH arnold"
+        assert fake.attrs["defaultArnoldRenderOptions.AASamples"] == 3, (
+            "the render's own AA count outlived it: the state snapshot read "
+            "nothing (no node yet), so the restore has to be handed the "
+            "fresh node's default")
+
+    def test_the_node_is_built_under_the_undo_suppression(self, monkeypatch,
+                                                          tmp_path):
+        """render_scene is no_undo_chunk: every write it makes has to happen
+        with recording OFF, or a perception call leaves a createNode in the
+        user's undo queue."""
+        fake = self._cold(monkeypatch, tmp_path)
+        recording = []
+        real_create = fake.createNode
+
+        def _watch_create(node_type, name=None, **kwargs):
+            recording.append(fake.undo_state)
+            return real_create(node_type, name=name, **kwargs)
+
+        monkeypatch.setattr(fake, "createNode", _watch_create)
+        render.render_scene(
+            {"angles": ["front"], "renderer": "arnold", "samples": 7})
+        assert recording == [False], (
+            "the options node was built while undo recording was %r" % recording)
+
+    def test_a_warm_maya_is_left_exactly_as_it_was(self, monkeypatch, tmp_path):
+        """The ordinary case: the node already exists, the snapshot read the
+        user's count, and nothing new is created."""
+        fake = FakeCmds(lights=["|keyLightShape"])
+        fake.attrs["defaultArnoldRenderOptions.AASamples"] = 2
+        monkeypatch.setattr(render, "_cmds", lambda: fake)
+        monkeypatch.setattr(render, "_render_frame",
+                            _stub_render_frame(tmp_path, fake))
+        render.render_scene(
+            {"angles": ["front"], "renderer": "arnold", "samples": 7})
+        assert fake.made_nodes == []
+        assert fake.attrs["defaultArnoldRenderOptions.AASamples"] == 2

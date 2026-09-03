@@ -425,3 +425,91 @@ class TestTheFakeRefusesWhatMayaRefuses:
         with pytest.raises(HandlerError) as exc:
             _run(curve, names=["|box"], cols=4, rows=4, patch=0)
         assert "mesh" in str(exc.value).lower()
+
+
+class TestTheBranchDropsIt:
+    """#797: a param world-scale mode drops is REFUSED, not silently applied.
+
+    `project="keep"` under world_scale was DESTRUCTIVE, not merely ignored:
+    the world branch box-autoprojects unconditionally, so a caller asking to
+    preserve an authored layout got it overwritten and was told the packing
+    succeeded.
+
+    Every refusal here fires before uv_atlas touches Maya - `_no_maya`
+    replaces `_cmds` with a raiser, so a refusal that slipped back below it
+    fails with that AssertionError instead of a HandlerError.
+    """
+
+    @pytest.fixture
+    def _no_maya(self, monkeypatch):
+        def boom():
+            raise AssertionError(
+                "uv_atlas reached Maya before refusing the inert param")
+
+        monkeypatch.setattr(uvatlas, "_cmds", boom)
+
+    # --- row 8: world_scale box-projects whatever project asked for -------
+
+    @pytest.mark.parametrize("mode", ["keep", "planar"])
+    def test_project_is_refused_under_world_scale(self, _no_maya, mode):
+        with pytest.raises(HandlerError) as exc:
+            uvatlas.uv_atlas({"names": ["|box"], "world_scale": 2.0,
+                              "project": mode})
+        assert "does not use 'project'" in str(exc.value)
+        assert "world_scale" in str(exc.value)
+
+    def test_project_box_is_what_world_mode_does_so_it_stands(self):
+        out = _run(FakeCmds(), names=["|box"], cols=4, rows=4, patch=0,
+                   world_scale=3.0, project="box")
+        assert out["projection"] == "world"
+
+    def test_an_unpassed_project_is_not_a_passed_one(self):
+        """The wrapper sends project=None on every call since #797; keying
+        the refusal on the key rather than the value would refuse every
+        world-scale pack ever made."""
+        out = _run(FakeCmds(), names=["|box"], cols=4, rows=4, patch=0,
+                   world_scale=3.0, project=None)
+        assert out["projection"] == "world"
+
+    # --- the wrapper's new None defaults --------------------------------
+
+    def test_a_null_normalize_still_normalises(self):
+        """`normalize=None` is the wrapper saying the caller said nothing -
+        the isinstance(bool) check would have refused it outright."""
+        fake = FakeCmds()
+        out = _run(fake, names=["|box"], cols=2, rows=2, patch=0,
+                   normalize=None)
+        assert "polyNormalizeUV" in fake.calls
+        assert out["normalized"] is True
+
+    def test_a_null_project_still_box_projects(self):
+        fake = FakeCmds()
+        _run(fake, names=["|box"], cols=2, rows=2, patch=0, project=None)
+        assert any(c.startswith("polyAutoProjection") for c in fake.calls)
+
+    # --- row 10: uv_per_metre is the world-scale density constant ---------
+
+    def test_uv_per_metre_without_world_scale_is_refused(self, _no_maya):
+        with pytest.raises(HandlerError) as exc:
+            uvatlas.uv_atlas({"names": ["|box"], "uv_per_metre": 1.0})
+        assert "does not use 'uv_per_metre'" in str(exc.value)
+        assert "world_scale" in str(exc.value)
+
+    def test_the_normalising_modes_report_no_density_constant(self):
+        """It used to echo autoproj_uv_per_metre(cmds) on every call, world
+        mode or not - a stated texel density for a pack that fitted the mesh
+        to the patch instead, which is a different density per mesh."""
+        out = _run(FakeCmds(linear="m"), names=["|box"], cols=4, rows=4,
+                   patch=0)
+        assert out["uv_per_metre"] is None
+
+    def test_world_mode_reports_the_constant_it_applied(self):
+        out = _run(FakeCmds(linear="m"), names=["|box"], cols=4, rows=4,
+                   patch=0, margin=0.0, world_scale=3.0)
+        assert out["uv_per_metre"] == 100.0
+
+    # --- the result field protocol.md already promised --------------------
+
+    def test_the_result_carries_the_warnings_list_it_documents(self):
+        out = _run(FakeCmds(), names=["|box"], cols=4, rows=4, patch=0)
+        assert out["warnings"] == []

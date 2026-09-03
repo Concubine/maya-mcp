@@ -570,6 +570,48 @@ def test_subdivisions_on_a_platonic_solid_is_refused_not_ignored():
     assert "no subdivision axes" in str(exc.value)
 
 
+def test_divisions_on_a_platonic_solid_is_refused_not_ignored():
+    # #797 row 1, the confirmed instance the whole ticket is named after.
+    # `divisions` was range-checked like every other kind's and then thrown
+    # away, because axes_for_divisions returns () for a platonic solid and
+    # polyPlatonicSolid has no subdivision flag to spend it on. The caller
+    # asked for a denser solid, got the same 20 faces, and was told nothing.
+    for kind, faces in [("octahedron", "8"), ("icosahedron", "20")]:
+        with pytest.raises(HandlerError) as exc:
+            modeling.resolve_subdivisions(kind, {"divisions": 3})
+        message = str(exc.value)
+        assert "create_primitive does not use 'divisions'" in message
+        assert kind in message
+        assert faces in message
+        assert "sculpt_ops" in exc.value.hint
+
+
+def test_a_platonic_part_without_divisions_still_builds():
+    # divisions is optional; only a PASSED one is refused. The default path
+    # must still resolve to the empty axis tuple.
+    assert modeling.resolve_subdivisions("icosahedron", {}) == ()
+    assert modeling.resolve_subdivisions("octahedron", {"divisions": None}) == ()
+
+
+def test_a_parts_divisions_refusal_names_the_part():
+    # assemble shares this resolver and passes `where`; a refusal that did
+    # not carry the prefix would name none of twenty parts.
+    with pytest.raises(HandlerError) as exc:
+        modeling.resolve_subdivisions("icosahedron", {"divisions": 2}, "part 3")
+    assert str(exc.value).startswith("part 3 ")
+    assert "does not use 'divisions'" in str(exc.value)
+
+
+def test_divisions_and_subdivisions_together_still_refuse_first_on_a_platonic():
+    # Two refusals compete on a platonic solid. "not both" is the more
+    # specific complaint about the CALL, so it stays first.
+    with pytest.raises(HandlerError) as exc:
+        modeling.resolve_subdivisions(
+            "icosahedron", {"divisions": 2, "subdivisions": [4, 4]}
+        )
+    assert "not both" in str(exc.value)
+
+
 def test_create_primitive_reports_what_it_actually_built(monkeypatch):
     # divisions=4 on a cylinder means 80 around and 4 along, which the caller
     # cannot see from the call site. The result says so.
@@ -1401,6 +1443,40 @@ def test_remesh_retopo_polyreduce_percentage_is_reduction_amount_not_keep_fracti
     )
     assert result["method"] == "polyReduce"
     assert fake.reduced_percentage == pytest.approx(75.0)
+
+
+def test_remesh_polyremesh_fallback_warns_it_cannot_honour_the_target(monkeypatch):
+    # #797 row 31 (Tier 2, a WARNING not a refusal - target_polycount is
+    # required by the schema, so refusing it would refuse the command).
+    # polyRemesh is called with no target at all: it remeshes to its own
+    # edge length, so the face count that comes back is whatever that
+    # produces. The old code said only "fell back to polyRemesh", which
+    # reads as "same result, different command".
+    fake = _mesh_fake("|blob")
+    fake.polyRemesh = lambda *a, **k: None  # present; polyRetopo still is not
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    _patch_auto_checkpoint(monkeypatch)
+    result = modeling.remesh_retopo(
+        {"mesh": "|blob", "target_polycount": 400, "keep_original": False}
+    )
+    assert result["method"] == "polyRemesh"
+    honoured = [w for w in result["warnings"] if "target_polycount" in w]
+    assert honoured, result["warnings"]
+    assert "400" in honoured[0]
+
+
+def test_remesh_polyretopo_path_says_nothing_about_the_target(monkeypatch):
+    # polyRetopo DOES take targetFaceCount, so the warning must not fire
+    # there - a warning on the branch that honours the param is noise.
+    fake = _mesh_fake("|blob")
+    fake.polyRetopo = lambda *a, **k: None
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    _patch_auto_checkpoint(monkeypatch)
+    result = modeling.remesh_retopo(
+        {"mesh": "|blob", "target_polycount": 400, "keep_original": False}
+    )
+    assert result["method"] == "polyRetopo"
+    assert not any("target_polycount" in w for w in result["warnings"])
 
 
 def test_remesh_retopo_target_at_or_above_current_skips_polyreduce_call(monkeypatch):
