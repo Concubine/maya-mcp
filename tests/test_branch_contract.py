@@ -211,6 +211,11 @@ BRANCHES = [
          params=lambda tmp: {"file": _fbx(tmp), "root": "|pelvis",
                              "clip": "walk", "fps": 30},
          param="fps", words=[".fbx"]),
+    # 43 (#814) - the sculptor is a sphere; rotating it about its centre is inert
+    dict(row=43, command="deform",
+         params={"mesh": "|slab", "deformer": "sculpt",
+                 "params": {"translate": [0, 0.3, 0], "rotate": [45, 30, 0]}},
+         param="rotate", words=["sculpt"]),
     # 26 - an empty target is no target
     dict(row=26, command="capture_turntable",
          params={"target": ""},
@@ -235,7 +240,9 @@ def _label(entry):
 
 
 def test_every_tier_one_row_is_covered():
-    assert {b["row"] for b in BRANCHES} == set(range(1, 29))
+    # rows 1-28 are #797's Tier-1 table; 43 is the sculpt-rotate row #814's
+    # probe settled (numbered after #797's 42-row branch table).
+    assert {b["row"] for b in BRANCHES} == set(range(1, 29)) | {43}
     assert {b["command"] for b in BRANCHES} <= set(HANDLERS)
     assert {b["row"] for b in SCENE} == {22, 24}, (
         "scene rows are tested with their module's fakes: pose_ik in "

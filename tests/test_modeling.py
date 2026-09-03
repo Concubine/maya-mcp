@@ -1771,3 +1771,31 @@ class TestTheFakeRefusesWhatMayaRefuses:
         # rather than filed under a path that no longer resolves.
         assert fake.shapes["|rig|blob"] == ("|blob|blobShape", "mesh")
         assert fake.nodeType("|blob|blobShape") == "mesh"
+
+
+def test_deform_refuses_rotate_on_a_sculpt_before_touching_maya(monkeypatch):
+    """#814 (the #797 probe finally run): the sculptor is a SPHERE, so
+    rotating it about its own centre changes nothing. MEASURED on Maya 2027:
+    vertex positions identical to five decimals under rotate=[45,30,0] and
+    [0,0,90], while the translate control moved them by 3.4 units. The
+    handle's rotate attribute was written and read back, which is exactly
+    the inert-but-accepted shape #797 exists to refuse."""
+    def boom():
+        raise AssertionError("refused after reaching Maya")
+    monkeypatch.setattr(sculpt, "_cmds", boom)
+    with pytest.raises(HandlerError) as exc:
+        sculpt.deform({"mesh": "|slab", "deformer": "sculpt",
+                       "params": {"translate": [0, 0.3, 0], "rotate": [45, 30, 0]}})
+    message = str(exc.value)
+    assert "does not use" in message and "rotate" in message and "sculpt" in message
+    assert "sphere" in message
+    assert "translate" in (exc.value.hint or "")
+
+
+def test_deform_still_takes_rotate_on_a_lattice(monkeypatch):
+    # the refusal is the sculpt branch's alone - a lattice handle really turns
+    fake = FakeCmds(objects={"|col"}, shapes={"|col": ("|col|colShape", "mesh")})
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    out = sculpt.deform({"mesh": "|col", "deformer": "lattice",
+                         "params": {"rotate": [0, 0, 30]}})
+    assert out["deformer_nodes"]

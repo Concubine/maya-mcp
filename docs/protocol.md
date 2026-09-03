@@ -244,6 +244,8 @@ Modeling and sculpting:
 
 **Each `sculpt_ops` op declares the keys it reads** (#797). The four cage ops always did; the eight original ops did not, so a key belonging to a neighbouring op went straight through and the op ran on its own defaults — `displace_noise` with `center`/`radius`/`falloff` reads none of the three and displaces the WHOLE mesh, reporting success. Every op now refuses a foreign key (`sculpt_ops op 'displace_noise' does not take 'center', 'radius'`), and the whole check runs before the auto-checkpoint. `soft_move` and `inflate_region` take `vertex_id` **or** `center`, never both: `vertex_id` resolves the region centre to that vertex's own world position and `center` is never read, so passing both is refused rather than silently centring somewhere else.
 
+**`rotate` on a `sculpt` deformer is refused** (#814, the #797 probe finally run). The sculptor `cmds.sculpt` builds is a sphere, and a sphere turned about its own centre pushes the mesh exactly as before — MEASURED: vertex positions identical to five decimals under `rotate=[45,30,0]` and `[0,0,90]`, while moving `translate` by 0.5 displaced them by 3.4, and the handle's rotate attribute read back exactly as written. Shape a sculpt with `params.translate`, `maxDisplacement` and `dropoffDistance`; `rotate` still turns a lattice or a nonLinear handle.
+
 **A lattice bake with no handle move is refused** (#797). `deform` with `deformer="lattice"`, `delete_history_after=true` and no `params.translate`/`params.rotate` built a lattice, deformed nothing with it (a lattice deforms nothing until its points move), deleted it again and returned `{deformer_nodes: [], baked: true, max_displacement: 0.0}` — a success report for a call in which the mesh was never touched. Move the handle before the bake, or drop `delete_history_after` and shape the lattice live. Relatedly, the "a lattice never warns about zero displacement" exemption now applies only while the lattice SURVIVES: once history is deleted there are no points left to move, so a baked lattice that moved nothing warns like any other deformer.
 
 **`create_curve_form`: `resolution.around` is refused on a sweep that gives `profile_sides`** (#797). A sweep's cross-section ring is `profile_sides` when it is given — that is the number that reaches `.profilePolySides`, and `resolution.around` is read on exactly one branch: the one where `profile_sides` is omitted and a round tube is approximated with as many sides as `around` asks for. A caller who passed both got the n-gon and had their `around` dropped silently. Pass `resolution={"along": N}` alongside `profile_sides` — `along` drives `interpolationSteps` and is read on every sweep branch — or drop `profile_sides` for a round tube of `around` sides. The face bill follows the same rule: `predicted_faces` on a sweep is `along * profile_sides` when the n-gon is given, `along * around` when it is not.
@@ -585,8 +587,10 @@ The chain runs `start..joint`; `start` defaults to two joints above
 `joint` — the classic 2-bone limb (hip for an ankle, shoulder for a
 wrist). `pole` is a world **position** the knee/elbow should face. When
 omitted, a bent chain keeps its own bend plane; a perfectly straight chain
-has no plane, so the fold direction is Maya's guess and a warning says so —
-pass `pole` to make it deterministic (a straight chain is quietly pre-bent
+has no plane of its own, so it folds toward world **+Z** — the ikHandle's
+default pole vector, MEASURED on every run of #814's probe, not a guess — and
+a warning says so; pass `pole` to choose the side (a given pole put the knee
+exactly where it pointed on all four sides tried, over a small pre-bend too) (a straight chain is quietly pre-bent
 a few degrees toward the pole so the RP solver can fold at all; the solve
 overwrites the nudge). A `pole` that lies ON the start→target line is refused: the pole vector is then parallel to the handle vector, so there is no bend plane — Maya builds a degenerate constraint, the pre-bend is skipped, and the straight-chain warning cannot fire because a pole WAS given (#797). "On the line" is measured against the chain's own reach.
 
@@ -872,12 +876,27 @@ connection — instead of misdiagnosing anim-layer/expression sources):
   curve carrying any other value is someone's squash-and-stretch and is
   kept and named; a rig whose only keys are such leftovers no longer
   refuses - it reaps them and says so.
-- `retarget_clip`'s `fps` is refused on the .fbx route (#797): an FBX's own
-  rate is only readable from the scene's time unit after the import, the
-  keyed range is read in THAT unit and the bake unit is set afterwards, so
-  a different `fps` has not been measured to resample correctly. BVH keeps
-  it. Fractional `start`/`end` are rounded to whole source rows, with a
-  warning naming the row used.
+- `retarget_clip`'s `fps` is refused on the .fbx route (#797): the file
+  bakes at its own rate, and a different `fps` has not been measured to
+  resample correctly. BVH keeps it. Fractional `start`/`end` are rounded to
+  whole source rows, with a warning naming the row used.
+- The .fbx route reads the FILE, not the scene (#814 - the route had never
+  run live, and its first run refuted every assumption it was written on).
+  MEASURED on Maya 2027: fbxmaya's default import mode is **merge**, so a
+  file whose joint names are already in the scene - a target rig built from
+  the same names, the ordinary case - wrote its keys straight onto the
+  TARGET RIG and created no joint; the route then refused "imported no
+  joints" with the caller's rig already animated. The import now forces
+  `add` mode and sets the CURRENT namespace for its duration (the file
+  command's `namespace=` flag lands the nodes in `ns1`, outside the reap),
+  and restores both. The import does not change the scene's time unit
+  (`FBXImportSetMayaFrameRate` changed nothing), so a 60 fps take in a
+  24 fps scene sits on fractional frames 0..62.8; the rate is now read from
+  the spacing of the take's own keys, the scene is put in that unit, and
+  the range is read in the file's frames. The importer's unit conversion
+  arrives as a scale on the imported ROOT JOINT (100 for a file declaring
+  metres in a centimetre scene); the source-to-target scale factor
+  MULTIPLIES it rather than replacing it.
 - `retarget_clip` shares the same rules for the channels IT writes (#796):
   the "hand-authored curves" refusal counts clip curves only (a driven key
   on the target no longer masquerades as hand-authored animation and sends

@@ -1080,7 +1080,12 @@ class TestPoseIk:
                                "target": [0.1, 0.6, 0.2]})
         assert out["pole_used"] is None
         assert not any(c[0] == "poleVectorConstraint" for c in fake.calls)
-        assert any("STRAIGHT" in w for w in out["warnings"])
+        straight = [w for w in out["warnings"] if "STRAIGHT" in w]
+        assert straight
+        # #814: MEASURED on Maya 2027 - with no pole the knee of a straight
+        # chain goes to world +Z every time (the ikHandle's default pole
+        # vector), so the warning names that instead of calling it a guess.
+        assert "+Z" in straight[0] and "default pole vector" in straight[0]
 
     def test_straight_chain_with_pole_prebends_the_knee(self, fake):
         self._rig(fake, bent=False)

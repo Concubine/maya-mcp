@@ -1029,10 +1029,18 @@ def solve_ik_plan(cmds, chain: List[str], target: List[float],
         positions, COLLINEAR_RATIO)
     straight = rigmath.chain_deviation(positions) < COLLINEAR_RATIO * reach
     if straight and pole_used is None:
+        # #814 MEASURED (evals/p797_probes.py part A, Maya 2027): with no
+        # pole the knee of a straight vertical chain went to world +Z in
+        # every run - the ikHandle's default pole vector - and a pole on
+        # +Z, -Z, +X or -X put it exactly there, overriding a 0.05 pre-bend
+        # the other way. So the fold side is not a guess; it is a default
+        # the caller did not choose.
         warnings.append(
             "the chain is STRAIGHT and no pole was given - the solver has no "
-            "bend plane, so which way the limb folds is Maya's guess; pass "
-            "pole=[x,y,z], the world position the knee/elbow should face")
+            "bend plane of its own, so the limb folds toward world +Z (the "
+            "ikHandle's default pole vector), whatever side the knee/elbow "
+            "should face; pass pole=[x,y,z], the world position it should "
+            "face, and the fold goes there")
     return {
         "positions": positions,
         "reach": reach,

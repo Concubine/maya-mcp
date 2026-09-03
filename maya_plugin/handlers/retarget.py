@@ -708,6 +708,113 @@ def _set_bake_unit(cmds, bake_fps: int, warnings: List[str]) -> None:
                         "1/%d s" % (prev_unit, unit, bake_fps))
 
 
+def _import_fbx_source(cmds, mel, path: str, ns: str) -> List[str]:
+    """Import `path` so that every node it holds lands in namespace `ns`, as
+    NEW nodes, whatever the scene already contains. Returns the imported
+    joints (long names).
+
+    MEASURED (evals/p797_fbx_probe.py, Maya 2027, #814), against the two
+    assumptions the old block made:
+
+      * fbxmaya's default `FBXImportMode` is **merge**: with the file's
+        joint names already in the scene - the ordinary case, a target rig
+        built by create_skeleton from the same names - the importer wrote
+        all 14,220 keys onto the TARGET RIG's own joints and created no
+        joint at all. The route then refused "imported no joints" with the
+        caller's rig already animated by the file, and the namespace reap
+        below found nothing to reap. `add` mode creates the nodes.
+      * the file command's `namespace=` flag is applied by the importer as
+        its OWN namespace request, so with `ns` already added it lands the
+        nodes in `ns1` - outside what the `finally` deletes. Setting the
+        CURRENT namespace for the duration of the import lands them in `ns`
+        exactly.
+
+    The import mode and the current namespace are both restored on the way
+    out, on the error path too.
+    """
+    before = set(cmds.ls(long=True))
+    prev_mode = mel.eval("FBXImportMode -q")
+    cmds.namespace(add=ns)
+    cmds.namespace(set=ns)
+    try:
+        mel.eval("FBXImportMode -v add")
+        cmds.file(path, i=True, type="FBX", ignoreVersion=True,
+                  preserveReferences=False)
+    finally:
+        cmds.namespace(set=":")
+        if prev_mode:
+            mel.eval("FBXImportMode -v %s" % prev_mode)
+    after = set(cmds.ls(long=True))
+    joints = sorted(n for n in (after - before) if cmds.nodeType(n) == "joint")
+    if not joints:
+        return []
+    # Under ONE group AT THE ORIGIN, like the BVH route's source: the scale
+    # that matches the source to the target is written on the imported
+    # root's PARENT, and a node's own scale does not move its own
+    # translation - MEASURED (#814 gate, second run): with the file's root
+    # joint scaled directly, its children shrank to the target's size while
+    # its hips translation stayed at file scale (97.8 units up). The group
+    # is created EMPTY and the roots parented in, not `cmds.group(roots)`:
+    # that form puts the group's pivot at the members' bounding-box centre,
+    # and the scale then shrank the skeleton in place at world (93, 56,
+    # -187) instead of toward the origin - the target's hips followed it
+    # there (third run). The group lives in `ns`, so the reap takes it.
+    roots = [j for j in joints
+             if not (cmds.listRelatives(j, parent=True, fullPath=True) or [])]
+    group = cmds.group(empty=True, world=True, name="%s:source" % ns)
+    cmds.parent(roots, group)
+    return sorted(cmds.listRelatives(group, allDescendents=True, fullPath=True,
+                                     type="joint") or [])
+
+
+def _scale_source(cmds, node: str, factor: float) -> None:
+    """Scale the imported source skeleton by `factor` ON TOP of whatever
+    scale it already carries.
+
+    MEASURED (#814 gate, first run): fbxmaya applies a file's unit
+    conversion as a scale on the imported ROOT JOINT itself - 100 on every
+    axis for a take declaring metres imported into a centimetre scene, with
+    no parent group. Writing the factor as an ABSOLUTE scale replaced that
+    100 with 0.0102, left the source a hundredth of the target's size, and
+    the HIK reach mapping baked a pelvis path of 73,930 units for a 3.8-unit
+    walk. The BVH route's source has scale 1, so multiplying is identical
+    there.
+    """
+    current = cmds.getAttr(node + ".scale")[0]
+    cmds.setAttr(node + ".scale", current[0] * factor, current[1] * factor,
+                 current[2] * factor)
+
+
+def _fbx_source_fps(times: Sequence[float], current_fps: int) -> int:
+    """The rate an imported FBX take was baked at, read from its own keys.
+
+    MEASURED (#814): fbxmaya does NOT change the scene's time unit on import
+    - a 60fps take imported into a 24fps scene keeps its seconds and lands
+    on fractional frames (0..62.8 for 158 frames), and
+    `FBXImportSetMayaFrameRate -v true` changed nothing here. So the scene
+    unit says nothing about the file; the spacing between consecutive keys,
+    converted to seconds through the CURRENT unit, does. Pure, so the
+    arithmetic is tested without a scene.
+    """
+    ticks = sorted(set(round(float(t), 6) for t in times))
+    if len(ticks) < 2:
+        raise HandlerError(
+            "the FBX take holds a single key time - no frame rate can be "
+            "read from it",
+            hint="a retarget needs a baked take spanning at least two frames")
+    gaps = sorted(b - a for a, b in zip(ticks, ticks[1:]) if b - a > 1e-6)
+    spacing_frames = gaps[len(gaps) // 2]
+    fps = current_fps / spacing_frames
+    nearest = min(clipmath.FPS_UNITS, key=lambda f: abs(f - fps))
+    if abs(fps - nearest) > 0.01 * nearest:
+        raise HandlerError(
+            "the FBX take's keys are spaced for %.3f fps, which is not a "
+            "rate Maya has a time unit for" % fps,
+            hint="one of: %s - re-export the take baked at one of those"
+                 % ", ".join(str(f) for f in sorted(clipmath.FPS_UNITS)))
+    return int(nearest)
+
+
 def _fold_measures(cmds, root_long: str, name: str,
                    warnings: List[str]) -> Dict[str, Any]:
     measures = clip.measure_clip({"root": root_long, "name": name})
@@ -1083,13 +1190,7 @@ def _retarget_fbx(path: str, root_param: str, name: str,
     characters: List[str] = []
     imported_joints: List[str] = []
     try:
-        before = set(cmds.ls(long=True))
-        cmds.namespace(add=ns)
-        cmds.file(path, i=True, namespace=ns, type="FBX",
-                 ignoreVersion=True, preserveReferences=False)
-        after = set(cmds.ls(long=True))
-        imported_joints = sorted(n for n in (after - before)
-                                 if cmds.nodeType(n) == "joint")
+        imported_joints = _import_fbx_source(cmds, mel, path, ns)
         if not imported_joints:
             raise HandlerError(
                 "%r imported no joints" % path,
@@ -1132,19 +1233,26 @@ def _retarget_fbx(path: str, root_param: str, name: str,
             raise HandlerError(
                 "%r's joints carry no keyframes" % path,
                 hint="this FBX has no baked animation to retarget")
-        src_start, src_end = min(times), max(times)
         time_unit = cmds.currentUnit(query=True, time=True)
-        source_fps = _FPS_BY_UNIT.get(time_unit)
-        if source_fps is None:
+        current_fps = _FPS_BY_UNIT.get(time_unit)
+        if current_fps is None:
             raise HandlerError(
-                "the scene's time unit %r after importing %r is not one "
-                "this tool recognizes" % (time_unit, path),
+                "the scene's time unit %r is not one this tool recognizes"
+                % time_unit,
                 hint="one of: %s"
                      % ", ".join(str(f) for f in sorted(clipmath.FPS_UNITS)))
-        # The file's own rate, always: a caller-given fps cannot reach
-        # here (#797 row 25 refuses it in _validate_common), and a branch
-        # that can only take one side is a claim the code does not make.
+        # The file's own rate, read from its keys (#814 - the scene unit
+        # said nothing about it, see _fbx_source_fps). A caller-given fps
+        # cannot reach here (#797 row 25 refuses it in _validate_common).
+        source_fps = _fbx_source_fps(times, current_fps)
         bake_fps = source_fps
+        # Put the scene in the file's unit NOW, so the keyed range below is
+        # read in the file's own frames (Maya keeps the keys' seconds across
+        # the unit change, so they land on whole frames). _set_bake_unit
+        # later in this route finds the unit already set and says nothing.
+        _set_bake_unit(cmds, bake_fps, warnings)
+        times = cmds.keyframe(imported_joints, query=True) or []
+        src_start, src_end = min(times), max(times)
 
         row_start = (_source_row("start", start_param, warnings)
                      if start_param is not None else int(round(src_start)))
@@ -1218,9 +1326,8 @@ def _retarget_fbx(path: str, root_param: str, name: str,
         if abs(scale_factor - 1.0) > 1e-9:
             parents = cmds.listRelatives(imported_joints[0], parent=True,
                                          fullPath=True) or []
-            scale_node = parents[0] if parents else imported_joints[0]
-            cmds.setAttr(scale_node + ".scale", scale_factor, scale_factor,
-                        scale_factor)
+            _scale_source(cmds, parents[0] if parents else imported_joints[0],
+                          scale_factor)
 
         target_start_frame = clipmath.next_start_frame(kept)
         num_bake_frames = row_end - row_start + 1

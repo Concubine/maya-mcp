@@ -1053,3 +1053,150 @@ class TestTheBakeIsAimedAtRotateAndTranslate:
         src = inspect.getsource(retarget)
         assert src.count("cmds.bakeResults(") == 1
         assert src.count("_bake_slot_joints(") >= 3   # def + two routes
+
+
+class TestTheFbxRouteReadsTheFileNotTheScene:
+    """#814 - the .fbx route had never run live. MEASURED (Maya 2027,
+    evals/p797_fbx_probe.py): fbxmaya's default import mode is MERGE, so a
+    file whose joint names are already in the scene writes its keys onto the
+    TARGET RIG and creates nothing; the file command's namespace flag lands
+    the nodes in `ns1`, outside the reap; and the scene's time unit does not
+    follow the file - a 60fps take in a 24fps scene sits on fractional frames
+    0..62.8, and FBXImportSetMayaFrameRate -v true changes nothing.
+    """
+
+    class Mel:
+        def __init__(self):
+            self.mode = "merge"
+            self.calls = []
+
+        def eval(self, cmd):
+            self.calls.append(cmd)
+            if cmd == "FBXImportMode -q":
+                return self.mode
+            if cmd.startswith("FBXImportMode -v "):
+                self.mode = cmd.split()[-1]
+            return None
+
+    class Cmds:
+        """Nodes appear in the CURRENT namespace at import; in merge mode
+        with clashing names nothing appears at all (the measured shape)."""
+
+        def __init__(self, mel):
+            self.mel = mel
+            self.current_ns = ":"
+            self.namespaces = []
+            self.nodes = {"|pelvis": "joint", "|pelvis|L_hip": "joint"}
+            self.import_kwargs = None
+            self.ns_at_import = None
+
+        def ls(self, long=False, **kw):
+            return sorted(self.nodes)
+
+        def nodeType(self, node):
+            return self.nodes[node]
+
+        def namespace(self, add=None, set=None, **kw):
+            if add is not None:
+                self.namespaces.append(add)
+            if set is not None:
+                self.current_ns = set
+
+        def file(self, path, **kw):
+            self.import_kwargs = kw
+            self.ns_at_import = self.current_ns
+            if self.mel.mode != "add":
+                return  # merge: keys land on the existing rig, no new node
+            prefix = "" if self.current_ns == ":" else self.current_ns + ":"
+            self.nodes["|%spelvis" % prefix] = "joint"
+            self.nodes["|%spelvis|%sL_hip" % (prefix, prefix)] = "joint"
+            self.nodes["|%spelvis_rotateX" % prefix] = "animCurveTA"
+
+        def listRelatives(self, node, parent=False, allDescendents=False,
+                          fullPath=True, type=None):
+            if parent:
+                head = node.rsplit("|", 1)[0]
+                return [head] if head else None
+            kids = [n for n in self.nodes if n.startswith(node + "|")
+                    and (type is None or self.nodes[n] == type)]
+            return sorted(kids) or None
+
+        def group(self, empty=False, world=False, name=None):
+            # the handler must ask for an EMPTY group (pivot at the origin),
+            # never the member form whose pivot sits at their bbox centre
+            assert empty, "group(members) puts the pivot at the members' centre"
+            grp = "|" + name
+            self.nodes[grp] = "transform"
+            return grp
+
+        def parent(self, nodes, grp):
+            for node in nodes:
+                for key in [k for k in self.nodes if k == node or k.startswith(node + "|")]:
+                    self.nodes[grp + key] = self.nodes.pop(key)
+
+    def test_import_forces_add_mode_and_the_current_namespace(self):
+        mel, cmds = self.Mel(), self.Cmds(self.__class__.Mel())
+        cmds.mel = mel
+        joints = retarget._import_fbx_source(cmds, mel, "C:/t/walk.fbx", "mocap_src_walk")
+        # grouped under ONE node in the namespace, so the parent-scale path
+        # (and the reap) reach the whole imported skeleton
+        assert joints == ["|mocap_src_walk:source|mocap_src_walk:pelvis",
+                          "|mocap_src_walk:source|mocap_src_walk:pelvis|mocap_src_walk:L_hip"]
+        assert cmds.nodes["|mocap_src_walk:source"] == "transform"
+        assert "namespace" not in cmds.import_kwargs, "the file flag lands nodes in ns1"
+        assert cmds.ns_at_import == "mocap_src_walk"
+        assert cmds.current_ns == ":", "the current namespace is restored"
+        assert mel.mode == "merge", "the user's import mode is restored"
+        assert cmds.namespaces == ["mocap_src_walk"]
+
+    def test_import_restores_mode_and_namespace_when_the_import_raises(self):
+        mel = self.Mel()
+        cmds = self.Cmds(mel)
+
+        def boom(path, **kw):
+            raise RuntimeError("unreadable")
+        cmds.file = boom
+        with pytest.raises(RuntimeError):
+            retarget._import_fbx_source(cmds, mel, "C:/t/walk.fbx", "ns")
+        assert cmds.current_ns == ":" and mel.mode == "merge"
+
+    def test_source_fps_is_read_from_key_spacing_in_the_current_unit(self):
+        # a 60fps take imported into a 24fps scene: keys every 0.4 frames
+        times = [round(i * 0.4, 6) for i in range(158)] * 3   # three curves' worth
+        assert retarget._fbx_source_fps(times, 24) == 60
+        # the same take in a scene already at 60fps: whole frames
+        assert retarget._fbx_source_fps(list(range(158)), 60) == 60
+        # a 30fps take in a 24fps scene
+        assert retarget._fbx_source_fps([i * 0.8 for i in range(40)], 24) == 30
+
+    def test_a_spacing_maya_has_no_unit_for_is_refused_with_the_list(self):
+        with pytest.raises(HandlerError) as exc:
+            retarget._fbx_source_fps([i * (24.0 / 100.0) for i in range(50)], 24)
+        assert "100.000 fps" in str(exc.value)
+        assert "60" in (exc.value.hint or "")
+
+    def test_a_single_key_time_is_refused(self):
+        with pytest.raises(HandlerError):
+            retarget._fbx_source_fps([3.0, 3.0, 3.0], 24)
+
+    def test_the_scale_factor_multiplies_the_importers_unit_scale(self):
+        # MEASURED: fbxmaya leaves scale 100 on the imported root joint for
+        # a metres file in a cm scene; the old absolute write replaced it.
+        class Cmds:
+            def __init__(self):
+                self.scale = (100.0, 100.0, 100.0)
+
+            def getAttr(self, plug):
+                assert plug == "|ns:pelvis.scale"
+                return [self.scale]
+
+            def setAttr(self, plug, *values):
+                assert plug == "|ns:pelvis.scale"
+                self.scale = tuple(values)
+        cmds = Cmds()
+        retarget._scale_source(cmds, "|ns:pelvis", 0.01)
+        assert cmds.scale == pytest.approx((1.0, 1.0, 1.0))
+        # a BVH-route source (scale 1) gets exactly the factor, as before
+        cmds.scale = (1.0, 1.0, 1.0)
+        retarget._scale_source(cmds, "|ns:pelvis", 0.0635)
+        assert cmds.scale == pytest.approx((0.0635, 0.0635, 0.0635))

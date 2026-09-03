@@ -897,6 +897,22 @@ def deform(params: Dict[str, Any]) -> Dict[str, Any]:
             hint="valid params: %s" % ", ".join(sorted(DEFORMER_WHITELIST[deformer])),
         )
     handle_xform = {k: dparams.pop(k) for k in ("translate", "rotate") if k in dparams}
+    if deformer == "sculpt" and "rotate" in handle_xform:
+        # #814 (the #797 probe finally run): the sculptor cmds.sculpt builds
+        # is a SPHERE, so turning it about its own centre presents the same
+        # surface to the mesh. MEASURED on Maya 2027 (evals/p797_probes.py
+        # part B): vertex positions identical to five decimals under
+        # rotate=[45,30,0] and [0,0,90], while moving `translate` by 0.5
+        # displaced them by 3.4 - and the handle's rotate attribute read
+        # back exactly as written, so nothing but the vertices could tell.
+        refuse_inert(
+            "deform", "rotate", "on a sculpt deformer",
+            "the sculptor is a sphere, and a sphere turned about its own "
+            "centre pushes the mesh exactly as before",
+            hint="drop rotate; shape a sculpt with params.translate "
+                 "(where the sphere sits), maxDisplacement and "
+                 "dropoffDistance - a lattice or bend handle does turn",
+        )
     baked = bool(params.get("delete_history_after"))
     if deformer == "lattice" and baked and not handle_xform:
         # #797 row 27. A lattice deforms nothing until its points move, and
