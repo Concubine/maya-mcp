@@ -183,6 +183,12 @@ Scene ops:
 | `parent` | `{ child, parent }` | `{ name, warnings }` |
 | `rename` | `{ name, new_name }` | `{ name, warnings }` |
 | `delete_objects` | `{ names }` | `{ deleted: [...], warnings }` |
+| `combine` | `{ names, name, pivot?, freeze? }` | `{ name, inputs, tris, verts, faces, shells, pivot, pivot_mode, frozen, shading, warnings }` |
+| `assemble` | `{ name, parts: [...], atlas?, combine?, pivot?, pivots?, freeze? }` | `{ objects: [...], parts, tris, outside_patch, atlas, warnings }` |
+
+**`combine` unites `names` into one mesh called `name`** (#803). `pivot` is `center` (bounding-box centre, the default), `origin`, or `keep`; `freeze` (default true) bakes the transform afterwards, and the reported `pivot` is **queried back from Maya after the freeze**, never the value that was written - a freeze used to be reported as the centre it had just thrown away. `name` may be a consumed input's own name (`combine(names=["|body","|arm"], name="body")` hands back `|body`, not `|body_001`): `polyUnite` consumes every input, so the name is claimed once they are gone, the #640 rule `boolean_op` and `etch_text` already follow. `new_name` is accepted as a synonym. `shells` should equal `inputs` - combine does not weld - and `shading` is the one object-level shading group the result carries, with a warning when the inputs wore more than one.
+
+**`assemble` is the flat build loop on the tool surface.** Each entry of `parts` is `{ kind, pos?, dim?, rotate?, patch?, taper?, chunk?, divisions? | subdivisions?, name? }` - a primitive, placed, optionally tapered and given an atlas cell; parts sharing a `chunk` (default: `name`) are united into one object per chunk when `combine` is true (`merge` is a synonym). `atlas` is `{ cols, rows, margin, world_scale, project, normalize }` or null to leave UVs alone; `pivot` is combine's mode and `pivots` is `{ chunk: [x, y, z] }` for an explicit placement per chunk. Every `objects` entry carries `name, parts, tris, verts, faces, shells, pivot, combined`. The #797 refusals and warnings below say which of these a given build actually reads.
 
 ### Resolution: `divisions` is a multiplier, `subdivisions` is a count (#669)
 
