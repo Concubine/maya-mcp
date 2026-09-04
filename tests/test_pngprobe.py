@@ -326,3 +326,57 @@ class TestOpacity:
         out = pngprobe.opacity(str(tmp_path / "nope.png"))
         assert out["blank"] is None
         assert "no file" in out["unavailable_reason"]
+
+
+class TestDominantColour:
+    """#830: a frame VP2 drew before the shading assignment bound comes back
+    flat unassigned-green - a valid PNG, fully opaque, wrong material. It
+    passes `opacity` (not blank) and `uniformity` (thousands of values in a
+    correct frame, so a two-value cap says nothing). What separates them is
+    flatness at ONE exact value: 76-83% of the measured bad frames."""
+
+    GREEN = (0, 208, 57)
+
+    def _flat(self, tmp_path, colour, share, size=32):
+        """A frame that is `share` one colour and the rest a gradient."""
+        rows = []
+        flat_rows = int(size * share)
+        for y in range(size):
+            if y < flat_rows:
+                rows.append([colour + (255,)] * size)
+            else:
+                rows.append([(x * 7 % 256, y * 3 % 256, 40, 255)
+                             for x in range(size)])
+        return _png(tmp_path / "f.png", rows, colour_type=6)
+
+    def test_it_finds_the_flat_colour_and_its_share(self, tmp_path):
+        out = pngprobe.dominant_colour(self._flat(tmp_path, self.GREEN, 0.75))
+        assert out["top_rgb"] == list(self.GREEN)
+        assert 0.6 < out["top_share"] < 0.9
+        assert out["unavailable_reason"] is None
+
+    def test_a_varied_frame_reports_a_small_share(self, tmp_path):
+        out = pngprobe.dominant_colour(self._flat(tmp_path, self.GREEN, 0.0))
+        assert out["top_share"] < 0.25
+
+    def test_transparent_pixels_are_background_not_subject(self, tmp_path):
+        # Half the frame is transparent green: it must not count, or every
+        # capture with a big empty margin would read as one flat colour.
+        size = 32
+        rows = [[(0, 208, 57, 0)] * size for _ in range(size // 2)]
+        rows += [[(200, 10, 10, 255)] * size for _ in range(size // 2)]
+        out = pngprobe.dominant_colour(_png(tmp_path / "t.png", rows,
+                                            colour_type=6))
+        assert out["top_rgb"] == [200, 10, 10]
+        assert out["top_share"] == 1.0
+
+    def test_a_fully_transparent_frame_says_it_could_not_measure(self, tmp_path):
+        rows = [[(0, 208, 57, 0)] * 8 for _ in range(8)]
+        out = pngprobe.dominant_colour(_png(tmp_path / "e.png", rows,
+                                            colour_type=6))
+        assert out["top_rgb"] is None
+        assert "no opaque pixels" in out["unavailable_reason"]
+
+    def test_an_unreadable_file_reports_rather_than_raising(self, tmp_path):
+        out = pngprobe.dominant_colour(tmp_path / "nope.png")
+        assert out["top_rgb"] is None and out["unavailable_reason"]

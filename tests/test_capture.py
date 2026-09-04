@@ -2346,3 +2346,59 @@ class TestIsolateBlankIsToldApartFromAnEmptyScene:
         note = " ".join(result["warnings"])
         assert "BLANK" in note
         assert "825" not in note
+
+
+class TestAFrameWithUnboundShadersSaysSo:
+    """#830: the capture flushes a draw so this should not happen - but a
+    mitigation is not a proof, and the failure it prevents is a picture that
+    lies with a plain success: real geometry, real opaque pixels, the wrong
+    material. Measured live: a bad frame is 76-83% exactly RGB 0,208,57."""
+
+    def _shot(self, rgb, share):
+        return {"png_b64": "ZmFrZQ==", "camera_position": [0, 0, 1],
+                "camera_rotation": [0, 0, 0], "camera": "|cam", "blank": False,
+                "blank_unmeasurable": None,
+                "dominant": {"top_rgb": rgb, "top_share": share,
+                             "sampled": 900, "unavailable_reason": None}}
+
+    def test_a_frame_full_of_the_placeholder_is_named(self):
+        notes = capture.unbound_shader_warnings(self._shot([0, 208, 57], 0.83),
+                                                "front")
+        assert len(notes) == 1
+        assert "front is 83%" in notes[0]
+        assert "unassigned-shader green" in notes[0]
+        assert "#830" in notes[0]
+
+    def test_it_offers_the_innocent_reading_too(self):
+        # A material really can be that green. The note must not accuse.
+        note = capture.unbound_shader_warnings(self._shot([0, 208, 57], 0.83),
+                                               "front")[0]
+        assert "material really is that flat green" in note
+        assert "again" in note
+
+    def test_a_correctly_shaded_frame_says_nothing(self):
+        assert capture.unbound_shader_warnings(
+            self._shot([189, 0, 17], 0.7), "front") == []
+
+    def test_a_trace_of_that_green_is_not_worth_a_warning(self):
+        # A small green object in an otherwise correct frame.
+        assert capture.unbound_shader_warnings(
+            self._shot([0, 208, 57], 0.04), "front") == []
+
+    def test_an_unmeasurable_frame_is_not_accused(self):
+        shot = self._shot(None, None)
+        shot["dominant"]["unavailable_reason"] = "no file"
+        assert capture.unbound_shader_warnings(shot, "front") == []
+        assert capture.unbound_shader_warnings({"blank": False}, "front") == []
+
+    def test_both_capture_paths_carry_the_note(self, monkeypatch):
+        monkeypatch.setattr(capture, "ensure_viewport_realized", lambda: None)
+        monkeypatch.setattr(
+            capture, "_capture_one",
+            lambda *a, **k: self._shot([0, 208, 57], 0.8))
+        viewport = capture.capture_viewport({"angles": ["front"]})
+        assert any("unassigned-shader green" in w
+                   for w in viewport["warnings"])
+        turn = capture.capture_turntable({"n_frames": 2})
+        assert sum(1 for w in turn["warnings"]
+                   if "unassigned-shader green" in w) == 2

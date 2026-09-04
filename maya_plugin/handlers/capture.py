@@ -311,6 +311,42 @@ def ensure_viewport_realized() -> Optional[str]:
     return None
 
 
+# What VP2 draws for a shape whose shading assignment has not bound yet.
+# MEASURED exactly (#830): a bad frame is 76-83% this one flat value, where a
+# correctly shaded frame spreads across its lighting ramp and tops out at the
+# background.
+UNASSIGNED_GREEN = [0, 208, 57]
+# A quarter of the sampled subject. The measured failure is three times this;
+# the margin is for a frame where the subject only partly fills the shot.
+_UNASSIGNED_SHARE = 0.25
+
+
+def unbound_shader_warnings(shot: Dict[str, Any], label: str) -> List[str]:
+    """Say it out loud when a frame is mostly Maya's unassigned-shader green.
+
+    The capture flushes a draw before every grab so this should not happen
+    (#830) - but that flush is a MITIGATION for one known VP2 path, not a
+    proof, and the failure it prevents is a picture that lies with a plain
+    success: real geometry, real opaque pixels, the wrong material. #765's
+    rule is that such a frame gets named, so this is the backstop for the day
+    the flush is not enough.
+
+    Never a refusal, and it says what else it could be: a material really can
+    be that exact green, and the caller is the one who knows which.
+    """
+    dominant = (shot.get("dominant") or {})
+    rgb, share = dominant.get("top_rgb"), dominant.get("top_share")
+    if rgb != UNASSIGNED_GREEN or not share or share < _UNASSIGNED_SHARE:
+        return []
+    return ["%s is %.0f%% Maya's unassigned-shader green (RGB %d,%d,%d), "
+            "which is what VP2 draws for a shape it rendered before the "
+            "shading assignment bound (maya-mcp #830). This capture flushes a "
+            "draw to prevent exactly that, so either the flush did not take "
+            "here or the material really is that flat green - shooting the "
+            "frame again tells the two apart."
+            % (label, 100 * share, rgb[0], rgb[1], rgb[2])]
+
+
 def blank_warnings(shot: Dict[str, Any], label: str) -> List[str]:
     """Say it out loud when a frame drew nothing (#765).
 
@@ -698,6 +734,7 @@ def capture_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
         images.append({"angle": angle, "png_b64": shot["png_b64"],
                        "blank": shot.get("blank")})
         warnings.extend(blank_warnings(shot, angle))
+        warnings.extend(unbound_shader_warnings(shot, angle))
         # Deduped: the unlit note carries no label and is identical on every
         # frame of the call, while the framing and size notes name theirs.
         for note in frame_warnings(shot, angle, resolution):
@@ -795,6 +832,7 @@ def capture_turntable(params: Dict[str, Any]) -> Dict[str, Any]:
         )
         label = "azimuth %.0f" % azimuth
         warnings.extend(blank_warnings(shot, label))
+        warnings.extend(unbound_shader_warnings(shot, label))
         for note in frame_warnings(shot, label, resolution):
             if note not in warnings:
                 warnings.append(note)
@@ -1185,14 +1223,24 @@ def _capture_one(
         cmds.modelEditor(panel, edit=True, **editor_kwargs)
         cmds.setAttr("hardwareRenderingGlobals.ssaoEnable", buffer == "ssao")
 
-        if isolate:
-            # VP2 builds a shape's isolate-mode render items lazily, and their
-            # first draw can precede the shading-group binding — a shape never
-            # drawn under this isolate renders flat unassigned-green for one
-            # frame (verified live on Maya 2027: first capture green, second
-            # correct). Flush one full draw so the playblast grabs bound
-            # materials.
-            cmds.refresh(force=True)
+        # VP2 builds a shape's render items lazily, and their first draw can
+        # precede the shading-group binding: a shape VP2 has not drawn since
+        # the assignment renders flat unassigned-green (measured: exactly RGB
+        # 0,208,57) for ONE frame, and the frames after it in the same call
+        # are correct. Flush one full draw so the playblast grabs bound
+        # materials.
+        #
+        # This used to be scoped to `if isolate:`, where it was first found.
+        # #830 measured the same failure with no isolate at all - a 28-mesh
+        # scene, freshly assigned, reproduced it 3 times out of 3 - and the
+        # scoping is why an agent building a prop got a capture that lied
+        # about its materials with a plain success. It has to sit HERE,
+        # after the panel is configured and immediately before the grab: the
+        # same refresh issued from an earlier command does not help (measured,
+        # 3/3 still green), because the draw that matters is the one this
+        # panel state provokes. It costs 2-4 ms, measured on a 160k-face
+        # scene, which is the whole reason there is nothing to trade off.
+        cmds.refresh(force=True)
 
         png_bytes, opacity = _grab_pixels(cmds, panel, resolution)
         isolate_view_failed = None
@@ -1213,6 +1261,12 @@ def _capture_one(
             "camera": camera_long,
             "blank": opacity.get("blank"),
             "blank_unmeasurable": opacity.get("unavailable_reason"),
+            # The colour census, for unbound_shader_warnings (#830). Measured
+            # in _grab_pixels and forgotten here in the first cut, which is
+            # #757 one layer down: the guard ran on a key nothing set, so a
+            # frame that WAS the placeholder green passed in silence and only
+            # the live gate noticed.
+            "dominant": opacity.get("dominant"),
             # What this frame did NOT do, for frame_warnings above.
             "drawn_size": opacity.get("drawn_size"),
             "unlit": unlit,
@@ -1308,6 +1362,10 @@ def _grab_pixels(cmds, panel: str, resolution: int):
                 hint="make sure a viewport is visible and not minimized, then retry",
             )
         opacity = dict(pngprobe.opacity(path))
+        # Same reason as drawn_size below: a per-frame measurement of this
+        # file, taken while the file exists. #830 reads it to tell an
+        # unbound-shader frame from a correct one.
+        opacity["dominant"] = pngprobe.dominant_colour(path)
         # Carried in the opacity dict rather than as a third return value:
         # it is a per-frame MEASUREMENT of the file, exactly like `blank`,
         # and every stand-in for this function returns the pair. Only set

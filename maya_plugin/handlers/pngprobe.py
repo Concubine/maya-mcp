@@ -249,3 +249,63 @@ def opacity(path) -> Dict[str, Any]:
                     "unavailable_reason": "%s: %s" % (type(exc).__name__, exc)}
     return {"blank": True, "opaque_found": False, "scanned": width * height,
             "unavailable_reason": None}
+
+
+# Every Nth pixel of every Nth row for the colour census below. The thing it
+# looks for covers 76% of the frame when it happens (measured, #830), so a
+# 1-in-64 sample settles it; the point of sampling at all is that this runs on
+# EVERY captured frame, unlike the blank walk which only pays in the rare case.
+_CENSUS_STEP = 8
+
+
+def dominant_colour(path) -> Dict[str, Any]:
+    """The most common opaque RGB in a frame, and what share of it that is.
+
+    Exists for #830: a shape VP2 draws before its shading assignment has bound
+    comes back flat unassigned-green, a valid PNG full of opaque pixels that
+    passes every other check this module makes. `opacity` cannot see it - the
+    frame is not blank - and `uniformity` cannot either, since it stops at two
+    distinct values and a lit correct frame has thousands.
+
+    What separates them is FLATNESS at one exact value: the measured bad frame
+    was 76% a single RGB, where a correctly shaded one spreads across the
+    lighting ramp. Reported as a measurement, never a verdict; the caller
+    decides what a given colour means.
+
+    Never raises - an unreadable file reports top_rgb None with a reason.
+    """
+    path = str(path)
+    if not os.path.isfile(path):
+        return {"top_rgb": None, "top_share": None, "sampled": 0,
+                "unavailable_reason": "no file at %s" % path}
+    try:
+        width, height, _bit_depth, _colour_type, stride, idat = (
+            _read_header_and_idat(path))
+        raw = zlib.decompress(idat)
+    except Exception as exc:  # noqa: BLE001 - any read failure is reportable
+        return {"top_rgb": None, "top_share": None, "sampled": 0,
+                "unavailable_reason": "%s: %s" % (type(exc).__name__, exc)}
+
+    counts: Dict[tuple, int] = {}
+    sampled = 0
+    try:
+        for index, row in enumerate(_unfilter_rows(raw, width, height, stride)):
+            if index % _CENSUS_STEP:
+                continue
+            for x in range(0, width, _CENSUS_STEP):
+                base = x * stride
+                if stride == 4 and row[base + 3] <= _ALPHA_FLOOR:
+                    continue  # background, not subject
+                rgb = tuple(row[base:base + 3])
+                counts[rgb] = counts.get(rgb, 0) + 1
+                sampled += 1
+    except Exception as exc:  # noqa: BLE001 - any read failure is reportable
+        return {"top_rgb": None, "top_share": None, "sampled": sampled,
+                "unavailable_reason": "%s: %s" % (type(exc).__name__, exc)}
+
+    if not sampled:
+        return {"top_rgb": None, "top_share": None, "sampled": 0,
+                "unavailable_reason": "no opaque pixels sampled"}
+    top_rgb, top_n = max(counts.items(), key=lambda kv: kv[1])
+    return {"top_rgb": list(top_rgb), "top_share": top_n / sampled,
+            "sampled": sampled, "unavailable_reason": None}

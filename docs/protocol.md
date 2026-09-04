@@ -373,6 +373,18 @@ So the note reports **across calls** rather than asserting inside one, and each 
 
 The `show()` itself is retried on every capture regardless, because that is #765's protection and it costs nothing. A window that was never hidden is neither shown nor mentioned. Gate: `evals/realized_note_live.py` (25/25), which forces both outcomes — the undone one with a one-shot event filter that hides the window one event-loop turn after it is shown.
 
+### A frame can also draw the WRONG MATERIAL, and now says so (#830)
+
+A blank frame is not the only picture that lies. Reported by an agent modelling a prop, then reproduced here: the **first frame of a capture call** came back flat green — real geometry, fully opaque, plain success, the wrong material — while the later frames of the *same* call were correct.
+
+The cause is VP2 building a shape's render items lazily: a shape it has not drawn since the shading assignment renders as Maya's unassigned-shader placeholder, measured as **exactly RGB (0, 208, 57)** covering 76–83% of the frame. `capture.py` already knew this failure and flushed a draw for it — but only inside `if isolate:`, where it was first found. Three measurements settled the fix:
+
+- it reproduces with **no isolate at all**, 3 times out of 3, on a 28-mesh scene freshly assigned (the same recipe with 3 meshes never reproduced it — scene size matters);
+- the same `cmds.refresh(force=True)` issued from an **earlier command does not help** (3/3 still green). It has to happen after the capture has configured the panel and immediately before the grab — the draw that matters is the one that panel state provokes;
+- it costs **2–4 ms**, measured on a 160k-face scene. There was never a trade-off worth protecting.
+
+So the flush is unconditional. And because a mitigation is not a proof, every frame now carries a colour census (`pngprobe.dominant_colour`, sampled 1-in-64) and a frame that is **still** ≥25% that exact green is **named in `warnings`** — never refused, and the note offers the innocent reading, because a material really can be that flat green and only the caller knows. That is #765's rule one level up: a picture that lies must not come back as a plain success.
+
 The blank report remains the backstop for every other cause, including ones nobody has met yet.
 
 `render_scene` is the second eye. `capture_viewport` reads the VP2 viewport, so
