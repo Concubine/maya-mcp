@@ -70,7 +70,26 @@ Failure — tracebacks are sacred, never truncated:
 - **Undo.** Every mutating command runs inside one `undoInfo` chunk = one undo
   step. Read-only perception commands (`capture_viewport`) suppress undo
   recording (`stateWithoutFlush`) so their internal churn never lands on the
-  undo queue — undo after a capture reverts the last real edit.
+  undo queue — undo after a capture reverts the last real edit. MEASURED for
+  the first time in #820 (Maya 2027): the chunking holds for every mutating
+  command tried, the auto-checkpoint adds no step, and a capture adds none —
+  but Maya's OWN callbacks push entries that change nothing
+  (`selectionMaskResetAll` after any call that touched the selection,
+  `hikDefinitionFileNewCallback;` after a new file, and a nameless entry
+  `new_scene` leaves at the bottom), and they land AFTER the chunk closes, once
+  Maya goes idle between requests. `undo`/`redo` step over those without
+  counting them (reported in `skipped`) and stop on the queue-empty query,
+  because `cmds.undo()` on an empty queue does not raise — the old handler
+  counted attempts, so `undo` after `new_scene` reported one step undone.
+  Two more measured facts shape the plugin itself: a deferred callback runs
+  inside whatever chunk opens next, so the plugin flushes Maya's idle events
+  before every chunk (a query-only call can no longer close a non-empty
+  chunk that undo counts as a step); and **a plugin load flushes the undo
+  queue** — Maya's deferred autoloads take the loaded count from 16 to 53 in
+  the first ~7 s after userSetup, and every chunk recorded before that was
+  gone — so `start_server` binds the port only once the plugin count has held
+  still for 1.5 s (~20 s after launch on this machine). A listening port now
+  means Maya is safe to edit.
 
 ### The unknown-key contract
 
@@ -159,8 +178,8 @@ Session safety:
 |---|---|---|
 | `checkpoint` | `{ label }` | `{ checkpoint_id, path }` |
 | `restore_checkpoint` | `{ checkpoint_id \| path }` | `{ restored, path, pre_restore_checkpoint, pre_restore_path }` |
-| `undo` | `{ steps? }` | `{ undone, requested }` |
-| `redo` | `{ steps? }` | `{ redone, requested }` |
+| `undo` | `{ steps? }` | `{ undone, requested, skipped, queue_empty }` |
+| `redo` | `{ steps? }` | `{ redone, requested, skipped, queue_empty }` |
 | `new_scene` | `{ confirm, linear_unit? }` | `{ new_scene: true, pre_checkpoint, pre_checkpoint_path, units }` |
 | `open_scene` | `{ path, confirm? }` | `{ opened, pre_checkpoint, pre_checkpoint_path }` |
 | `save_scene` | `{ path? }` | `{ path }` |

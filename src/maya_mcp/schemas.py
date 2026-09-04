@@ -158,6 +158,15 @@ class UndoResult(BaseModel):
     undone: int = 0
     redone: int = 0
     requested: int
+    skipped: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Maya's own no-op queue entries stepped over without counting "
+            "(selectionMaskResetAll, hikDefinitionFileNewCallback, the "
+            "nameless entry new_scene leaves) - measured, they change nothing."))
+    queue_empty: bool = Field(
+        default=False,
+        description="True when nothing is left to undo (or redo) afterwards.")
 
 
 class NewSceneResult(BaseModel):

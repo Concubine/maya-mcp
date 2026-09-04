@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any, Dict, Optional
+from typing import List, Any, Dict, Optional
 
 from ..dispatcher import HandlerError, refuse_inert, require_known_keys
 from . import ledger, units
@@ -246,18 +246,75 @@ UNDO_KEYS = ("steps",)
 UNDO_SYNONYMS = {"count": "steps"}
 
 
+# Entries Maya's OWN callbacks push onto the undo queue that change nothing in
+# the scene - MEASURED (#820, evals/undo_probe_820b.py, Maya 2027):
+#   * "selectionMaskResetAll" - the deferred selection-mask callback, pushed
+#     after any call that touched the selection (most tools do), once Maya
+#     goes idle - i.e. between an agent's requests;
+#   * "hikDefinitionFileNewCallback;" - HumanIK's new-file callback;
+#   * "" - a nameless entry new_scene leaves at the bottom of the queue
+#     (never popped: an empty name is how the walk recognises the end).
+# They land AFTER a tool's chunk closes - the plugin flushes Maya's pending
+# idle events BEFORE it opens a chunk (maya_mcp_plugin._undo_hooks), so a
+# callback never runs INSIDE a chunk and turns a query into a "step" - and
+# "one tool call = one undo step" holds only if undo/redo step over them
+# without counting them. Undoing one changed no object in any measurement
+# (the probe walks the queue and checks).
+NO_OP_UNDO_ENTRIES = frozenset({"selectionMaskResetAll",
+                                "hikDefinitionFileNewCallback;"})
+# Two more families, seen in the boot window and after it: Maya's deferred
+# plugin autoloads ('autoLoadPlugin("", "MayaMuscle", "MayaMuscle")') and
+# Arnold's deferred registration ('mtoa.cmds.registerArnoldRenderer._register').
+# A plugin LOAD also flushes the whole queue - see maya_mcp_plugin's startup
+# note - which is why the server waits for the autoloads before it listens.
+NO_OP_UNDO_PREFIXES = ("autoLoadPlugin(", "mtoa.")
+
+
+def is_no_op_entry(name: str) -> bool:
+    name = (name or "").strip()
+    return name in NO_OP_UNDO_ENTRIES or name.startswith(NO_OP_UNDO_PREFIXES)
+
+
+def _walk_queue(cmds, steps: int, name_flag: str, step,
+                skipped: List[str]) -> int:
+    """Perform `steps` REAL undo/redo steps, stepping over Maya's no-op
+    entries, and stop at the end of the queue.
+
+    The end is an EMPTY NAME, never the `undoQueueEmpty` /
+    `redoQueueEmpty` flag: MEASURED (#820), that flag reads True with
+    entries still on the queue once Maya has processed idle events between
+    requests - the first gate run stopped on it with a cube still standing.
+    The queue's bottom is a nameless entry `new_scene` leaves, and the name
+    query answers "" for it and for a truly empty queue alike; neither is a
+    step, so both end the walk. cmds.undo() / cmds.redo() on an empty queue
+    do NOT raise (measured - they return None / the linear unit), so nothing
+    else could stop it.
+    """
+    done = 0
+    while done < steps:
+        head = cmds.undoInfo(query=True, **{name_flag: True}) or ""
+        if head == "":
+            break
+        step()
+        if is_no_op_entry(head):
+            skipped.append(head)
+            continue
+        done += 1
+    return done
+
+
+def _queue_end(cmds, name_flag: str) -> bool:
+    return (cmds.undoInfo(query=True, **{name_flag: True}) or "") == ""
+
+
 def undo(params: Dict[str, Any]) -> Dict[str, Any]:
     require_known_keys(params, UNDO_KEYS, "undo", UNDO_SYNONYMS)
     cmds = _cmds()
     steps = _steps(params)
-    done = 0
-    for _ in range(steps):
-        try:
-            cmds.undo()
-        except RuntimeError:
-            break  # queue exhausted
-        done += 1
-    return {"undone": done, "requested": steps}
+    skipped: List[str] = []
+    done = _walk_queue(cmds, steps, "undoName", cmds.undo, skipped)
+    return {"undone": done, "requested": steps, "skipped": skipped,
+            "queue_empty": _queue_end(cmds, "undoName")}
 
 
 undo.no_undo_chunk = True
@@ -275,14 +332,10 @@ def redo(params: Dict[str, Any]) -> Dict[str, Any]:
     require_known_keys(params, REDO_KEYS, "redo", REDO_SYNONYMS)
     cmds = _cmds()
     steps = _steps(params)
-    done = 0
-    for _ in range(steps):
-        try:
-            cmds.redo()
-        except RuntimeError:
-            break
-        done += 1
-    return {"redone": done, "requested": steps}
+    skipped: List[str] = []
+    done = _walk_queue(cmds, steps, "redoName", cmds.redo, skipped)
+    return {"redone": done, "requested": steps, "skipped": skipped,
+            "queue_empty": _queue_end(cmds, "redoName")}
 
 
 redo.no_undo_chunk = True

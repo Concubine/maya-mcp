@@ -31,19 +31,18 @@ class FakeCmds:
         self.new_calls = 0
         self.undo_calls = 0
         self.redo_calls = 0
-        # Raise RuntimeError after N successful steps, which is what both
-        # handlers are written against ("except RuntimeError: break").
-        #
-        # UNMEASURED, and deliberately not flipped here: nobody has checked
-        # whether real cmds.undo() on an empty queue RAISES or merely prints
-        # "// Warning: There are no more commands to undo". If it warns, both
-        # handlers over-report - undo({"steps": 5}) on an empty queue would
-        # return undone=5. Modelling that outcome here would be asserting a
-        # failure no one has seen (the #796 round-4 pairBlend mistake), so
-        # this fake keeps the measured-by-nobody-but-believed-by-the-handler
-        # behaviour and the question is carried in the ticket instead.
-        self.undo_fail_after = None
-        self.redo_fail_after = None
+        # The undo queue as Maya keeps it, bottom to top, by entry NAME - and
+        # the answer to the question the previous version of this comment
+        # refused to guess. MEASURED (#820, evals/undo_probe_820b.py, Maya
+        # 2027): cmds.undo() on an EMPTY queue does NOT raise - it returns
+        # None (redo returns the linear unit) - so the old "except
+        # RuntimeError: break" was dead code and both handlers counted
+        # attempts: undo after new_scene reported undone=1. Maya's own
+        # callbacks also push entries that change nothing
+        # (selectionMaskResetAll, hikDefinitionFileNewCallback;, and a
+        # nameless "" entry new_scene leaves), AFTER a tool's chunk closes.
+        self.undo_queue = []
+        self.redo_queue = []
         self.unit_preference = "m"  # what a new scene comes up in
         self.linear = "m"  # a session left in metres, as an eval can leave it
         self.unit_set_calls = []
@@ -116,19 +115,33 @@ class FakeCmds:
             "unmodelled workspace flag: %r" % (sorted(set(kw) - {"query", "rootDirectory"}),))
         return self._tmp
 
+    def undoInfo(self, query=False, undoQueueEmpty=False, redoQueueEmpty=False,
+                 undoName=False, redoName=False, **kw):
+        assert query, "this fake models the queries only"
+        if undoQueueEmpty:
+            return not self.undo_queue
+        if redoQueueEmpty:
+            return not self.redo_queue
+        if undoName:
+            return self.undo_queue[-1] if self.undo_queue else ""
+        if redoName:
+            return self.redo_queue[-1] if self.redo_queue else ""
+        raise AssertionError("unexpected undoInfo query %r" % (kw,))
+
     def undo(self):
-        if self.undo_fail_after is not None and self.undo_calls >= self.undo_fail_after:
-            raise RuntimeError("nothing to undo")
+        # Measured: no raise on an empty queue, just None.
         self.undo_calls += 1
+        if not self.undo_queue:
+            return None
+        self.redo_queue.append(self.undo_queue.pop())
+        return None
 
     def redo(self):
-        # #799: symmetric with undo. `redo` that can never fail is an
-        # answers-anything surface - it made session.redo's whole
-        # queue-exhausted branch unreachable, which is why redo had no test
-        # in this file at all while undo had two.
-        if self.redo_fail_after is not None and self.redo_calls >= self.redo_fail_after:
-            raise RuntimeError("nothing to redo")
         self.redo_calls += 1
+        if not self.redo_queue:
+            return "centimeter"   # measured: cmds.redo() on empty answers this
+        self.undo_queue.append(self.redo_queue.pop())
+        return None
 
 
 @pytest.fixture
@@ -368,9 +381,63 @@ class TestAPathNamesItsOwnCheckpoint:
 
 
 def test_undo_counts_steps_and_stops_at_queue_end(fake):
-    fake.undo_fail_after = 2
+    fake.undo_queue = ["maya-mcp", "maya-mcp"]
     result = session.undo({"steps": 5})
-    assert result == {"undone": 2, "requested": 5}
+    assert result == {"undone": 2, "requested": 5, "skipped": [], "queue_empty": True}
+    assert fake.undo_calls == 2, "an empty queue is not undone into"
+
+
+def test_undo_on_an_empty_queue_calls_nothing_and_says_zero(fake):
+    # #820: the old handler reported undone=1 after new_scene, because
+    # cmds.undo() on an empty queue does not raise.
+    assert session.undo({"steps": 1}) == {"undone": 0, "requested": 1, "skipped": [],
+                                          "queue_empty": True}
+    assert fake.undo_calls == 0
+
+
+def test_undo_steps_over_mayas_no_op_entries_without_counting_them(fake):
+    # bottom -> top, exactly the shape the probe enumerated after two creates
+    fake.undo_queue = ["", "maya-mcp", "hikDefinitionFileNewCallback;", "maya-mcp",
+                       "selectionMaskResetAll", "selectionMaskResetAll"]
+    out = session.undo({"steps": 1})
+    assert out == {"undone": 1, "requested": 1,
+                   "skipped": ["selectionMaskResetAll", "selectionMaskResetAll"],
+                   "queue_empty": False}
+    assert fake.undo_queue == ["", "maya-mcp", "hikDefinitionFileNewCallback;"]
+    out = session.undo({"steps": 1})
+    assert out["undone"] == 1 and out["skipped"] == ["hikDefinitionFileNewCallback;"]
+    assert fake.undo_queue == [""]
+    # the nameless bottom entry IS the end: never popped, nothing counted
+    out = session.undo({"steps": 1})
+    assert out == {"undone": 0, "requested": 1, "skipped": [], "queue_empty": True}
+    assert fake.undo_queue == [""]
+
+
+def test_boot_window_entries_are_no_ops_too(fake):
+    # MEASURED in the first ~10 s after boot: deferred plugin autoloads and
+    # Arnold's deferred registration land as named entries that change nothing
+    fake.undo_queue = ["maya-mcp", 'autoLoadPlugin("", "MayaMuscle", "MayaMuscle")',
+                       "mtoa.cmds.registerArnoldRenderer._register"]
+    out = session.undo({"steps": 1})
+    assert out["undone"] == 1
+    assert out["skipped"] == ["mtoa.cmds.registerArnoldRenderer._register",
+                              'autoLoadPlugin("", "MayaMuscle", "MayaMuscle")']
+    assert fake.undo_queue == []
+
+
+def test_the_stop_is_the_name_not_the_empty_flag(fake):
+    # MEASURED: undoQueueEmpty reads True with entries still on the queue
+    # after idle processing; the handler must never consult it.
+    fake.undo_queue = ["maya-mcp", "maya-mcp"]
+    calls = []
+    real = fake.undoInfo
+
+    def spy(**kw):
+        calls.append(kw)
+        return real(**kw)
+    fake.undoInfo = spy
+    assert session.undo({"steps": 2})["undone"] == 2
+    assert not any(k.get("undoQueueEmpty") or k.get("redoQueueEmpty") for k in calls)
 
 
 def test_undo_rejects_bad_steps(fake):
@@ -382,9 +449,18 @@ def test_redo_counts_steps_and_stops_at_queue_end(fake):
     # #799: redo had no test whatsoever, because the fake's redo() could not
     # fail. Its "except RuntimeError: break" was dead code under test, and
     # so was every claim the result makes about how many steps really ran.
-    fake.redo_fail_after = 3
-    assert session.redo({"steps": 5}) == {"redone": 3, "requested": 5}
+    fake.redo_queue = ["maya-mcp"] * 3
+    assert session.redo({"steps": 5}) == {"redone": 3, "requested": 5, "skipped": [],
+                                          "queue_empty": True}
     assert fake.redo_calls == 3
+
+
+def test_redo_steps_over_mayas_no_op_entries_too(fake):
+    fake.redo_queue = ["maya-mcp", "selectionMaskResetAll"]
+    out = session.redo({"steps": 1})
+    assert out == {"redone": 1, "requested": 1, "skipped": ["selectionMaskResetAll"],
+                   "queue_empty": True}
+    assert fake.undo_queue == ["selectionMaskResetAll", "maya-mcp"]
 
 
 def test_redo_rejects_bad_steps(fake):
@@ -615,13 +691,12 @@ class TestTheFakeRefusesWhatMayaRefuses:
             fake.currentUnit(query=True, linear=False)
 
     def test_redo_can_run_out_the_way_undo_can(self, fake):
-        # The round-1 change that WAS real: a redo() that could never fail
-        # made session.redo's "except RuntimeError: break" dead code. If
-        # someone removes redo_fail_after, this goes red.
-        fake.redo_fail_after = 0
-        with pytest.raises(RuntimeError, match="nothing to redo"):
-            fake.redo()
-        assert session.redo({"steps": 3}) == {"redone": 0, "requested": 3}
+        # #799 wanted redo's exhausted branch reachable; #820 measured what
+        # exhaustion IS: cmds.redo() answers "centimeter" and raises nothing,
+        # so the handler must stop on the queue-empty query, not on an error.
+        assert fake.redo() == "centimeter"
+        assert session.redo({"steps": 3}) == {"redone": 0, "requested": 3, "skipped": [],
+                                              "queue_empty": True}
 
 
 class TestTheIprFakeRefusesWhatMayaRefuses:

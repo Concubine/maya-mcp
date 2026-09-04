@@ -254,14 +254,29 @@ def _main_thread_executor():
 
 
 def _undo_hooks():
-    """Per-request undo chunk hooks; each tool call is one undo step."""
+    """Per-request undo chunk hooks; each tool call is one undo step.
+
+    Idle events are flushed BEFORE the chunk opens. MEASURED (#820, Maya
+    2027): Maya's deferred callbacks - the selection-mask reset after any
+    call that touched the selection, HumanIK's new-file callback - run at
+    the next idle, and if that idle falls inside the next request's chunk
+    they are recorded IN it, so a query-only execute_python closes a
+    non-empty "maya-mcp" chunk that undo then counts as a real step.
+    Flushed first, they land as their own nameless-or-named entries, which
+    session.undo / session.redo step over without counting.
+    """
     try:
         import maya.cmds as cmds  # noqa: PLC0415
+        import maya.utils  # noqa: PLC0415
 
-        return (
-            lambda: cmds.undoInfo(openChunk=True, chunkName="maya-mcp"),
-            lambda: cmds.undoInfo(closeChunk=True),
-        )
+        def open_chunk():
+            try:
+                maya.utils.processIdleEvents()
+            except Exception:  # noqa: BLE001 - a flush that fails must not fail the call
+                pass
+            cmds.undoInfo(openChunk=True, chunkName="maya-mcp")
+
+        return open_chunk, lambda: cmds.undoInfo(closeChunk=True)
     except ImportError:
         return None, None
 
@@ -441,13 +456,53 @@ class PluginServer:
         log.info("maya-mcp plugin stopped")
 
 
+# How long two consecutive plugin counts must agree before the server binds.
+# MEASURED (#820, evals/undo_boot_timeline_820.py, Maya 2027): Maya's deferred
+# plugin autoloads take the loaded count from 16 to 53 over the first ~7 s
+# after userSetup runs, and a plugin LOAD FLUSHES THE UNDO QUEUE - every tool
+# call chunk recorded before ~8 s was gone, every one after survived. A port
+# that listens before that is a port that accepts un-undoable edits, so the
+# server waits for the count to hold still.
+AUTOLOAD_SETTLE_S = 1.5
+
+
+def _plugin_count() -> Optional[int]:
+    """Loaded plugin count, or None outside Maya (headless: nothing to wait for)."""
+    try:
+        import maya.cmds as cmds  # noqa: PLC0415
+    except ImportError:
+        return None
+    try:
+        return len(cmds.pluginInfo(query=True, listPlugins=True) or [])
+    except Exception:  # noqa: BLE001 - a failed query must not stop the server
+        return None
+
+
+def _defer(seconds: float, fn, *args) -> None:
+    """Call `fn(*args)` on Maya's main thread after `seconds`."""
+    import threading  # noqa: PLC0415
+
+    import maya.utils  # noqa: PLC0415
+
+    threading.Timer(seconds, lambda: maya.utils.executeDeferred(fn, *args)).start()
+
+
 def start_server(
     host: Optional[str] = None,
     port: Optional[int] = None,
     token: Optional[str] = None,
     body_deadline_s: float = DEFAULT_BODY_DEADLINE_S,
-) -> PluginServer:
-    """Start the plugin server; returns the running server (also kept globally)."""
+    wait_for_autoloads: bool = True,
+    _last_count: Optional[int] = None,
+) -> Optional[PluginServer]:
+    """Start the plugin server; returns the running server (also kept globally).
+
+    Inside Maya, with `wait_for_autoloads` (the default), the bind is deferred
+    until the loaded-plugin count has held still for AUTOLOAD_SETTLE_S - the
+    boot-window flush measured in #820 - and the call returns None while it
+    waits; the server appears on the port once Maya is safe to edit. Headless
+    (no maya.cmds) there is nothing to wait for and the bind is immediate.
+    """
     global _active_server
     _setup_logging()
     host = host or os.environ.get("MAYA_MCP_HOST", DEFAULT_HOST)
@@ -460,6 +515,15 @@ def start_server(
             "refusing to bind non-loopback host %r: set both MAYA_MCP_BIND_ANY=1 "
             "and a MAYA_MCP_TOKEN token to opt in" % host
         )
+
+    if wait_for_autoloads:
+        count = _plugin_count()
+        if count is not None and count != _last_count:
+            log.info("waiting for Maya's plugin autoloads to settle before "
+                     "binding %s:%d (%d plugins loaded)", host, port, count)
+            _defer(AUTOLOAD_SETTLE_S, start_server, host, port, token,
+                   body_deadline_s, True, count)
+            return None
 
     if _active_server is not None:
         log.info("stopping previous plugin server before restart")

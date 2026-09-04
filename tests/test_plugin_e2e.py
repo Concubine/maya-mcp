@@ -274,3 +274,53 @@ class TestHardening:
                 handler.close()
         maya_mcp_plugin.log.handlers = []
         logging.getLogger("maya_mcp").handlers = []
+
+
+
+class TestStartServerWaitsForTheAutoloads:
+    """#820: a plugin load flushes Maya's undo queue, and the deferred
+    autoloads run for ~7 s after userSetup - so a port that listens before
+    they settle accepts edits that cannot be undone. start_server defers the
+    bind until two plugin counts AUTOLOAD_SETTLE_S apart agree. Headless
+    (_plugin_count() is None) it binds at once, which is what every other
+    test in this file relies on."""
+
+    def test_headless_binds_immediately(self):
+        srv = maya_mcp_plugin.start_server(port=0)
+        try:
+            assert srv is not None
+        finally:
+            maya_mcp_plugin.stop_server()
+
+    def test_a_changing_plugin_count_defers_the_bind(self, monkeypatch):
+        counts = iter([16, 41, 53, 53])
+        deferred = []
+        monkeypatch.setattr(maya_mcp_plugin, "_plugin_count", lambda: next(counts))
+        monkeypatch.setattr(maya_mcp_plugin, "_defer",
+                            lambda seconds, fn, *args: deferred.append((seconds, fn, args)))
+        # 16 vs None: defer, carrying 16
+        assert maya_mcp_plugin.start_server(port=0) is None
+        assert deferred[-1][0] == maya_mcp_plugin.AUTOLOAD_SETTLE_S
+        assert deferred[-1][1] is maya_mcp_plugin.start_server
+        assert deferred[-1][2][-1] == 16
+        # the deferred call: 41 vs 16, defer again; then 53 vs 41; then 53 == 53 binds
+        for expected in (41, 53):
+            args = deferred[-1][2]
+            assert maya_mcp_plugin.start_server(*args) is None
+            assert deferred[-1][2][-1] == expected
+        args = deferred[-1][2]
+        srv = maya_mcp_plugin.start_server(*args)
+        try:
+            assert srv is not None and len(deferred) == 3
+        finally:
+            maya_mcp_plugin.stop_server()
+
+    def test_wait_can_be_switched_off(self, monkeypatch):
+        monkeypatch.setattr(maya_mcp_plugin, "_plugin_count", lambda: 16)
+        monkeypatch.setattr(maya_mcp_plugin, "_defer",
+                            lambda *a: (_ for _ in ()).throw(AssertionError("deferred")))
+        srv = maya_mcp_plugin.start_server(port=0, wait_for_autoloads=False)
+        try:
+            assert srv is not None
+        finally:
+            maya_mcp_plugin.stop_server()
