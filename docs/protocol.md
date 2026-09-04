@@ -198,12 +198,14 @@ Scene ops:
 | `create_primitive` | `{ kind, name, translate?, rotate?, scale?, divisions? \| subdivisions? }` | `{ name, subdivisions, faces, warnings }` |
 | `duplicate` | `{ name, new_name, translate?, rotate?, scale? }` | `{ name, warnings }` |
 | `transform` | `{ names, translate?, rotate?, scale?, relative?, pivot? }` | `{ objects: [...], warnings }` |
-| `group` | `{ names, group_name }` | `{ name, warnings }` |
+| `group` | `{ names, group_name, pivot? }` | `{ name, pivot, children, warnings }` |
 | `parent` | `{ child, parent }` | `{ name, warnings }` |
 | `rename` | `{ name, new_name }` | `{ name, warnings }` |
 | `delete_objects` | `{ names }` | `{ deleted: [...], warnings }` |
 | `combine` | `{ names, name, pivot?, freeze? }` | `{ name, inputs, tris, verts, faces, shells, pivot, pivot_mode, frozen, shading, warnings }` |
 | `assemble` | `{ name, parts: [...], atlas?, combine?, pivot?, pivots?, freeze? }` | `{ objects: [...], parts, tris, outside_patch, atlas, warnings }` |
+
+**`group` says where its pivot is** (#823, measured). `cmds.group` builds the new transform at the origin with identity, but puts its **rotate pivot at the members' bounding-box centre** — two cubes at x=2 and x=4 grouped and then rotated 90° about Y orbit (3,0,0), not the origin, and nothing in the old `{name}` result said so. The result now carries `pivot` (queried back from Maya) and `children` (each member's new canonical long name, in the order given), and `pivot: "origin"` moves the pivot to the world origin before reporting — the rig case (#814: parent the roots under a group at the origin and scale that). `warnings` names what Maya did quietly: a `group_name` already held (`|taken` → `|taken_001`, like `boolean_op`), a member renamed because a sibling had its short name (`|p2|part` → `part1`; members are matched by UUID, so the renamed one keeps its drift-ledger record — matching by short name used to lose it), a duplicate entry in `names` (dropped), and a former parent left with no children. A member's world transform is preserved across the reparent; its local one is rewritten.
 
 **`combine` unites `names` into one mesh called `name`** (#803). `pivot` is `center` (bounding-box centre, the default), `origin`, or `keep`; `freeze` (default true) bakes the transform afterwards, and the reported `pivot` is **queried back from Maya after the freeze**, never the value that was written - a freeze used to be reported as the centre it had just thrown away. `name` may be a consumed input's own name (`combine(names=["|body","|arm"], name="body")` hands back `|body`, not `|body_001`): `polyUnite` consumes every input, so the name is claimed once they are gone, the #640 rule `boolean_op` and `etch_text` already follow. `new_name` is accepted as a synonym. `shells` should equal `inputs` - combine does not weld - and `shading` is the one object-level shading group the result carries, with a warning when the inputs wore more than one.
 
@@ -295,6 +297,8 @@ Viewport and camera:
 |---|---|---|
 | `set_viewport` | `{ show_grid?, show_light_icons?, show_camera_icons?, show_locators?, show_manipulators?, show_texture_placements?, wireframe_on_shaded?, display_lights? }` | `{ panel, show_grid, ..., camera }` |
 | `set_camera` | `{ camera?, position?, look_at?, focal_length?, set_active? }` | `{ name, position, rotation, warnings }` |
+
+`set_camera` aims exactly (#823, measured: the camera's forward axis against the vector to `look_at` reads 1.000000 from every position tried; a capture through it shows what sits in front of it), and `rotation` is Maya's own euler readback, which may be an equivalent triple rather than `[-elevation, azimuth, 0]`. `focal_length` is validated before anything is written: below 0.5 mm (Maya's own floor) or not a number is refused with nothing moved — it used to reach `setAttr`, which raised raw after the position had already landed.
 
 ## Commands (M2)
 

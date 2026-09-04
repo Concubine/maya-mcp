@@ -224,6 +224,22 @@ class NameResult(BaseModel):
     warnings: List[str] = Field(default_factory=list)
 
 
+class GroupResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str = Field(description="Canonical long name of the new group.")
+    pivot: List[float] = Field(description=(
+        "World-space rotate pivot the group actually has: the members' "
+        "bounding-box centre by default (Maya's choice), or the origin when "
+        "pivot='origin'. A later rotate or scale on the group turns about it."
+    ))
+    children: List[str] = Field(description=(
+        "The members' canonical long names inside the group, in the order "
+        "given - a member may have been renamed if a sibling held its name."
+    ))
+    warnings: List[str] = Field(default_factory=list)
+
+
 class PrimitiveResult(NameResult):
     """What create_primitive actually built, not just what it was asked for.
 

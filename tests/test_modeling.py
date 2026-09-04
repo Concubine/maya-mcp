@@ -125,10 +125,21 @@ class FakeCmds:
     def objExists(self, name):
         return any(o == name or o.split("|")[-1] == name for o in self.objects)
 
-    def ls(self, name=None, long=False, selection=False, **kw):
+    def ls(self, name=None, long=False, selection=False, uuid=False, **kw):
+        if uuid:
+            # #823: a node's identity survives a reparent and a rename; the
+            # group handler maps its members by it. Assigned on first ask.
+            self._require(name)
+            uuids = self.__dict__.setdefault("uuids", {})
+            if name not in uuids:
+                uuids[name] = "u%02d" % len(uuids)
+            return [uuids[name]]
         assert long
         if selection:
             return list(self.selection)
+        by_uuid = [n for n, u in self.__dict__.get("uuids", {}).items() if u == name]
+        if by_uuid:
+            return by_uuid
         return [o for o in self.objects if o == name or o.split("|")[-1] == name]
 
     def select(self, *args, replace=False, clear=False):
@@ -153,8 +164,13 @@ class FakeCmds:
     def bridge_saw_selection(self):
         return list(self.selection)
 
-    def listRelatives(self, node, shapes=False, children=False, fullPath=False, noIntermediate=False):
+    def listRelatives(self, node, shapes=False, children=False, fullPath=False, noIntermediate=False, parent=False):
         self._require(node)
+        if parent:
+            assert fullPath
+            long = next((o for o in self.objects if o == node or o.split("|")[-1] == node), node)
+            head = long.rpartition("|")[0]
+            return [head] if head else None
         if shapes:
             assert shapes and fullPath and noIntermediate
             entry = self.shapes.get(node)
@@ -291,15 +307,29 @@ class FakeCmds:
         long_name = "|" + name
         self.objects.add(long_name)
         self.xf[long_name] = ((0, 0, 0), (0, 0, 0), (1, 1, 1))
+        # #823, measured: Maya puts the new group's pivot at the members'
+        # bounding-box centre, and a second member whose short name a sibling
+        # already holds is renamed with a numeric suffix.
+        translates = [self.xf.get(c, ((0, 0, 0),))[0] for c in names]
+        self.pivots[long_name] = tuple(
+            (min(t[i] for t in translates) + max(t[i] for t in translates)) / 2.0
+            for i in range(3)) if translates else (0, 0, 0)
+        taken = set()
+        uuids = self.__dict__.setdefault("uuids", {})
         # Reparent children: update their long names in objects set
         for child in names:
             self.objects.discard(child)
             child_short = child.split("|")[-1]
+            if child_short in taken:
+                child_short = child_short + "1"
+            taken.add(child_short)
             new_long = long_name + "|" + child_short
             self.objects.add(new_long)
             if child in self.xf:
                 self.xf[new_long] = self.xf[child]
                 del self.xf[child]
+            if child in uuids:
+                uuids[new_long] = uuids.pop(child)
             # The shape travels with its transform: keeping it filed under the
             # pre-group path would leave a path that no longer resolves
             # answering queries (#799).
@@ -816,6 +846,71 @@ def test_delete_objects_lists_all_missing(monkeypatch):
         modeling.delete_objects({"names": ["|a", "|gone", "|also_gone"]})
     assert "|gone" in str(exc.value) and "|also_gone" in str(exc.value)
     assert not any(c[0] == "delete" for c in fake.calls)  # nothing deleted
+
+
+class TestGroupSaysWhatItDid:
+    """#823, measured: cmds.group puts the pivot at the members' bbox centre
+    (rotating the group then orbits that point, not the origin), renames a
+    member whose short name a sibling holds, leaves a former parent empty,
+    and a taken group_name comes back with a suffix. None of it was said."""
+
+    def _pair(self, monkeypatch):
+        fake = FakeCmds(objects={"|a", "|b"})
+        fake.xf["|a"] = ((2, 0, 0), (0, 0, 0), (1, 1, 1))
+        fake.xf["|b"] = ((4, 0, 0), (0, 0, 0), (1, 1, 1))
+        monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+        return fake
+
+    def test_the_pivot_and_children_are_reported(self, monkeypatch):
+        self._pair(monkeypatch)
+        out = modeling.group({"names": ["|a", "|b"], "group_name": "pair"})
+        assert out["name"] == "|pair"
+        assert out["pivot"] == [3.0, 0.0, 0.0]
+        assert out["children"] == ["|pair|a", "|pair|b"]
+        assert out["warnings"] == []
+
+    def test_pivot_origin_moves_the_pivot_before_reporting(self, monkeypatch):
+        fake = self._pair(monkeypatch)
+        out = modeling.group({"names": ["|a", "|b"], "group_name": "pair", "pivot": "origin"})
+        assert ("xform", "|pair", {"worldSpace": True, "pivots": (0.0, 0.0, 0.0)}) in fake.calls
+        assert out["pivot"] == [0.0, 0.0, 0.0]
+
+    def test_an_unknown_pivot_mode_is_refused_before_maya(self, monkeypatch):
+        fake = self._pair(monkeypatch)
+        with pytest.raises(HandlerError, match="pivot"):
+            modeling.group({"names": ["|a", "|b"], "group_name": "pair", "pivot": "keep"})
+        assert not any(c[0] == "group" for c in fake.calls)
+
+    def test_a_taken_name_is_named_in_warnings(self, monkeypatch):
+        fake = self._pair(monkeypatch)
+        fake.objects.add("|taken")
+        out = modeling.group({"names": ["|a", "|b"], "group_name": "taken"})
+        assert out["name"] == "|taken_001"
+        assert any("taken_001" in w and "|taken" in w for w in out["warnings"])
+
+    def test_a_renamed_member_is_tracked_by_identity_and_named(self, monkeypatch):
+        fake = FakeCmds(objects={"|p1", "|p2", "|p1|part", "|p2|part"})
+        monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+        recorded = []
+        monkeypatch.setattr(modeling.ledger, "record", lambda cmds, n: recorded.append(n))
+        out = modeling.group({"names": ["|p1|part", "|p2|part"], "group_name": "parts"})
+        assert out["children"] == ["|parts|part", "|parts|part1"]
+        assert sorted(recorded) == ["|parts|part", "|parts|part1"]
+        assert any("|p2|part" in w and "part1" in w for w in out["warnings"])
+
+    def test_duplicate_entries_are_dropped_with_a_warning(self, monkeypatch):
+        fake = self._pair(monkeypatch)
+        out = modeling.group({"names": ["|a", "|a", "|b"], "group_name": "pair"})
+        assert [c for c in fake.calls if c[0] == "group"][0][1] == ("|a", "|b")
+        assert out["children"] == ["|pair|a", "|pair|b"]
+        assert any("duplicate" in w and "|a" in w for w in out["warnings"])
+
+    def test_a_former_parent_left_empty_is_named(self, monkeypatch):
+        fake = FakeCmds(objects={"|holder", "|holder|child", "|spun"})
+        monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+        out = modeling.group({"names": ["|holder|child", "|spun"], "group_name": "mixed"})
+        assert out["children"] == ["|mixed|child", "|mixed|spun"]
+        assert any("|holder" in w and "empty" in w for w in out["warnings"])
 
 
 def test_group_rekeys_ledger_for_children(monkeypatch):

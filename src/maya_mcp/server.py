@@ -57,6 +57,7 @@ from .schemas import (
     LightingResult,
     MaterialResult,
     MeasureClipResult,
+    GroupResult,
     NameResult,
     PrimitiveResult,
     NewSceneResult,
@@ -1556,14 +1557,26 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         ))],
         group_name: Annotated[str, Field(min_length=1, description=(
             "Requested name for the new group; collisions get a deterministic "
-            "_NNN suffix and the assigned canonical long name is returned."
+            "_NNN suffix, the assigned canonical long name is returned and "
+            "warnings say who held the name."
         ))],
-    ) -> NameResult:
-        """Create a new group transform and parent the named objects under it."""
-        return NameResult.model_validate(
+        pivot: Annotated[Literal["center", "origin"], Field(description=(
+            "Where the group's rotate pivot lands. 'center' is Maya's own "
+            "choice, the members' bounding-box centre - a later rotate or "
+            "scale on the group orbits that point. 'origin' puts it at the "
+            "world origin, which is what a rig root wants."
+        ))] = "center",
+    ) -> GroupResult:
+        """Create a new group transform, parent the named objects under it,
+        and MEASURE the pivot it got.
+
+        Members keep their world transforms. warnings name what Maya did
+        quietly: a member renamed because a sibling held its short name, a
+        duplicate entry dropped, a former parent left empty."""
+        return GroupResult.model_validate(
             maya.request(
                 "group",
-                {"names": names, "group_name": group_name},
+                {"names": names, "group_name": group_name, "pivot": pivot},
                 timeout_s=SCENE_TIMEOUT_S,
             )
         )

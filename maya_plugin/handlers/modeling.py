@@ -607,7 +607,7 @@ def transform(params: Dict[str, Any]) -> Dict[str, Any]:
 # Every top-level key group reads. Anything else is refused rather
 # than ignored (#767): an unread key does not fail, it succeeds and does
 # something else.
-GROUP_KEYS = ("names", "group_name")
+GROUP_KEYS = ("names", "group_name", "pivot")
 # `name` is what the RESULT calls the group that was made, so a caller who
 # read one result reaches for it as the input - the #764 shape. Recording it
 # is what makes the refusal useful here, because the prefix fallback would
@@ -615,6 +615,12 @@ GROUP_KEYS = ("names", "group_name")
 # `objects` is the generic word for the things being gathered, and it is what
 # transform's result calls the objects it touched.
 GROUP_SYNONYMS = {"name": "group_name", "objects": "names"}
+# #823, measured: cmds.group puts the new group's pivot at the members'
+# bounding-box CENTRE, so a rotate or scale on the group orbits that point,
+# not the origin - the rigging case (#814: parent the roots under a group at
+# the origin and scale THAT) wants `origin`. combine's vocabulary; `keep`
+# has no meaning for a node that did not exist a moment ago.
+GROUP_PIVOT_MODES = ("center", "origin")
 
 
 def group(params: Dict[str, Any]) -> Dict[str, Any]:
@@ -625,31 +631,81 @@ def group(params: Dict[str, Any]) -> Dict[str, Any]:
         raise HandlerError(
             "names must be a non-empty list", hint='e.g. names=["|a", "|b"]'
         )
-    resolved = [naming.require_object(cmds, str(n)) for n in names]
+    pivot_mode = params.get("pivot") or "center"
+    if pivot_mode not in GROUP_PIVOT_MODES:
+        raise HandlerError(
+            "pivot must be one of %s, got %r" % (", ".join(GROUP_PIVOT_MODES), pivot_mode),
+            hint="'center' is Maya's own choice (the members' bounding-box "
+                 "centre); 'origin' is what a rig root wants",
+        )
+    warnings: List[str] = []
+    resolved: List[str] = []
+    for n in names:
+        long_name = naming.require_object(cmds, str(n))
+        if long_name in resolved:
+            # Maya silently dedupes; saying so is cheaper than a caller
+            # wondering why the group holds one fewer child than asked.
+            warnings.append("duplicate entry %s in names was dropped" % long_name)
+            continue
+        resolved.append(long_name)
     requested = params.get("group_name")
     if not isinstance(requested, str) or not requested.strip():
         raise HandlerError(
             "missing required param 'group_name'", hint="e.g. group_name='golem'"
         )
-    grp = cmds.group(*resolved, name=naming.unique_name(cmds, requested))
+    unique = naming.unique_name(cmds, requested)
+    if unique != requested:
+        holder = (cmds.ls(requested, long=True) or [requested])[0]
+        warnings.append(
+            "the group is called %s, not the requested %r: that name is held "
+            "by %s" % (unique, requested, holder))
+
+    # Identity and former parents, BEFORE the reparent: a member's path is
+    # about to change, and its short name may change too (Maya suffixes a
+    # second child whose name a sibling holds - measured). Matching by short
+    # name afterwards mapped both onto the first and lost the renamed one.
+    identities = [(cmds.ls(n, uuid=True) or [None])[0] for n in resolved]
+    former_parents: List[str] = []
+    for n in resolved:
+        parent_of = (cmds.listRelatives(n, parent=True, fullPath=True) or [None])[0]
+        if parent_of and parent_of not in former_parents:
+            former_parents.append(parent_of)
+
+    grp = cmds.group(*resolved, name=unique)
     group_long = _long(cmds, grp)
 
-    # Re-key ledger entries: each child's long name has changed due to reparenting.
-    # Query Maya's actual post-group paths rather than assuming a naming scheme
-    # (Maya may auto-rename a child on collision).
-    actual_children = (
-        cmds.listRelatives(group_long, children=True, fullPath=True) or []
-    )
-    for old_long in resolved:
+    children: List[str] = []
+    for old_long, uid in zip(resolved, identities):
         ledger.forget(old_long)
-        old_short = old_long.split("|")[-1]
-        new_long = next(
-            (c for c in actual_children if c.split("|")[-1] == old_short), None
-        )
-        if new_long is not None:
-            ledger.record(cmds, new_long)
+        new_long = (cmds.ls(uid, long=True) or [None])[0] if uid else None
+        if new_long is None:
+            warnings.append("%s could not be found again after grouping" % old_long)
+            continue
+        children.append(new_long)
+        ledger.record(cmds, new_long)
+        if new_long.split("|")[-1] != old_long.split("|")[-1]:
+            warnings.append(
+                "%s was renamed %s inside the group: a sibling already had "
+                "that name" % (old_long, new_long.split("|")[-1]))
 
-    return {"name": group_long, "warnings": []}
+    if pivot_mode == "origin":
+        cmds.xform(group_long, worldSpace=True, pivots=(0.0, 0.0, 0.0))
+    pivot = cmds.xform(group_long, query=True, worldSpace=True, rotatePivot=True)
+
+    for parent_of in former_parents:
+        if parent_of == group_long or not cmds.objExists(parent_of):
+            continue
+        if not cmds.listRelatives(parent_of, children=True, fullPath=True):
+            warnings.append(
+                "%s is left empty: its only children moved into the group; "
+                "delete it if it was just a holder" % parent_of)
+
+    return {
+        "name": group_long,
+        "pivot": [round(float(v), 6) for v in pivot],
+        "children": children,
+        "warnings": warnings,
+    }
 
 
 # Every top-level key parent reads. Anything else is refused rather

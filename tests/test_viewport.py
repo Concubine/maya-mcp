@@ -725,6 +725,28 @@ class TestPanelDiscovery:
         assert result["warnings"] == []   # a fresh create, not a reuse
 
 
+class TestFocalLengthIsCheckedBeforeAnyWrite:
+    """#823, measured: focal_length 0 or negative reached setAttr and Maya
+    answered "Cannot set the attribute ... below its minimum value of 0.5" -
+    a raw error, after the position had already been written."""
+
+    @pytest.mark.parametrize("focal", [0, -5, 0.2, "35", True, None])
+    def test_a_bad_focal_length_is_refused_with_nothing_written(self, fake_cmds, focal):
+        if focal is None:
+            pytest.skip("None means not passed")
+        viewport.set_camera({"camera": "focCam", "set_active": False})
+        before = list(fake_cmds.translate["|focCam"])
+        with pytest.raises(HandlerError, match="focal_length"):
+            viewport.set_camera({"camera": "focCam", "position": [1, 2, 3],
+                                 "focal_length": focal, "set_active": False})
+        assert fake_cmds.translate["|focCam"] == before
+
+    def test_maya_s_minimum_is_still_accepted(self, fake_cmds):
+        out = viewport.set_camera({"camera": "focCam", "focal_length": 0.5, "set_active": False})
+        assert fake_cmds.attrs["|focCam|focCamShape.focalLength"] == 0.5
+        assert out["name"] == "|focCam"
+
+
 class TestSetCameraMeetsAConnectedPlug:
     """#799 contract 2: `camera` names a node the caller need not have made.
 

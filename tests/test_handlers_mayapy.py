@@ -276,6 +276,39 @@ class TestModelingInMaya:
         )
         assert moved["objects"][0]["translate"] == [0.0, 0.0, 0.0]
 
+    def test_group_reports_the_bbox_centre_pivot_and_a_renamed_member(self):
+        # #823, measured: the pivot sits at the members' bbox centre and a
+        # second "part" becomes "part1" inside the group.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        p1 = cmds.group(empty=True, name="gp1")
+        p2 = cmds.group(empty=True, name="gp2")
+        x = cmds.polyCube(name="gpart", ch=False)[0]
+        cmds.parent(x, p1)
+        cmds.xform("|gp1|gpart", ws=True, t=(2, 0, 0))
+        y = cmds.polyCube(name="gpart", ch=False)[0]
+        cmds.parent(y, p2)
+        cmds.xform("|gp2|gpart", ws=True, t=(4, 0, 0))
+        out = modeling.group({"names": ["|gp1|gpart", "|gp2|gpart"], "group_name": "gparts"})
+        assert out["children"] == ["|gparts|gpart", "|gparts|gpart1"]
+        assert out["pivot"] == pytest.approx([3.0, 0.0, 0.0])
+        assert any("gpart1" in w for w in out["warnings"])
+        assert any("|gp1" in w and "empty" in w for w in out["warnings"])
+
+    def test_group_pivot_origin_lands_at_the_origin(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        cmds.polyCube(name="go_a", ch=False)
+        cmds.xform("|go_a", ws=True, t=(5, 5, 5))
+        out = modeling.group({"names": ["|go_a"], "group_name": "go_grp", "pivot": "origin"})
+        assert out["pivot"] == pytest.approx([0.0, 0.0, 0.0])
+        assert cmds.xform("|go_grp", q=True, ws=True, rp=True) == pytest.approx([0.0, 0.0, 0.0])
+        assert cmds.xform("|go_grp|go_a", q=True, ws=True, t=True) == pytest.approx([5.0, 5.0, 5.0])
+
     def test_group_parent_rename_delete(self):
         import maya.cmds as cmds
 

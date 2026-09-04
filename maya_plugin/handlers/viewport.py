@@ -16,6 +16,8 @@ from . import naming, plugwrite
 from .capture import find_model_panel
 
 DEFAULT_CAMERA = "mcpCam"
+# The floor Maya enforces on camera.focalLength (measured, #823).
+CAMERA_MIN_FOCAL_MM = 0.5
 _EDITOR_FLAGS = {
     # param name -> modelEditor flag
     "show_grid": "grid",
@@ -178,6 +180,16 @@ def set_camera(params: Dict[str, Any]) -> Dict[str, Any]:
         raise HandlerError("look_at must be [x, y, z]", hint="world-space point")
     shape = None
     if focal is not None:
+        # #823, measured: 0 or a negative reached setAttr and Maya answered
+        # "Cannot set the attribute ... below its minimum value of 0.5" - a
+        # raw error, after the position write had already landed.
+        if (isinstance(focal, bool) or not isinstance(focal, (int, float))
+                or float(focal) < CAMERA_MIN_FOCAL_MM):
+            raise HandlerError(
+                "focal_length must be a number of millimetres, at least %s "
+                "(Maya's own minimum), got %r" % (CAMERA_MIN_FOCAL_MM, focal),
+                hint="35 is a normal lens, 85 a portrait lens; nothing was "
+                     "written")
         shape = cmds.listRelatives(cam, shapes=True, fullPath=True)[0]
 
     # `camera` names a node the caller need not have made, and a shot camera
