@@ -59,6 +59,21 @@ def bbox_extent(flat: list) -> float:
     return math.sqrt(sum((hi[i] - lo[i]) ** 2 for i in range(3)))
 
 
+def bbox_intersection(a: list, b: list):
+    """The overlap of two world bboxes ([xmin, ymin, zmin, xmax, ymax, zmax],
+    exactWorldBoundingBox's layout), or None when they do not overlap.
+
+    Touching is not overlapping: two cubes sharing exactly one face gave
+    polyCBoolOp an EMPTY intersection (#822, measured), so a zero-thickness
+    overlap answers None.
+    """
+    lo = [max(float(a[i]), float(b[i])) for i in range(3)]
+    hi = [min(float(a[i + 3]), float(b[i + 3])) for i in range(3)]
+    if any(hi[i] <= lo[i] for i in range(3)):
+        return None
+    return lo + hi
+
+
 def max_displacement(before: list, after: list) -> float:
     """Largest per-vertex move between two flat [x,y,z,...] lists.
 

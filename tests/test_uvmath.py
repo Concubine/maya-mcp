@@ -212,3 +212,57 @@ class TestFitTransform:
         # and the corners land exactly on the rect, not merely inside it
         assert (0.0 * su + ou, 0.0 * sv + ov) == pytest.approx(rect[:2])
         assert (1.0 * su + ou, 1.0 * sv + ov) == pytest.approx(rect[2:])
+
+
+class TestFaceUvStats:
+    """#822: a planar projection along the wrong axis collapses every face
+    edge-on to it to zero UV area, and stacks the far side of a solid on the
+    near side with mirrored winding. Both were silent."""
+
+    SQUARE = [(0, 0), (1, 0), (1, 1), (0, 1)]           # counter-clockwise
+    MIRRORED = [(0, 0), (0, 1), (1, 1), (1, 0)]         # clockwise
+    LINE = [(0, 0), (0.5, 0), (1, 0), (0.5, 0)]         # collinear
+
+    def test_a_healthy_face_counts_as_neither(self):
+        assert uvmath.face_uv_stats([self.SQUARE]) == {"faces": 1, "zero_area": 0, "mirrored": 0}
+
+    def test_collinear_uvs_are_zero_area(self):
+        assert uvmath.face_uv_stats([self.LINE, self.SQUARE])["zero_area"] == 1
+
+    def test_clockwise_uvs_are_mirrored(self):
+        assert uvmath.face_uv_stats([self.MIRRORED, self.SQUARE])["mirrored"] == 1
+
+    def test_a_face_with_no_uvs_is_zero_area(self):
+        assert uvmath.face_uv_stats([[], self.SQUARE])["zero_area"] == 1
+
+    def test_no_faces(self):
+        assert uvmath.face_uv_stats([]) == {"faces": 0, "zero_area": 0, "mirrored": 0}
+
+
+class TestThinnestAxis:
+    """#822: a planar projection has to run along the axis the sheet is thin
+    on. Maya's md="b" ("best plane") collapsed an X-facing sheet under a
+    headless Maya while working in the GUI, so the axis is chosen here from
+    the world bbox ([xmin, ymin, zmin, xmax, ymax, zmax]) instead."""
+
+    def test_a_flat_y_sheet_projects_along_y(self):
+        assert uvmath.thinnest_axis([-1, 0, -1, 1, 0, 1]) == "y"
+
+    def test_a_sheet_standing_on_x_projects_along_x(self):
+        assert uvmath.thinnest_axis([0, -1, -1, 0, 1, 1]) == "x"
+
+    def test_a_thin_slab_counts_as_a_sheet(self):
+        assert uvmath.thinnest_axis([-1, -1, -0.01, 1, 1, 0.01]) == "z"
+
+    def test_a_cube_falls_back_to_z(self):
+        assert uvmath.thinnest_axis([-0.5, -0.5, -0.5, 0.5, 0.5, 0.5]) == "z"
+
+    def test_a_uniformly_flipped_sheet_is_not_mirrored(self):
+        # measured (#822): a sheet projected from its back side has EVERY
+        # face wound clockwise - a whole-mesh flip, nothing stacked on
+        # anything. Mirrored means the minority winding: the far side of a
+        # solid landing on the near side.
+        assert uvmath.face_uv_stats([TestFaceUvStats.MIRRORED] * 16)["mirrored"] == 0
+
+    def test_the_minority_winding_is_the_mirrored_one(self):
+        assert uvmath.face_uv_stats([TestFaceUvStats.MIRRORED] * 5 + [TestFaceUvStats.SQUARE] * 2)["mirrored"] == 2

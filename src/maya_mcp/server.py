@@ -1844,7 +1844,10 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         ))] = 0.02,
         project: Annotated[Optional[Literal["box", "planar", "keep"]], Field(description=(
             "'box' (default) re-projects with automatic projection, which suits "
-            "primitives and hard-surface parts. 'planar' projects down -z. "
+            "primitives and hard-surface parts. 'planar' projects along the "
+            "axis the mesh is thinnest on and suits a flat sheet: on a solid it "
+            "collapses the edge-on faces and mirrors the far side, and says "
+            "so in warnings. "
             "'keep' preserves an existing layout and only moves it into the patch. "
             "world_scale always box-projects, so 'planar' and 'keep' are refused "
             "with it."
@@ -2019,7 +2022,8 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 "squash: factor. twist: startAngle/endAngle. flare: curve, "
                 "startFlareX/Z, endFlareX/Z - THE taper, for a limb thick at "
                 "one end and thin at the other. sine: amplitude, wavelength, "
-                "offset, dropoff - linear ripple. wave: amplitude, wavelength, "
+                "offset, dropoff - linear ripple; lengths are SCENE UNITS "
+                "whatever the mesh's size. wave: amplitude, wavelength, "
                 "offset, dropoff, minRadius, maxRadius - concentric radial "
                 "ripple; note wave is bounded radially and takes NO lowBound/"
                 "highBound. sculpt: maxDisplacement/dropoffDistance. lattice: "

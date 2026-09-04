@@ -78,6 +78,48 @@ def _require_mesh(cmds, transform: str) -> str:
     return mesh
 
 
+def _face_uv_loops(cmds, shape: str) -> List[List[Any]]:
+    """One (u, v) polygon per face, in face-vertex order; [] for a face with
+    no UVs. The API, not cmds: polyEvaluate has no per-face UV area query and
+    a cmds call per face is the whole timeout on a real mesh."""
+    import maya.api.OpenMaya as om  # noqa: PLC0415 - only importable inside Maya
+
+    sel = om.MSelectionList()
+    sel.add(shape)
+    fn = om.MFnMesh(sel.getDagPath(0))
+    loops: List[List[Any]] = []
+    for face in range(fn.numPolygons):
+        try:
+            loops.append([fn.getPolygonUV(face, i)
+                          for i in range(fn.polygonVertexCount(face))])
+        except RuntimeError:
+            loops.append([])
+    return loops
+
+
+def _planar_warnings(cmds, shape: str) -> List[str]:
+    """What a planar projection did to this shape's faces (#822).
+
+    A projection is along ONE plane, so every face edge-on to it collapses
+    to zero UV area and every face on the far side of a solid lands mirrored
+    over the near side. Both were silent, reported `inside_patch: true`.
+    """
+    stats = uvmath.face_uv_stats(_face_uv_loops(cmds, shape))
+    out: List[str] = []
+    if stats["zero_area"]:
+        out.append(
+            "%d of %d faces have zero UV area after the planar projection "
+            "(they are edge-on to the projection axis); planar suits a flat "
+            "sheet - use project=box for a solid"
+            % (stats["zero_area"], stats["faces"]))
+    if stats["mirrored"]:
+        out.append(
+            "%d of %d faces are mirrored after the planar projection (the far "
+            "side of the mesh is stacked on the near side); use project=box "
+            "for a solid" % (stats["mirrored"], stats["faces"]))
+    return out
+
+
 def _uv_bounds(cmds, shape: str) -> List[float]:
     # boundingBox2d, NOT boundingBoxComponent2d. The component form measures a
     # component SELECTION and returns ((0,0),(0,0)) when handed a shape, which
@@ -99,6 +141,7 @@ def pack_shape(
     code rather than a second copy of it - the world-scale arithmetic and the
     boundingBox2d trap below are the kind of thing that must have one home.
     """
+    warnings: List[str] = []
     if world_scale is not None:
         # WORLD-SCALE MODE: texel density is decided by real-world size, so
         # a 3 m slab and a 0.5 m band carry the SAME pixels per metre. The
@@ -126,7 +169,13 @@ def pack_shape(
         if project == "box":
             cmds.polyAutoProjection(shape, ch=False)
         elif project == "planar":
-            cmds.polyProjection(shape + ".f[*]", type="Planar", ch=False, md="z")
+            # The axis follows the mesh: "z" was WORLD -z whatever the mesh
+            # faced (#822, measured: a sheet facing X collapsed 16 of 16 faces
+            # to zero UV area, reported inside_patch true), and Maya's own
+            # md="b" collapsed the same sheet under a headless Maya.
+            axis = uvmath.thinnest_axis(cmds.exactWorldBoundingBox(shape))
+            cmds.polyProjection(shape + ".f[*]", type="Planar", ch=False, md=axis)
+            warnings.extend(_planar_warnings(cmds, shape))
 
         if normalize:
             # normalizeType=0 is COLLECTIVE: the whole mesh becomes one 0..1
@@ -154,7 +203,8 @@ def pack_shape(
     # A piece that does not fit is REPORTED, never silently clamped: its UVs
     # spill into the neighbouring patch, which reads as another material's
     # pixels on this piece.
-    return {"uv_bounds": [round(q, 6) for q in bounds], "inside_patch": bool(inside)}
+    return {"uv_bounds": [round(q, 6) for q in bounds], "inside_patch": bool(inside),
+            "warnings": warnings}
 
 
 # Every top-level key uv_atlas reads. Anything else is refused rather than
@@ -268,11 +318,15 @@ def uv_atlas(params: Dict[str, Any]) -> Dict[str, Any]:
     shapes = [_require_mesh(cmds, t) for t in targets]
 
     out: List[Dict[str, Any]] = []
+    warnings: List[str] = []
     for transform, shape in zip(targets, shapes):
         packed = pack_shape(
             cmds, shape, rect, project=project, normalize=normalize,
             world_scale=world_scale, uv_per_metre=uv_per_metre,
         )
+        # Per-shape findings (#822: what a planar projection collapsed or
+        # mirrored) travel in the result's own warnings, named by mesh.
+        warnings.extend("%s: %s" % (transform, w) for w in packed.pop("warnings", []))
         out.append({"name": transform, **packed})
 
     return {
@@ -294,8 +348,7 @@ def uv_atlas(params: Dict[str, Any]) -> Dict[str, Any]:
         ),
         "all_inside": all(m["inside_patch"] for m in out),
         # Documented in protocol.md's result row since M2.3 and never
-        # actually sent. Empty today - every condition this handler can spot
-        # is a refusal or the per-mesh inside_patch flag - but a promised
-        # field that is absent is a field no caller can read.
-        "warnings": [],
+        # actually sent before #797; since #822 it carries what a planar
+        # projection did to each mesh's faces.
+        "warnings": warnings,
     }

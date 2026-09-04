@@ -197,6 +197,64 @@ def rect_contains(
     )
 
 
+def thinnest_axis(bbox: Sequence[float]) -> str:
+    """The world axis a planar projection should run along: the one the mesh
+    is thinnest on, as polyProjection's mapDirection letter.
+
+    #822: `md="z"` projected along WORLD -z whatever the mesh faced, so a
+    sheet standing up lost every face to zero UV area, silently. Maya's own
+    "best plane" (`md="b"`) collapsed that same sheet under a headless Maya
+    while working in the GUI, so the axis is chosen here, from the bbox
+    ([xmin, ymin, zmin, xmax, ymax, zmax]). A tie - a cube - keeps z, the
+    documented default, so nothing that worked changes.
+    """
+    extents = [abs(float(bbox[i + 3]) - float(bbox[i])) for i in range(3)]
+    smallest = min(extents)
+    tied = [axis for axis, e in zip("xyz", extents)
+            if e <= smallest + 1e-6 * max(extents + [1.0])]
+    return "z" if "z" in tied else tied[0]
+
+
+# Below this signed UV area a face has collapsed to a line or point.
+ZERO_UV_AREA = 1e-9
+
+
+def face_uv_stats(loops: Sequence[Sequence[Sequence[float]]]) -> Dict[str, int]:
+    """Count the faces a projection collapsed or mirrored.
+
+    `loops` is one (u, v) polygon per face, in face-vertex order. Signed area
+    by the shoelace formula: ~0 is a face edge-on to the projection (a planar
+    projection along the wrong axis, #822 - a cube loses 4 of 6, a plane
+    facing the wrong way loses all 16). "Mirrored" is the MINORITY winding:
+    the far side of a solid stacked on the near side (a sphere lands 200 of
+    400 that way). A sheet projected from its back has every face wound the
+    other way - measured - which is a whole-mesh flip, nothing stacked, and
+    counts as 0. A face with no UVs at all counts as collapsed.
+    """
+    zero = 0
+    positive = 0
+    negative = 0
+    for loop in loops:
+        n = len(loop)
+        if n < 3:
+            zero += 1
+            continue
+        area = 0.0
+        for i in range(n):
+            u1, v1 = loop[i][0], loop[i][1]
+            u2, v2 = loop[(i + 1) % n][0], loop[(i + 1) % n][1]
+            area += u1 * v2 - u2 * v1
+        area *= 0.5
+        if abs(area) < ZERO_UV_AREA:
+            zero += 1
+        elif area < 0:
+            negative += 1
+        else:
+            positive += 1
+    return {"faces": len(loops), "zero_area": zero,
+            "mirrored": min(positive, negative)}
+
+
 def fit_transform(rect: Sequence[float]) -> Tuple[float, float, float, float]:
     """(scale_u, scale_v, offset_u, offset_v) mapping the unit square onto rect.
 

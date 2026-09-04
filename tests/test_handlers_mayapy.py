@@ -458,6 +458,43 @@ class TestBooleanInMaya:
         history = [(cmds.ls(h, long=True) or [h])[0] for h in cmds.listHistory(shape)]
         assert history == [shape]
 
+    def test_an_empty_result_is_refused_and_nothing_is_left(self, tmp_path):
+        # #822 measured: difference with a inside b (and intersection of
+        # disjoint or face-sharing cubes) returns a 0-face mesh reported
+        # `watertight: true` with both operands consumed.
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import modeling
+
+        cmds.file(rename=str(tmp_path / "empty.ma"))
+        cmds.polyCube(name="inner", w=1, h=1, d=1)
+        cmds.polyCube(name="outer", w=3, h=3, d=3)
+        with pytest.raises(HandlerError, match="empty") as exc:
+            modeling.boolean_op({"a": "|inner", "b": "|outer", "op": "difference",
+                                 "new_name": "gone"})
+        assert "checkpoint" in (exc.value.hint or "").lower()
+        assert not cmds.objExists("|gone")
+        assert not [m for m in cmds.ls(type="mesh", long=True)
+                    if cmds.polyEvaluate(m, vertex=True) == 0]
+        assert cmds.ls(type="polyCBoolOp") == []
+
+    def test_a_disjoint_intersection_refuses_before_consuming_the_operands(self, tmp_path):
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import modeling
+
+        cmds.file(rename=str(tmp_path / "disjoint.ma"))
+        cmds.polyCube(name="left", w=1, h=1, d=1)
+        cmds.polyCube(name="right", w=1, h=1, d=1)
+        cmds.xform("right", ws=True, t=(3, 0, 0))
+        with pytest.raises(HandlerError, match="do not overlap"):
+            modeling.boolean_op({"a": "|left", "b": "|right", "op": "intersection",
+                                 "new_name": "cut"})
+        assert cmds.objExists("|left") and cmds.objExists("|right")
+        assert not cmds.objExists("|cut")
+
     def test_boolean_keeps_object_level_shading(self, tmp_path):
         import maya.cmds as cmds
 
@@ -1498,6 +1535,21 @@ class TestDeformRemeshCleanupInMaya:
         # unit sideways. Pre-fix this measured 0.0055 (45 was read as degrees
         # already, so it worked) - the guard that matters is the low end below.
         assert result["max_displacement"] > 0.2, result
+        assert result["warnings"] == []
+
+    def test_sine_amplitude_is_scene_units_on_a_tall_mesh(self):
+        # #822 measured: the nonLinear handle is scaled to half the mesh's
+        # largest extent, so amplitude 0.2 moved a 10-tall cylinder by 1.0.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import sculpt
+
+        cmds.polyCylinder(name="tall", sx=8, sy=40, height=10.0, radius=0.2)
+        result = sculpt.deform(
+            {"mesh": "|tall", "deformer": "sine",
+             "params": {"amplitude": 0.2, "wavelength": 1.0}}
+        )
+        assert result["max_displacement"] == pytest.approx(0.2, abs=0.02), result
         assert result["warnings"] == []
 
     def test_bend_that_moves_nothing_says_so(self):
@@ -6668,3 +6720,30 @@ class TestCorrectivesInMaya:
         assert cmds.getAttr(node + ".elbow_fix") > 0.9
         cmds.currentTime(0)
         assert cmds.getAttr(node + ".elbow_fix") < 0.05
+
+
+class TestPlanarProjectionInMaya:
+    """#822: planar projects along the sheet's thinnest world axis and says
+    what collapsed or mirrored. (Maya's md="b" collapsed the X-facing sheet
+    under mayapy while working in the GUI - not a flag to build on.)"""
+
+    def test_a_sheet_facing_x_has_no_collapsed_faces(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import uvatlas
+
+        sheet = cmds.polyPlane(name="wallX", w=2, h=2, sx=4, sy=4, ch=False)[0]
+        cmds.xform(sheet, ro=(0, 0, 90))
+        cmds.makeIdentity(sheet, apply=True, t=1, r=1, s=1)
+        out = uvatlas.uv_atlas({"names": ["|wallX"], "project": "planar"})
+        assert out["warnings"] == [], out["warnings"]
+        assert out["meshes"][0]["inside_patch"] is True
+
+    def test_a_cube_says_which_faces_collapsed(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import uvatlas
+
+        cmds.polyCube(name="solid", ch=False)
+        out = uvatlas.uv_atlas({"names": ["|solid"], "project": "planar"})
+        assert any("of 6" in w and "zero" in w.lower() for w in out["warnings"]), out["warnings"]

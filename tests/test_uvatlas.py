@@ -18,7 +18,10 @@ class FakeCmds:
     """A mesh whose UVs start somewhere unhelpful, so normalisation matters."""
 
     def __init__(self, objects=("|box",), shapes=None, uvs=None, world_m=3.0,
-                 linear="m"):
+                 linear="m", bbox=(-1.0, 0.0, -1.0, 1.0, 0.0, 1.0)):
+        # #822: world bbox the planar branch reads to pick its axis. The
+        # default is a flat sheet lying in XZ (thin on Y).
+        self.bbox = list(bbox)
         # Default "m" keeps every pre-existing test measuring what it always
         # measured; the maya-mcp #635 tests below set it explicitly.
         self.linear = linear
@@ -102,9 +105,13 @@ class FakeCmds:
         else:
             self.uvs = [(0.0, 0.0), (1.0, 1.0)]
 
+    def exactWorldBoundingBox(self, name):
+        self._require(name)
+        return list(self.bbox)
+
     def polyProjection(self, target, **kwargs):
         self._require(target)
-        self.calls.append("polyProjection:%s" % kwargs.get("type"))
+        self.calls.append("polyProjection:%s:%s" % (kwargs.get("type"), kwargs.get("md")))
         self.uvs = [(0.0, 0.0), (1.0, 1.0)]
 
     def polyNormalizeUV(self, target, **kwargs):
@@ -217,16 +224,66 @@ class TestOrderAndModes:
         assert not any(c.startswith("poly" + "AutoProjection") for c in fake.calls)
         assert not any(c.startswith("polyProjection") for c in fake.calls)
 
-    def test_planar_projection_is_requested_by_name(self):
-        fake = FakeCmds()
+    def test_planar_projection_runs_along_the_sheet_s_thin_axis(self, monkeypatch):
+        # #822 measured: md="z" is WORLD -z whatever the mesh faces - a sheet
+        # facing X collapsed 16/16 faces to zero UV area, silently. The axis
+        # now follows the mesh's thinnest world extent.
+        monkeypatch.setattr(uvatlas, "_face_uv_loops", lambda cmds, shape: [])
+        fake = FakeCmds()                                   # lying flat: thin on Y
         _run(fake, names=["|box"], cols=2, rows=2, patch=0, project="planar")
-        assert "polyProjection:Planar" in fake.calls
+        assert "polyProjection:Planar:y" in fake.calls
+        fake = FakeCmds(bbox=(0, -1, -1, 0, 1, 1))          # standing: thin on X
+        _run(fake, names=["|box"], cols=2, rows=2, patch=0, project="planar")
+        assert "polyProjection:Planar:x" in fake.calls
+        fake = FakeCmds(bbox=(-1, -1, -1, 1, 1, 1))         # a solid: z, the old default
+        _run(fake, names=["|box"], cols=2, rows=2, patch=0, project="planar")
+        assert "polyProjection:Planar:z" in fake.calls
 
     def test_normalisation_can_be_declined(self):
         fake = FakeCmds(uvs=[(0.0, 0.0), (1.0, 1.0)])
         _run(fake, names=["|box"], cols=2, rows=2, patch=0,
              project="keep", normalize=False)
         assert "polyNormalizeUV" not in fake.calls
+
+
+class TestPlanarHonesty:
+    """#822: planar cannot be made to suit a solid, so it has to SAY what it
+    did - the faces edge-on to the projection collapse to zero UV area (a
+    cube: 4 of 6) and the far side of a sphere lands mirrored on the near
+    side (200 of 400)."""
+
+    SQUARE = [(0, 0), (1, 0), (1, 1), (0, 1)]
+    MIRRORED = [(0, 0), (0, 1), (1, 1), (1, 0)]
+    LINE = [(0, 0), (1, 0), (1, 0), (0, 0)]
+
+    def test_collapsed_faces_are_named_in_warnings(self, monkeypatch):
+        fake = FakeCmds()
+        monkeypatch.setattr(uvatlas, "_face_uv_loops",
+                            lambda cmds, shape: [self.SQUARE, self.SQUARE] + [self.LINE] * 4)
+        out = _run(fake, names=["|box"], cols=2, rows=2, patch=0, project="planar")
+        assert len(out["warnings"]) == 1
+        assert "4 of 6" in out["warnings"][0] and "|box" in out["warnings"][0]
+
+    def test_mirrored_faces_are_named_in_warnings(self, monkeypatch):
+        fake = FakeCmds()
+        monkeypatch.setattr(uvatlas, "_face_uv_loops",
+                            lambda cmds, shape: [self.SQUARE] * 3 + [self.MIRRORED] * 2)
+        out = _run(fake, names=["|box"], cols=2, rows=2, patch=0, project="planar")
+        assert len(out["warnings"]) == 1
+        assert "2 of 5" in out["warnings"][0] and "mirrored" in out["warnings"][0]
+
+    def test_a_flat_sheet_warns_about_nothing(self, monkeypatch):
+        fake = FakeCmds()
+        monkeypatch.setattr(uvatlas, "_face_uv_loops", lambda cmds, shape: [self.SQUARE] * 16)
+        out = _run(fake, names=["|box"], cols=2, rows=2, patch=0, project="planar")
+        assert out["warnings"] == []
+
+    def test_box_projection_never_reads_the_faces(self, monkeypatch):
+        fake = FakeCmds()
+        monkeypatch.setattr(uvatlas, "_face_uv_loops",
+                            lambda cmds, shape: pytest.fail("box projection measured faces"))
+        out = _run(fake, names=["|box"], cols=2, rows=2, patch=0)
+        assert out["warnings"] == []
 
 
 class TestRejections:

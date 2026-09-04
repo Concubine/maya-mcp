@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..dispatcher import HandlerError, refuse_inert, require_known_keys
-from . import ledger, naming, plugwrite, uvmath
+from . import ledger, naming, plugwrite, sculpt_math, uvmath
 
 PRIMITIVE_KINDS = (
     "cube", "sphere", "cylinder", "plane", "torus", "cone",
@@ -846,7 +846,12 @@ def _claim_name(cmds, node: str, requested: str) -> str:
     return _long(cmds, cmds.rename(node, requested))
 
 
-def _do_boolean(cmds, a_long: str, b_long: str, op: str, new_name: str) -> Dict[str, Any]:
+def _short(name: str) -> str:
+    return name.split("|")[-1]
+
+
+def _do_boolean(cmds, a_long: str, b_long: str, op: str, new_name: str,
+                checkpoint: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Shared boolean core: polyCBoolOp + the golem-run cleanup discipline.
 
     `new_name` is the name the caller ASKED for, not a pre-uniquified one: it
@@ -899,6 +904,27 @@ def _do_boolean(cmds, a_long: str, b_long: str, op: str, new_name: str) -> Dict[
         )
 
     _, out_shape = naming.require_mesh(cmds, out_long)
+    if not cmds.polyEvaluate(out_shape, face=True):
+        # #822, measured: an empty boolean (difference with a inside b, an
+        # intersection of volumes that never meet) comes back as a mesh with
+        # no faces and no vertices, which mesh_stats reports as WATERTIGHT.
+        # The operands are already gone - polyCBoolOp emptied them and the
+        # history delete above reaped them - so this cannot be undone here;
+        # it can only be refused honestly, with the checkpoint named.
+        cmds.delete(out_long)
+        ledger.forget(a_long)
+        ledger.forget(b_long)
+        where = ("restore checkpoint %s (maya_restore_checkpoint) to get the "
+                 "operands back" % checkpoint["checkpoint_id"]
+                 if checkpoint and checkpoint.get("checkpoint_id")
+                 else "restore the checkpoint taken before this call to get "
+                      "the operands back")
+        raise HandlerError(
+            "the %s of %s and %s is empty: Maya returned a mesh with no "
+            "faces, and both operands were consumed producing it. The empty "
+            "result was deleted." % (op, _short(a_long), _short(b_long)),
+            hint=where + "; a difference is empty when b covers a, an "
+                 "intersection when the volumes never meet")
     # polyCBoolOp leaves groupId nodes wired into the shape's (comp)InstObjGroups
     # to carry each operand's original per-face material group across the
     # boolean; constructionHistory=True does not remove them because they are
@@ -999,12 +1025,30 @@ def boolean_op(params: Dict[str, Any]) -> Dict[str, Any]:
         raise HandlerError(
             "missing required param 'new_name'", hint="name for the result mesh"
         )
+    if op == "intersection":
+        # #822, measured: polyCBoolOp on two meshes whose volumes do not meet
+        # (disjoint, or sharing exactly one face) returns an EMPTY mesh -
+        # reported watertight - and consumes both operands. The boxes know
+        # this answer before anything is spent; the general case (boxes
+        # overlap, volumes do not) is caught after the fact in _do_boolean.
+        a_box = cmds.exactWorldBoundingBox(a_long)
+        b_box = cmds.exactWorldBoundingBox(b_long)
+        if sculpt_math.bbox_intersection(a_box, b_box) is None:
+            raise HandlerError(
+                "%s and %s do not overlap (bboxes %s and %s): their "
+                "intersection would be empty, and Maya would consume both "
+                "operands to say so"
+                % (_short(a_long), _short(b_long),
+                   [round(v, 4) for v in a_box], [round(v, 4) for v in b_box]),
+                hint="move one operand into the other first (maya_transform), "
+                     "or check the names - nothing was changed")
     from . import session  # noqa: PLC0415
 
-    session.auto_checkpoint("boolean")
+    checkpoint = session.auto_checkpoint("boolean")
     # Raw, not uniquified: new_name may be a's or b's, and both are about to
     # stop existing. _do_boolean claims it at the only moment it is free (#640).
-    return _do_boolean(cmds, a_long, b_long, op, requested.strip())
+    return _do_boolean(cmds, a_long, b_long, op, requested.strip(),
+                       checkpoint=checkpoint)
 
 
 MIN_TARGET_POLYCOUNT = 100

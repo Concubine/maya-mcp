@@ -347,6 +347,15 @@ class FakeCmds:
         self.objects.add("|sculpt1StretchOrigin")
         return ["sculpt1", "sculptor1", "sculpt1StretchOrigin"]
 
+    def exactWorldBoundingBox(self, name):
+        # #822: [xmin, ymin, zmin, xmax, ymax, zmax]; a test declares boxes
+        # via `bboxes`. No answers-anything fallback (#799).
+        self._require(name)
+        boxes = getattr(self, "bboxes", {})
+        if name not in boxes:
+            raise AssertionError("FakeCmds.exactWorldBoundingBox: no bbox declared for %r" % name)
+        return list(boxes[name])
+
     def polyEvaluate(self, name, face=False, triangle=False, vertex=False, edge=False,
                      uvcoord=False):
         self._require(name)
@@ -861,6 +870,34 @@ def test_boolean_rejects_same_object(monkeypatch):
         modeling.boolean_op({"a": "|a", "b": "|a", "op": "union", "new_name": "x"})
 
 
+def test_intersection_of_disjoint_bboxes_is_refused_before_maya(monkeypatch):
+    # #822 measured: polyCBoolOp on two cubes that do not overlap (or only
+    # share a face) returns an EMPTY mesh, reported watertight, and consumes
+    # both operands. The bbox test catches that before anything is spent.
+    fake = FakeCmds(objects={"|a", "|b"},
+                    shapes={"|a": ("|a|aShape", "mesh"), "|b": ("|b|bShape", "mesh")})
+    fake.bboxes = {"|a": [0, 0, 0, 1, 1, 1], "|b": [1, 0, 0, 2, 1, 1]}
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    with pytest.raises(HandlerError, match="do not overlap") as exc:
+        modeling.boolean_op({"a": "|a", "b": "|b", "op": "intersection", "new_name": "cut"})
+    assert "empty" in str(exc.value)
+    assert "|a" in fake.objects and "|b" in fake.objects
+    assert not any(c[0] in ("polyCBoolOp", "delete") for c in fake.calls)
+
+
+def test_union_of_disjoint_bboxes_is_not_refused_by_the_precheck(monkeypatch):
+    # a disjoint union is a two-shell result, measured fine; only
+    # intersection knows its answer from the boxes alone
+    fake = FakeCmds(objects={"|a", "|b"},
+                    shapes={"|a": ("|a|aShape", "mesh"), "|b": ("|b|bShape", "mesh")})
+    fake.bboxes = {"|a": [0, 0, 0, 1, 1, 1], "|b": [3, 0, 0, 4, 1, 1]}
+    monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+    monkeypatch.setattr(modeling, "_do_boolean", lambda *a, **k: {"stub": True})
+    from maya_plugin.handlers import session
+    monkeypatch.setattr(session, "auto_checkpoint", lambda reason: None)
+    assert modeling.boolean_op({"a": "|a", "b": "|b", "op": "union", "new_name": "cut"}) == {"stub": True}
+
+
 def _mesh_fake(name="|blob"):
     return FakeCmds(objects={name}, shapes={name: (name + "|blobShape", "mesh")})
 
@@ -1068,6 +1105,50 @@ def test_deform_sculpt_calls_sculpt_command_with_whitelisted_params(monkeypatch)
     assert sculpt_calls[0][2] == {"maxDisplacement": 1.0, "dropoffDistance": 2.0}
     assert not any(c[0] == "nonLinear" for c in fake.calls)
     assert result["deformer_nodes"] == ["sculpt1", "|sculptor1", "|sculpt1StretchOrigin"]
+
+
+def test_sine_length_params_are_scene_units_whatever_the_handle_scale(monkeypatch):
+    # #822 measured: cmds.nonLinear scales its handle to HALF THE MESH'S
+    # LARGEST EXTENT, and sine's amplitude / wavelength / offset are read in
+    # handle units - amplitude 0.2 moved a 2-tall cylinder 0.2 and a 10-tall
+    # one 1.0. The documented contract is scene units, so divide by the scale.
+    fake = _mesh_fake("|col")
+    fake.xf["sineHandle1"] = ((0, 5, 0), (0, 0, 0), (5, 5, 5))
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    sculpt.deform({"mesh": "|col", "deformer": "sine",
+                   "params": {"amplitude": 0.2, "wavelength": 1.0, "offset": 0.5,
+                              "dropoff": 1.0, "lowBound": -1.0}})
+    written = {c[1]: c[2] for c in fake.calls if c[0] == "setAttr"}
+    assert written["sine1.amplitude"] == pytest.approx(0.04)
+    assert written["sine1.wavelength"] == pytest.approx(0.2)
+    assert written["sine1.offset"] == pytest.approx(0.1)
+    assert written["sine1.dropoff"] == 1.0      # a factor, not a length
+    assert written["sine1.lowBound"] == -1.0    # handle-local by Maya's convention
+
+
+def test_wave_length_params_are_scene_units_too(monkeypatch):
+    fake = _mesh_fake("|col")
+    fake.xf["waveHandle1"] = ((0, 5, 0), (0, 0, 0), (5, 5, 5))
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    sculpt.deform({"mesh": "|col", "deformer": "wave",
+                   "params": {"amplitude": 0.2, "wavelength": 1.0, "minRadius": 0.5,
+                              "maxRadius": 2.0, "dropoff": 0.5}})
+    written = {c[1]: c[2] for c in fake.calls if c[0] == "setAttr"}
+    assert written["wave1.amplitude"] == pytest.approx(0.04)
+    assert written["wave1.wavelength"] == pytest.approx(0.2)
+    assert written["wave1.minRadius"] == pytest.approx(0.1)
+    assert written["wave1.maxRadius"] == pytest.approx(0.4)
+    assert written["wave1.dropoff"] == 0.5
+
+
+def test_bend_params_are_not_rescaled_by_the_handle(monkeypatch):
+    fake = _mesh_fake("|col")
+    fake.xf["bendHandle1"] = ((0, 5, 0), (0, 0, 0), (5, 5, 5))
+    monkeypatch.setattr(sculpt, "_cmds", lambda: fake)
+    sculpt.deform({"mesh": "|col", "deformer": "bend",
+                   "params": {"curvature": 45, "lowBound": -1.0}})
+    written = {c[1]: c[2] for c in fake.calls if c[0] == "setAttr"}
+    assert written == {"bend1.curvature": 45.0, "bend1.lowBound": -1.0}
 
 
 def test_deform_accepts_the_three_new_nonlinear_types():

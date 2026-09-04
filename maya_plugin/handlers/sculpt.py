@@ -806,6 +806,13 @@ DEFORMER_WHITELIST = {
 # 0.07% and a 45-degree bend on a test cylinder moves 14%. The measured number
 # always ships in max_displacement, so deliberately subtle work can read it and
 # ignore the line.
+# Length-typed params of the deformers whose handle Maya scales to the mesh
+# (#822). They are converted from scene units into handle units at set time.
+HANDLE_LENGTH_PARAMS = {
+    "sine": ("amplitude", "wavelength", "offset"),
+    "wave": ("amplitude", "wavelength", "offset", "minRadius", "maxRadius"),
+}
+
 NOOP_DISPLACEMENT_RATIO = 1e-2
 
 # Why a deformer of each type can end up inert, in the order worth checking.
@@ -965,7 +972,21 @@ def deform(params: Dict[str, Any]) -> Dict[str, Any]:
         # attribute on the resulting deform* node under exactly this name, so
         # one path serves all six types and the question stops existing.
         nodes = cmds.nonLinear(mesh_long, type=deformer)
+        # #822, measured on Maya 2027: cmds.nonLinear scales its handle to
+        # HALF THE MESH'S LARGEST EXTENT (a 2-tall cylinder: 1; a 10-tall
+        # one: 5; a 4x1x1 slab: 2) and sine/wave read their length params in
+        # handle units - amplitude 0.2 moved the 2-tall cylinder 0.2 and the
+        # 10-tall one 1.0. The documented contract (and the inert hint) is
+        # scene units, so lengths are divided by that scale here. Bounds
+        # (lowBound/highBound) stay handle-local, Maya's own convention.
+        length_params = HANDLE_LENGTH_PARAMS.get(deformer, ())
+        handle_scale = 1.0
+        if length_params:
+            scale = cmds.xform(nodes[1], query=True, relative=True, scale=True)
+            handle_scale = float(scale[0]) if scale and scale[0] else 1.0
         for attr, value in dparams.items():
+            if attr in length_params:
+                value = float(value) / handle_scale
             _set_deformer_attr(cmds, nodes[0], attr, value)
     else:
         # Reached only if a type is added to DEFORMER_WHITELIST without also
