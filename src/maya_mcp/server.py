@@ -2153,13 +2153,15 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
     def maya_set_viewport(
         show_grid: Annotated[Optional[bool], Field(description="Grid visibility.")] = None,
         show_light_icons: Annotated[Optional[bool], Field(description=(
-            "Light icons render into playblasts - keep off while capturing art."
+            "Light icons in the working viewport. Captures force them off for their "
+            "own frames, so this changes what you see in Maya, not a captured image."
         ))] = None,
         show_camera_icons: Annotated[Optional[bool], Field(description="Camera icons.")] = None,
         show_locators: Annotated[Optional[bool], Field(description="Locator display.")] = None,
         show_manipulators: Annotated[Optional[bool], Field(description="Manipulator display.")] = None,
         show_texture_placements: Annotated[Optional[bool], Field(description=(
-            "place3dTexture widgets - they render into captures too."
+            "place3dTexture widgets in the working viewport - captures force them off "
+            "too, so this is for your eyes, not for a captured frame."
         ))] = None,
         wireframe_on_shaded: Annotated[Optional[bool], Field(description="Wire overlay.")] = None,
         display_lights: Annotated[

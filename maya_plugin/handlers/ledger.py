@@ -42,6 +42,22 @@ def check(cmds, name: str) -> Optional[str]:
     return None
 
 
+def rekey(old: str, new: str) -> None:
+    """Follow a rename: `old` and everything under it now live under `new`.
+
+    Entries are keyed by canonical long path, so renaming a node moves the
+    node AND every descendant out from under their entries. MEASURED (#829):
+    renaming a group `|rig` to `|lamp_rig` left `|rig|kid_a` and `|rig|kid_b`
+    in here pointing at paths that no longer exist, which silently retires
+    the "someone moved this outside maya-mcp" check for the whole subtree.
+
+    A rename moves nothing, so the recorded values stay valid - only the key
+    changes.
+    """
+    for key in [k for k in _written if k == old or k.startswith(old + "|")]:
+        _written[new + key[len(old):]] = _written.pop(key)
+
+
 def forget(name: str) -> None:
     _written.pop(name, None)
 

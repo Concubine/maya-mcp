@@ -954,6 +954,45 @@ class TestSetViewport:
         assert result.structured_content["panel"] == "modelPanel4"
         assert result.structured_content["camera"] == "|persp"
 
+    def test_the_capture_wont_show_this_note_survives_the_wrapper(self):
+        # #757's lesson, checked for this tool by #829: ViewportState is
+        # extra="ignore", so a warning the handler sends and the model does
+        # not declare is dropped before any caller sees it.
+        note = ("The grid is now shown in the working viewport - that is what "
+                "YOU see in Maya. Captures force it off for their own frames.")
+        conn = FakeConn(
+            responses={
+                "set_viewport": {
+                    "panel": "modelPanel4", "show_grid": True,
+                    "show_light_icons": False, "show_camera_icons": True,
+                    "show_locators": True, "show_manipulators": True,
+                    "show_texture_placements": True, "wireframe_on_shaded": False,
+                    "display_lights": "default", "camera": "|persp",
+                    "warnings": [note],
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_set_viewport", {"show_grid": True}))
+        assert result.is_error is False
+        assert result.structured_content["warnings"] == [note]
+
+    def test_a_call_that_warns_about_nothing_carries_an_empty_list(self):
+        conn = FakeConn(
+            responses={
+                "set_viewport": {
+                    "panel": "modelPanel4", "show_grid": False,
+                    "show_light_icons": False, "show_camera_icons": True,
+                    "show_locators": True, "show_manipulators": True,
+                    "show_texture_placements": True, "wireframe_on_shaded": False,
+                    "display_lights": "default", "camera": "|persp",
+                }
+            }
+        )
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_set_viewport", {}))
+        assert result.structured_content["warnings"] == []
+
     def test_bare_call_is_a_state_query_with_all_params_none(self):
         conn = FakeConn(
             responses={

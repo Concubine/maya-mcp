@@ -384,3 +384,23 @@ class TestRequireKnownKeys:
             require_known_keys({"material": "clay"}, ("mesh", "name"),
                                "assign_material", {"material": "name"})
         assert "'material' is called 'name' here" in exc.value.hint
+
+
+
+class TestACommandThatReadsNothingSaysSo:
+    """#829: reset_namespace's refusal ended on the words "valid params: "
+    and stopped, because it has none. Measured live - the hint named nothing
+    at all, which reads as a bug in the error rather than a fact about the
+    command."""
+
+    def test_the_hint_states_the_fact_instead_of_trailing_off(self):
+        with pytest.raises(HandlerError) as excinfo:
+            require_known_keys({"confirm": True}, (), "reset_namespace")
+        assert "reset_namespace does not take 'confirm'" in str(excinfo.value)
+        assert "reads no params at all" in excinfo.value.hint
+        assert not excinfo.value.hint.rstrip().endswith("valid params:")
+
+    def test_a_command_with_params_still_lists_them(self):
+        with pytest.raises(HandlerError) as excinfo:
+            require_known_keys({"nope": 1}, ("name", "kind"), "create_primitive")
+        assert "valid params: kind, name" in excinfo.value.hint

@@ -79,6 +79,23 @@ SET_VIEWPORT_SYNONYMS = {
 }
 
 
+# Every capture forces these OFF for its own frames (capture.py's
+# editor_kwargs: grid, lights, cameras, locators, manipulators, textures), and
+# restores the panel afterwards - MEASURED in #829, where a grid switched on
+# here changed nothing in the pixels of the capture that followed. So
+# switching one on changes what a HUMAN sees in Maya and nothing that comes
+# back from capture_viewport or capture_turntable. Said out loud, because the
+# param names read like they are about pictures.
+_CAPTURE_FORCES_OFF = {
+    "show_grid": "the grid",
+    "show_light_icons": "light icons",
+    "show_camera_icons": "camera icons",
+    "show_locators": "locators",
+    "show_manipulators": "manipulators",
+    "show_texture_placements": "texture placements",
+}
+
+
 def set_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
     require_known_keys(params, SET_VIEWPORT_KEYS, "set_viewport",
                        SET_VIEWPORT_SYNONYMS)
@@ -114,6 +131,19 @@ def set_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
         state[param] = bool(cmds.modelEditor(panel, query=True, **{flag: True}))
     state["display_lights"] = cmds.modelEditor(panel, query=True, displayLights=True)
     state["camera"] = camera_long
+    switched_on = sorted(label for param, label in _CAPTURE_FORCES_OFF.items()
+                         if params.get(param) is True)
+    state["warnings"] = []
+    if switched_on:
+        one = len(switched_on) == 1
+        joined = (switched_on[0] if one else
+                  ", ".join(switched_on[:-1]) + " and " + switched_on[-1])
+        state["warnings"].append(
+            "%s %s now shown in the working viewport - that is what YOU see "
+            "in Maya. Captures force %s off for their own frames, so this "
+            "changes no captured image (maya-mcp #829)."
+            % (joined[0].upper() + joined[1:], "is" if one else "are",
+               "it" if one else "them"))
     return state
 
 

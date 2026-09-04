@@ -2060,3 +2060,140 @@ class TestRemeshReportsAndRepairsWhatRetopoDestroys:
         out2 = modeling.remesh_retopo({"mesh": "|blob", "target_polycount": 200,
                                        "keep_original": False})
         assert not any("export" in w for w in out2["warnings"])
+
+
+class MayaNameRules:
+    """What `cmds.rename` measurably does with a name Maya dislikes (#829).
+
+    It does NOT refuse one. Measured on Maya 2027, probe A4:
+
+        "my lamp" -> "my_lamp"     a space becomes _
+        "a|b"     -> "a_b"         so does anything else non-word
+        "lamp-01" -> "lamp_01"
+        "2lamp"   -> "lamp"        leading digits are stripped
+        "ns:lamp" -> "lamp"        a namespace prefix is DROPPED
+        "lampe" with an accent survives - the rule is word characters, not ASCII
+
+    Modelled here because the old fake had no `rename` at all, which is
+    exactly why every one of these went unnoticed until a live probe.
+    """
+
+    @staticmethod
+    def mangle(requested):
+        import re
+
+        name = requested.split(":")[-1]
+        name = re.sub(r"\W", "_", name, flags=re.UNICODE)
+        return re.sub(r"^[0-9]+", "", name)
+
+
+class RenameCmds(FakeCmds):
+    """FakeCmds that renames the way Maya does, mangling included."""
+
+    def rename(self, old, requested):
+        new_short = MayaNameRules.mangle(requested)
+        parent = old.rsplit("|", 1)[0] if "|" in old.strip("|") else ""
+        new_long = "%s|%s" % (parent, new_short) if parent else "|" + new_short
+        moved = {}
+        for obj in list(self.objects):
+            if obj == old or obj.startswith(old + "|"):
+                self.objects.discard(obj)
+                moved[obj] = new_long + obj[len(old):]
+        self.objects.update(moved.values())
+        for src, dst in moved.items():
+            if src in self.shapes:
+                self.shapes[dst] = self.shapes.pop(src)
+            # A rename moves NOTHING in the scene, so the transforms follow
+            # the new path. A fake that dropped them would make the ledger
+            # look broken for the wrong reason.
+            for store in (self.xf, self.pivots):
+                if src in store:
+                    store[dst] = store.pop(src)
+        self.calls.append(("rename", old, requested))
+        return new_short
+
+
+class TestRenameSaysWhatNameYouActuallyGot:
+    """#829: rename returned `warnings: []` in every case, including the two
+    where the caller did not get the name they asked for."""
+
+    def _cmds(self, monkeypatch, objects=("|lamp",)):
+        cmds = RenameCmds(objects=objects)
+        monkeypatch.setattr(modeling, "_cmds", lambda: cmds)
+        ledger.clear()
+        return cmds
+
+    def test_a_clean_rename_says_nothing(self, monkeypatch):
+        self._cmds(monkeypatch)
+        out = modeling.rename({"name": "|lamp", "new_name": "desk_lamp"})
+        assert out["name"] == "|desk_lamp"
+        assert out["warnings"] == []
+
+    def test_a_taken_name_is_reported_not_just_returned(self, monkeypatch):
+        self._cmds(monkeypatch, objects=("|shade", "|arm"))
+        out = modeling.rename({"name": "|shade", "new_name": "arm"})
+        assert out["name"] == "|arm_001"
+        assert len(out["warnings"]) == 1
+        assert "already taken" in out["warnings"][0]
+        assert "arm_001" in out["warnings"][0]
+
+    @pytest.mark.parametrize("requested,got", [
+        ("my lamp", "my_lamp"),
+        ("2lamp", "lamp"),
+        ("a|b", "a_b"),
+        ("ns:lamp", "lamp"),
+        ("lamp-01", "lamp_01"),
+    ])
+    def test_a_name_maya_rewrote_is_reported(self, monkeypatch, requested, got):
+        self._cmds(monkeypatch)
+        out = modeling.rename({"name": "|lamp", "new_name": requested})
+        assert out["name"] == "|" + got
+        assert len(out["warnings"]) == 1, out["warnings"]
+        assert "does not accept" in out["warnings"][0]
+        assert repr(requested) in out["warnings"][0]
+        assert repr(got) in out["warnings"][0]
+
+    def test_a_name_maya_keeps_is_not_reported(self, monkeypatch):
+        # The rule is \w, not ASCII: an accented letter is legal and must not
+        # be reported as a rewrite.
+        self._cmds(monkeypatch)
+        out = modeling.rename({"name": "|lamp", "new_name": "lampé"})
+        assert out["name"] == "|lampé"
+        assert out["warnings"] == []
+
+
+class TestRenameCarriesTheLedgerWithIt:
+    """#829 A3: renaming a parent left every descendant's ledger entry keyed
+    to a path that no longer exists, which silently retires the
+    'moved outside maya-mcp' check for the whole subtree."""
+
+    def _rig(self, monkeypatch):
+        cmds = RenameCmds(objects=("|rig", "|rig|kid_a", "|rig|kid_b"))
+        monkeypatch.setattr(modeling, "_cmds", lambda: cmds)
+        ledger.clear()
+        for kid in ("|rig|kid_a", "|rig|kid_b"):
+            cmds.xf[kid] = ((1.0, 0.0, 0.0), (0.0, 0.0, 0.0), (1.0, 1.0, 1.0))
+            ledger.record(cmds, kid)
+        return cmds
+
+    def test_descendant_entries_follow_the_new_path(self, monkeypatch):
+        self._rig(monkeypatch)
+        modeling.rename({"name": "|rig", "new_name": "lamp_rig"})
+        assert sorted(ledger._written) == ["|lamp_rig|kid_a", "|lamp_rig|kid_b"]
+
+    def test_the_outside_edit_check_still_fires_after_a_rename(self, monkeypatch):
+        cmds = self._rig(monkeypatch)
+        modeling.rename({"name": "|rig", "new_name": "lamp_rig"})
+        cmds.xf["|lamp_rig|kid_a"] = ((9.0, 0.0, 0.0), (0.0, 0.0, 0.0),
+                                      (1.0, 1.0, 1.0))
+        assert ledger.check(cmds, "|lamp_rig|kid_a") is not None
+        assert ledger.check(cmds, "|lamp_rig|kid_b") is None
+
+    def test_a_rename_does_not_claim_a_write_it_never_made(self, monkeypatch):
+        # forget-and-record used to enter the renamed node into the ledger as
+        # though a tool had just written its transform.
+        cmds = RenameCmds(objects=("|lamp",))
+        monkeypatch.setattr(modeling, "_cmds", lambda: cmds)
+        ledger.clear()
+        modeling.rename({"name": "|lamp", "new_name": "desk_lamp"})
+        assert ledger._written == {}

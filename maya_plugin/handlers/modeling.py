@@ -742,6 +742,20 @@ RENAME_SYNONYMS = {"old_name": "name"}
 
 
 def rename(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Rename a node, and say so when the name it got is not the one asked for.
+
+    Two ways that happens, both MEASURED live for the first time in #829 and
+    both silent before it - the result carried the new name and an empty
+    `warnings`, so a caller who did not diff the string never learned:
+
+    - the name was TAKEN, and `naming.unique_name` redirected to a `_001`
+      suffix ("arm" -> "arm_001");
+    - MAYA REWROTE IT. It does not refuse a name it dislikes, it mangles it:
+      "my lamp" -> "my_lamp", "a|b" -> "a_b", "lamp-01" -> "lamp_01",
+      "2lamp" -> "lamp" (leading digits stripped) and "ns:lamp" -> "lamp"
+      (the namespace prefix dropped, so asking for a namespace silently gets
+      you none). Non-ASCII letters survive: "lampe" with an accent stays.
+    """
     require_known_keys(params, RENAME_KEYS, "rename", RENAME_SYNONYMS)
     cmds = _cmds()
     old = naming.require_object(cmds, str(params.get("name") or ""))
@@ -750,11 +764,31 @@ def rename(params: Dict[str, Any]) -> Dict[str, Any]:
         raise HandlerError(
             "missing required param 'new_name'", hint="pass the new object name"
         )
-    new = cmds.rename(old, naming.unique_name(cmds, requested))
-    ledger.forget(old)
+    unique = naming.unique_name(cmds, requested)
+    new = cmds.rename(old, unique)
     long_name = _long(cmds, new)
-    ledger.record(cmds, long_name)
-    return {"name": long_name, "warnings": []}
+    short = long_name.rsplit("|", 1)[-1]
+    warnings: List[str] = []
+    if unique != requested:
+        warnings.append(
+            "%r was already taken, so this node is called %r instead - use "
+            "that name from now on" % (requested, short))
+    elif short != requested:
+        warnings.append(
+            "Maya does not accept %r as a node name and rewrote it to %r "
+            "rather than refusing: it drops a namespace prefix, strips "
+            "leading digits, and turns anything but letters, digits and _ "
+            "into _. Use the name it gave from now on." % (requested, short))
+    # Re-key rather than forget-and-record. A rename writes no transform, so
+    # recording one claims a write that never happened - and dropping the
+    # entries would retire the "moved outside maya-mcp" check for the node's
+    # whole subtree, whose long paths just changed underneath it (#829).
+    # It also keeps this off `ledger.record`, whose xform query RAISES on a
+    # shape - measured: renaming a shape used to return a raw, hintless "No
+    # valid objects supplied to 'xform' command" AFTER the rename had
+    # already happened.
+    ledger.rekey(old, long_name)
+    return {"name": long_name, "warnings": warnings}
 
 
 # Every top-level key delete_objects reads. Anything else is refused rather

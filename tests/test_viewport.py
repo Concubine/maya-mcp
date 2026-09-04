@@ -810,3 +810,44 @@ class TestSetCameraMeetsAConnectedPlug:
         assert fake_cmds.translate["|shotCam"] == [0.0, 0.0, 5.0], (
             "the camera moved even though the call failed"
         )
+
+
+class TestSetViewportSaysWhatACaptureWillIgnore:
+    """#829: these flags read like they are about pictures. They are not.
+
+    MEASURED live: every capture forces grid, light/camera icons, locators,
+    manipulators and texture placements OFF for its own frames and restores
+    the panel afterwards - a grid switched on here changed nothing at all in
+    the pixels of the capture that followed. Before this, set_viewport
+    answered a caller who asked for a grid in their shots with a cheerful
+    show_grid: true and nothing else.
+    """
+
+    def test_switching_a_capture_forced_flag_on_says_so(self, fake_cmds):
+        out = viewport.set_viewport({"show_grid": True})
+        assert out["show_grid"] is True
+        assert len(out["warnings"]) == 1
+        note = out["warnings"][0].lower()
+        assert "the grid is now shown" in note
+        assert "captures force it off" in note
+
+    def test_it_names_every_flag_the_call_switched_on(self, fake_cmds):
+        out = viewport.set_viewport({"show_grid": True, "show_locators": True})
+        assert len(out["warnings"]) == 1
+        note = out["warnings"][0].lower()
+        assert "locators and the grid are now shown" in note
+        assert "captures force them off" in note
+
+    def test_switching_one_OFF_is_not_worth_a_word(self, fake_cmds):
+        # Off is what a capture does anyway: nothing to warn about.
+        assert viewport.set_viewport({"show_grid": False})["warnings"] == []
+
+    def test_a_flag_captures_do_not_touch_is_not_warned_about(self, fake_cmds):
+        # wireframe_on_shaded and display_lights are both READ by a capture
+        # (as wireframe_overlay and lighting), so they are not in this list.
+        assert viewport.set_viewport({"wireframe_on_shaded": True})["warnings"] == []
+        assert viewport.set_viewport({"display_lights": "all"})["warnings"] == []
+
+    def test_a_pure_query_never_warns(self, fake_cmds):
+        # Reading the state must not lecture: nothing was changed.
+        assert viewport.set_viewport({})["warnings"] == []

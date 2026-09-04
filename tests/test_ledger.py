@@ -179,3 +179,54 @@ class TestTheFakeRefusesWhatMayaRefuses:
         fake = self._live()
         ledger.record(fake, "|a")
         assert ledger.check(fake, "|a") is None
+
+
+class TestRekeyFollowsARename:
+    """#829: entries are keyed by long path, so renaming a node moves it and
+    every descendant out from under their entries - measured live, where
+    renaming |rig left |rig|kid_a and |rig|kid_b keyed to paths that no
+    longer existed and the outside-edit check for them silently stopped."""
+
+    class Cmds:
+        def __init__(self, xf):
+            self.xf = xf
+
+        def xform(self, name, **kw):
+            t, r, s = self.xf[name]
+            if kw.get("translation"):
+                return list(t)
+            if kw.get("rotation"):
+                return list(r)
+            return list(s)
+
+    def test_the_node_and_its_descendants_move_together(self):
+        ledger.clear()
+        cmds = self.Cmds({"|rig": ((0, 0, 0), (0, 0, 0), (1, 1, 1)),
+                          "|rig|kid": ((1, 0, 0), (0, 0, 0), (1, 1, 1))})
+        ledger.record(cmds, "|rig")
+        ledger.record(cmds, "|rig|kid")
+        ledger.rekey("|rig", "|lamp_rig")
+        assert sorted(ledger._written) == ["|lamp_rig", "|lamp_rig|kid"]
+
+    def test_the_recorded_values_are_kept_because_a_rename_moves_nothing(self):
+        ledger.clear()
+        cmds = self.Cmds({"|a": ((3, 2, 1), (0, 0, 0), (1, 1, 1))})
+        ledger.record(cmds, "|a")
+        before = ledger._written["|a"]
+        ledger.rekey("|a", "|b")
+        assert ledger._written["|b"] == before
+
+    def test_a_name_that_merely_starts_the_same_is_left_alone(self):
+        # |rig_spare is not under |rig, however it reads as a string.
+        ledger.clear()
+        cmds = self.Cmds({"|rig": ((0, 0, 0), (0, 0, 0), (1, 1, 1)),
+                          "|rig_spare": ((0, 0, 0), (0, 0, 0), (1, 1, 1))})
+        ledger.record(cmds, "|rig")
+        ledger.record(cmds, "|rig_spare")
+        ledger.rekey("|rig", "|lamp_rig")
+        assert sorted(ledger._written) == ["|lamp_rig", "|rig_spare"]
+
+    def test_rekeying_something_never_recorded_is_a_no_op(self):
+        ledger.clear()
+        ledger.rekey("|nothing", "|still_nothing")
+        assert ledger._written == {}

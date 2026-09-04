@@ -90,7 +90,12 @@ def require_known_keys(params, allowed, command: str, synonyms=None) -> None:
     raise HandlerError(
         "%s does not take %s" % (command, ", ".join(repr(k) for k in unknown)),
         hint=("; ".join(hints) + ". " if hints else "")
-        + "valid params: %s" % ", ".join(sorted(allowed)),
+        # A command that reads nothing used to end its refusal on the words
+        # "valid params: " and stop, naming none because there are none
+        # (measured on reset_namespace, #829). Say the actual fact instead.
+        + ("%s reads no params at all - call it with an empty object" % command
+           if not allowed else
+           "valid params: %s" % ", ".join(sorted(allowed))),
     )
 
 

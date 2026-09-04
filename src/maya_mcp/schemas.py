@@ -543,6 +543,15 @@ class ViewportState(BaseModel):
         description="Canonical long name of the panel's active camera, or None when the "
         "panel reports no camera.",
     )
+    # extra="ignore" above is why this field has to exist: a warning the
+    # handler sends and the model does not declare is dropped before any
+    # caller sees it (#757, and the reason #829 checked).
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Notes about what this call did and did not change - notably that "
+        "captures force grid and icons off for their own frames, so switching one on "
+        "here changes only what a human sees in Maya.",
+    )
 
 
 class CameraResult(BaseModel):
