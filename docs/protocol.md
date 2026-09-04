@@ -1243,6 +1243,18 @@ a real, correctly-bound mesh. LimbNodes (skinned joints) gate under the same
 identity-scale rule as meshes (#629), since a joint's scale reaches a vertex
 without being its ancestor.
 
+**More than 4 influences per vertex is warned, not refused** (#817). The skin
+block reports `max_influences` (the most clusters carrying a non-zero weight
+for any one vertex, read from the file) and `vertices_over_4_influences`, and
+when the latter is non-zero `warnings` carries one line naming both and what a
+consumer that caps influences at 4 does - Unity's default import does, MEASURED
+in #743/#748 as `bones_per_vertex_max = 4`: it keeps the 4 heaviest and
+renormalises, so those vertices deform differently there than in Maya by an
+amount that grows with joint rotation on deep chains (#748 measured ~3 % of the
+curl on the drifter's tendril, ~0 at rest). `maya_bind_skin` allows 8 on purpose,
+and a consumer that reads 8 keeps them all, so the export goes ahead; rebind
+with `max_influences=4` for a capping consumer.
+
 LimbNodes additionally must not carry FBX `InheritType 2` — Maya writes it for
 a joint whose `segmentScaleCompensate` is on, and Unity (which does not
 implement that inheritance) materialises the metres declaration as

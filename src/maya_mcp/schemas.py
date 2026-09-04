@@ -730,6 +730,16 @@ class SkinFacts(BaseModel):
             "when the records could not be read - see unavailable_reason, "
             "never a guess."))
     unweighted_file_vertices: int = 0
+    max_influences: Optional[int] = Field(
+        default=None,
+        description=(
+            "Most clusters carrying a non-zero weight for any one vertex, in "
+            "the file. Above 4, a consumer that caps influences (Unity's "
+            "default import) keeps the 4 heaviest and renormalises - see "
+            "warnings. Null when the records could not be read."))
+    vertices_over_4_influences: int = Field(
+        default=0,
+        description="File vertices carrying more than 4 non-zero influences.")
     unavailable_reason: Optional[str] = None
 
 

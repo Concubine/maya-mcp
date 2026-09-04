@@ -347,6 +347,39 @@ def _scene_shape_aliases(cmds, nodes) -> List[str]:
     return aliases
 
 
+# What a consumer that caps influences per vertex at 4 - Unity's default
+# import, MEASURED in #743/#748 as bones_per_vertex_max = 4 - does to a bind
+# above that: keeps the 4 heaviest and renormalises. #748 measured the cost
+# on the drifter (22,716 of 23,922 vertices capped): the deformation drifted
+# by ~3% of the joint rotation on its deepest chain, ~0 at rest.
+CONSUMER_INFLUENCE_CAP = 4
+
+
+def skin_warnings(sfacts) -> List[str]:
+    """What the skin records will LOSE in a common consumer, said once (#817).
+
+    A warning and never a violation: bind_skin allows up to 8 influences on
+    purpose, and a consumer that reads 8 keeps them all. An unreadable count
+    is left to skin_violations' "records unreadable" line rather than said
+    twice.
+    """
+    top = sfacts.get("max_influences")
+    over = sfacts.get("vertices_over_4_influences") or 0
+    if top is None or top <= CONSUMER_INFLUENCE_CAP or not over:
+        return []
+    return [
+        "%d file vertices carry more than %d influences (the file's maximum "
+        "is %d): a consumer that caps influences at %d - Unity's default "
+        "import does - keeps the %d heaviest and renormalises them, so those "
+        "vertices deform differently there than in Maya, by an amount that "
+        "grows with joint rotation on deep chains (#748 measured ~3%% of the "
+        "curl). Rebind with maya_bind_skin max_influences=%d for such a "
+        "consumer, or keep the bind for one that reads them all."
+        % (over, CONSUMER_INFLUENCE_CAP, top, CONSUMER_INFLUENCE_CAP,
+           CONSUMER_INFLUENCE_CAP, CONSUMER_INFLUENCE_CAP)
+    ]
+
+
 def shape_violations(sfacts, declared: List[str]) -> List[str]:
     """Ways the file's Shape records break the shapes-ride-along contract.
 
@@ -1143,10 +1176,12 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
     violations = gate_violations(facts)
     skin_block = None
     skin_bad: List[str] = []
+    skin_notes: List[str] = []
     if include_skins:
         skin_block = fbxbytes.skin_facts(facts)
         skin_bad = skin_violations(skin_block)
         violations += skin_bad
+        skin_notes = skin_warnings(skin_block)
     # "Freeze transforms" is the action for a unit violation and means nothing
     # for a skin one, so the hint gains the action that DOES apply, and only
     # when a skin violation is among the reasons.
@@ -1312,5 +1347,5 @@ def export_fbx(params: Dict[str, Any]) -> Dict[str, Any]:
                    if declared_shapes or shapes_block["channels"] else None),
         "animation": reported_anim,
         "textures": reported_textures,
-        "warnings": tex_warnings,
+        "warnings": tex_warnings + skin_notes,
     }

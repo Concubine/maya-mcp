@@ -650,6 +650,13 @@ def skin_facts(facts, tol=1e-3):
                   if c["model"] is not None}
     max_err = None
     unweighted = 0
+    # #817: how many clusters carry a NON-ZERO weight for each vertex - the
+    # number a 4-influence consumer caps. Read from the records that ship,
+    # so a weight the exporter dropped (it drops anything below 1e-3
+    # without renormalising - see WEIGHT_SUM_TOL's note in export.py) is
+    # not counted as an influence the consumer will see.
+    max_influences = None
+    over_four = 0
     reasons = []
     for uid, skin in facts.skins.items():
         verts = facts.geometries.get(skin["geometry"])
@@ -659,6 +666,7 @@ def skin_facts(facts, tol=1e-3):
             continue
         num = len(verts) // 3
         sums = [0.0] * num
+        counts = [0] * num
         readable = True
         for cluster_uid in skin["clusters"]:
             cluster = facts.clusters.get(cluster_uid) or {}
@@ -673,6 +681,8 @@ def skin_facts(facts, tol=1e-3):
             for i, w in zip(idx, wts):
                 if 0 <= i < num:
                     sums[i] += w
+                    if w > tol:
+                        counts[i] += 1
                 else:
                     readable = False
                     reasons.append(
@@ -688,6 +698,10 @@ def skin_facts(facts, tol=1e-3):
                 err = abs(s - 1.0)
                 if max_err is None or err > max_err:
                     max_err = err
+        if counts:
+            top = max(counts)
+            max_influences = top if max_influences is None else max(max_influences, top)
+            over_four += sum(1 for c in counts if c > 4)
     return {
         "deformers": len(facts.skins),
         "clusters": len(facts.clusters),
@@ -695,6 +709,8 @@ def skin_facts(facts, tol=1e-3):
         "bind_pose_present": facts.bind_pose_count > 0,
         "max_weight_sum_error": max_err,
         "unweighted_file_vertices": unweighted,
+        "max_influences": max_influences,
+        "vertices_over_4_influences": over_four,
         "unavailable_reason": "; ".join(reasons) or None,
     }
 

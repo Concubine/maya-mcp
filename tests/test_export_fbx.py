@@ -2419,3 +2419,55 @@ class TestTheMelFakeRefusesWhatMayaRefuses:
         mel = FakeMel()
         mel.eval("FBXExportSkins -v false")
         assert mel.evaluated == ["FBXExportSkins -v false"]
+
+
+class TestMoreThanFourInfluencesIsWarned:
+    """#817 - the one durable sentence out of #748. bind_skin allows 8, a
+    4-influence consumer keeps the 4 heaviest and renormalises, and #743
+    measured the deformation drift that costs (~3% of the joint rotation on
+    a deep chain). A WARNING, never a refusal: 8 is legitimate for a consumer
+    that supports it."""
+
+    def _block(self, **over):
+        block = {"deformers": 1, "clusters": 8, "influenced_models": 8,
+                 "bind_pose_present": True, "max_weight_sum_error": 1e-7,
+                 "unweighted_file_vertices": 0, "unavailable_reason": None,
+                 "max_influences": 4, "vertices_over_4_influences": 0}
+        block.update(over)
+        return block
+
+    def test_over_four_warns_with_the_counts_and_the_consumer_rule(self):
+        out = export.skin_warnings(self._block(max_influences=8,
+                                               vertices_over_4_influences=22716))
+        assert len(out) == 1
+        assert "22716" in out[0] and "8" in out[0] and "4" in out[0]
+        assert "renormalis" in out[0]
+        assert "max_influences=4" in out[0]
+
+    def test_at_or_under_four_says_nothing(self):
+        assert export.skin_warnings(self._block()) == []
+        assert export.skin_warnings(self._block(max_influences=2)) == []
+
+    def test_an_unreadable_count_says_nothing_here(self):
+        # the unreadable-records violation already speaks, once
+        assert export.skin_warnings(self._block(max_influences=None,
+                                                unavailable_reason="x")) == []
+
+    def test_it_is_a_warning_not_a_violation(self):
+        block = self._block(max_influences=8, vertices_over_4_influences=5)
+        assert export.skin_violations(block) == []
+
+    def test_the_export_carries_it_in_warnings(self, monkeypatch, tmp_path):
+        node = fbxbytes.FbxNode(name="tube", kind="Mesh", uid=1, geometry=7)
+        joint = fbxbytes.FbxNode(name="j1", kind="LimbNode", uid=2)
+        facts = _facts([node, joint])
+        facts.meshes = [(0.0, 0.0, 0.0, 1.0, 2.0, 1.0)]
+        facts.geometries = {7: facts.meshes[0]}
+        _install(monkeypatch, FakeCmds(), facts)
+        monkeypatch.setattr(export.fbxbytes, "skin_facts",
+                            lambda _f: self._block(max_influences=6,
+                                                   vertices_over_4_influences=3))
+        out = export.export_fbx({"path": str(tmp_path / "eight.fbx"),
+                                 "metres_per_unit": 1.0, "include_skins": True})
+        assert out["skin"]["max_influences"] == 6
+        assert any("more than 4 influences" in w for w in out["warnings"])

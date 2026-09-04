@@ -526,3 +526,50 @@ class TestTextureRecords:
         assert block == {"texture_records": 0, "video_records": 0,
                          "textures": [], "videos": [],
                          "unavailable_reason": None}
+
+
+class TestInfluencesPerVertexFromTheFile:
+    """#817: how many clusters carry a NON-ZERO weight for each vertex, read
+    from the records that ship. A 4-influence consumer (Unity's default -
+    #743/#748 measured bones_per_vertex_max = 4) caps and renormalises above
+    that, and the export must be able to say so from the bytes."""
+
+    def _facts(self, clusters, verts=3):
+        facts = FbxFacts(version=7500)
+        facts.geometries = {10: tuple([0.0] * (verts * 3))}
+        facts.skins = {20: {"geometry": 10, "clusters": list(range(30, 30 + len(clusters)))}}
+        facts.clusters = {30 + n: {"indexes": tuple(idx), "weights": tuple(wts), "model": 100 + n}
+                          for n, (idx, wts) in enumerate(clusters)}
+        facts.bind_pose_count = 1
+        return facts
+
+    def test_five_clusters_on_one_vertex_read_as_five_influences(self):
+        # vertex 0: 5 clusters at 0.2; vertex 1: 2 clusters; vertex 2: 1
+        clusters = [([0, 1], [0.2, 0.5]), ([0, 1], [0.2, 0.5]), ([0], [0.2]),
+                    ([0], [0.2]), ([0, 2], [0.2, 1.0])]
+        out = fbxbytes.skin_facts(self._facts(clusters))
+        assert out["max_influences"] == 5
+        assert out["vertices_over_4_influences"] == 1
+
+    def test_a_zero_weight_record_is_not_an_influence(self):
+        clusters = [([0], [1.0]), ([0], [0.0]), ([0], [0.0]), ([0], [0.0]), ([0], [0.0])]
+        out = fbxbytes.skin_facts(self._facts(clusters, verts=1))
+        assert out["max_influences"] == 1
+        assert out["vertices_over_4_influences"] == 0
+
+    def test_exactly_four_is_not_over(self):
+        clusters = [([0], [0.25])] * 4
+        out = fbxbytes.skin_facts(self._facts(clusters, verts=1))
+        assert out["max_influences"] == 4
+        assert out["vertices_over_4_influences"] == 0
+
+    def test_unreadable_records_null_the_count_with_the_reason(self):
+        out = fbxbytes.skin_facts(self._facts([([0, 1], [1.0])]))
+        assert out["max_influences"] is None
+        assert out["vertices_over_4_influences"] == 0
+        assert "indexes" in out["unavailable_reason"]
+
+    def test_no_skins_reads_as_no_maximum(self):
+        out = fbxbytes.skin_facts(FbxFacts(version=7500))
+        assert out["max_influences"] is None
+        assert out["vertices_over_4_influences"] == 0
