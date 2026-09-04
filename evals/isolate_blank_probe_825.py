@@ -69,7 +69,7 @@ def cap(label, isolate=True, save=True):
     img = res["images"][0]
     out = opaque(img["png_b64"], label if save else None)
     out["blank_flag"] = img.get("blank")
-    out["never_shown_note"] = any("never been shown" in w for w in res.get("warnings") or [])
+    out["never_shown_note"] = any("main window" in w for w in res.get("warnings") or [])
     return out
 
 

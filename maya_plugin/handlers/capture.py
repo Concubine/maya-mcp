@@ -192,8 +192,58 @@ def _names(params: Dict[str, Any], key: str, example: str) -> Optional[List[str]
     return value or None
 
 
+def _maya_main_window():
+    """Maya's main window as a QWidget, or None when there is no Qt to ask.
+
+    Split out from `ensure_viewport_realized` so the note logic can be tested
+    against a window that behaves the way a real one measurably does.
+    """
+    try:
+        from maya.OpenMayaUI import MQtUtil  # noqa: PLC0415 - Maya-only
+        from shiboken6 import wrapInstance  # noqa: PLC0415
+        from PySide6.QtWidgets import QWidget  # noqa: PLC0415
+
+        pointer = MQtUtil.mainWindow()
+        if pointer is None:
+            return None
+        return wrapInstance(int(pointer), QWidget)
+    except Exception:  # noqa: BLE001 - never fail a capture over this
+        return None
+
+
+# What this process has already SAID about the main window. Three facts, each
+# worth saying once: we asked for the window, the request did not take, the
+# window came up. Per process, because that is the scope of the thing being
+# described - one Maya, one window, one screen.
+_WINDOW_NOTES = {"asked": False, "said_not_taken": False, "said_up": False}
+
+_ASKED_NOTE = (
+    "Maya's main window is not shown, which makes the viewport draw nothing "
+    "into a capture (maya-mcp #765), so this call asked Maya to show it. "
+    "Whether a window actually appears on your screen cannot be measured "
+    "from inside this call - Maya acts on the request on its own next turn, "
+    "and reads back as shown either way - so this is a request, not a "
+    "report. The next capture says what came of it (maya-mcp #826).")
+_NOT_TAKEN_NOTE = (
+    "Maya's main window is still not shown, so the earlier request did not "
+    "take and nothing has appeared on your screen. Asked again. MEASURED on "
+    "agent-launched Mayas: the FIRST show a process is asked for is undone "
+    "again before the next command, whenever it comes, and the one after it "
+    "sticks - so this is the capture that usually puts the window up "
+    "(maya-mcp #826).")
+_UP_NOTE = (
+    "Maya's main window is up on screen now, after a capture asked for it "
+    "(maya-mcp #765). That is a visible change to the screen and the only "
+    "one a capture makes.")
+
+
+def reset_window_notes() -> None:
+    """Forget what this process has said about the main window (tests, gates)."""
+    _WINDOW_NOTES.update(asked=False, said_not_taken=False, said_up=False)
+
+
 def ensure_viewport_realized() -> Optional[str]:
-    """Show Maya's main window if it has never been shown, and say so.
+    """Show Maya's main window if it is not shown, and report what happened.
 
     MEASURED, and it is the cause of #765: a Maya whose main window has not
     been realized draws NOTHING into an offscreen playblast. Every pixel comes
@@ -213,28 +263,52 @@ def ensure_viewport_realized() -> Optional[str]:
     appear on someone's screen is a side effect and this tool's contract is
     that it has none.
 
-    Returns the note to warn with, or None when nothing needed doing (which
-    includes "this Maya has no Qt to ask" - the blank check downstream is the
-    backstop for every cause this cannot see).
-    """
-    try:
-        from maya.OpenMayaUI import MQtUtil  # noqa: PLC0415 - Maya-only
-        from shiboken6 import wrapInstance  # noqa: PLC0415
-        from PySide6.QtWidgets import QWidget  # noqa: PLC0415
+    #826 is what that report may and may not claim. It used to say "this call
+    showed it", which is an assertion about the screen that this call cannot
+    check. MEASURED (evals/realized_note_probe_826b.py) on a virgin agent
+    Maya: `show()` makes `isVisible()` True synchronously and the window is
+    hidden again by the next command, with neither `sendPostedEvents` nor
+    `processEvents` revealing it - the two worlds are indistinguishable from
+    in here.
 
-        pointer = MQtUtil.mainWindow()
-        if pointer is None:
-            return None
-        window = wrapInstance(int(pointer), QWidget)
-        if window.isVisible():
-            return None
-        window.show()
+    What is undone is the process's FIRST show, not "a show during the first
+    seconds": the #826 gate reproduced it on a Maya 67 s old, and the next
+    show stuck for good. That is also the shape #825 saw from outside - the
+    note on captures 1 and 2 and never again.
+
+    So the note reports across calls instead of asserting inside one: this
+    call says it ASKED, and the next call - which can see the outcome - says
+    the request did not take, or that the window is up. Each of the three is
+    said at most once per process; the show() itself is retried every time,
+    because that is #765's protection and it costs nothing.
+
+    Returns the note to warn with, or None when there is nothing new to say
+    (which includes "this Maya has no Qt to ask" - the blank check downstream
+    is the backstop for every cause this cannot see).
+    """
+    window = _maya_main_window()
+    if window is None:
+        return None
+    try:
+        visible = bool(window.isVisible())
+        if not visible:
+            window.show()
     except Exception:  # noqa: BLE001 - see docstring; never fail a capture
         return None
-    return ("Maya's main window had never been shown, which makes the "
-            "viewport draw nothing into a capture (maya-mcp #765), so this "
-            "call showed it. That is a visible change to the screen and the "
-            "only one a capture makes.")
+
+    if visible:
+        # Only ours to report if we are the reason it might be up.
+        if _WINDOW_NOTES["asked"] and not _WINDOW_NOTES["said_up"]:
+            _WINDOW_NOTES["said_up"] = True
+            return _UP_NOTE
+        return None
+    if not _WINDOW_NOTES["asked"]:
+        _WINDOW_NOTES["asked"] = True
+        return _ASKED_NOTE
+    if not _WINDOW_NOTES["said_not_taken"]:
+        _WINDOW_NOTES["said_not_taken"] = True
+        return _NOT_TAKEN_NOTE
+    return None
 
 
 def blank_warnings(shot: Dict[str, Any], label: str) -> List[str]:

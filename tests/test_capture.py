@@ -1438,6 +1438,53 @@ class TestBlankFrameIsNamed:
         assert [img["blank"] for img in result["images"]] == [True, False]
 
 
+class FakeMainWindow:
+    """Maya's main window, with the one behaviour that makes #826 hard.
+
+    MEASURED (evals/realized_note_probe_826b.py, virgin agent Maya inside the
+    boot race): `show()` sets `isVisible()` True SYNCHRONOUSLY, in the same
+    command, in both worlds - the one where the window stays up and the one
+    where Maya's start-up hides it again on its next event-loop turn. Neither
+    `QApplication.sendPostedEvents` nor `processEvents` revealed the
+    difference; only the next command did.
+
+    So `stick=False` models the racing process: show() reads back True, and
+    the value the NEXT call sees is False again.
+    """
+
+    def __init__(self, visible=False, stick=True):
+        self._visible = visible
+        self.stick = stick
+        self.shows = 0
+        self._pending_hide = False
+
+    def isVisible(self):  # noqa: N802 - Qt's name
+        return self._visible
+
+    def show(self):
+        self.shows += 1
+        # True inside this call whatever happens next - that is the trap, so
+        # the fake must NOT hide it here. A readback in the same command
+        # cannot tell the two worlds apart, and a fake that let one work
+        # would make an impossible design look verifiable (#799's lesson).
+        self._visible = True
+        self._pending_hide = not self.stick
+
+    def next_command(self):
+        """Hand back to Maya's event loop: a racing process re-hides here."""
+        if self._pending_hide:
+            self._visible = False
+            self._pending_hide = False
+
+
+@pytest.fixture(autouse=True)
+def _forget_window_notes():
+    """Each test gets a process that has said nothing about the window yet."""
+    capture.reset_window_notes()
+    yield
+    capture.reset_window_notes()
+
+
 class TestUnrealizedWindow:
     """#765's cause: a main window that was never shown draws nothing.
 
@@ -1485,6 +1532,119 @@ class TestUnrealizedWindow:
         assert result["warnings"] == ["showed the window"]
         turn = capture.capture_turntable({"n_frames": 2})
         assert turn["warnings"] == ["showed the window"]
+
+
+class TestTheWindowNoteSaysWhatActuallyHappened:
+    """#826: the note used to ASSERT an effect it never checked.
+
+    It said "this call showed it. That is a visible change to the screen" on
+    every capture of a hidden window. MEASURED on agent Mayas (probes
+    realized_note_probe_826*.py): during Maya's first seconds a show() is
+    undone again before the next command, so no window appeared and the same
+    claim fired on capture after capture; a few seconds later a show() sticks
+    for good, and then it is true. Neither state is knowable from inside the
+    call that shows - the readback is True either way - so the note stops
+    asserting and the NEXT call reports what came of it.
+    """
+
+    def _call(self, window):
+        window.next_command()
+        return capture.ensure_viewport_realized()
+
+    def _use(self, monkeypatch, window):
+        monkeypatch.setattr(capture, "_maya_main_window", lambda: window)
+        return window
+
+    def test_the_first_call_asks_and_does_not_claim_it_showed_anything(
+        self, monkeypatch
+    ):
+        window = self._use(monkeypatch, FakeMainWindow(visible=False))
+        note = self._call(window)
+        assert window.shows == 1, "the show() #765 needs must still happen"
+        assert "asked Maya to show it" in note
+        assert "showed it." not in note
+
+    def test_a_request_that_did_not_take_is_reported_once_not_every_capture(
+        self, monkeypatch
+    ):
+        # The racing process: show() reads back True, next command says False.
+        window = self._use(monkeypatch, FakeMainWindow(visible=False,
+                                                       stick=False))
+        first = self._call(window)
+        assert "asked Maya to show it" in first
+        second = self._call(window)
+        assert "did not take" in second
+        assert window.shows == 2, "the protection is retried, only the note stops"
+        # The defect itself: before #826 this note repeated forever.
+        assert self._call(window) is None
+        assert self._call(window) is None
+        assert window.shows == 4
+
+    def test_a_window_that_came_up_is_reported_once_when_it_is_measurable(
+        self, monkeypatch
+    ):
+        window = self._use(monkeypatch, FakeMainWindow(visible=False))
+        assert "asked Maya to show it" in self._call(window)
+        note = self._call(window)  # now genuinely visible, and we asked for it
+        assert "up on screen now" in note
+        assert "the only one a capture makes" in note
+        assert self._call(window) is None, "said once, not on every capture"
+
+    def test_the_racing_process_walks_ask_then_not_taken_then_up(
+        self, monkeypatch
+    ):
+        # The whole measured sequence: Maya un-shows the first request, the
+        # second sticks, and each stage is reported exactly once.
+        window = self._use(monkeypatch, FakeMainWindow(visible=False,
+                                                       stick=False))
+        assert "asked Maya to show it" in self._call(window)
+        window.stick = True  # the boot race closes
+        assert "did not take" in self._call(window)
+        assert "up on screen now" in self._call(window)
+        assert self._call(window) is None
+
+    def test_a_window_somebody_is_looking_at_is_never_touched_or_mentioned(
+        self, monkeypatch
+    ):
+        # An interactive Maya. Nothing to fix, nothing to report, and above
+        # all no show() - this must stay invisible to the user's session.
+        window = self._use(monkeypatch, FakeMainWindow(visible=True))
+        assert self._call(window) is None
+        assert self._call(window) is None
+        assert window.shows == 0
+
+    def test_a_window_up_for_reasons_of_ours_is_not_claimed(self, monkeypatch):
+        # Visible without this tool ever asking: no credit taken.
+        window = self._use(monkeypatch, FakeMainWindow(visible=True))
+        assert self._call(window) is None
+        window._visible = False
+        assert "asked Maya to show it" in self._call(window)
+
+    def test_no_qt_to_ask_is_silent_rather_than_fatal(self, monkeypatch):
+        monkeypatch.setattr(capture, "_maya_main_window", lambda: None)
+        assert capture.ensure_viewport_realized() is None
+
+    def test_a_window_that_raises_never_fails_the_capture(self, monkeypatch):
+        class Hostile:
+            def isVisible(self):  # noqa: N802 - Qt's name
+                raise RuntimeError("wrapped a dead pointer")
+
+        monkeypatch.setattr(capture, "_maya_main_window", lambda: Hostile())
+        assert capture.ensure_viewport_realized() is None
+
+    def test_a_show_that_raises_is_silent_and_leaves_the_latch_alone(
+        self, monkeypatch
+    ):
+        class HalfDead(FakeMainWindow):
+            def show(self):
+                raise RuntimeError("no window server")
+
+        window = self._use(monkeypatch, HalfDead(visible=False))
+        assert capture.ensure_viewport_realized() is None
+        # Nothing was said, so nothing is owed: a later working call still
+        # gets to ask rather than jumping straight to "did not take".
+        good = self._use(monkeypatch, FakeMainWindow(visible=False))
+        assert "asked Maya to show it" in self._call(good)
 
 
 class TestTheFakesRefuseWhatMayaRefuses:

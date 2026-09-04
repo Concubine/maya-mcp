@@ -348,7 +348,21 @@ The defect this closes: `capture_viewport` returned frames in which every pixel 
 
 **The cause, and the other half of the fix.** A Maya whose main window has **never been shown** draws nothing into an offscreen playblast — and every agent-launched Maya starts that way. `offScreen=True` does not save it and neither does the `M3dView.readColorBuffer` fallback. The discriminator is `isVisible()`, not `isMinimized()`: the blind session measured `minimized=False, visible=False`, which is why chasing minimisation led nowhere. One `show()` fixes it permanently for that process, and minimising the window again afterwards does not break it, because the surface stays valid once created.
 
-So `capture_viewport` and `capture_turntable` now show an unrealized window before capturing, and **say that they did** — making a window appear is a visible side effect, and a capture's contract is that it has none. It only ever fires on a window nobody is looking at: an interactive session has a visible window by definition.
+So `capture_viewport` and `capture_turntable` now show an unrealized window before capturing, and **say so** — making a window appear is a visible side effect, and a capture's contract is that it has none. It only ever fires on a window nobody is looking at: an interactive session has a visible window by definition.
+
+**What that note may claim (#826).** It used to say "this call showed it. That is a visible change to the screen", which is an assertion about the screen that the call making it cannot check. MEASURED on virgin agent Mayas: `show()` sets `isVisible()` True **synchronously**, inside the calling command, and the window can be hidden again by the very next command — with neither `QApplication.sendPostedEvents` nor `processEvents` revealing the difference from in there. The two outcomes are indistinguishable at the moment of speaking, so on those processes the tool announced a window that never appeared, and announced it again on every later capture because visibility never latched.
+
+What is undone is the process's **first** `show()`, not "a show during Maya's first seconds": the #826 gate reproduced it on a Maya 67 s old, and the next `show()` stuck for good. That is the shape #825 saw from outside — the note on captures 1 and 2 and never again.
+
+So the note reports **across calls** rather than asserting inside one, and each of three facts is said at most once per process:
+
+| what the capture found | what it says |
+|---|---|
+| window hidden, nothing said yet | it **asked** Maya to show it, and that the outcome is not measurable from inside this call |
+| still hidden on a later capture | the earlier request **did not take**, nothing appeared, asked again |
+| visible on a later capture, after we asked | the window **is up on screen now** — the visible change, reported when it is true |
+
+The `show()` itself is retried on every capture regardless, because that is #765's protection and it costs nothing. A window that was never hidden is neither shown nor mentioned. Gate: `evals/realized_note_live.py` (25/25), which forces both outcomes — the undone one with a one-shot event filter that hides the window one event-loop turn after it is shown.
 
 The blank report remains the backstop for every other cause, including ones nobody has met yet.
 

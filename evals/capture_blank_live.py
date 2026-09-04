@@ -142,7 +142,7 @@ def main() -> int:
     first = ok("capture_viewport", {"angles": ["front"], "resolution": 256})
     shot = (first.get("images") or [{}])[0]
     drawn = opaque_pixels(shot.get("png_b64", ""))
-    shown = [w for w in (first.get("warnings") or []) if "never been shown" in w]
+    shown = [w for w in (first.get("warnings") or []) if "main window" in w]
     print("  blank=%r opaque(measured here)=%d window-was-shown=%s"
           % (shot.get("blank"), drawn, bool(shown)))
     if drawn == 0:
