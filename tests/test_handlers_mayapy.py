@@ -253,6 +253,75 @@ class TestMeshStatsNonMeshInMaya:
             meshcheck.mesh_stats("|someGroup")
 
 
+class TestOcclusionRaysInMaya:
+    """#824: the ray seam against a real MFnMesh. No GL needed -
+    closestIntersection is geometry, so mayapy can measure it."""
+
+    def _red_blue(self):
+        import maya.cmds as cmds
+
+        red = cmds.polyCube(name="red", ch=False)[0]
+        cmds.xform(red, ws=True, t=[0, 0, 1.2])
+        blue = cmds.polyCube(name="blue", ch=False)[0]
+        cmds.xform(blue, ws=True, t=[0, 0, -1.2])
+        return "|red", "|blue|blueShape"
+
+    def test_a_cube_in_the_way_blocks_every_sample(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import capture
+
+        red, blue_shape = self._red_blue()
+        box = cmds.exactWorldBoundingBox(red)
+        samples = capture.bbox_samples(box[:3], box[3:])
+        hits = capture.blocked_samples((0.0, 0.0, -5.35), samples, [blue_shape])
+        assert hits == [blue_shape] * 9
+
+    def test_nothing_in_the_way_blocks_none(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import capture
+
+        red, blue_shape = self._red_blue()
+        box = cmds.exactWorldBoundingBox(red)
+        samples = capture.bbox_samples(box[:3], box[3:])
+        assert capture.blocked_samples((0.0, 0.0, 5.35), samples, [blue_shape]) == [None] * 9
+
+    def test_a_floor_the_target_stands_on_does_not_count(self):
+        """MEASURED (#824): rays to the bottom corners of a cube standing
+        on a plane hit the plane exactly AT the corner (param == distance),
+        4 of 9 from three_quarter with no tolerance, 0 with it."""
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import capture
+
+        cube = cmds.polyCube(name="red", ch=False)[0]
+        floor = cmds.polyPlane(name="floor", w=10, h=10, sx=1, sy=1, ch=False)[0]
+        cmds.xform(floor, ws=True, t=[0, -0.5, 0])
+        box = cmds.exactWorldBoundingBox(cube)
+        position, _rot = capture.camera_placement("three_quarter", box[:3], box[3:])
+        samples = capture.bbox_samples(box[:3], box[3:])
+        hits = capture.blocked_samples(position, samples, ["|floor|floorShape"])
+        assert hits == [None] * 9, hits
+
+    def test_occluders_exclude_a_grouped_targets_own_shapes_and_orig(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import capture
+
+        a = cmds.polyCube(name="a", ch=False)[0]
+        b = cmds.polyCube(name="b", ch=False)[0]
+        cmds.group(a, b, name="pair")
+        cmds.polyCube(name="wall", ch=False)
+        skinned = cmds.polyCube(name="skinned", ch=False)[0]
+        joint = cmds.joint(p=(0, 0, 0))
+        cmds.skinCluster(joint, skinned)
+        # Order is Maya's (ls answers creation order in one session and
+        # not in another); the SET is the claim.
+        assert sorted(capture.occluder_shapes(cmds, ["|pair"], None)) == [
+            "|skinned|skinnedShape", "|wall|wallShape"]
+
+
 class TestModelingInMaya:
     def test_create_transform_duplicate_roundtrip(self):
         import maya.cmds as cmds

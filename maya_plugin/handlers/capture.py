@@ -313,6 +313,9 @@ def frame_warnings(shot: Dict[str, Any], label: str,
         'all' with nothing to light with draws the subject black on black,
         and the blank check cannot catch it because the background still
         renders.
+      * the `target` is behind another mesh from this angle (#824): the
+        camera is placed from the target's bbox alone, so the frame is full
+        of the occluder and the blank check cannot see it either.
     """
     out: List[str] = []
     if shot.get("target_unframed"):
@@ -333,7 +336,194 @@ def frame_warnings(shot: Dict[str, Any], label: str,
             "by nothing and draws dark against the background. Call "
             "maya_setup_lighting first, or use lighting='default' for Maya's "
             "headlight.")
+    note = occlusion_warning(label, shot.get("occlusion"))
+    if note:
+        out.append(note)
     return out
+
+
+# ------------------------------------------------------- occlusion (#824)
+
+# A ray that reaches its sample point within this fraction of the distance
+# is NOT blocked. MEASURED: a cube standing on a plane has its bottom
+# corners ON the plane, and the rays to them hit it at param == distance
+# (4 of 9 from three_quarter, 2 of 9 from the front); with this tolerance,
+# none.
+OCCLUSION_TOLERANCE = 1e-4
+
+
+def bbox_samples(bbox_min: Sequence[float], bbox_max: Sequence[float]
+                 ) -> List[Tuple[float, float, float]]:
+    """The nine points a target's visibility is asked at: the centre of
+    its world bbox and the eight corners, centre first."""
+    centre = tuple((float(lo) + float(hi)) / 2.0
+                   for lo, hi in zip(bbox_min, bbox_max))
+    corners = [
+        (float(x), float(y), float(z))
+        for x in (bbox_min[0], bbox_max[0])
+        for y in (bbox_min[1], bbox_max[1])
+        for z in (bbox_min[2], bbox_max[2])
+    ]
+    return [centre] + corners
+
+
+def occlusion_warning(label: str, occlusion: Optional[Dict[str, Any]]
+                      ) -> Optional[str]:
+    """Say when the target the caller asked to see is behind something.
+
+    MEASURED (#823 K2, #824): `back` with `target=|red` on a red(+Z)/blue
+    (-Z) pair places the camera from the target's bbox alone, so the blue
+    cube sits between them and the frame is 65536/65536 blue px, zero red,
+    `blank: false`, no warning. The caller asked for the red cube and got a
+    success holding none of it. The blank check cannot see this - the frame
+    is full of pixels - so it is asked with rays instead (target_occlusion).
+
+    A WARNING, never a refusal: a caller framing a part with its
+    surroundings in shot may want exactly that, and a partial cover is a
+    measurement of nine sample points, not a verdict on the picture. The
+    unmeasured case is reported too (the blank_warnings discipline).
+    """
+    if not occlusion:
+        return None
+    targets = occlusion.get("targets") or []
+    names = ", ".join(targets)
+    if occlusion.get("unmeasurable") is not None:
+        return ("%s: whether target %s is hidden behind another object could "
+                "not be measured (%s); the frame may show something else"
+                % (label, names, occlusion["unmeasurable"]))
+    blocked = int(occlusion.get("blocked") or 0)
+    if blocked <= 0:
+        return None
+    samples = int(occlusion.get("samples") or 0)
+    by = ", ".join(occlusion.get("by") or []) or "another mesh"
+    isolate = "isolate=[%s]" % ", ".join("'%s'" % t for t in targets)
+    if blocked >= samples:
+        return ("%s: target %s is hidden behind %s from this angle - all %d "
+                "sample points on its bounding box (centre and corners) are "
+                "blocked, so the frame shows the occluder, not the target. "
+                "Pass %s to photograph it alone, or choose another angle."
+                % (label, names, by, samples, isolate))
+    return ("%s: target %s is partly hidden behind %s from this angle - %d "
+            "of %d sample points on its bounding box are blocked. Pass %s "
+            "if the occluder is not wanted in shot."
+            % (label, names, by, blocked, samples, isolate))
+
+
+def occluder_shapes(cmds, framing: Sequence[str],
+                    isolate: Optional[Sequence[str]]) -> List[str]:
+    """Every visible mesh that could stand between the camera and the
+    target: what `ls(geometry=True, visible=True)` draws, minus the
+    target's own shapes, minus intermediate shapes, and under `isolate`
+    only what is actually shown. Each exclusion is MEASURED (#824):
+
+      * the target's own shapes: rays to a grouped target's far corners
+        pass through its near member, and counted as 4 blocks of 9 from
+        the back until excluded. `ls(<nodes>, dag=True, shapes=True)` is
+        the form that finds them under a group - `listRelatives(
+        allDescendents=True, shapes=True)` answered NOTHING for one.
+      * a skinned mesh's ShapeOrig is listed as visible geometry next to
+        the drawn shape; it draws nothing and would answer rays.
+      * only meshes: closestIntersection is an MFnMesh call.
+      * isolate=[red] + target red from the back drew 14884 red px: the
+        hidden blue cube cannot occlude what it is not drawn in front of.
+    """
+    own = set(cmds.ls(list(framing), dag=True, shapes=True, long=True,
+                      noIntermediate=True) or [])
+    shown = None
+    if isolate:
+        shown = set(cmds.ls(list(isolate), dag=True, shapes=True, long=True,
+                            noIntermediate=True) or [])
+    out = []
+    for shape in cmds.ls(geometry=True, visible=True, long=True) or []:
+        if shape in own or cmds.nodeType(shape) != "mesh":
+            continue
+        if cmds.getAttr(shape + ".intermediateObject"):
+            continue
+        if shown is not None and shape not in shown:
+            continue
+        out.append(shape)
+    return out
+
+
+def blocked_samples(camera_position: Sequence[float],
+                    samples: Sequence[Sequence[float]],
+                    shapes: Sequence[str],
+                    tolerance: float = OCCLUSION_TOLERANCE
+                    ) -> List[Optional[str]]:
+    """For each sample point, the shape a ray from the camera hits FIRST
+    on its way there, or None when it arrives unblocked.
+
+    OpenMaya, module-level ON PURPOSE (the physics._points_and_triangles
+    seam): FakeCmds cannot fake MFnMesh, so the headless tests monkeypatch
+    this and the mayapy tests measure it. MEASURED on Maya 2027: nine rays
+    against a 40k-face mesh take 11 ms without an accelerator, so none is
+    built. closestIntersection answers None on a miss and a (point, param,
+    face, triangle, bary1, bary2) tuple on a hit.
+    """
+    import maya.api.OpenMaya as om  # noqa: PLC0415 - only importable inside Maya
+
+    meshes = []
+    for shape in shapes:
+        sel = om.MSelectionList()
+        sel.add(shape)
+        meshes.append((shape, om.MFnMesh(sel.getDagPath(0))))
+    source = om.MPoint(*[float(v) for v in camera_position])
+    out: List[Optional[str]] = []
+    for sample in samples:
+        offset = om.MPoint(*[float(v) for v in sample]) - source
+        distance = offset.length()
+        if distance <= 0.0:
+            out.append(None)
+            continue
+        direction = om.MFloatVector(offset.normal())
+        nearest = distance * (1.0 - tolerance)
+        hit_by = None
+        for shape, mesh in meshes:
+            hit = mesh.closestIntersection(
+                om.MFloatPoint(source), direction, om.MSpace.kWorld,
+                distance, False)
+            if hit is not None and hit[2] != -1 and hit[1] < nearest:
+                nearest = hit[1]
+                hit_by = shape
+        out.append(hit_by)
+    return out
+
+
+def _transform_short_name(shape: str) -> str:
+    parts = shape.split("|")
+    return parts[-2] if len(parts) >= 2 and parts[-2] else parts[-1]
+
+
+def target_occlusion(cmds, camera: str, framing: Sequence[str],
+                     isolate: Optional[Sequence[str]]) -> Dict[str, Any]:
+    """Is the framed target visible from where the camera ended up?
+
+    Asked AFTER viewFit, from the camera's final position, at the nine
+    bbox_samples of the target against occluder_shapes. Never raises: a
+    capture must not fail because this could not be asked, and the
+    `unmeasurable` form says so rather than reading as "fine".
+    """
+    targets = list(framing)
+    try:
+        position = tuple(cmds.getAttr(camera + ".translate")[0])
+        bbox_min, bbox_max = _scene_bbox(cmds, targets, param="target")
+        samples = bbox_samples(bbox_min, bbox_max)
+        shapes = occluder_shapes(cmds, targets, isolate)
+        hits = (blocked_samples(position, samples, shapes) if shapes
+                else [None] * len(samples))
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        return {"targets": targets,
+                "unmeasurable": "%s: %s" % (type(exc).__name__, exc)}
+    by: List[str] = []
+    for hit in hits:
+        if hit is None:
+            continue
+        name = _transform_short_name(hit)
+        if name not in by:
+            by.append(name)
+    return {"targets": targets,
+            "blocked": sum(1 for hit in hits if hit is not None),
+            "samples": len(samples), "by": by}
 
 
 # Every top-level key capture_viewport reads. Anything else is refused rather
@@ -870,6 +1060,14 @@ def _capture_one(
             else:
                 cmds.viewFit(capture_cam, allObjects=True, fitFactor=0.85)
 
+        # Is the target actually in view from where the camera ended up?
+        # Asked here, after viewFit has moved it, and only for a named
+        # target on a placing angle: isolate alone leaves nothing else to
+        # hide behind, and "current" placed no camera (#824).
+        occlusion = None
+        if frame_on and angle != "current":
+            occlusion = target_occlusion(cmds, capture_cam, frame_on, isolate)
+
         # Deselect before grabbing pixels: selection highlight (green/white
         # wireframes) otherwise pollutes the capture. Must happen AFTER viewFit,
         # which frames the current selection; _PanelState restores the user's
@@ -923,6 +1121,7 @@ def _capture_one(
             "drawn_size": opacity.get("drawn_size"),
             "unlit": unlit,
             "target_unframed": target_unframed,
+            "occlusion": occlusion,
         }
     finally:
         state.restore()

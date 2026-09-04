@@ -344,7 +344,10 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 "With neither target nor isolate the whole scene is framed, "
                 "lights excluded. Refused when every angle is 'current' (nothing "
                 "is framed then); on a mixed list it frames the other angles and "
-                "the current frame says it was not framed on it."
+                "the current frame says it was not framed on it. The camera is "
+                "placed from the target's bounding box alone, so a warning says "
+                "when another mesh stands between them and hides it (fully or "
+                "N of 9 sample points) - pass isolate to photograph it alone."
             )),
         ] = None,
         frame_all: Annotated[

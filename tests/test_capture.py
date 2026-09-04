@@ -568,8 +568,11 @@ class FakeCaptureCmds:
 
     # -- #799 existence ---------------------------------------------------
     def _long_names(self):
-        """Every node in the fake scene - transforms AND their shapes."""
-        return list(self.nodes) + [s for s in self.nodes.values() if s]
+        """Every node in the fake scene - transforms AND their shapes,
+        including a second shape under one transform (a ShapeOrig, #824)."""
+        shapes = [s for s in self.nodes.values() if s]
+        return list(self.nodes) + shapes + [
+            g for g in self.geometry if g not in shapes]
 
     def _resolve(self, name):
         """The registered long name for `name`, or None. Matches Maya's own
@@ -681,6 +684,22 @@ class FakeCaptureCmds:
             # an unknown type answers nothing rather than raising, which is
             # what a Maya without mtoa does through light_shapes' guard.
             return list(self.lights) if kw["type"] == "light" else []
+        if kw.get("dag") and kw.get("shapes"):
+            # `ls(<transforms>, dag=True, shapes=True)`: every shape at or
+            # under the named nodes. MEASURED (#824): this is the form that
+            # answers for a group - listRelatives(allDescendents=True,
+            # shapes=True) answered NOTHING for one on Maya 2027. Before the
+            # `long` branch, which reads a bare name.
+            roots = list(args[0]) if isinstance(args[0], (list, tuple)) else [args[0]]
+            roots = [self._require(r) for r in roots]
+            out = []
+            for shape in self.geometry:
+                if kw.get("noIntermediate") and self.plugs.get(
+                        shape + ".intermediateObject"):
+                    continue
+                if any(shape == r or shape.startswith(r + "|") for r in roots):
+                    out.append(shape)
+            return out
         if args and kw.get("long"):
             name = str(args[0])
             if self.ambiguous_name and name.lstrip("|") == self.ambiguous_name:
@@ -746,21 +765,52 @@ class FakeCaptureCmds:
                 if node_type in FakeSceneCmds.LIGHT_TYPES else [])
 
     def exactWorldBoundingBox(self, *targets, **kw):
-        boxes = [self.boxes[self._require(t)] for t in targets]
+        # A transform's box is the union of the shapes under it, as in
+        # Maya; a box registered for the transform itself wins (#824).
+        boxes = []
+        for target in targets:
+            node = self._require(target)
+            if node in self.boxes:
+                boxes.append(self.boxes[node])
+                continue
+            under = [b for shape, b in self.boxes.items()
+                     if shape.startswith(node + "|")]
+            if not under:
+                raise KeyError(node)
+            boxes.append(tuple(
+                [min(b[i] for b in under) for i in range(3)]
+                + [max(b[i] for b in under) for i in range(3, 6)]))
         if not boxes:
             return [1e20, 1e20, 1e20, -1e20, -1e20, -1e20]
         return [min(b[i] for b in boxes) for i in range(3)] + [
             max(b[i] for b in boxes) for i in range(3, 6)
         ]
 
-    def add_geometry(self, shape, node_type="mesh", box=(-1, -1, -1, 1, 1, 1)):
-        """Register a visible shape ls(geometry=True) will report."""
+    def add_geometry(self, shape, node_type="mesh", box=(-1, -1, -1, 1, 1, 1),
+                     intermediate=False):
+        """Register a visible shape ls(geometry=True) will report.
+
+        `intermediate` registers a deformer's ShapeOrig: MEASURED (#824),
+        `ls(geometry=True, visible=True)` lists it alongside the drawn
+        shape, and only its `.intermediateObject` plug tells them apart.
+        """
         transform = shape.rsplit("|", 1)[0] or "|" + shape.lstrip("|")
-        self.nodes[transform] = shape
+        # The FIRST shape stays the transform's listRelatives answer; a
+        # second one (a ShapeOrig) is still a node, via self.geometry.
+        if not self.nodes.get(transform):
+            self.nodes[transform] = shape
         self.node_types[transform] = "transform"
         self.node_types[shape] = node_type
         self.boxes[shape] = tuple(box)
+        self.plugs[shape + ".intermediateObject"] = bool(intermediate)
         self.geometry.append(shape)
+        # Every ancestor transform is a node too, so a GROUP can be named
+        # as a target and its shapes found under it (#824).
+        parts = transform.strip("|").split("|")
+        for depth in range(1, len(parts)):
+            ancestor = "|" + "|".join(parts[:depth])
+            self.nodes.setdefault(ancestor, None)
+            self.node_types.setdefault(ancestor, "transform")
         return shape
 
     def lookThru(self, panel, camera, *a, **kw):
@@ -1868,3 +1918,224 @@ class TestATypoTargetRefusesOnAMixedList:
                                  None, False, 256, "default", False,
                                  frame_on=["|nosuchthing"])
         assert "target objects not found" in str(exc.value)
+
+
+# ----------------------------------------------------------------- #824
+
+
+class TestOcclusionSamples:
+    """The nine points a target's visibility is asked at: the bbox centre
+    and its eight corners. Measured basis (#824): on the #823 K2 scene all
+    nine rays from the back camera to |red's box hit |blue first, and the
+    frame was 65536/65536 blue px; from the front none did."""
+
+    def test_nine_points_centre_first(self):
+        pts = capture.bbox_samples([-1, -2, -3], [1, 2, 3])
+        assert len(pts) == 9
+        assert pts[0] == (0.0, 0.0, 0.0)
+        corners = set(pts[1:])
+        assert corners == {(x, y, z) for x in (-1, 1) for y in (-2, 2)
+                           for z in (-3, 3)}
+
+
+class TestOcclusionWarning:
+    """Pure text. Warning, never a refusal: the caller may WANT the context
+    in shot, and a partial cover is a measurement, not a verdict."""
+
+    def _occ(self, blocked, by=("blue",), samples=9):
+        return {"targets": ["|red"], "blocked": blocked, "samples": samples,
+                "by": list(by)}
+
+    def test_fully_hidden_names_the_occluder_and_isolate(self):
+        note = capture.occlusion_warning("back", self._occ(9))
+        assert note is not None
+        assert note.startswith("back:")
+        assert "|red" in note and "blue" in note
+        assert "all 9" in note
+        assert "isolate" in note
+
+    def test_partly_hidden_gives_the_count(self):
+        note = capture.occlusion_warning("back", self._occ(5))
+        assert "partly" in note
+        assert "5 of 9" in note
+        assert "blue" in note
+
+    def test_nothing_in_the_way_says_nothing(self):
+        assert capture.occlusion_warning("front", self._occ(0, by=())) is None
+
+    def test_unmeasured_is_reported_not_hidden(self):
+        """The blank_warnings discipline: "I did not check" must not look
+        like "I checked and it is fine"."""
+        note = capture.occlusion_warning(
+            "back", {"targets": ["|red"], "unmeasurable": "no OpenMaya"})
+        assert "could not be measured" in note
+        assert "no OpenMaya" in note
+
+    def test_no_occlusion_dict_means_no_target(self):
+        assert capture.occlusion_warning("front", None) is None
+
+
+class TestOccluderShapes:
+    """Which meshes can hide the target: every visible mesh that is not
+    the target's own, not an intermediate shape, and (under isolate) is
+    actually shown. Each exclusion was measured on Maya 2027 (#824)."""
+
+    def _cmds(self):
+        cmds = FakeCaptureCmds()
+        cmds.add_geometry("|red|redShape", box=(-0.5, -0.5, 0.7, 0.5, 0.5, 1.7))
+        cmds.add_geometry("|blue|blueShape", box=(-0.5, -0.5, -1.7, 0.5, 0.5, -0.7))
+        return cmds
+
+    def test_the_other_mesh_is_an_occluder(self):
+        cmds = self._cmds()
+        assert capture.occluder_shapes(cmds, ["|red"], None) == ["|blue|blueShape"]
+
+    def test_the_targets_own_shapes_never_are(self):
+        """A grouped target: rays to a far bbox corner pass through the
+        group's own near member, and the probe counted that as a block
+        (4 of 9 from the back) until the group's shapes were excluded."""
+        cmds = FakeCaptureCmds()
+        cmds.add_geometry("|pair|a|aShape", box=(-1.5, -0.5, -0.5, -0.5, 0.5, 0.5))
+        cmds.add_geometry("|pair|b|bShape", box=(0.5, -0.5, -0.5, 1.5, 0.5, 0.5))
+        cmds.add_geometry("|wall|wallShape", box=(-2, -1, 1.9, 2, 1, 2.1))
+        assert capture.occluder_shapes(cmds, ["|pair"], None) == ["|wall|wallShape"]
+
+    def test_a_target_named_by_its_shape_is_excluded_too(self):
+        cmds = self._cmds()
+        assert capture.occluder_shapes(cmds, ["|red|redShape"], None) == ["|blue|blueShape"]
+
+    def test_an_intermediate_shape_is_not_an_occluder(self):
+        """MEASURED: ls(geometry=True, visible=True) lists a skinned mesh's
+        ShapeOrig next to the drawn shape. It draws nothing."""
+        cmds = self._cmds()
+        cmds.add_geometry("|skinned|skinnedShape", box=(2, -0.5, -0.5, 3, 0.5, 0.5))
+        cmds.add_geometry("|skinned|skinnedShapeOrig", intermediate=True,
+                          box=(2, -0.5, -0.5, 3, 0.5, 0.5))
+        assert capture.occluder_shapes(cmds, ["|red"], None) == [
+            "|blue|blueShape", "|skinned|skinnedShape"]
+
+    def test_only_meshes_count(self):
+        """closestIntersection is a mesh call; a nurbs surface or a light
+        cannot be asked and must not fail the capture."""
+        cmds = self._cmds()
+        cmds.add_geometry("|dome|domeShape", "aiSkyDomeLight",
+                          box=(-1000, -1000, -1000, 1000, 1000, 1000))
+        cmds.add_geometry("|patch|patchShape", "nurbsSurface")
+        assert capture.occluder_shapes(cmds, ["|red"], None) == ["|blue|blueShape"]
+
+    def test_isolate_limits_occluders_to_what_is_shown(self):
+        """MEASURED: isolate=[red] + target red from the back draws 14884
+        red px - the blue cube is hidden, so it cannot occlude."""
+        cmds = self._cmds()
+        assert capture.occluder_shapes(cmds, ["|red"], ["|red"]) == []
+        assert capture.occluder_shapes(cmds, ["|red"], ["|red", "|blue"]) == [
+            "|blue|blueShape"]
+
+
+class TestCaptureOneMeasuresOcclusion:
+    """_capture_one asks the rays AFTER viewFit, from where the camera
+    actually is, and only when a target was named on a placing angle."""
+
+    def _fake(self, monkeypatch, blocked_by=None, raise_with=None):
+        cmds = FakeCaptureCmds()
+        cmds.add_geometry("|red|redShape", box=(-0.5, -0.5, 0.7, 0.5, 0.5, 1.7))
+        cmds.add_geometry("|blue|blueShape", box=(-0.5, -0.5, -1.7, 0.5, 0.5, -0.7))
+        monkeypatch.setattr(capture, "_cmds", lambda: cmds)
+        monkeypatch.setattr(
+            capture, "_grab_pixels",
+            lambda *a, **k: (b"fakepng", {"blank": False,
+                                          "unavailable_reason": None}))
+        rays = []
+
+        def fake_blocked(camera_position, samples, shapes, tolerance=None):
+            rays.append({"camera": tuple(camera_position), "samples": list(samples),
+                         "shapes": list(shapes)})
+            if raise_with is not None:
+                raise raise_with
+            return [blocked_by] * len(samples) if blocked_by else [None] * len(samples)
+
+        monkeypatch.setattr(capture, "blocked_samples", fake_blocked)
+        return cmds, rays
+
+    def test_a_target_on_a_placing_angle_is_measured_from_the_camera(
+            self, monkeypatch):
+        cmds, rays = self._fake(monkeypatch, blocked_by="|blue|blueShape")
+        shot = capture._capture_one(
+            "back", "smoothShaded", True, "beauty", None, True, 256,
+            frame_on=["|red"])
+        assert len(rays) == 1
+        assert rays[0]["shapes"] == ["|blue|blueShape"]
+        assert len(rays[0]["samples"]) == 9
+        assert rays[0]["camera"] == tuple(shot["camera_position"])
+        assert shot["occlusion"] == {
+            "targets": ["|red"], "blocked": 9, "samples": 9, "by": ["blue"]}
+
+    def test_nothing_in_the_way_is_zero_blocked(self, monkeypatch):
+        cmds, rays = self._fake(monkeypatch)
+        shot = capture._capture_one(
+            "front", "smoothShaded", True, "beauty", None, True, 256,
+            frame_on=["|red"])
+        assert shot["occlusion"]["blocked"] == 0
+        assert shot["occlusion"]["by"] == []
+
+    def test_no_target_asks_no_rays(self, monkeypatch):
+        cmds, rays = self._fake(monkeypatch, blocked_by="|blue|blueShape")
+        shot = capture._capture_one(
+            "back", "smoothShaded", True, "beauty", None, True, 256)
+        assert rays == []
+        assert shot["occlusion"] is None
+
+    def test_isolate_alone_asks_no_rays(self, monkeypatch):
+        """isolate hides the rest; nothing else is left to hide behind."""
+        cmds, rays = self._fake(monkeypatch, blocked_by="|blue|blueShape")
+        shot = capture._capture_one(
+            "back", "smoothShaded", True, "beauty", ["|red"], True, 256)
+        assert rays == []
+        assert shot["occlusion"] is None
+
+    def test_the_current_angle_asks_no_rays(self, monkeypatch):
+        cmds, rays = self._fake(monkeypatch, blocked_by="|blue|blueShape")
+        shot = capture._capture_one(
+            "current", "smoothShaded", True, "beauty", None, True, 256,
+            frame_on=["|red"])
+        assert rays == []
+        assert shot["occlusion"] is None
+
+    def test_a_failed_measurement_is_reported_not_swallowed(self, monkeypatch):
+        cmds, rays = self._fake(monkeypatch, raise_with=RuntimeError("no api"))
+        shot = capture._capture_one(
+            "back", "smoothShaded", True, "beauty", None, True, 256,
+            frame_on=["|red"])
+        assert shot["occlusion"]["unmeasurable"] == "RuntimeError: no api"
+        assert shot["png_b64"], "the frame itself still comes back"
+
+
+class TestCaptureViewportSaysTheTargetIsHidden:
+    """End to end through capture_viewport's marshaling: the per-frame
+    occlusion dict becomes a warning naming the angle."""
+
+    def _spy(self, monkeypatch, occlusion):
+        def fake_capture_one(angle, *args, **kwargs):
+            return dict(png_b64="x", camera_position=[0, 0, 0],
+                        camera_rotation=[0, 0, 0], camera="|cam",
+                        blank=False, blank_unmeasurable=None,
+                        occlusion=occlusion if angle == "back" else None)
+
+        monkeypatch.setattr(capture, "_capture_one", fake_capture_one)
+
+    def test_a_hidden_target_is_warned_per_angle(self, monkeypatch):
+        self._spy(monkeypatch, {"targets": ["|red"], "blocked": 9,
+                                "samples": 9, "by": ["blue"]})
+        result = capture.capture_viewport(
+            {"angles": ["front", "back"], "target": ["|red"]})
+        notes = [w for w in result["warnings"] if "hidden behind" in w]
+        assert len(notes) == 1, result["warnings"]
+        assert notes[0].startswith("back:")
+        assert "blue" in notes[0]
+
+    def test_a_visible_target_adds_no_warning(self, monkeypatch):
+        self._spy(monkeypatch, {"targets": ["|red"], "blocked": 0,
+                                "samples": 9, "by": []})
+        result = capture.capture_viewport(
+            {"angles": ["back"], "target": ["|red"]})
+        assert not [w for w in result["warnings"] if "hidden" in w]
