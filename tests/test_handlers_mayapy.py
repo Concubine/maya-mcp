@@ -2685,6 +2685,73 @@ class TestBindSkinInMaya:
         out = rigging.bind_skin({"mesh": mesh, "root": skel["root"]})
         assert not any("OUTSIDE the hierarchy" in w for w in out["warnings"])
 
+    def test_geodesic_voxel_computes_real_weights(self):
+        """#821: skinCluster(bindMethod=3) alone leaves every vertex on the
+        last joint; the handler must run geomBind, after which every joint
+        of a chain through a cylinder owns vertices."""
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import rigging
+
+        mesh = _serpent_cylinder(cmds, name="tube6")
+        skel = self._chain(rigging, n=4)
+        try:
+            out = rigging.bind_skin({"mesh": mesh, "root": skel["root"],
+                                     "method": "geodesicVoxel"})
+        except HandlerError as exc:
+            # measured: geomBind needs a GL context; a headless mayapy has
+            # none and raises "Unable to create an offscreen OpenGL buffer".
+            # The handler must then leave NO half-bind behind. The real
+            # weights are the live gate's job (evals/geodesic_voxel_live.py).
+            assert "OpenGL" in str(exc)
+            assert not cmds.ls(cmds.listHistory(mesh, pruneDagObjects=True) or [],
+                               type="skinCluster")
+            assert not cmds.ls(type="geomBind")
+            return
+        assert out["unweighted_vertices"] == 0
+        assert all(p["vertices"] > 0 for p in out["per_joint"]), out["per_joint"]
+        assert not any("own no vertices" in w for w in out["warnings"])
+        geom = cmds.ls(type="geomBind")
+        assert geom and out["skin_cluster"] in (
+            cmds.listConnections(geom[-1] + ".skinClusters") or [])
+
+    def test_geodesic_voxel_on_a_flat_sheet_is_refused_and_leaves_nothing(self):
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import rigging
+
+        sheet = cmds.polyPlane(name="sheet6", width=2, height=2,
+                               subdivisionsX=4, subdivisionsY=4, ch=False)[0]
+        sheet = cmds.ls(sheet, long=True)[0]
+        skel = rigging.create_skeleton({
+            "chain": [[-1, 0, 0], [0, 0, 0], [1, 0, 0]], "chain_prefix": "sj"})
+        before = set(cmds.ls(type=("skinCluster", "geomBind")))
+        with pytest.raises(HandlerError, match="flat"):
+            rigging.bind_skin({"mesh": sheet, "root": skel["root"],
+                               "method": "geodesicVoxel"})
+        assert set(cmds.ls(type=("skinCluster", "geomBind"))) == before
+        assert not cmds.ls(cmds.listHistory(sheet, pruneDagObjects=True) or [],
+                           type="skinCluster")
+
+    def test_heatmap_on_a_flat_sheet_is_refused_before_binding(self):
+        # #797 measured heatMap hanging Maya for >6 min on exactly this mesh;
+        # the refusal has to come from the pre-check, never from Maya
+        import maya.cmds as cmds
+
+        from maya_plugin.dispatcher import HandlerError
+        from maya_plugin.handlers import rigging
+
+        sheet = cmds.polyPlane(name="sheet7", width=2, height=2,
+                               subdivisionsX=4, subdivisionsY=4, ch=False)[0]
+        sheet = cmds.ls(sheet, long=True)[0]
+        skel = rigging.create_skeleton({
+            "chain": [[-1, 0, 0], [0, 0, 0], [1, 0, 0]], "chain_prefix": "hj"})
+        with pytest.raises(HandlerError, match="flat"):
+            rigging.bind_skin({"mesh": sheet, "root": skel["root"],
+                               "method": "heatMap"})
+
 
 class TestPoseSkeletonInMaya:
     def _bound_serpent(self, cmds, rigging, name="ptube", n=4, height=4.0):

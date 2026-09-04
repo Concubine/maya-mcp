@@ -538,6 +538,28 @@ an already-bound mesh is refused — stacked skinClusters make weights
 unexplainable — with a hint to unbind via `execute_python` or restore the
 pre-bind checkpoint.
 
+`method` picks the initial weighting. `closestDistance` weights by
+straight-line distance, so it reaches across gaps: two legs 4 cm apart, left
+hip bent 45°, drags the right leg 18.6 cm (measured, #821). `geodesicVoxel`
+measures distance through the mesh's volume and moves the other leg 0.0 mm
+on the same rig. Maya's `skinCluster(bindMethod=3)` computes **no weights**
+at all (every vertex lands at 1.0 on the last influence, reported as
+success); the real bind is the separate `geomBind` command, so the handler
+binds `closestDistance` first and then runs geomBind at Maya's UI defaults —
+resolution 256 (0.66 s on 400 verts, 1.4 s on 20k), falloff 0.2 — which
+leaves a `geomBind` record node on the skinCluster (one undo step removes
+both). A geodesic bind whose table still shows the untouched default (every
+vertex at 1.0 on one joint) is **refused** and unbound again. Both
+`geodesicVoxel` and `heatMap` need a volume: a flat mesh (zero extent along
+one local axis) is refused before Maya sees it, because a zero-volume sheet
+gets that degenerate table from geomBind silently and hangs Maya under
+heatMap (#797, >6 min). `heatMap` on a closed, open-pipe, two-shell or
+self-intersecting mesh binds in 2.5–4 s in a GUI Maya. Both geomBind and
+heatMap need a GL context: a headless mayapy raises "Unable to create an
+offscreen OpenGL buffer", which the handler turns into a refusal that
+unbinds the closestDistance skin it was about to refine, so no silent
+substitute survives.
+
 `pose_skeleton`'s `rotations` map is per-joint **local euler degrees,
 absolute** (not deltas — re-applying a pose is idempotent). This map is the
 pose currency phases 3 and 6 reuse: IK bakes into it, a clip keys it.

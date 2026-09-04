@@ -2467,9 +2467,13 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         method: Annotated[
             Literal["closestDistance", "heatMap", "geodesicVoxel"],
             Field(description=(
-                "Initial weighting. closestDistance is robust everywhere; "
-                "heatMap follows the surface (fails on non-manifold meshes); "
-                "geodesicVoxel handles overlapping shells."
+                "Initial weighting. closestDistance is robust everywhere but "
+                "reaches across gaps (two legs 4 cm apart: bending one hip "
+                "drags the other leg 18.6 cm). geodesicVoxel measures through "
+                "the mesh's volume (0.0 mm on the same rig; ~1 s per 20k "
+                "verts; handles open pipes, overlapping and self-intersecting "
+                "shells). heatMap follows the surface. Both need a volume: a "
+                "flat mesh is refused for them - use closestDistance there."
             )),
         ] = "closestDistance",
     ) -> BindSkinResult:

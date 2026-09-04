@@ -377,7 +377,32 @@ class FakeCmds:
             if kw.get("geometry"):
                 return list(self.skin_geometry.get(sc, []))
             return None
+        if kw.get("edit"):
+            self._require(args[0])
+            if kw.get("unbind") and args[0] in self.objects:
+                self.objects.remove(args[0])
+            return None
+        self.objects.append("fakeSkin1")
         return ["fakeSkin1"]
+
+    def geomBind(self, sc, **kw):
+        # #821: the geodesic voxel bind is THIS command on an existing
+        # skinCluster, not a skinCluster flag. Maya refuses a name that is
+        # not a skinCluster; it creates a geomBind record node.
+        self._require(sc)
+        self.calls.append(("geomBind", (sc,), kw))
+        self.objects.append("geomBind1")
+        return "geomBind1"
+
+    def polyEvaluate(self, mesh, boundingBox=False, **kw):
+        self.calls.append(("polyEvaluate", mesh, dict(kw, boundingBox=boundingBox)))
+        self._require(mesh)
+        if boundingBox:
+            # local-space ((xmin, xmax), (ymin, ymax), (zmin, zmax)); a test
+            # declares a flat sheet via `bboxes`
+            return getattr(self, "bboxes", {}).get(
+                mesh, ((-1.0, 1.0), (0.0, 2.0), (-1.0, 1.0)))
+        raise AssertionError("FakeCmds.polyEvaluate models boundingBox= only")
 
     def ikHandle(self, startJoint=None, endEffector=None, solver=None,
                  name=None, **kw):
@@ -572,6 +597,116 @@ class TestBindSkinValidation:
         with pytest.raises(HandlerError, match="already bound") as err:
             rigging.bind_skin({"mesh": "serpent", "root": "root_j"})
         assert "unbind" in err.value.hint
+
+
+class TestBindSkinMethods:
+    """#821: measured on Maya 2027, `skinCluster(bindMethod=3)` computes NO
+    weights - every vertex lands at 1.0 on the last influence. The geodesic
+    voxel bind is `geomBind` run on the skinCluster afterwards (Maya's own
+    createSkinCluster.mel binds with method 0 first). A flat sheet gets the
+    same degenerate table from geomBind silently, and hangs heatMap."""
+
+    HEALTHY = (["|root_j", "|root_j|tip"], [1.0, 0.0, 0.5, 0.5, 0.0, 1.0], 3)
+    DEGENERATE = (["|root_j", "|root_j|tip"], [0.0, 1.0, 0.0, 1.0, 0.0, 1.0], 3)
+
+    def _scene(self, fake, monkeypatch, table=HEALTHY, bbox=None):
+        fake.objects += ["|serpent", "|root_j"]
+        fake.parents["|root_j|tip"] = "|root_j"
+        fake.shapes = {"|serpent": "|serpent|serpentShape"}
+
+        def listRelatives(node, shapes=False, **kw):
+            if shapes:
+                return [fake.shapes.get(node)]
+            return FakeCmds.listRelatives(fake, node, **kw)
+        fake.listRelatives = listRelatives
+        if bbox is not None:
+            fake.bboxes = {"|serpent|serpentShape": bbox}
+        monkeypatch.setattr(rigging, "_skin_weights", lambda sc, shape: table)
+
+    def _calls(self, fake, name):
+        return [c for c in fake.calls if c[0] == name]
+
+    def test_geodesic_binds_closest_first_then_geomBind(self, fake, monkeypatch):
+        self._scene(fake, monkeypatch)
+        out = rigging.bind_skin({"mesh": "serpent", "root": "root_j",
+                                 "method": "geodesicVoxel", "max_influences": 3})
+        skin = self._calls(fake, "skinCluster")[0]
+        assert skin[2]["bindMethod"] == 0
+        geom = self._calls(fake, "geomBind")
+        assert geom == [("geomBind", ("fakeSkin1",), {
+            "bindMethod": 3, "geodesicVoxelParams": (256, True),
+            "falloff": 0.2, "maxInfluences": 3})]
+        assert fake.calls.index(skin) < fake.calls.index(geom[0])
+        assert out["skin_cluster"] == "fakeSkin1"
+        assert out["unweighted_vertices"] == 0
+
+    def test_closest_and_heatmap_never_call_geomBind(self, fake, monkeypatch):
+        self._scene(fake, monkeypatch)
+        rigging.bind_skin({"mesh": "serpent", "root": "root_j"})
+        assert self._calls(fake, "skinCluster")[0][2]["bindMethod"] == 0
+        fake.skin_history = []
+        fake.calls.clear()
+        fake.objects.remove("fakeSkin1")
+        rigging.bind_skin({"mesh": "serpent", "root": "root_j", "method": "heatMap"})
+        assert self._calls(fake, "skinCluster")[0][2]["bindMethod"] == 2
+        assert not self._calls(fake, "geomBind")
+
+    def test_a_degenerate_geodesic_result_is_refused_and_unbound(self, fake, monkeypatch):
+        self._scene(fake, monkeypatch, table=self.DEGENERATE)
+        with pytest.raises(HandlerError, match="computed no weights") as err:
+            rigging.bind_skin({"mesh": "serpent", "root": "root_j",
+                               "method": "geodesicVoxel"})
+        assert "tip" in str(err.value)
+        assert "closestDistance" in err.value.hint
+        unbinds = [c for c in self._calls(fake, "skinCluster")
+                   if c[2].get("edit") and c[2].get("unbind")]
+        assert unbinds and unbinds[0][1] == ("fakeSkin1",)
+        assert ("delete", ("geomBind1",)) in fake.calls
+        assert "fakeSkin1" not in fake.objects and "geomBind1" not in fake.objects
+
+    def test_geomBind_raising_leaves_no_half_bind_behind(self, fake, monkeypatch):
+        # measured: a headless mayapy raises "Unable to create an offscreen
+        # OpenGL buffer. Failed computing weights." from geomBind. The
+        # closestDistance skin it was going to refine must not survive as a
+        # silent substitute for the geodesic bind the caller asked for.
+        self._scene(fake, monkeypatch)
+
+        def geomBind(sc, **kw):
+            fake.calls.append(("geomBind", (sc,), kw))
+            raise RuntimeError("Unable to create an offscreen OpenGL buffer.\n"
+                               "Failed computing weights.")
+        fake.geomBind = geomBind
+        with pytest.raises(HandlerError, match="OpenGL") as err:
+            rigging.bind_skin({"mesh": "serpent", "root": "root_j",
+                               "method": "geodesicVoxel"})
+        assert "closestDistance" in err.value.hint
+        unbinds = [c for c in self._calls(fake, "skinCluster")
+                   if c[2].get("edit") and c[2].get("unbind")]
+        assert unbinds and unbinds[0][1] == ("fakeSkin1",)
+        assert "fakeSkin1" not in fake.objects
+
+    def test_a_degenerate_table_under_closest_distance_is_not_refused(self, fake, monkeypatch):
+        # only the geodesic route has the measured "no weights" failure; a
+        # closestDistance bind that lands on one joint is just a bad rig,
+        # and the existing warning already says so
+        self._scene(fake, monkeypatch, table=self.DEGENERATE)
+        out = rigging.bind_skin({"mesh": "serpent", "root": "root_j"})
+        assert any("own no vertices" in w for w in out["warnings"])
+
+    @pytest.mark.parametrize("method", ["heatMap", "geodesicVoxel"])
+    def test_a_flat_sheet_is_refused_before_anything_is_bound(self, fake, monkeypatch, method):
+        self._scene(fake, monkeypatch, bbox=((-1.0, 1.0), (0.0, 0.0), (-1.0, 1.0)))
+        with pytest.raises(HandlerError, match="flat") as err:
+            rigging.bind_skin({"mesh": "serpent", "root": "root_j", "method": method})
+        assert "Y" in str(err.value)
+        assert "closestDistance" in err.value.hint
+        assert not self._calls(fake, "skinCluster")
+        assert not self._calls(fake, "geomBind")
+
+    def test_a_flat_sheet_still_binds_with_closest_distance(self, fake, monkeypatch):
+        self._scene(fake, monkeypatch, bbox=((-1.0, 1.0), (0.0, 0.0), (-1.0, 1.0)))
+        out = rigging.bind_skin({"mesh": "serpent", "root": "root_j"})
+        assert out["skin_cluster"] == "fakeSkin1"
 
 
 class TestPoseValidation:

@@ -205,6 +205,50 @@ def weight_stats(influences: List[str], weights: List[float], num_verts: int,
     }
 
 
+def sole_owner(influences: List[str], weights: List[float], num_verts: int,
+               tol: float = WEIGHT_TOL) -> Optional[str]:
+    """The one influence holding EVERY vertex at full weight, or None.
+
+    #821, measured on Maya 2027: a geodesic voxel bind that computed nothing
+    (skinCluster's own bindMethod 3, or geomBind on a zero-volume sheet)
+    leaves this exact table - every vertex 1.0 on the last influence - and
+    raises nothing. A single-influence skeleton legitimately owns everything,
+    so that case is not a signature.
+    """
+    ncols = len(influences)
+    if ncols < 2 or num_verts == 0 or len(weights) != num_verts * ncols:
+        return None
+    owner = None
+    for v in range(num_verts):
+        row = weights[v * ncols:(v + 1) * ncols]
+        held = [j for j in range(ncols) if row[j] > tol]
+        if len(held) != 1 or row[held[0]] < 1.0 - tol:
+            return None
+        if owner is None:
+            owner = held[0]
+        elif held[0] != owner:
+            return None
+    return influences[owner]
+
+
+# Below this fraction of the mesh's largest extent an axis counts as flat.
+# The measured failure is a polyPlane: exactly zero. A real thin shell (1 mm
+# on 2 m = 5e-4) must stay a shell.
+FLAT_RATIO = 1e-6
+
+
+def flat_axis(bbox) -> Optional[str]:
+    """Name of the axis along which a bbox ((xmin,xmax),(ymin,ymax),(zmin,zmax))
+    has no extent, or None. A zero-volume sheet gets a silent degenerate table
+    from geomBind and hangs heatMap (#797, #821)."""
+    extents = [abs(float(hi) - float(lo)) for lo, hi in bbox]
+    largest = max(extents)
+    for axis, extent in zip("XYZ", extents):
+        if extent <= largest * FLAT_RATIO:
+            return axis
+    return None
+
+
 def displaced_count(before: List[float], after: List[float],
                     tol: float = 1e-5) -> int:
     """How many vertices moved more than `tol` between two flat xyz lists."""

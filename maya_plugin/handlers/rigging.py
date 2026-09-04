@@ -124,6 +124,18 @@ def create_skeleton(params: Dict[str, Any]) -> Dict[str, Any]:
 # run fights for it.
 BIND_METHODS = {"closestDistance": 0, "heatMap": 2, "geodesicVoxel": 3}
 MAX_INFLUENCES_CEILING = 8
+# #821, measured on Maya 2027: `skinCluster(bindMethod=3)` computes NO
+# weights - it leaves every vertex at 1.0 on the last influence and reports
+# success. The geodesic voxel bind is the separate `geomBind` command run on
+# an existing skinCluster; Maya's own createSkinCluster.mel binds with method
+# 0 first, then geomBind. Resolution and falloff are Maya's UI defaults:
+# 256 = 0.66 s on 416 verts / 1.4 s on 20k (1024 is 28 s), falloff 0.2 is
+# the blend sharpness (0.0 spreads to 4 influences, 1.0 narrows to 2).
+GEODESIC_RESOLUTION = 256
+GEODESIC_FALLOFF = 0.2
+# Methods that need a volume. A flat sheet hands geomBind the same degenerate
+# table with no error, and hung heatMap for >6 min in #797's probe.
+VOLUME_METHODS = ("heatMap", "geodesicVoxel")
 
 
 def _require_joint(cmds, name) -> str:
@@ -212,17 +224,64 @@ def bind_skin(params: Dict[str, Any]) -> Dict[str, Any]:
                  "unbind=True) - or restore the checkpoint taken before the "
                  "first bind" % existing[0])
 
+    if method in VOLUME_METHODS:
+        flat = rigmath.flat_axis(cmds.polyEvaluate(mesh_shape, boundingBox=True))
+        if flat:
+            raise HandlerError(
+                "%s is flat along %s (zero extent): %s needs a volume - a "
+                "zero-volume sheet gets no weights from the geodesic voxel "
+                "bind (silently) and hangs Maya under heatMap (#797)"
+                % (mesh_long, flat, method),
+                hint="bind a sheet with method=closestDistance, or give it "
+                     "thickness first")
+
     session.auto_checkpoint("bind_skin")
+    geodesic = method == "geodesicVoxel"
     sc = cmds.skinCluster(
         root_long, mesh_long,
-        bindMethod=BIND_METHODS[method],
+        bindMethod=0 if geodesic else BIND_METHODS[method],
         maximumInfluences=max_influences,
         obeyMaxInfluences=True,
         toSelectedBones=False,
         name=naming.unique_name(cmds, _short(mesh_long) + "_skin"),
     )[0]
+    geom_bind = None
+    if geodesic:
+        try:
+            geom_bind = cmds.geomBind(
+                sc, bindMethod=BIND_METHODS[method],
+                geodesicVoxelParams=(GEODESIC_RESOLUTION, True),
+                falloff=GEODESIC_FALLOFF, maxInfluences=max_influences)
+        except Exception as exc:  # noqa: BLE001 - Maya's RuntimeError
+            # Measured: a headless mayapy raises "Unable to create an
+            # offscreen OpenGL buffer. Failed computing weights." The
+            # closestDistance skin geomBind was about to refine must not
+            # survive as a silent substitute for what the caller asked for.
+            cmds.skinCluster(sc, edit=True, unbind=True)
+            raise HandlerError(
+                "geodesic voxel bind failed on %s: %s. The mesh was unbound "
+                "again." % (mesh_long, str(exc).strip().replace("\n", " ")),
+                hint="geomBind needs a GL context (a GUI Maya); bind with "
+                     "method=closestDistance where there is none")
 
     influences, weights, num_verts = _skin_weights(sc, mesh_shape)
+    if geodesic:
+        owner = rigmath.sole_owner(influences, weights, num_verts)
+        if owner is not None:
+            # The measured "computed nothing" table. Leave no half-bind
+            # behind: the skinCluster AND geomBind's record node go.
+            cmds.skinCluster(sc, edit=True, unbind=True)
+            if geom_bind:
+                cmds.delete(geom_bind)
+            raise HandlerError(
+                "geodesic voxel bind computed no weights on %s: every vertex "
+                "landed at 1.0 on %s, which is Maya's untouched default table, "
+                "not a bind. The mesh was unbound again."
+                % (mesh_long, _short(owner)),
+                hint="the voxelizer found no volume to fill (a sheet, or "
+                     "geometry thinner than 1/%d of its size); bind with "
+                     "method=closestDistance, or thicken the mesh"
+                % GEODESIC_RESOLUTION)
     stats = rigmath.weight_stats(influences, weights, num_verts, max_influences)
 
     warnings: List[str] = []

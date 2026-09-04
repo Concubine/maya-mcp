@@ -530,3 +530,39 @@ class TestBindRotationDeg:
     def test_non_xyz_rotate_order_refuses(self):
         assert rigmath.bind_rotation_deg(_xform16(_xyz([10, 0, 0])),
                                          [0, 0, 0], [0, 0, 0], 3) is None
+
+
+class TestSoleOwner:
+    """#821: the signature of a geodesic bind that computed nothing - every
+    vertex at 1.0 on ONE influence, the last one."""
+
+    def test_a_healthy_table_has_no_sole_owner(self):
+        assert rigmath.sole_owner(["a", "b"], [1.0, 0.0, 0.5, 0.5, 0.0, 1.0], 3) is None
+
+    def test_every_vertex_on_the_same_joint_names_it(self):
+        assert rigmath.sole_owner(["a", "b"], [0.0, 1.0, 0.0, 1.0, 0.0, 1.0], 3) == "b"
+
+    def test_one_dissenting_vertex_is_not_degenerate(self):
+        assert rigmath.sole_owner(["a", "b"], [0.0, 1.0, 0.9, 0.1, 0.0, 1.0], 3) is None
+
+    def test_a_single_influence_owning_everything_is_legitimate(self):
+        assert rigmath.sole_owner(["a"], [1.0, 1.0, 1.0], 3) is None
+
+    def test_an_empty_mesh_has_no_owner(self):
+        assert rigmath.sole_owner(["a", "b"], [], 0) is None
+
+
+class TestFlatAxis:
+    def test_a_box_is_not_flat(self):
+        assert rigmath.flat_axis(((-1, 1), (0, 2), (-1, 1))) is None
+
+    def test_a_zero_extent_axis_is_named(self):
+        assert rigmath.flat_axis(((-1, 1), (0, 0), (-1, 1))) == "Y"
+        assert rigmath.flat_axis(((3, 3), (0, 2), (-1, 1))) == "X"
+
+    def test_a_thin_but_real_extent_is_not_flat(self):
+        # 1 mm of thickness on a 2 m sheet is a real shell, not a sheet
+        assert rigmath.flat_axis(((-1, 1), (0, 0.001), (-1, 1))) is None
+
+    def test_a_point_mesh_is_flat_on_its_first_axis(self):
+        assert rigmath.flat_axis(((0, 0), (0, 0), (0, 0))) == "X"
