@@ -402,11 +402,29 @@ class RemeshResult(BaseModel):
 
     name: str
     tris: int
+    faces: int = Field(
+        default=0,
+        description=(
+            "Face count after the call - the currency target_polycount is in. "
+            "polyRetopo lands within its own 10% tolerance of the target "
+            "(measured); polyRemesh ignores the target and says so."))
+    faces_before: int = Field(default=0, description="Face count before the call.")
+    target_polycount: int = Field(default=0, description="What was asked for, echoed.")
+    uvs: Dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "{before, after, transferred}. polyRetopo destroys every UV "
+            "(measured: 439 -> 0); with keep_original the UVs are transferred "
+            "back from the hidden original by world position and `after` is "
+            "non-zero; without it `after` is 0 and warnings say so."))
     method: str = Field(description="Which path ran: polyRetopo, polyRemesh, or polyReduce.")
     warnings: List[str] = Field(default_factory=list)
     original: Optional[str] = Field(
         default=None,
-        description="Long name of the hidden pre-remesh duplicate, when keep_original=true.",
+        description=(
+            "Long name of the hidden pre-remesh duplicate, when keep_original=true. "
+            "A hidden mesh still travels into export_fbx (measured) - delete it "
+            "before exporting, or pass keep_original=false."),
     )
 
 

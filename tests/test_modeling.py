@@ -347,9 +347,13 @@ class FakeCmds:
         self.objects.add("|sculpt1StretchOrigin")
         return ["sculpt1", "sculptor1", "sculpt1StretchOrigin"]
 
-    def polyEvaluate(self, name, face=False, triangle=False, vertex=False, edge=False):
+    def polyEvaluate(self, name, face=False, triangle=False, vertex=False, edge=False,
+                     uvcoord=False):
         self._require(name)
         self.calls.append(("polyEvaluate", name, face, triangle, vertex, edge))
+        if uvcoord:
+            # #819: the UV count, which polyRetopo zeroes (MEASURED 439 -> 0)
+            return getattr(self, "uv_count", 8)
         if face:
             return self.face_count
         if triangle:
@@ -377,6 +381,13 @@ class FakeCmds:
         self._require(name)
         self.calls.append(("polySplit", name, insertpoint))
         # No-op by default, for the same reason as polySplitRing above.
+
+    def transferAttributes(self, source, target, **kw):
+        # #819: UVs come back from the kept original by world position
+        self._require(source)
+        self._require(target)
+        self.calls.append(("transferAttributes", source, target, kw))
+        self.uv_count = getattr(self, "uv_count_orig", 8)
 
     def polyReduce(self, name, percentage=None, constructionHistory=False):
         self._require(name)
@@ -1799,3 +1810,77 @@ def test_deform_still_takes_rotate_on_a_lattice(monkeypatch):
     out = sculpt.deform({"mesh": "|col", "deformer": "lattice",
                          "params": {"rotate": [0, 0, 30]}})
     assert out["deformer_nodes"]
+
+
+class TestRemeshReportsAndRepairsWhatRetopoDestroys:
+    """#819 - remesh_retopo had never run against Maya. MEASURED on Maya 2027
+    (evals/remesh_probe_819.py): polyRetopo lands within its 10% tolerance
+    of target_polycount and keeps transform, pivot, shading group and shells,
+    but ZEROES the mesh's UVs on every call (439 -> 0 on a sphere, 121 -> 0
+    on a plane) and the result said nothing; it also reported only `tris`
+    for a caller who asked for a FACE count. The kept hidden original still
+    holds the UVs, and export_fbx ships hidden meshes."""
+
+    def _fake(self, monkeypatch, retopo_drops_uvs=True):
+        fake = _mesh_fake("|blob")
+        fake.face_count = 400
+        fake.uv_count = 439
+        fake.uv_count_orig = 439
+
+        def retopo(name, **kw):
+            fake.calls.append(("polyRetopo", name, kw))
+            fake.face_count = 183
+            if retopo_drops_uvs:
+                fake.uv_count = 0
+        fake.polyRetopo = retopo
+        monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+        _patch_auto_checkpoint(monkeypatch)
+        return fake
+
+    def test_faces_are_reported_in_the_callers_currency(self, monkeypatch):
+        self._fake(monkeypatch)
+        out = modeling.remesh_retopo({"mesh": "|blob", "target_polycount": 200})
+        assert out["faces_before"] == 400
+        assert out["faces"] == 183
+        assert out["target_polycount"] == 200
+        assert out["tris"] == 183  # the fake's triangle count; still reported
+
+    def test_uvs_are_transferred_back_from_the_kept_original(self, monkeypatch):
+        fake = self._fake(monkeypatch)
+        out = modeling.remesh_retopo({"mesh": "|blob", "target_polycount": 200})
+        xfer = [c for c in fake.calls if c[0] == "transferAttributes"]
+        assert len(xfer) == 1
+        assert xfer[0][1] == "|blob_orig" and xfer[0][2] == "|blob"
+        kw = xfer[0][3]
+        assert kw["transferUVs"] == 2 and kw["sampleSpace"] == 0 and kw["searchMethod"] == 3
+        assert kw.get("transferPositions", 0) == 0 and kw.get("transferNormals", 0) == 0
+        assert out["uvs"] == {"before": 439, "after": 439, "transferred": True}
+        # the transfer leaves history, and the history delete must come AFTER it
+        names = [c[0] for c in fake.calls]
+        assert names.index("transferAttributes") < len(names) - 1 - names[::-1].index("delete")
+        assert not any("UV" in w for w in out["warnings"])
+
+    def test_without_an_original_the_loss_is_reported_and_named(self, monkeypatch):
+        fake = self._fake(monkeypatch)
+        out = modeling.remesh_retopo({"mesh": "|blob", "target_polycount": 200,
+                                      "keep_original": False})
+        assert not any(c[0] == "transferAttributes" for c in fake.calls)
+        assert out["uvs"] == {"before": 439, "after": 0, "transferred": False}
+        uvw = [w for w in out["warnings"] if "UV" in w]
+        assert len(uvw) == 1 and "uv_atlas" in uvw[0] and "keep_original" in uvw[0]
+
+    def test_uvs_the_command_kept_are_left_alone(self, monkeypatch):
+        fake = self._fake(monkeypatch, retopo_drops_uvs=False)
+        out = modeling.remesh_retopo({"mesh": "|blob", "target_polycount": 200})
+        assert not any(c[0] == "transferAttributes" for c in fake.calls)
+        assert out["uvs"] == {"before": 439, "after": 439, "transferred": False}
+        assert not any("UV" in w for w in out["warnings"])
+
+    def test_the_hidden_original_is_named_as_something_an_export_ships(self, monkeypatch):
+        self._fake(monkeypatch)
+        out = modeling.remesh_retopo({"mesh": "|blob", "target_polycount": 200})
+        note = [w for w in out["warnings"] if "blob_orig" in w]
+        assert len(note) == 1 and "export" in note[0] and "delete_objects" in note[0]
+        out2 = modeling.remesh_retopo({"mesh": "|blob", "target_polycount": 200,
+                                       "keep_original": False})
+        assert not any("export" in w for w in out2["warnings"])

@@ -1044,6 +1044,14 @@ def remesh_retopo(params: Dict[str, Any]) -> Dict[str, Any]:
 
     session.auto_checkpoint("remesh")
 
+    # Measured before anything runs, in the caller's currency: the target is
+    # a FACE count, and #819's first live run showed the old result reported
+    # only `tris` - 200 asked, 366 answered, nothing to compare. The UV count
+    # too: polyRetopo ZEROES every UV the mesh had (MEASURED, Maya 2027:
+    # 439 -> 0 on a sphere, 121 -> 0 on a plane) and nothing said so.
+    faces_before = cmds.polyEvaluate(mesh_long, face=True)
+    uvs_before = cmds.polyEvaluate(mesh_long, uvcoord=True)
+
     original: Optional[str] = None
     if keep_original:
         orig_name = naming.unique_name(cmds, mesh_long.split("|")[-1] + "_orig")
@@ -1118,10 +1126,40 @@ def remesh_retopo(params: Dict[str, Any]) -> Dict[str, Any]:
             )
         method = "polyReduce"
 
+    # #819: the retopologised mesh has no UVs. The hidden original still
+    # holds them, so bring them back by world position (transferUVs=2 = all
+    # UV sets, sampleSpace=0 = world, searchMethod=3 = closest point on
+    # surface) before the history delete bakes the transfer in. Without an
+    # original there is nothing to transfer from, so the loss is reported.
+    uvs_after = cmds.polyEvaluate(mesh_long, uvcoord=True)
+    transferred = False
+    if uvs_after == 0 and uvs_before and original is not None:
+        cmds.transferAttributes(
+            original, mesh_long, transferPositions=0, transferNormals=0,
+            transferUVs=2, transferColors=0, sampleSpace=0, searchMethod=3)
+        transferred = True
+        uvs_after = cmds.polyEvaluate(mesh_long, uvcoord=True)
     cmds.delete(mesh_long, constructionHistory=True)
+    if uvs_before and not uvs_after:
+        warnings.append(
+            "%s lost every UV in the remesh (%d -> 0) and there was no kept "
+            "original to transfer them back from - maya_uv_atlas creates a "
+            "new layout, or call again with keep_original=true to have the "
+            "old UVs projected onto the new topology"
+            % (mesh_long, uvs_before))
+    if original is not None:
+        warnings.append(
+            "the pre-remesh mesh is kept hidden as %s; a hidden mesh still "
+            "travels into maya_export_fbx (measured: it doubles the file's "
+            "mesh count) - maya_delete_objects it before exporting, or pass "
+            "keep_original=false" % original)
     tris = cmds.polyEvaluate(mesh_long, triangle=True)
     return {
-        "name": mesh_long, "tris": tris, "method": method, "warnings": warnings,
+        "name": mesh_long, "tris": tris,
+        "faces": cmds.polyEvaluate(mesh_long, face=True),
+        "faces_before": faces_before, "target_polycount": target,
+        "uvs": {"before": uvs_before, "after": uvs_after, "transferred": transferred},
+        "method": method, "warnings": warnings,
         "original": original,
     }
 
