@@ -251,6 +251,25 @@ def blank_warnings(shot: Dict[str, Any], label: str) -> List[str]:
     "I checked and it is fine" are different answers and must not look alike.
     """
     if shot.get("blank") is True:
+        # An isolate frame that came back blank was asked a follow-up
+        # question, so answer it instead of listing the possibilities (#825).
+        if shot.get("isolate_view_failed") is True:
+            return ["%s came back BLANK, but the SAME frame drawn without "
+                    "isolate was not. So the scene is not empty and the "
+                    "camera is not pointed at nothing: what drew nothing is "
+                    "the isolated view. Either everything named in 'isolate' "
+                    "is hidden or has no drawable geometry, or the viewport "
+                    "failed to draw an isolated view at all (maya-mcp #825, "
+                    "measured on some agent-launched Mayas). Do not judge "
+                    "anything from this frame. Check the objects are visible, "
+                    "then re-take it without 'isolate', or pass 'target' to "
+                    "frame the subject while leaving the rest visible."
+                    % label]
+        if shot.get("isolate_view_failed") is False:
+            return ["%s came back BLANK, and so did the same frame drawn "
+                    "without isolate: there was nothing to draw. The scene "
+                    "is empty, or every subject is outside the frame. Do not "
+                    "judge anything from this frame." % label]
         return ["%s came back BLANK - every pixel is transparent, so nothing "
                 "was drawn. The scene may be empty or the subject outside the "
                 "frame; if neither is true, the viewport itself drew nothing "
@@ -1102,6 +1121,9 @@ def _capture_one(
             cmds.refresh(force=True)
 
         png_bytes, opacity = _grab_pixels(cmds, panel, resolution)
+        isolate_view_failed = None
+        if isolate and opacity.get("blank") is True:
+            isolate_view_failed = _isolate_blank_control(cmds, panel, resolution)
 
         pos = cmds.getAttr(capture_cam + ".translate")[0]
         rot = cmds.getAttr(capture_cam + ".rotate")[0]
@@ -1122,6 +1144,7 @@ def _capture_one(
             "unlit": unlit,
             "target_unframed": target_unframed,
             "occlusion": occlusion,
+            "isolate_view_failed": isolate_view_failed,
         }
     finally:
         state.restore()
@@ -1134,6 +1157,41 @@ def _capture_one(
             cmds.undoInfo(stateWithoutFlush=prev_undo)
         except Exception:
             pass
+
+
+def _isolate_blank_control(cmds, panel: str, resolution: int) -> Optional[bool]:
+    """A blank isolate frame: was it the scene, or the isolate view? (#825)
+
+    Re-shoots the SAME camera with view-selected switched off and nothing
+    else touched. If that draws, the scene is not empty and the subject is
+    not out of frame, so the isolated view is what failed - which is the
+    #825 condition, measured on agent-launched Mayas where every isolate
+    capture in a process comes back transparent while non-isolate captures
+    in that same process draw fine.
+
+    Costs one extra playblast and only ever runs on a frame that already
+    came back blank, which is rare and already worth a warning.
+
+    Membership survives the toggle: `_apply_isolate` keeps its objects in
+    the panel's ViewSelectedSet, and `state` only gates whether the panel
+    honours it, so flipping it back leaves the isolate exactly as it was.
+
+    Returns True (the isolate view failed), False (the scene really is
+    empty), or None when the question could not be answered - which must
+    stay distinct, because "I did not check" and "I checked" are different
+    answers and the caller is told which one it got.
+    """
+    try:
+        cmds.isolateSelect(panel, state=0)
+        try:
+            cmds.refresh(force=True)
+            _, opacity = _grab_pixels(cmds, panel, resolution)
+        finally:
+            cmds.isolateSelect(panel, state=1)
+    except Exception:  # noqa: BLE001 - a diagnostic must never fail a capture
+        return None
+    blank = opacity.get("blank")
+    return None if blank is None else blank is False
 
 
 def _grab_pixels(cmds, panel: str, resolution: int):

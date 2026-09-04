@@ -2139,3 +2139,50 @@ class TestCaptureViewportSaysTheTargetIsHidden:
         result = capture.capture_viewport(
             {"angles": ["back"], "target": ["|red"]})
         assert not [w for w in result["warnings"] if "hidden" in w]
+
+
+class TestIsolateBlankIsToldApartFromAnEmptyScene:
+    """A blank ISOLATE frame has two very different causes (#825).
+
+    Either the scene really is empty / unframed, or the isolate view itself
+    drew nothing while the same camera would have drawn the scene fine -
+    which is what #825 records on some agent-launched Mayas. The old message
+    listed both as possibilities and left the caller to guess. A capture's
+    contract is that it does not lie about what it saw, and "I checked, and
+    it was the isolate view" is a different answer from "it might be one of
+    these two things".
+    """
+
+    def _shot(self, isolate_view_failed):
+        return {"png_b64": "ZmFrZQ==", "camera_position": [0, 0, 10],
+                "camera_rotation": [0, 0, 0], "camera": "|cam",
+                "blank": True, "blank_unmeasurable": None,
+                "isolate_view_failed": isolate_view_failed}
+
+    def test_the_isolate_view_is_named_when_the_control_drew(self, monkeypatch):
+        monkeypatch.setattr(capture, "_capture_one",
+                            lambda *a, **k: self._shot(True))
+        result = capture.capture_viewport(
+            {"angles": ["front"], "isolate": ["|red"]})
+        note = " ".join(result["warnings"])
+        assert "825" in note
+        assert "isolate" in note.lower()
+        # and it must NOT go on guessing about the two causes it ruled out
+        assert "may be empty" not in note
+
+    def test_an_empty_scene_is_still_called_an_empty_scene(self, monkeypatch):
+        monkeypatch.setattr(capture, "_capture_one",
+                            lambda *a, **k: self._shot(False))
+        result = capture.capture_viewport(
+            {"angles": ["front"], "isolate": ["|red"]})
+        note = " ".join(result["warnings"])
+        assert "825" not in note
+        assert "empty" in note.lower()
+
+    def test_an_unmeasured_control_keeps_the_old_honest_hedge(self, monkeypatch):
+        monkeypatch.setattr(capture, "_capture_one",
+                            lambda *a, **k: self._shot(None))
+        result = capture.capture_viewport({"angles": ["front"]})
+        note = " ".join(result["warnings"])
+        assert "BLANK" in note
+        assert "825" not in note
