@@ -35,6 +35,7 @@ class FakeCmds:
         # deliberately NOT 0..1: a raw polyCube's UVs span a bigger range
         self.uvs = list(uvs if uvs is not None else [(-2.0, 3.0), (4.0, 7.0)])
         self.calls = []
+        self.normalize_types = []
         # #799 contract 1: what stopped existing. uv_atlas deletes nothing
         # itself, but it is handed shapes by callers that do (assemble packs
         # each part between a taper bake and a polyUnite), so a query about a
@@ -117,6 +118,11 @@ class FakeCmds:
     def polyNormalizeUV(self, target, **kwargs):
         self._require(target)
         self.calls.append("polyNormalizeUV")
+        # #845: the MODE is the whole defect. Maya's normalizeType=0 scales
+        # every face to the full square on its own; 1 is the collective one.
+        # The fake normalises collectively whichever mode it is handed, which
+        # is exactly why no test could see the wrong mode - so it records it.
+        self.normalize_types.append(kwargs.get("normalizeType"))
         us = [u for u, _ in self.uvs]
         vs = [v for _, v in self.uvs]
         du = (max(us) - min(us)) or 1.0
@@ -570,3 +576,16 @@ class TestTheBranchDropsIt:
     def test_the_result_carries_the_warnings_list_it_documents(self):
         out = _run(FakeCmds(), names=["|box"], cols=4, rows=4, patch=0)
         assert out["warnings"] == []
+
+
+class TestNormalisationMode:
+    def test_normalises_collectively_not_per_face(self):
+        """redmine #845. MEASURED on Maya 2027: polyNormalizeUV normalizeType=0
+        normalises EACH FACE separately - every face of a projected cube came
+        back spanning the whole 0..1 square - and normalizeType=1 is the
+        collective mode. The tool sent 0 for its whole life with a comment
+        claiming the opposite; the overall bbox is 0..1 either way, so
+        uv_bounds could never tell."""
+        fake = FakeCmds()
+        _run(fake, names=["|box"], cols=4, rows=4, patch=0)
+        assert fake.normalize_types == [1]

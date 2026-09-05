@@ -1383,3 +1383,29 @@ class TestTheFakeRefusesWhatMayaRefuses:
             cmds.connectAttr("ghost.outColor", "skin_mat.emissionColor")
         with pytest.raises(RuntimeError, match="No object matches name"):
             cmds.connectAttr("mcpTex_noise.outColor", "ghost.baseColor")
+
+
+class TestStackedUVsRefuse:
+    """redmine #845: a layout where every face spans the whole square (what
+    uv_atlas produced before the fix) samples ONE texel for the whole mesh;
+    refused with the cause named. The census needs OpenMaya, so the seam is
+    stubbed."""
+
+    def test_a_per_face_normalised_layout_refuses_naming_845(
+            self, fake, tmp_path, monkeypatch):
+        from maya_plugin.handlers import uvatlas
+        monkeypatch.setattr(
+            uvatlas, "face_uv_census",
+            lambda cmds, shape, rect: {"faces": 6, "faces_spanning_patch": 6,
+                                       "largest_face_fraction": 1.0})
+        params = texbake.validate(_params(tmp_path), fake)
+        with pytest.raises(HandlerError, match="845") as exc:
+            texbake.plan_bakes(fake, params["meshes"], params["slots"])
+        assert "maya_uv_atlas" in (exc.value.hint or "")
+
+    def test_an_unmeasurable_census_is_not_a_refusal(self, fake, tmp_path,
+                                                     monkeypatch):
+        from maya_plugin.handlers import uvatlas
+        monkeypatch.setattr(uvatlas, "face_uv_census", lambda *a: None)
+        params = texbake.validate(_params(tmp_path), fake)
+        texbake.plan_bakes(fake, params["meshes"], params["slots"])  # no raise

@@ -266,3 +266,64 @@ class TestThinnestAxis:
 
     def test_the_minority_winding_is_the_mirrored_one(self):
         assert uvmath.face_uv_stats([TestFaceUvStats.MIRRORED] * 5 + [TestFaceUvStats.SQUARE] * 2)["mirrored"] == 2
+
+
+class TestFaceFootprints:
+    """redmine #845: the per-face census that the overall bbox hides."""
+
+    # six quads laid out as a 3x2 grid: each face covers 1/6 of the square
+    GRID_US = [x for col in range(3) for x in (col / 3.0, (col + 1) / 3.0,
+                                                 (col + 1) / 3.0, col / 3.0)
+               for _ in range(2)]
+
+    def _grid(self):
+        us, vs, counts, ids = [], [], [], []
+        for row in range(2):
+            for col in range(3):
+                u0, u1 = col / 3.0, (col + 1) / 3.0
+                v0, v1 = row / 2.0, (row + 1) / 2.0
+                base = len(us)
+                us += [u0, u1, u1, u0]
+                vs += [v0, v0, v1, v1]
+                counts.append(4)
+                ids += [base, base + 1, base + 2, base + 3]
+        return us, vs, counts, ids
+
+    def test_a_laid_out_mesh_spans_nothing(self):
+        us, vs, counts, ids = self._grid()
+        out = uvmath.face_footprints(us, vs, counts, ids, (0, 0, 1, 1))
+        assert out == {"faces": 6, "faces_spanning_patch": 0,
+                       "largest_face_fraction": pytest.approx(1 / 6.0, abs=1e-4)}
+        assert not uvmath.per_face_normalised(out)
+
+    def test_a_per_face_normalised_mesh_spans_everything(self):
+        # what polyNormalizeUV normalizeType=0 does to the grid above
+        us, vs, counts, ids = [], [], [], []
+        for _ in range(6):
+            base = len(us)
+            us += [0.0, 1.0, 1.0, 0.0]
+            vs += [0.0, 0.0, 1.0, 1.0]
+            counts.append(4)
+            ids += [base, base + 1, base + 2, base + 3]
+        out = uvmath.face_footprints(us, vs, counts, ids, (0, 0, 1, 1))
+        assert out["faces_spanning_patch"] == 6
+        assert out["largest_face_fraction"] == 1.0
+        assert uvmath.per_face_normalised(out)
+
+    def test_one_plane_filling_the_patch_is_not_the_defect(self):
+        out = uvmath.face_footprints([0, 1, 1, 0], [0, 0, 1, 1], [4], [0, 1, 2, 3],
+                                     (0, 0, 1, 1))
+        assert out == {"faces": 1, "faces_spanning_patch": 1,
+                       "largest_face_fraction": 1.0}
+        assert not uvmath.per_face_normalised(out)
+
+    def test_footprint_is_relative_to_the_patch_not_the_square(self):
+        # the same face inside a quarter patch spans that patch
+        out = uvmath.face_footprints([0, 0.5, 0.5, 0], [0.5, 0.5, 1, 1], [4],
+                                     [0, 1, 2, 3], (0, 0.5, 0.5, 1))
+        assert out["largest_face_fraction"] == 1.0
+
+    def test_faces_without_uvs_are_skipped(self):
+        out = uvmath.face_footprints([0, 1, 1, 0], [0, 0, 1, 1], [0, 4, 0],
+                                     [0, 1, 2, 3], (0, 0, 1, 1))
+        assert out["faces"] == 1

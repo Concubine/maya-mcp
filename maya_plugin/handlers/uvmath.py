@@ -264,3 +264,60 @@ def fit_transform(rect: Sequence[float]) -> Tuple[float, float, float, float]:
     """
     u0, v0, u1, v1 = (float(q) for q in rect)
     return (u1 - u0, v1 - v0, u0, v0)
+
+
+# A face whose UV bbox covers at least this fraction of its patch "spans" it.
+# Half, not all: a per-face normalisation puts every face at 1.0, and a face
+# that fills half a patch on a mesh with more than a few faces is already
+# stacked on most of the texels its neighbours use.
+SPANNING_FRACTION = 0.5
+
+
+def face_footprints(
+    us: Sequence[float], vs: Sequence[float], counts: Sequence[int],
+    ids: Sequence[int], rect: Sequence[float],
+) -> Dict[str, Any]:
+    """Per-face UV footprint, as a fraction of `rect`'s area (redmine #845).
+
+    `counts` / `ids` are MFnMesh.getAssignedUVs: per face, how many UV ids it
+    has, then the ids in that order. A face with no UVs is skipped.
+
+    This is the number uv_atlas could never see: the overall bbox of a
+    per-face-normalised mesh is 0..1 exactly like a good layout's, while
+    every face's own bbox is the whole square. Measured on a polyCube after
+    polyAutoProjection: faces at 0.056-0.167 of the square, then 1.000 for
+    every face after polyNormalizeUV normalizeType=0.
+    """
+    width = float(rect[2]) - float(rect[0])
+    height = float(rect[3]) - float(rect[1])
+    rect_area = width * height if width > 0 and height > 0 else 1.0
+    faces = 0
+    spanning = 0
+    largest = 0.0
+    k = 0
+    for count in counts:
+        face = ids[k:k + count]
+        k += count
+        if not face:
+            continue
+        faces += 1
+        xs = [us[i] for i in face]
+        ys = [vs[i] for i in face]
+        area = (max(xs) - min(xs)) * (max(ys) - min(ys)) / rect_area
+        if area > largest:
+            largest = area
+        if area >= SPANNING_FRACTION:
+            spanning += 1
+    return {
+        "faces": faces,
+        "faces_spanning_patch": spanning,
+        "largest_face_fraction": round(largest, 4),
+    }
+
+
+def per_face_normalised(census: Dict[str, Any]) -> bool:
+    """The #845 signature: at least two faces, and at least half of them span
+    the patch. One face spanning it is a plane, and a plane is fine."""
+    faces = int(census.get("faces") or 0)
+    spanning = int(census.get("faces_spanning_patch") or 0)
+    return faces >= 2 and spanning >= 2 and spanning * 2 >= faces

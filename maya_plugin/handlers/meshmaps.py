@@ -42,7 +42,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..dispatcher import HandlerError, refuse_inert, require_known_keys
 from . import material as material_mod
-from . import naming, pbr, pngprobe, pngwrite, session, texbake, texclaim
+from . import naming, pbr, pngprobe, pngwrite, session, texbake, texclaim, uvatlas
 
 MAPS = ("ao", "curvature", "world_normal")
 CURVATURE_OUTPUTS = ("convex", "concave", "both")
@@ -238,6 +238,9 @@ def validate(params: Dict[str, Any], cmds) -> Dict[str, Any]:
                 "normally and writes a CORRUPT file that only fails later, "
                 "at read (MEASURED, #770 probe Q5)" % shape,
                 hint="maya_uv_atlas creates UVs; bake after that")
+        # #836: the 40-minute bake. Its UVs had every face over the whole
+        # square (#845), and Arnold's texture bake is quadratic in that.
+        uvatlas.refuse_per_face_normalised(cmds, shape, "bake")
 
     shorts: Dict[str, str] = {}
     for transform, _shape in meshes:

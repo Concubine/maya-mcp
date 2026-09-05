@@ -1200,3 +1200,40 @@ class TestTheFakeRefusesWhatMayaRefuses:
         for itself" degrade arm."""
         assert fake.listRelatives("|limbShape", parent=True) == ["|limb"]
         assert fake.listRelatives("|limb", shapes=True) == ["|limbShape"]
+
+
+class TestStackedUVsRefuse:
+    """redmine #845 / #836: a mesh whose faces each span the whole square
+    (what uv_atlas produced before #845) sends arnoldRenderToTexture over
+    every texel per face - 16+ minutes for a 256 AO map of 58k tris,
+    measured - and the map is one texel for the whole mesh. Refused before
+    Arnold is asked, with the cause named. The census needs OpenMaya, which
+    this fake does not have, so it is stubbed at the seam."""
+
+    def test_a_per_face_normalised_layout_refuses_naming_845(
+            self, fake, tmp_path, monkeypatch):
+        from maya_plugin.handlers import uvatlas
+        monkeypatch.setattr(
+            uvatlas, "face_uv_census",
+            lambda cmds, shape, rect: {"faces": 6, "faces_spanning_patch": 6,
+                                       "largest_face_fraction": 1.0})
+        with pytest.raises(HandlerError, match="845") as exc:
+            meshmaps.validate(_params(tmp_path), fake)
+        assert "span the whole 0..1 square" in str(exc.value)
+        assert "maya_uv_atlas" in (exc.value.hint or "")
+
+    def test_a_laid_out_mesh_passes(self, fake, tmp_path, monkeypatch):
+        from maya_plugin.handlers import uvatlas
+        monkeypatch.setattr(
+            uvatlas, "face_uv_census",
+            lambda cmds, shape, rect: {"faces": 6, "faces_spanning_patch": 0,
+                                       "largest_face_fraction": 0.17})
+        assert meshmaps.validate(_params(tmp_path), fake)["meshes"]
+
+    def test_an_unmeasurable_census_is_not_a_refusal(self, fake, tmp_path,
+                                                     monkeypatch):
+        # None means "could not tell" (no OpenMaya, an unopenable shape) -
+        # never "fine", but not a reason to refuse a bake either.
+        from maya_plugin.handlers import uvatlas
+        monkeypatch.setattr(uvatlas, "face_uv_census", lambda *a: None)
+        assert meshmaps.validate(_params(tmp_path), fake)["meshes"]

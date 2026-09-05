@@ -22,7 +22,7 @@ the incoming layout was.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ..dispatcher import HandlerError, refuse_inert, require_known_keys
 from . import naming, units, uvmath
@@ -178,12 +178,19 @@ def pack_shape(
             warnings.extend(_planar_warnings(cmds, shape))
 
         if normalize:
-            # normalizeType=0 is COLLECTIVE: the whole mesh becomes one 0..1
-            # block, which is what a single atlas patch wants. Normalising per
-            # shell would give every shell the full patch and destroy the
-            # relative scale between a piece's parts.
+            # normalizeType=1 is COLLECTIVE: the whole mesh becomes one 0..1
+            # block, which is what a single atlas patch wants. MEASURED on
+            # Maya 2027 (#845): normalizeType=0 normalises EACH FACE
+            # separately - every face of a polyAutoProjection'd cube came
+            # back spanning the full square (per-face UV area 1.000, from
+            # 0.056-0.167), while normalizeType=1 kept the layout (0.059-
+            # 0.177). This comment used to say the opposite, and the tool
+            # sent 0 for its whole life: every normalised atlas had all of
+            # its faces stacked over the entire patch. The overall bbox is
+            # 0..1 either way, which is why uv_bounds never saw it; the
+            # face census in the result below does.
             cmds.polyNormalizeUV(
-                shape + ".map[*]", normalizeType=0, preserveAspectRatio=False,
+                shape + ".map[*]", normalizeType=1, preserveAspectRatio=False,
                 ch=False,
             )
 
@@ -200,11 +207,63 @@ def pack_shape(
         bounds[0] >= rect[0] - tol and bounds[1] >= rect[1] - tol
         and bounds[2] <= rect[2] + tol and bounds[3] <= rect[3] + tol
     )
+    # The per-face census (#845): the overall bbox above reads 0..1 for a
+    # good layout AND for one where every face was normalised to the whole
+    # patch on its own, so it is measured here, where the bbox lied.
+    census = face_uv_census(cmds, shape, rect)
+    if census and uvmath.per_face_normalised(census):
+        warnings.append(
+            "%s: %d of %d faces each span the patch - every face is stacked "
+            "on the same texels, so a bake through these UVs writes one "
+            "texel for the whole mesh and takes minutes per map (#845). "
+            "Re-project with maya_uv_atlas, or unwrap it in Maya"
+            % (_short(shape), census["faces_spanning_patch"], census["faces"]))
     # A piece that does not fit is REPORTED, never silently clamped: its UVs
     # spill into the neighbouring patch, which reads as another material's
     # pixels on this piece.
     return {"uv_bounds": [round(q, 6) for q in bounds], "inside_patch": bool(inside),
-            "warnings": warnings}
+            "face_census": census, "warnings": warnings}
+
+
+def face_uv_census(cmds, shape: str, rect) -> Optional[Dict[str, Any]]:
+    """uvmath.face_footprints over the shape's real UV assignment.
+
+    None when it cannot be measured - outside Maya (the handler tests drive
+    a fake cmds with no OpenMaya), or a shape the API will not open. The
+    callers treat None as "unknown", never as "fine".
+    """
+    try:
+        import maya.api.OpenMaya as om  # noqa: PLC0415 - only importable inside Maya
+    except ImportError:
+        return None
+    try:
+        sel = om.MSelectionList()
+        sel.add(shape)
+        fn = om.MFnMesh(sel.getDagPath(0))
+        us, vs = fn.getUVs()
+        counts, ids = fn.getAssignedUVs()
+    except Exception:  # noqa: BLE001 - a census, not a gate; the bbox still reports
+        return None
+    return uvmath.face_footprints(list(us), list(vs), list(counts), list(ids), rect)
+
+
+def refuse_per_face_normalised(cmds, shape: str, tool: str) -> None:
+    """The bake tools' pre-flight (#836 / #845): a mesh whose faces each span
+    the whole 0..1 square is refused before Arnold is asked to rasterise
+    every face over every texel - MEASURED at over 16 minutes for a 256x256
+    AO map of a 58k-tri mesh, against 0.6 s for the same mesh laid out."""
+    census = face_uv_census(cmds, shape, (0.0, 0.0, 1.0, 1.0))
+    if census and uvmath.per_face_normalised(census):
+        raise HandlerError(
+            "%s: %d of %d faces' UVs each span the whole 0..1 square - every "
+            "face is stacked over every texel, the signature of a per-face "
+            "normalisation (maya_uv_atlas before #845 did exactly this). "
+            "arnoldRenderToTexture rasterises every face over every texel it "
+            "covers: a 58k-tri mesh ran past 16 minutes at 256x256 (measured, "
+            "#836), and the map it writes is one texel for the whole mesh"
+            % (_short(shape), census["faces_spanning_patch"], census["faces"]),
+            hint="re-run maya_uv_atlas on it (collective normalisation since "
+                 "#845), or unwrap it in Maya, then %s" % tool)
 
 
 # Every top-level key uv_atlas reads. Anything else is refused rather than

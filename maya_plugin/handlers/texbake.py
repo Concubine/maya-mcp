@@ -23,7 +23,7 @@ import os
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..dispatcher import HandlerError, require_known_keys
-from . import naming, orphans, pbr, pngprobe, session, texclaim
+from . import naming, orphans, pbr, pngprobe, session, texclaim, uvatlas
 
 RESOLUTIONS = (256, 512, 1024, 2048, 4096)
 DEFAULT_RESOLUTION = 1024
@@ -147,6 +147,9 @@ def plan_bakes(cmds, shapes: List[str],
                 "flat, useless image (MEASURED, #714 probe P2c)" % shape,
                 hint="maya_uv_atlas creates UVs (project='box' is enough for "
                      "tiling detail); bake after that")
+        # Every face over the whole square (#845) samples one texel for the
+        # whole mesh; refused with the cause named rather than baked.
+        uvatlas.refuse_per_face_normalised(cmds, shape, "bake")
 
     claims = texclaim.material_claims(cmds, shapes)
     jobs: List[Dict[str, Any]] = []
