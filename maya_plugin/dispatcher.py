@@ -132,6 +132,7 @@ class Dispatcher:
         default_timeout_s: float = DEFAULT_TIMEOUT_S,
         undo_open: Optional[Callable[[], None]] = None,
         undo_close: Optional[Callable[[], None]] = None,
+        undo_flush: Optional[Callable[[], None]] = None,
     ):
         self._handlers = dict(handlers)
         self._main_thread_exec = main_thread_exec or (lambda fn: fn())
@@ -139,6 +140,7 @@ class Dispatcher:
         self._default_timeout_s = default_timeout_s
         self._undo_open = undo_open
         self._undo_close = undo_close
+        self._undo_flush = undo_flush
 
         self._lock = threading.Lock()
         self._inflight: Optional[Future] = None
@@ -359,6 +361,16 @@ class Dispatcher:
                     self._undo_close()
 
         try:
+            if getattr(handler, "flush_undo_first", False) and self._undo_flush is not None:
+                # A handler that replaces the scene (redmine #847). MEASURED on
+                # Maya 2027: after an isolate capture, file-new spins forever
+                # unless the undo queue was flushed in a SEPARATE request
+                # first - the same flush inside the handler, in every order
+                # tried, still spins. Separate requests are separate
+                # main-thread executions with Maya's event loop running
+                # between them, so the flush gets its own hop here, and the
+                # handler runs as the next one.
+                self._main_thread_exec(self._undo_flush)
             result = self._main_thread_exec(run_on_main)
             elapsed_ms = int((time.monotonic() - start) * 1000)
             if not isinstance(result, dict):

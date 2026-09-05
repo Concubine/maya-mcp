@@ -276,9 +276,15 @@ def _undo_hooks():
                 pass
             cmds.undoInfo(openChunk=True, chunkName="maya-mcp")
 
-        return open_chunk, lambda: cmds.undoInfo(closeChunk=True)
+        def flush_undo():
+            # The hop a scene-replacing handler gets before it runs (#847):
+            # MEASURED to be what lets file-new return after an isolate
+            # capture, where the same flush inside the handler does not.
+            cmds.flushUndo()
+
+        return open_chunk, lambda: cmds.undoInfo(closeChunk=True), flush_undo
     except ImportError:
-        return None, None
+        return None, None, None
 
 
 def _setup_logging() -> None:
@@ -312,13 +318,14 @@ class PluginServer:
         _bound_at = time.time()
         self._body_deadline_s = body_deadline_s
 
-        undo_open, undo_close = _undo_hooks()
+        undo_open, undo_close, undo_flush = _undo_hooks()
         self._dispatcher = Dispatcher(
             handlers=_build_handlers(),
             main_thread_exec=_main_thread_executor(),
             token=token,
             undo_open=undo_open,
             undo_close=undo_close,
+            undo_flush=undo_flush,
         )
         self._conns: set = set()
         self._conns_lock = threading.Lock()
