@@ -66,3 +66,11 @@ evals/texbake_live/
 
 # user-stocked local mocap clips (#774) - repo ships only evals/mocap_fixtures/
 mocap/
+
+# The kethran creature run (2026-09-05, the second fresh-agent art run - its
+# friction report is the source of the tickets that followed). Same rule as
+# the lizard run: the scene, the reports and the renders are committed; the
+# auto-checkpoints and the recovered checkpoint copy are the safety net, not
+# the delivery.
+evals/kethran_run/checkpoints/
+evals/kethran_run/kethran_recovered.ma
