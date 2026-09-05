@@ -18,7 +18,14 @@ from . import ledger, units
 KEEP_CHECKPOINTS = 20
 MAX_UNDO_STEPS = 50
 CHECKPOINT_DIRNAME = "checkpoints"
-_NUMBERED = re.compile(r"^(\d{3})_(.+)\.ma$")
+# Three digits OR MORE. `\d{3}` exactly is how every checkpoint on this machine
+# between 2026-08-15 and 2026-09-05 came to be numbered 1000 (maya-mcp #835):
+# the writer's "%03d" grows to four digits on its own, but a pattern that
+# could not read "1000_" back left the maximum at 999 forever, so every later
+# save was 1000 again - overwriting the same-label file - and the ring never
+# pruned a file it could not see. 38 such files were found in the default
+# project's checkpoints dir, the one every untitled scene shares.
+_NUMBERED = re.compile(r"^(\d{3,})_(.+)\.ma$")
 
 # A checkpoint id is only unique inside ONE directory, and the directory is
 # derived from the open scene - which is exactly what the destructive ops that
@@ -65,14 +72,45 @@ def _existing(cp_dir: str):
     return sorted(entries)
 
 
-def _save_checkpoint(cmds, label: str) -> Dict[str, str]:
-    cp_dir = _checkpoint_dir(cmds)
+def _claim_number(cp_dir: str, slug: str) -> "tuple[str, str]":
+    """Take the next free number by creating its file exclusively.
+
+    The checkpoint dir of an UNTITLED scene is the workspace's, which every
+    Maya on the machine shares - the user's session and the agent Mayas
+    alike (maya-mcp #835). Two of them reading the directory in the same
+    instant would otherwise both take max+1 and the second save would
+    overwrite the first. An O_EXCL create makes the number a claim the other
+    process's listing already sees; on a collision this one simply moves up.
+    """
     entries = _existing(cp_dir)
     number = (entries[-1][0] + 1) if entries else 1
-    stem = "%03d_%s" % (number, _sanitize(label))
-    path = os.path.join(cp_dir, stem + ".ma")
-    cmds.file(path, exportAll=True, type="mayaAscii", force=True,
-              preserveReferences=True)
+    while True:
+        stem = "%03d_%s" % (number, slug)
+        path = os.path.join(cp_dir, stem + ".ma")
+        try:
+            os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        except FileExistsError:
+            number += 1
+            continue
+        return stem, path
+
+
+def _save_checkpoint(cmds, label: str) -> Dict[str, str]:
+    cp_dir = _checkpoint_dir(cmds)
+    stem, path = _claim_number(cp_dir, _sanitize(label))
+    try:
+        # force=True overwrites the empty claim with the scene.
+        cmds.file(path, exportAll=True, type="mayaAscii", force=True,
+                  preserveReferences=True)
+    except Exception:
+        # An empty claim left behind would be listed as a checkpoint and
+        # restore as an empty scene; the number can be reused.
+        try:
+            if os.path.isfile(path) and os.path.getsize(path) == 0:
+                os.unlink(path)
+        except OSError:
+            pass
+        raise
     for _, name in _existing(cp_dir)[:-KEEP_CHECKPOINTS]:
         try:
             os.unlink(os.path.join(cp_dir, name))

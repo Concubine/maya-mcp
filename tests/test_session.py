@@ -720,3 +720,83 @@ class TestTheIprFakeRefusesWhatMayaRefuses:
     def test_about_answers_one_question_only(self):
         with pytest.raises(AssertionError, match="one thing"):
             RecordingIprCmds().about()
+
+
+# --- maya-mcp #835: the counter must survive 999 -------------------------
+# Every checkpoint written in an untitled scene on this machine between
+# 2026-08-15 and 2026-09-05 was id 1000: _NUMBERED matched exactly three
+# digits, so once 1000_<label>.ma existed the max stayed at 999 and every
+# later save was numbered 1000 again, overwriting the same-label file. The
+# ring never pruned a 1000 file either. Measured on disk: 38 files named
+# 1000_* in the default project's checkpoints dir.
+
+
+def test_checkpoint_numbering_passes_999(fake, tmp_path):
+    cp_dir = tmp_path / "checkpoints"
+    cp_dir.mkdir()
+    (cp_dir / "999_old.ma").write_text("x")
+    first = session.checkpoint({"label": "a"})
+    assert first["checkpoint_id"] == "1000_a"
+    second = session.checkpoint({"label": "b"})
+    assert second["checkpoint_id"] == "1001_b"
+    assert first["checkpoint_id"] != second["checkpoint_id"]
+
+
+def test_checkpoint_ring_prunes_four_digit_files(fake, tmp_path):
+    cp_dir = tmp_path / "checkpoints"
+    cp_dir.mkdir()
+    for i in range(985, 1005):  # 20 files straddling the 999/1000 line
+        (cp_dir / ("%d_old.ma" % i)).write_text("x")
+    result = session.checkpoint({"label": "newest"})
+    assert result["checkpoint_id"] == "1005_newest"
+    remaining = sorted(os.listdir(str(cp_dir)))
+    assert "985_old.ma" not in remaining
+    assert "1004_old.ma" in remaining
+    assert len(remaining) == 20
+
+
+def test_two_processes_sharing_a_dir_never_take_the_same_number(fake, tmp_path):
+    """The default project's checkpoints dir is shared by every untitled
+    scene on the machine - the user's Maya and the agent Mayas alike. The
+    number is claimed on disk BEFORE the save, so a second process reading
+    the dir in the same instant sees the claim and moves on; and a number
+    someone else claimed in the meantime is skipped, not overwritten."""
+    cp_dir = tmp_path / "checkpoints"
+    cp_dir.mkdir()
+    (cp_dir / "007_older.ma").write_text("x")
+    seen_at_save = {}
+    real_file = fake.file
+
+    def file_that_looks_first(*args, **kw):
+        if kw.get("exportAll"):
+            seen_at_save["existed"] = os.path.exists(args[0])
+            seen_at_save["size"] = os.path.getsize(args[0])
+        return real_file(*args, **kw)
+
+    fake.file = file_that_looks_first
+    result = session.checkpoint({"label": "mine"})
+    assert result["checkpoint_id"] == "008_mine"
+    assert seen_at_save == {"existed": True, "size": 0}  # claimed, empty, then saved over
+
+    # Another process claimed 009 between our listing and our save: the
+    # empty claim is exactly what its listing would find, so we take 010.
+    (cp_dir / "009_theirs.ma").write_text("")
+    result = session.checkpoint({"label": "again"})
+    assert result["checkpoint_id"] == "010_again"
+    assert (cp_dir / "009_theirs.ma").read_text() == ""  # never overwritten
+
+
+def test_claim_is_removed_when_the_save_fails(fake, tmp_path):
+    cp_dir = tmp_path / "checkpoints"
+    cp_dir.mkdir()
+    real_file = fake.file
+
+    def failing_file(*args, **kw):
+        if kw.get("exportAll"):
+            raise RuntimeError("disk full")
+        return real_file(*args, **kw)
+
+    fake.file = failing_file
+    with pytest.raises(RuntimeError):
+        session.checkpoint({"label": "doomed"})
+    assert os.listdir(str(cp_dir)) == []  # no empty checkpoint left to restore
