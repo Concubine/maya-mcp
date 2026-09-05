@@ -44,7 +44,9 @@ DEFAULT_SAMPLES, MIN_SAMPLES, MAX_SAMPLES = 3, 1, 8
 # matches URP with post-processing off, which is where the game side is today;
 # a tone-mapped view (ACES) would darken a linear-0.5 plane to 165 instead of
 # 188 and put a look on an image whose job is to report the asset (#615).
-DISPLAY_TRANSFORM = "Un-tone-mapped (sRGB)"
+# Owned by capture.py since #837, so the viewport eye and the render eye are
+# one constant apart from drifting, not two.
+DISPLAY_TRANSFORM = capture.DISPLAY_TRANSFORM
 
 
 def resolve_angles(angles: Optional[Sequence[str]]) -> List[str]:
@@ -460,11 +462,31 @@ def _ensure_arnold_samples(cmds, samples: int) -> Tuple[Optional[str], Any]:
     return None, restore_value
 
 
-def _render_frame(cmds, camera, prefix, renderer, resolution, samples) -> str:
+HW2_FALLBACK_NOTE = (
+    "arnold wrote nothing at the path Maya predicted for it, so this frame "
+    "fell back to the hardware renderer: it is RAW LINEAR, with no display "
+    "transform (a 0.5 albedo reads 127 where the render eye says 188), no "
+    "sky-dome light and no transmission. Measured cause: an empty 'images' "
+    "file rule in the project makes the prediction and Arnold's write "
+    "disagree - check the project's workspace (#837)"
+)
+DISPLAY_STATE_NOTE = (
+    "the display transform could not be configured on Arnold's driver, so "
+    "this frame fell back to the hardware renderer and is RAW LINEAR (#837)"
+)
+
+
+def _render_frame(cmds, camera, prefix, renderer, resolution, samples,
+                  notes: Optional[List[str]] = None) -> str:
     """Render one frame and return the file it landed on.
 
     Its own function so the restore and marshaling tests can run without a
     renderer; everything Maya-version-specific about rendering lives here.
+
+    `notes` collects what a frame did NOT do: the arnold branch below falls
+    through to cmds.render when Arnold writes nothing, and until #837 that
+    fallback was silent - the calibration gate read a raw 127 from a result
+    that said renderer='arnold' and nothing else.
     """
     # cmds.render renders with whatever the scene's currentRenderer is - the
     # renderer is a scene attribute, not a call argument. _RenderGlobalsState
@@ -495,8 +517,13 @@ def _render_frame(cmds, camera, prefix, renderer, resolution, samples) -> str:
                 display.restore()
             if written:
                 return written
+            if notes is not None and HW2_FALLBACK_NOTE not in notes:
+                notes.append(HW2_FALLBACK_NOTE)
+        elif notes is not None and DISPLAY_STATE_NOTE not in notes:
+            notes.append(DISPLAY_STATE_NOTE)
         # arnoldRender could not run or wrote nothing: a dark frame beats no
-        # frame, so fall through to the interactive path as before.
+        # frame, so fall through to the interactive path as before - SAID,
+        # since #837, never silently.
     written = cmds.render(camera, x=resolution, y=resolution)
     # Some Maya versions hand back a list of written files rather than one path;
     # str() of a list is a path that cannot exist, which would surface as a
@@ -1156,7 +1183,7 @@ def _run_shots(cmds, shots: List[Dict[str, Any]], params: Dict[str, Any]) -> Dic
 
             path = _render_frame(
                 cmds, temp_camera, frame_prefix(call_id, index, resolved_angle),
-                maya_renderer, resolution, samples,
+                maya_renderer, resolution, samples, notes=framing_warnings,
             )
             if not path or not os.path.exists(path):
                 raise HandlerError(

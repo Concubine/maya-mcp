@@ -30,6 +30,54 @@ VALID_BUFFERS = ("beauty", "ssao")
 # judgeable; "default" is Maya's headlight (what every capture did before M2).
 VALID_LIGHTING = ("default", "scene", "flat")
 _LIGHTING_TO_DISPLAY = {"default": "default", "scene": "all", "flat": "flat"}
+
+# The display transform every frame this module grabs is encoded with, and
+# the one render_scene delivers (#615) - render.py imports it from here so the
+# two eyes cannot drift apart. Measured on Maya 2027 (#837): an offscreen
+# playblast takes the PANEL's view transform, which is ACES 1.0 SDR-video on a
+# stock install. That curve read a linear-0.5 plane as 165 and a 0.028 plane
+# as 17 where Arnold said 188 and 47; an agent judging its materials through
+# the viewport darkened them until Arnold showed clay, and then blamed Arnold.
+# Un-tone-mapped sRGB reports the asset; a tone-mapped view puts a look on it.
+DISPLAY_TRANSFORM = "Un-tone-mapped (sRGB)"
+
+
+def _apply_display_transform(cmds, panel: str):
+    """Make the grab that follows encode like render_scene.
+
+    The view transform is swapped on the GLOBAL colour-management prefs for
+    the duration of the grab, and _PanelState puts the user's back with the
+    rest of the panel state. Not on the panel: modelEditor has a per-panel
+    viewTransformName flag that can be set and read back, and the offscreen
+    playblast ignores it - measured, the panel reported Un-tone-mapped and
+    drew 165 (ACES); the global swap drew 188. The panel's own cmEnabled is
+    forced on because OFF means no transform at all - a raw linear frame,
+    127 for a 0.5 albedo.
+
+    Returns (transform_name, note): the name the prefs report AFTER the
+    edit, and a note when that is not the one asked for - a Maya that
+    refuses the edit draws with whatever it has, and the result must say so
+    rather than claim the render's encoding.
+    """
+    try:
+        cmds.modelEditor(panel, edit=True, cmEnabled=True)
+        cmds.colorManagementPrefs(edit=True, viewTransformName=DISPLAY_TRANSFORM)
+        applied = cmds.colorManagementPrefs(query=True, viewTransformName=True)
+    except Exception as exc:  # noqa: BLE001 - reported, never hidden
+        return None, (
+            "the display transform could not be set on %s (%s: %s): the frames "
+            "carry the panel's own view transform, so their tones will not "
+            "match maya_render_scene's %s encoding"
+            % (panel, type(exc).__name__, str(exc).strip() or "no message",
+               DISPLAY_TRANSFORM)
+        )
+    if applied != DISPLAY_TRANSFORM:
+        return applied, (
+            "the panel reports view transform %r after asking for %r: the "
+            "frames' tones will not match maya_render_scene's encoding"
+            % (applied, DISPLAY_TRANSFORM)
+        )
+    return applied, None
 MAX_ANGLES_PER_CALL = 4
 DEFAULT_ANGLES = ["front", "side", "three_quarter"]
 DEFAULT_RESOLUTION = 768
@@ -732,12 +780,16 @@ def capture_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
             lighting, shadows, frame_on=target,
         )
         images.append({"angle": angle, "png_b64": shot["png_b64"],
-                       "blank": shot.get("blank")})
+                       "blank": shot.get("blank"),
+                       "display_transform": shot.get("display_transform")})
         warnings.extend(blank_warnings(shot, angle))
         warnings.extend(unbound_shader_warnings(shot, angle))
         # Deduped: the unlit note carries no label and is identical on every
         # frame of the call, while the framing and size notes name theirs.
         for note in frame_warnings(shot, angle, resolution):
+            if note not in warnings:
+                warnings.append(note)
+        for note in display_transform_warnings(shot):
             if note not in warnings:
                 warnings.append(note)
         camera_positions.append(
@@ -749,7 +801,17 @@ def capture_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
             }
         )
     return {"images": images, "camera_positions": camera_positions,
+            # One panel per call, so one encoding per call (#837): the name
+            # every frame above carries, or None when it could not be set.
+            "display_transform": (images[0].get("display_transform")
+                                  if images else None),
             "warnings": warnings}
+
+
+def display_transform_warnings(shot: Dict[str, Any]) -> List[str]:
+    """The #837 note, when the frame is not encoded like the render."""
+    note = shot.get("display_transform_note")
+    return [note] if note else []
 
 
 TURNTABLE_DEFAULT_FRAMES = 8
@@ -828,7 +890,8 @@ def capture_turntable(params: Dict[str, Any]) -> Dict[str, Any]:
         )
         images_out.append(
             {"index": i, "azimuth": azimuth, "png_b64": shot["png_b64"],
-             "blank": shot.get("blank")}
+             "blank": shot.get("blank"),
+             "display_transform": shot.get("display_transform")}
         )
         label = "azimuth %.0f" % azimuth
         warnings.extend(blank_warnings(shot, label))
@@ -836,7 +899,13 @@ def capture_turntable(params: Dict[str, Any]) -> Dict[str, Any]:
         for note in frame_warnings(shot, label, resolution):
             if note not in warnings:
                 warnings.append(note)
-    return {"images": images_out, "n_frames": n_frames, "warnings": warnings}
+        for note in display_transform_warnings(shot):
+            if note not in warnings:
+                warnings.append(note)
+    return {"images": images_out, "n_frames": n_frames,
+            "display_transform": (images_out[0].get("display_transform")
+                                  if images_out else None),
+            "warnings": warnings}
 
 
 capture_turntable.no_undo_chunk = True
@@ -1029,6 +1098,19 @@ class _PanelState:
         self.isolate_state = bool(cmds.modelEditor(panel, query=True, viewSelected=True))
         self.isolate_members = _isolate_members(cmds, panel) if self.isolate_state else []
         self.isolate_dirty = False
+        # Colour management (#837): the capture swaps the GLOBAL view
+        # transform for the grab and forces this panel's cmEnabled on, so
+        # both must come back. None when Maya cannot say (an older build
+        # without the flags), and then restore leaves that one alone.
+        try:
+            self.cm_enabled = me(cmEnabled=True)
+        except Exception:
+            self.cm_enabled = None
+        try:
+            self.view_transform = cmds.colorManagementPrefs(
+                query=True, viewTransformName=True)
+        except Exception:
+            self.view_transform = None
         self.ssao = cmds.getAttr("hardwareRenderingGlobals.ssaoEnable")
         self.selection = cmds.ls(selection=True, long=True) or []
         try:
@@ -1056,6 +1138,16 @@ class _PanelState:
             )
         except Exception:
             pass
+        if self.view_transform is not None:
+            try:
+                cmds.colorManagementPrefs(edit=True, viewTransformName=self.view_transform)
+            except Exception:
+                pass
+        if self.cm_enabled is not None:
+            try:
+                cmds.modelEditor(panel, edit=True, cmEnabled=bool(self.cm_enabled))
+            except Exception:
+                pass
         if self.isolate_dirty:
             try:
                 if self.isolate_state:
@@ -1222,6 +1314,10 @@ def _capture_one(
         }
         cmds.modelEditor(panel, edit=True, **editor_kwargs)
         cmds.setAttr("hardwareRenderingGlobals.ssaoEnable", buffer == "ssao")
+        # Encode like the render eye (#837), after the panel is configured
+        # and before the flush below, so the draw the playblast grabs is the
+        # one made under this transform.
+        display_transform, display_transform_note = _apply_display_transform(cmds, panel)
 
         # VP2 builds a shape's render items lazily, and their first draw can
         # precede the shading-group binding: a shape VP2 has not drawn since
@@ -1273,6 +1369,10 @@ def _capture_one(
             "target_unframed": target_unframed,
             "occlusion": occlusion,
             "isolate_view_failed": isolate_view_failed,
+            # The encoding this frame actually carries (#837), and why it is
+            # not the render's when it is not.
+            "display_transform": display_transform,
+            "display_transform_note": display_transform_note,
         }
     finally:
         state.restore()

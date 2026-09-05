@@ -31,6 +31,14 @@ from live_call import DEFAULT_PORT, call, structured_result  # noqa: E402
 # Linear 0.5 through the sRGB transfer function: 1.055 * 0.5^(1/2.4) - 0.055.
 EXPECTED = 188
 TOLERANCE = 3
+# sRGB of linear 0.028: the kethran run's "claw", the albedo where the ACES
+# tone curve is most visibly wrong (17 vs 47).
+DARK_EXPECTED = 47
+
+SET_ALBEDO = """
+import maya.cmds as cmds
+cmds.setAttr("calibMat.baseColor", %r, %r, %r, type="double3")
+"""
 
 # The dome check is a floor, not a target: it asks whether the sky survived
 # isolate at all. Measured ~122 for this plane under the default sky, against 0
@@ -125,6 +133,25 @@ def render_the_plane() -> bytes:
     return base64.b64decode(result["images"][0]["png_b64"])
 
 
+def capture_the_plane() -> bytes:
+    """The same plane through the viewport eye (redmine #837).
+
+    The capture used to go through the panel's view transform - ACES 1.0
+    SDR-video on a stock Maya 2027 - which read the linear-0.5 plane as 165
+    and a 0.028 plane as 17 where the render said 188 and 47. The agent's two
+    eyes disagreed by the tone curve, and the field report guessed the
+    viewport was the honest one. It must now encode with the render's
+    transform.
+    """
+    result = send("capture_viewport", {
+        "isolate": ["calibPlane"],
+        "angles": ["top"],
+        "lighting": "scene",
+        "resolution": 256,
+    })
+    return base64.b64decode(result["images"][0]["png_b64"])
+
+
 def lit_value(png_bytes) -> int:
     """The red channel of the commonest lit colour in the frame.
 
@@ -153,6 +180,16 @@ def main() -> int:
         #    transform at all (#615)? It does not go through setup_lighting, so
         #    it is unaffected by #617 and makes a useful control.
         measured = lit_value(render_the_plane())
+
+        # 1b. the same plane through the viewport eye (#837): it must encode
+        #     with the render's transform, at the albedo where the tone
+        #     curve is subtle (0.5) AND where it is brutal (0.028, the
+        #     kethran run's claw - 17 through ACES, 47 through sRGB).
+        captured = lit_value(capture_the_plane())
+        send("execute_python", {"code": SET_ALBEDO % (0.028, 0.028, 0.028)})
+        dark_rendered = lit_value(render_the_plane())
+        dark_captured = lit_value(capture_the_plane())
+        send("execute_python", {"code": SET_ALBEDO % (0.5, 0.5, 0.5)})
 
         # 2. the same surface, lit by the PRESET at intensity 1.0 (#617)
         send("execute_python", {"code": PRESET_SETUP})
@@ -198,8 +235,25 @@ def main() -> int:
               "rig in which a metal can be judged (redmine #618)."
               % dome_measured)
         return 1
-    print("PASS: displayable pixels, intensity 1.0 is a fully-lit surface, and "
-          "isolate leaves the sky alone")
+    print("viewport eye: capture of the 0.5 plane -> %d (render %d); the 0.028 "
+          "plane -> capture %d, render %d, sRGB says %d"
+          % (captured, measured, dark_captured, dark_rendered, DARK_EXPECTED))
+    if abs(captured - EXPECTED) > TOLERANCE:
+        print("FAIL: capture_viewport read the linear-0.5 plane as %d, not %d. "
+              "The playblast is going through the panel's own view transform "
+              "again (ACES SDR-video reads it as 165) instead of the render's "
+              "Un-tone-mapped sRGB (redmine #837)." % (captured, EXPECTED))
+        return 1
+    if abs(dark_captured - dark_rendered) > TOLERANCE or abs(dark_captured - DARK_EXPECTED) > TOLERANCE:
+        print("FAIL: the 0.028 plane reads %d through the viewport and %d "
+              "through Arnold (sRGB: %d). A tone curve is crushing the darks in "
+              "one eye and not the other - the agent's two eyes disagree "
+              "exactly where the kethran run lost its materials (redmine #837)."
+              % (dark_captured, dark_rendered, DARK_EXPECTED))
+        return 1
+    print("PASS: displayable pixels, intensity 1.0 is a fully-lit surface, "
+          "isolate leaves the sky alone, and the viewport eye agrees with the "
+          "render eye at 0.5 and at 0.028")
     return 0
 
 

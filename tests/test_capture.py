@@ -550,7 +550,15 @@ class FakeCaptureCmds:
             "textures": True,
             "displayLights": "default",
             "shadows": False,
+            # A stock Maya 2027 panel: colour-managed, ACES SDR-video view
+            # (#837). The capture must set its own transform for the grab
+            # and hand these back.
+            "cmEnabled": True,
         }
+        # The GLOBAL colour-management prefs (#837): the offscreen playblast
+        # follows these, not the panel's own view transform (measured).
+        self.cm_prefs = {"viewTransformName": "ACES 1.0 SDR-video (sRGB)",
+                         "cmEnabled": True}
         self.ssao = False
         self.active_camera = "persp"  # panel's current camera (not cmds.camera(), below)
         self.focus_panel = "modelPanel1"
@@ -635,6 +643,18 @@ class FakeCaptureCmds:
         for flag, value in kw.items():
             if flag in self.editor_state:
                 self.editor_state[flag] = value
+        return None
+
+    def colorManagementPrefs(self, **kw):
+        self.calls.append(("colorManagementPrefs", dict(kw)))
+        if kw.get("query"):
+            for flag, value in self.cm_prefs.items():
+                if kw.get(flag):
+                    return value
+            return None
+        for flag, value in kw.items():
+            if flag in self.cm_prefs:
+                self.cm_prefs[flag] = value
         return None
 
     def undoInfo(self, **kw):
@@ -2402,3 +2422,87 @@ class TestAFrameWithUnboundShadersSaysSo:
         turn = capture.capture_turntable({"n_frames": 2})
         assert sum(1 for w in turn["warnings"]
                    if "unassigned-shader green" in w) == 2
+
+
+# --- redmine #837: the viewport eye encodes like the render eye ------------
+# Measured on Maya 2027: the offscreen playblast took the panel's view
+# transform, ACES 1.0 SDR-video, which read a linear-0.5 plane as 165 and a
+# 0.028 plane as 17 where render_scene (Un-tone-mapped sRGB, #615) said 188
+# and 47. The capture now sets the render's transform on the panel it draws
+# with, for the grab only, and says so in the result.
+
+
+def _capture_fake_with_view_transform(view="ACES 1.0 SDR-video (sRGB)"):
+    fake = FakeCaptureCmds()
+    fake.cm_prefs["viewTransformName"] = view
+    fake.editor_state["cmEnabled"] = True
+    return fake
+
+
+def test_capture_sets_the_display_transform_for_the_grab_and_restores_it(monkeypatch):
+    fake = _capture_fake_with_view_transform()
+    monkeypatch.setattr(capture, "_cmds", lambda: fake)
+    seen_at_grab = {}
+
+    def grab(cmds, panel, resolution):
+        seen_at_grab["view"] = fake.cm_prefs["viewTransformName"]
+        seen_at_grab["cm"] = fake.editor_state["cmEnabled"]
+        return b"fakepng", {"blank": False, "unavailable_reason": None}
+
+    monkeypatch.setattr(capture, "_grab_pixels", grab)
+    result = capture.capture_viewport({"angles": ["front"]})
+    assert seen_at_grab == {"view": capture.DISPLAY_TRANSFORM, "cm": True}
+    # restored to what the user had, like every other panel setting
+    assert fake.cm_prefs["viewTransformName"] == "ACES 1.0 SDR-video (sRGB)"
+    assert result["display_transform"] == capture.DISPLAY_TRANSFORM
+    assert all(img["display_transform"] == capture.DISPLAY_TRANSFORM
+               for img in result["images"])
+    assert not [w for w in result["warnings"] if "transform" in w]
+
+
+def test_capture_turns_colour_management_on_for_the_grab(monkeypatch):
+    # cmEnabled off means NO transform: the frame is raw linear, 127 for a
+    # 0.5 albedo. The grab must not depend on the user's preference.
+    fake = _capture_fake_with_view_transform()
+    fake.editor_state["cmEnabled"] = False
+    monkeypatch.setattr(capture, "_cmds", lambda: fake)
+    seen = {}
+    monkeypatch.setattr(capture, "_grab_pixels", lambda c, p, r: (
+        seen.setdefault("cm", fake.editor_state["cmEnabled"]) and None
+        or (b"fakepng", {"blank": False, "unavailable_reason": None})))
+    capture.capture_viewport({"angles": ["front"]})
+    assert seen["cm"] is True
+    assert fake.editor_state["cmEnabled"] is False  # restored
+
+
+def test_capture_reports_the_transform_it_could_not_set(monkeypatch):
+    # A Maya whose modelEditor has no viewTransformName flag (or refuses it)
+    # draws with whatever it has. The result must say which, not claim the
+    # render's transform, and warn - the caller's two eyes then disagree.
+    fake = FakeCaptureCmds()
+
+    def refused(**kw):
+        raise RuntimeError("colorManagementPrefs: ")
+
+    fake.colorManagementPrefs = refused
+    monkeypatch.setattr(capture, "_cmds", lambda: fake)
+    monkeypatch.setattr(capture, "_grab_pixels", lambda *a, **k: (
+        b"fakepng", {"blank": False, "unavailable_reason": None}))
+    result = capture.capture_viewport({"angles": ["front"]})
+    assert result["display_transform"] is None
+    assert any("transform" in w and "could not" in w for w in result["warnings"]), result["warnings"]
+
+
+def test_turntable_carries_the_display_transform_too(monkeypatch):
+    fake = _capture_fake_with_view_transform()
+    monkeypatch.setattr(capture, "_cmds", lambda: fake)
+    monkeypatch.setattr(capture, "_grab_pixels", lambda *a, **k: (
+        b"fakepng", {"blank": False, "unavailable_reason": None}))
+    result = capture.capture_turntable({"n_frames": 2})
+    assert result["display_transform"] == capture.DISPLAY_TRANSFORM
+    assert fake.cm_prefs["viewTransformName"] == "ACES 1.0 SDR-video (sRGB)"
+
+
+def test_render_and_capture_share_one_display_transform():
+    from maya_plugin.handlers import render
+    assert render.DISPLAY_TRANSFORM == capture.DISPLAY_TRANSFORM == "Un-tone-mapped (sRGB)"

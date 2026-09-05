@@ -370,7 +370,15 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
 
         Returns one image per angle plus a text summary of camera positions,
         and writes the frames to disk when given a path.
-        Captures are side-effect-free: all viewport state is restored."""
+        Captures are side-effect-free: all viewport state is restored.
+
+        Frames are encoded with the same display transform as
+        maya_render_scene (Un-tone-mapped sRGB), so a material reads the
+        same through both eyes and setup_lighting's intensity calibration
+        holds for both; `display_transform` names it. Before this, the
+        capture took the panel's own view transform (ACES SDR-video on a
+        stock Maya), which reads a 0.028 albedo as 17 where the render says
+        47 - dark materials looked right here and like clay in Arnold."""
         if len(angles) > 4:
             raise ValueError("at most 4 angles per call; split larger captures")
         out_path = _resolve_path(path)
@@ -450,7 +458,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
     ) -> list:
         """Orbit the subject and return a single contact-sheet image.
 
-        Eight views for the token cost of one image - the final judgement pass."""
+        Eight views for the token cost of one image - the final judgement pass.
+        Cells are encoded like maya_render_scene (Un-tone-mapped sRGB, see
+        maya_capture_viewport); `display_transform` names it."""
         out_path = _resolve_path(path)
         result = maya.request(
             "capture_turntable",
@@ -1074,16 +1084,18 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
     )
     def maya_bake_mesh_maps(
         meshes: Annotated[List[str], Field(description=(
-            "Meshes to bake maps for. Each needs UVs whose shells do NOT "
-            "overlap: overlapping shells (e.g. box projection on a torus "
-            "or a capped cylinder) rasterize conflicting surfaces into "
-            "the same texels - measured to turn a whole AO map uniform "
-            "black. Native primitive UVs are non-overlapping; so is "
-            "maya_uv_atlas on box-friendly shapes. A UV-less mesh writes "
-            "a corrupt bake Maya does not refuse (measured), so it "
-            "refuses upfront. Other scene meshes still occlude: bake the "
-            "whole assembly's parts in one scene so contact shadows land "
-            "where parts actually meet."
+            "Meshes to bake maps for. Each needs UVs whose faces do NOT "
+            "stack: faces sharing texels rasterize conflicting surfaces "
+            "into them - a whole AO map baked uniform black that way. "
+            "(Until #845 that was every maya_uv_atlas layout: it normalised "
+            "each face to the full patch. It is fixed, and a mesh still "
+            "carrying that layout is refused here with the cause named, "
+            "because Arnold takes minutes per map on it - measured.) "
+            "Native primitive UVs and maya_uv_atlas layouts are fine. A "
+            "UV-less mesh writes a corrupt bake Maya does not refuse "
+            "(measured), so it refuses upfront. Other scene meshes still "
+            "occlude: bake the whole assembly's parts in one scene so "
+            "contact shadows land where parts actually meet."
         ))],
         out_dir: Annotated[str, Field(description=(
             "Absolute directory the map PNGs are written to. It must "
@@ -2249,7 +2261,10 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "Rig intensity, in fully-lit surfaces. 1.0 means a surface facing "
             "the key reads its OWN albedo - a light grey wall renders light "
             "grey. 0.5 is visibly dim, 2.0 deliberately hot. The key/fill/rim "
-            "ratio is fixed; this scales the whole rig."
+            "ratio is fixed; this scales the whole rig. The calibration holds "
+            "through maya_capture_viewport and maya_render_scene alike (both "
+            "encode Un-tone-mapped sRGB): if a material looks right in one "
+            "and wrong in the other, re-check the material, not the rig."
         ))] = 1.0,
         hdri_path: Annotated[Optional[str], Field(description=(
             "Absolute path to an .hdr/.exr. Required for preset='hdri' - no HDRI "

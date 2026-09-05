@@ -627,7 +627,8 @@ def _stub_render_frame(tmp_path, fake):
     """Stand in for cmds.render: writes a small lit PNG, records the call."""
     from PIL import Image as PILImage
 
-    def render_frame(cmds, camera, prefix, renderer, resolution, samples):
+    def render_frame(cmds, camera, prefix, renderer, resolution, samples,
+                     notes=None):
         path = tmp_path / (prefix + ".png")
         PILImage.new("RGB", (8, 8), (120, 30, 30)).save(path)
         fake.written.append({
@@ -1988,3 +1989,64 @@ class TestTheColdArnoldOptionsNodeIsNotLeftDirty:
             {"angles": ["front"], "renderer": "arnold", "samples": 7})
         assert fake.made_nodes == []
         assert fake.attrs["defaultArnoldRenderOptions.AASamples"] == 2
+
+
+class TestHardwareFallbackIsSaid:
+    """redmine #837: the arnold branch of _render_frame falls through to
+    cmds.render when Arnold writes nothing, and that fallback was silent -
+    the calibration gate read a raw-linear 127 from a result that said
+    renderer='arnold'. Measured cause: a project whose 'images' file rule
+    is empty makes the predicted path and Arnold's write disagree."""
+
+    class _Cmds:
+        def __init__(self):
+            self.rendered = []
+
+        def setAttr(self, *a, **kw):
+            return None
+
+        def render(self, camera, x=None, y=None):
+            self.rendered.append(camera)
+            return "hw2.png"
+
+    class _DisplayOk:
+        def __init__(self, cmds):
+            pass
+
+        def apply(self):
+            return True
+
+        def restore(self):
+            return None
+
+    class _DisplayNo(_DisplayOk):
+        def apply(self):
+            return False
+
+    def test_arnold_writing_nothing_is_reported(self, monkeypatch):
+        cmds = self._Cmds()
+        monkeypatch.setattr(render, "_ArnoldDisplayState", self._DisplayOk)
+        monkeypatch.setattr(render, "_arnold_render", lambda c, cam, res: "")
+        monkeypatch.setattr(render, "_ensure_arnold_samples", lambda c, s: (None, None))
+        notes = []
+        path = render._render_frame(cmds, "|cam", "p", "arnold", 64, 1, notes=notes)
+        assert path == "hw2.png" and cmds.rendered == ["|cam"]
+        assert notes == [render.HW2_FALLBACK_NOTE]
+        assert "RAW LINEAR" in notes[0] and "images" in notes[0]
+
+    def test_a_display_state_that_cannot_apply_is_reported(self, monkeypatch):
+        cmds = self._Cmds()
+        monkeypatch.setattr(render, "_ArnoldDisplayState", self._DisplayNo)
+        monkeypatch.setattr(render, "_ensure_arnold_samples", lambda c, s: (None, None))
+        notes = []
+        render._render_frame(cmds, "|cam", "p", "arnold", 64, 1, notes=notes)
+        assert notes == [render.DISPLAY_STATE_NOTE]
+
+    def test_a_frame_arnold_wrote_carries_no_note(self, monkeypatch):
+        cmds = self._Cmds()
+        monkeypatch.setattr(render, "_ArnoldDisplayState", self._DisplayOk)
+        monkeypatch.setattr(render, "_arnold_render", lambda c, cam, res: "arnold.png")
+        monkeypatch.setattr(render, "_ensure_arnold_samples", lambda c, s: (None, None))
+        notes = []
+        assert render._render_frame(cmds, "|cam", "p", "arnold", 64, 1, notes=notes) == "arnold.png"
+        assert notes == [] and cmds.rendered == []
