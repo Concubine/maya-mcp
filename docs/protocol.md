@@ -184,6 +184,10 @@ Session safety:
 | `open_scene` | `{ path, confirm? }` | `{ opened, pre_checkpoint, pre_checkpoint_path }` |
 | `save_scene` | `{ path? }` | `{ path }` |
 
+**Sizes are metres, whatever the unit string says (#833).** `new_scene` sets the scene to `cm` by default, and the rule that produces is **1 scene unit = 1 metre in the exported FBX** — a 45 cm lamp is authored as `0.45`, a 2 m creature as `2`. The reason the label and the meaning disagree: Maya's internal linear unit is centimetres whatever `currentUnit` reports, and the FBX exporter writes those internal numbers, so `cm` is precisely the setting that makes the exporter leave the authored numbers alone. Setting `m` instead exports the same numbers 100x too large — the #629 defect, invisible to every in-Maya measurement.
+
+So the number to trust is **`export_metres_per_unit`**, reported by `new_scene`, `get_scene_graph` and `get_object_info`; `1.0` is the only metre-true value. Never assert on the `linear_unit` string: under the authoring convention it reads `"cm"` while the numbers mean metres, which is exactly the contradiction a fresh agent reported after ignoring the tool and guessing (it guessed right, which is worse — the next one may not).
+
 Checkpoints go to `<dir of the open scene>/checkpoints/`, so a `checkpoint_id`
 (`NNN_label`) is unique only inside one directory — and `new_scene`,
 `open_scene` and `restore_checkpoint` all change which directory that is. Ids

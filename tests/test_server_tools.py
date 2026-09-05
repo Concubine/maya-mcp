@@ -2937,3 +2937,33 @@ class TestApplySurfaceDetail:
         detail = by_name["maya_apply_surface_detail"].annotations
         assert (detail.read_only_hint, detail.destructive_hint,
                 detail.idempotent_hint) == (False, True, False)
+
+
+class TestTheUnitConventionIsStatedWhereItIsDECIDED:
+    """#833 item 1: a fresh agent read `linear_unit: 'cm'` alongside "the
+    numbers you pass mean METRES", could not resolve it, and sized its model
+    by ignoring the tool. It guessed right, which is worse than guessing
+    wrong - the next one may not.
+
+    The rule is 1 scene unit = 1 metre in the exported FBX. These pin it in
+    the two places a caller meets it: the parameter that sets the unit, and
+    the parameter where a size is actually typed."""
+
+    def _description(self, tool_name, param):
+        mcp = server_mod.create_server(FakeConn())
+        tools = {t.name: t for t in run(mcp.list_tools())}
+        return tools[tool_name].input_schema["properties"][param].get(
+            "description", "")
+
+    def test_new_scene_states_the_rule_and_a_worked_example(self):
+        text = self._description("maya_new_scene", "linear_unit")
+        assert "1 SCENE UNIT = 1 METRE" in text
+        assert "0.45" in text, "a worked example is what made it resolvable"
+        assert "export_metres_per_unit" in text
+
+    def test_the_place_a_size_is_typed_says_it_too(self):
+        # assemble's `parts[].dim` is where a modeller decides how big
+        # something is; the rule is useless if it only lives on new_scene.
+        text = self._description("maya_assemble", "parts")
+        assert "1 unit = 1 METRE" in text
+        assert "0.45" in text

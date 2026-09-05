@@ -75,12 +75,15 @@ class SceneUnits(BaseModel):
     export_metres_per_unit: Optional[float] = Field(
         default=None,
         description=(
-            "Metres one scene unit becomes in an exported FBX. 1.0 (linear_unit "
-            "'cm') is the ONLY value that produces a metre-true delivery - it is "
-            "the authoring convention every mesh out of this repo uses, where "
-            "the numbers you pass mean metres. 100.0 (linear_unit 'm') is the "
-            "100x defect of maya-mcp #629, which no in-Maya measurement can see. "
-            "Null means the unit was not recognised - never assume 1.0."
+            "Metres one scene unit becomes in an exported FBX, and the number "
+            "to size your model by: at 1.0 a 45 cm lamp is 0.45 units and a 2 m "
+            "creature is 2. 1.0 (linear_unit 'cm') is the ONLY value that "
+            "produces a metre-true delivery and is the convention every mesh "
+            "out of this repo is authored under - the scene reads 'cm' while "
+            "the numbers mean metres, so trust THIS number and not the unit "
+            "string. 100.0 (linear_unit 'm') is the 100x defect of maya-mcp "
+            "#629, which no in-Maya measurement can see. Null means the unit "
+            "was not recognised - never assume 1.0."
         ),
     )
 

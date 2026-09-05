@@ -885,11 +885,16 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "Must be true; the current scene is discarded."
         ))] = False,
         linear_unit: Annotated[Optional[str], Field(description=(
-            "Linear unit the new scene is SET to, after the replace. Default "
-            "'cm' is the authoring convention for every deliverable out of this "
-            "repo: the numbers you pass mean METRES, and the exporter writes "
-            "them unchanged. 'm' instead makes the same numbers export 100x too "
-            "large - the maya-mcp #629 defect, invisible to every in-Maya check. "
+            "Linear unit the new scene is SET to, after the replace. THE RULE "
+            "THIS PRODUCES, under the default 'cm': 1 SCENE UNIT = 1 METRE in "
+            "the exported FBX. So build a 45 cm lamp as 0.45, and a 2 m "
+            "creature as 2. Why the label says 'cm' while your numbers mean "
+            "metres: Maya's internal unit is centimetres whatever this is set "
+            "to, and the FBX exporter writes those internal numbers - so 'cm' "
+            "is the setting that makes the exporter leave your numbers alone. "
+            "Trust the reported export_metres_per_unit (1.0), not the unit "
+            "string. 'm' instead makes the same numbers export 100x too large "
+            "- the maya-mcp #629 defect, invisible to every in-Maya check. "
             "Pass null to inherit whatever the session already had, which is "
             "what this parameter exists to stop being the default."
         ))] = "cm",
@@ -1757,7 +1762,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         parts: Annotated[List[dict], Field(min_length=1, description=(
             "One entry per primitive:\n"
             "  dim     [w, h, d] in scene units - REQUIRED. Every kind is built "
-            "to fill a 1-unit box, so dim is literally the size.\n"
+            "to fill a 1-unit box, so dim is literally the size. Under this "
+            "repo's convention 1 unit = 1 METRE in the exported FBX, so a 45 cm "
+            "part is 0.45 (see new_scene's linear_unit).\n"
             "  pos     [x, y, z] centre, default origin\n"
             "  kind    cube (default), sphere, cylinder, plane, torus, cone, "
             "octahedron, icosahedron, prism, pyramid\n"
