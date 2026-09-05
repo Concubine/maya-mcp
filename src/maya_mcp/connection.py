@@ -83,7 +83,8 @@ class MayaConnection:
     # ---------------------------------------------------------------- public
 
     def request(
-        self, cmd: str, params: Dict[str, Any], timeout_s: float = 30.0
+        self, cmd: str, params: Dict[str, Any], timeout_s: float = 30.0,
+        timeout_adjustable: bool = False,
     ) -> Dict[str, Any]:
         """Send one command and return its `result` dict.
 
@@ -92,7 +93,8 @@ class MayaConnection:
         problems.
         """
         with self._lock:
-            frame = protocol.make_request(cmd, params, timeout_s, token=self.token)
+            frame = protocol.make_request(cmd, params, timeout_s, token=self.token,
+                                          timeout_adjustable=timeout_adjustable)
             sock = self._ensure_connected()
             try:
                 sock.settimeout(timeout_s + self.response_grace_s)

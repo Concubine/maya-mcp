@@ -242,8 +242,19 @@ class Dispatcher:
                     self._straggler = fut
             # Do not advise a larger timeout_s when the caller is already at the
             # ceiling - that advice cannot be followed, and following it is what
-            # #640 found impossible.
-            if timeout_s >= MAX_TIMEOUT_S:
+            # #640 found impossible. Nor when the caller's tool has no timeout_s
+            # at all (#836): the frame says whether it had the knob, and a bake
+            # that ran 40 minutes on a fixed budget was told to raise a
+            # parameter it could not.
+            if not frame.get("timeout_adjustable"):
+                hint = (
+                    "the command is still running in Maya and the session is busy "
+                    "until it finishes. This tool ran on its own fixed %.0f s budget "
+                    "and takes no timeout_s, so waiting longer is not available here: "
+                    "split the work - fewer meshes or maps per call, a lower "
+                    "resolution - or retry once the session is free" % timeout_s
+                )
+            elif timeout_s >= MAX_TIMEOUT_S:
                 hint = (
                     "the command is still running in Maya and the session is busy "
                     "until it finishes. This was already the maximum timeout "

@@ -26,8 +26,9 @@ class FakeConn:
         self.calls = []
         self.responses = responses or {}
 
-    def request(self, cmd, params, timeout_s=30.0):
-        self.calls.append({"cmd": cmd, "params": params, "timeout_s": timeout_s})
+    def request(self, cmd, params, timeout_s=30.0, **kw):
+        self.calls.append({"cmd": cmd, "params": params, "timeout_s": timeout_s,
+                           "timeout_adjustable": kw.get("timeout_adjustable")})
         return self.responses[cmd]
 
 
@@ -2967,3 +2968,57 @@ class TestTheUnitConventionIsStatedWhereItIsDECIDED:
         text = self._description("maya_assemble", "parts")
         assert "1 unit = 1 METRE" in text
         assert "0.45" in text
+
+
+class TestBakeToolsTakeATimeout:
+    """redmine #836: bake_mesh_maps ran 40 minutes on a fixed 300 s budget and
+    the timeout hint told the caller to pass a timeout_s the tool did not
+    take. Both bake tools now take one, the #640 shape, and every tool that
+    takes one says so on the wire so the hint can be truthful."""
+
+    def _bake_args(self, tmp_path):
+        return {"meshes": ["|body"], "out_dir": str(tmp_path), "maps": ["ao"]}
+
+    def test_bake_mesh_maps_default_budget_is_the_export_budget(self, tmp_path):
+        conn = FakeConn({"bake_mesh_maps": {"meshes": ["|body"], "out_dir": str(tmp_path),
+                                            "resolution": 1024, "maps": ["ao"], "baked": [],
+                                            "applied": [], "checkpoint_id": None, "warnings": []}})
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_bake_mesh_maps", self._bake_args(tmp_path)))
+        assert conn.calls[0]["timeout_s"] == server_mod.EXPORT_TIMEOUT_S
+        assert conn.calls[0]["timeout_adjustable"] is True
+
+    def test_bake_mesh_maps_timeout_reaches_the_wire(self, tmp_path):
+        conn = FakeConn({"bake_mesh_maps": {"meshes": ["|body"], "out_dir": str(tmp_path),
+                                            "resolution": 1024, "maps": ["ao"], "baked": [],
+                                            "applied": [], "checkpoint_id": None, "warnings": []}})
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_bake_mesh_maps", dict(self._bake_args(tmp_path), timeout_s=1500)))
+        assert conn.calls[0]["timeout_s"] == 1500
+        assert "timeout_s" not in conn.calls[0]["params"]  # the wrapper's knob, not the handler's
+
+    def test_bake_mesh_maps_timeout_above_the_ceiling_is_refused(self, tmp_path):
+        mcp = server_mod.create_server(FakeConn())
+        with pytest.raises(Exception, match="timeout_s"):
+            run(mcp.call_tool("maya_bake_mesh_maps", dict(self._bake_args(tmp_path), timeout_s=9999)))
+
+    def test_bake_textures_takes_the_same_knob(self, tmp_path):
+        conn = FakeConn({"bake_textures": {"meshes": ["|body"], "out_dir": str(tmp_path),
+                                           "resolution": 1024, "baked": [], "rewired": [],
+                                           "skipped_file_backed": [], "checkpoint_id": None,
+                                           "warnings": []}})
+        mcp = server_mod.create_server(conn)
+        run(mcp.call_tool("maya_bake_textures", {"meshes": ["|body"], "out_dir": str(tmp_path),
+                                                 "timeout_s": 1200}))
+        assert conn.calls[0]["timeout_s"] == 1200
+        assert conn.calls[0]["timeout_adjustable"] is True
+
+    def test_a_tool_without_the_knob_does_not_claim_it(self):
+        # The fake records the call before it looks up a response, so the
+        # wire flag is observable without modelling the tool's result.
+        conn = FakeConn()
+        mcp = server_mod.create_server(conn)
+        with pytest.raises(Exception):
+            run(mcp.call_tool("maya_get_scene_graph", {}))
+        assert conn.calls[0]["cmd"] == "get_scene_graph"
+        assert not conn.calls[0]["timeout_adjustable"]

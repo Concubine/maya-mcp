@@ -92,6 +92,15 @@ class TestRequests:
         assert frame["cmd"] == "ping"
         assert frame["params"] == {"x": 1}
         assert frame["timeout_s"] == 5
+        assert "timeout_adjustable" not in frame
+        conn.close()
+
+    def test_request_carries_the_timeout_adjustable_flag(self, plugin):
+        # redmine #836: only a tool that exposes timeout_s says so on the wire
+        srv = plugin()
+        conn = MayaConnection(port=srv.port)
+        conn.request("ping", {}, timeout_s=5, timeout_adjustable=True)
+        assert srv.frames[0]["timeout_adjustable"] is True
         conn.close()
 
     def test_persistent_connection_reused_across_requests(self, plugin):

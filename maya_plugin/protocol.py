@@ -94,6 +94,7 @@ def make_request(
     timeout_s: float,
     token: Optional[str] = None,
     req_id: Optional[str] = None,
+    timeout_adjustable: Optional[bool] = None,
 ) -> Dict[str, Any]:
     req: Dict[str, Any] = {
         "v": PROTOCOL_VERSION,
@@ -104,6 +105,12 @@ def make_request(
     }
     if token is not None:
         req["token"] = token
+    # Whether the CALLER had a timeout_s to raise (redmine #836): the
+    # dispatcher's timeout hint used to advise "pass a larger timeout_s" for
+    # every command, and the bake tools had none - an unfollowable hint on
+    # the call that cost the kethran run an hour. Absent means no.
+    if timeout_adjustable:
+        req["timeout_adjustable"] = True
     return req
 
 

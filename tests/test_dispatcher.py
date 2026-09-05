@@ -466,3 +466,38 @@ def test_flush_undo_first_without_a_flush_hook_just_runs():
         assert calls == ["replace"]
     finally:
         d.shutdown()
+
+
+class TestTimeoutHintNamesOnlyAKnobTheCallerHas:
+    """redmine #836: "pass a larger timeout_s (up to 1800 s)" was the hint for
+    every command, and the bake tools had no timeout_s to pass - the hint sent
+    the kethran run chasing a parameter that did not exist. The frame's
+    timeout_adjustable flag says whether the caller had the knob."""
+
+    def _slow_dispatcher(self, dispatcher):
+        release = threading.Event()
+
+        def slow(params):
+            release.wait(5.0)
+            return {}
+
+        return dispatcher({"slow": slow}), release
+
+    def test_a_caller_without_the_knob_is_told_to_split_the_work(self, dispatcher):
+        d, release = self._slow_dispatcher(dispatcher)
+        try:
+            resp = d.handle_request(req("slow", timeout_s=0.05))
+            hint = resp["error"]["hint"]
+            assert "pass a larger timeout_s" not in hint   # the unfollowable advice
+            assert "takes no timeout_s" in hint            # says so instead
+            assert "budget" in hint and "split" in hint    # names the budget, offers the way out
+        finally:
+            release.set()
+
+    def test_a_caller_with_the_knob_is_told_to_raise_it(self, dispatcher):
+        d, release = self._slow_dispatcher(dispatcher)
+        try:
+            resp = d.handle_request(req("slow", timeout_s=0.05, timeout_adjustable=True))
+            assert "pass a larger timeout_s" in resp["error"]["hint"]
+        finally:
+            release.set()

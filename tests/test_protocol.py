@@ -146,3 +146,18 @@ class TestInboundCap:
         header = struct.pack(">I", 10 * 1024 * 1024)
         with pytest.raises(protocol.ProtocolError, match="exceeds"):
             protocol.read_frame(reader_from(header), max_bytes=4 * 1024 * 1024)
+
+
+class TestTimeoutAdjustableFlag:
+    """redmine #836: the timeout hint used to tell EVERY caller to pass a
+    larger timeout_s, including callers of tools that have no such knob -
+    the bake that ran 40 minutes was told to pass one it could not. The
+    frame now says whether the caller had the knob; absent means no."""
+
+    def test_absent_by_default(self):
+        req = protocol.make_request("bake_mesh_maps", {}, timeout_s=300)
+        assert "timeout_adjustable" not in req
+
+    def test_carried_when_the_caller_had_the_knob(self):
+        req = protocol.make_request("render_scene", {}, timeout_s=600, timeout_adjustable=True)
+        assert req["timeout_adjustable"] is True

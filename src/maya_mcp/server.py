@@ -221,7 +221,7 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             maya.request(
                 "execute_python",
                 {"code": code, "timeout_s": timeout_s, "risky": risky},
-                timeout_s=float(timeout_s),
+                timeout_s=float(timeout_s), timeout_adjustable=True,
             )
         )
 
@@ -572,7 +572,7 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
              "isolate": isolate, "target": target, "zoom": zoom,
              "relight": relight, "samples": samples,
              "fallback_light": fallback_light},
-            timeout_s=timeout_s,
+            timeout_s=timeout_s, timeout_adjustable=True,
         )
         content: List[Union[Image, str]] = []
         frames = []
@@ -695,7 +695,7 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "render_sheet",
             {"subjects": subjects, "angle": angle, "renderer": renderer,
              "resolution": resolution, "isolate": isolate, "samples": samples},
-            timeout_s=timeout_s,
+            timeout_s=timeout_s, timeout_adjustable=True,
         )
         shots = result.get("images", [])
         cells = [
@@ -1053,6 +1053,13 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "slot found. An EMPTY list is refused, not read as 'all': it "
             "selects no slot."
         ))] = None,
+        timeout_s: Annotated[float, Field(ge=30.0, le=MAX_RENDER_TIMEOUT_S, description=(
+            "Seconds to wait for the bake before this call returns a timeout "
+            "(the bake itself keeps running in Maya either way, and the session "
+            "stays busy until it finishes). Default 300; up to 1800. A bake "
+            "that needs more is a layout problem, not a budget one: see the "
+            "stacked-UV refusal (#845)."
+        ))] = EXPORT_TIMEOUT_S,
     ) -> BakeTexturesResult:
         """Turn procedural texture networks into file textures the FBX can carry.
 
@@ -1072,7 +1079,7 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 "bake_textures",
                 {"meshes": meshes, "out_dir": out_dir,
                  "resolution": resolution, "slots": slots},
-                timeout_s=EXPORT_TIMEOUT_S,
+                timeout_s=float(timeout_s), timeout_adjustable=True,
             )
         )
 
@@ -1129,6 +1136,13 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 "convex-only geometry (measured) - that ships with a "
                 "warning, not a refusal. Refused unless 'curvature' is in maps."
             ))] = None,
+        timeout_s: Annotated[float, Field(ge=30.0, le=MAX_RENDER_TIMEOUT_S, description=(
+            "Seconds to wait for the bake before this call returns a timeout "
+            "(the bake itself keeps running in Maya either way, and the session "
+            "stays busy until it finishes). Default 300; up to 1800. A bake "
+            "that needs more is a layout problem, not a budget one: see the "
+            "stacked-UV refusal (#845)."
+        ))] = EXPORT_TIMEOUT_S,
     ) -> BakeMeshMapsResult:
         """Bake geometry-derived maps - AO, curvature, world-normal - per mesh.
 
@@ -1150,7 +1164,7 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                  "resolution": resolution, "apply_ao": apply_ao,
                  "curvature_radius": curvature_radius,
                  "curvature_output": curvature_output},
-                timeout_s=EXPORT_TIMEOUT_S,
+                timeout_s=float(timeout_s), timeout_adjustable=True,
             )
         )
 
@@ -2905,7 +2919,7 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 {"root": root, "name": name, "fps": fps,
                  "keys": [k.model_dump(exclude_none=True) for k in keys],
                  "interpolation": interpolation, "loop": loop},
-                timeout_s=float(timeout_s),
+                timeout_s=float(timeout_s), timeout_adjustable=True,
             )
         )
 
@@ -3027,7 +3041,7 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             {"root": root, "name": name, "angle": angle,
              "every_nth": every_nth, "resolution": resolution,
              "renderer": renderer, "zoom": zoom},
-            timeout_s=timeout_s,
+            timeout_s=timeout_s, timeout_adjustable=True,
         )
         shots = result.get("images", [])
         cells = [images.decode_and_downscale(s["png_b64"],
