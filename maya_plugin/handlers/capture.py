@@ -1211,6 +1211,22 @@ def _capture_one(
     # keeps the user's existing undo history intact.
     prev_undo = cmds.undoInfo(query=True, state=True)
     cmds.undoInfo(stateWithoutFlush=False)
+    # Maya's invisibility evaluator is OFF for the whole frame (redmine #847).
+    # MEASURED on Maya 2027 (evals/newscene_spin_probe_847/, three identical
+    # native stack samples): a capture changes what is visible - isolate,
+    # displayLights, the temp camera and its deletion - which the Evaluation
+    # Manager's invisibility evaluator starts monitoring with a delayed
+    # notification. A scene replace (file -new / -open) within ~100 ms of the
+    # capture, before an idle turn delivered it, tears the evaluator down
+    # (AnimUISlice!TinvisibilityEvaluator::endMonitoring) into an access
+    # violation, after which Maya's crash handler spins one core forever and
+    # only a process kill recovers. Off before the capture and back on after
+    # it: 6/6 timed scene replaces returned where the control spun 2/3.
+    # Switching it off AFTER the capture trips the same crash (setActive ->
+    # endMonitoring), so the bracket is here, and the restore is the LAST
+    # thing the finally does. Only ever restored to what it was: a user who
+    # keeps it off keeps it off.
+    invisibility_was = _invisibility_evaluator_off(cmds)
     try:
         # Framing and visibility are separate questions, exactly as in
         # render_scene: `frame_on` frames, `isolate` hides. With no frame_on,
@@ -1385,6 +1401,33 @@ def _capture_one(
             cmds.undoInfo(stateWithoutFlush=prev_undo)
         except Exception:
             pass
+        # Last, after every visibility change above (#847).
+        _invisibility_evaluator_restore(cmds, invisibility_was)
+
+
+INVISIBILITY_EVALUATOR = "invisibility"
+
+
+def _invisibility_evaluator_off(cmds) -> Optional[bool]:
+    """Switch the invisibility evaluator off for a capture; returns what it
+    was, or None when it was already off or cannot be asked (an older Maya,
+    a headless one), in which case there is nothing to restore."""
+    try:
+        was = bool(cmds.evaluator(query=True, name=INVISIBILITY_EVALUATOR, enable=True))
+        if was:
+            cmds.evaluator(name=INVISIBILITY_EVALUATOR, enable=False)
+        return was or None
+    except Exception:  # noqa: BLE001 - no evaluator to bracket, nothing to undo
+        return None
+
+
+def _invisibility_evaluator_restore(cmds, was: Optional[bool]) -> None:
+    if not was:
+        return
+    try:
+        cmds.evaluator(name=INVISIBILITY_EVALUATOR, enable=True)
+    except Exception:  # noqa: BLE001 - a restore that fails must not fail the frame
+        pass
 
 
 def _isolate_blank_control(cmds, panel: str, resolution: int) -> Optional[bool]:

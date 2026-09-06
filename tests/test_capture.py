@@ -476,6 +476,66 @@ def test_lighting_scene_sets_displayLights_all_and_restores_it(monkeypatch):
     assert fake.editor_state["shadows"] is False
 
 
+class TestInvisibilityEvaluatorBracket:
+    """#847: a capture arms Maya's invisibility evaluator (isolate, the temp
+    camera, displayLights all change what is visible), and the next scene
+    replace within ~100 ms then crashes inside the evaluator's tear-down
+    (AnimUISlice!TinvisibilityEvaluator::endMonitoring, three identical
+    native stack samples), after which Maya's crash handler spins forever.
+    MEASURED: switching the evaluator off before the capture and back on
+    after it returned 6/6 timed calls where the control spun 2/3; switching
+    it off AFTER the capture trips the same crash (setActive -> endMonitoring).
+    So the bracket is around the capture, and the restore is the LAST thing
+    the capture does - after the panel restore and the temp camera delete,
+    both of which change visibility too.
+    """
+
+    def _fake(self, monkeypatch, enabled):
+        fake = FakeCaptureCmds()
+        fake.evaluators["invisibility"] = enabled
+        monkeypatch.setattr(capture, "_cmds", lambda: fake)
+        seen = []
+
+        def grab(*a, **k):
+            seen.append(fake.evaluators["invisibility"])
+            return (b"fakepng", {"blank": False, "unavailable_reason": None})
+
+        monkeypatch.setattr(capture, "_grab_pixels", grab)
+        return fake, seen
+
+    def test_off_for_the_frame_and_back_on_last(self, monkeypatch):
+        fake, seen = self._fake(monkeypatch, enabled=True)
+        capture.capture_viewport({"angles": ["front"]})
+        assert seen == [False], seen
+        assert fake.evaluators["invisibility"] is True
+        kinds = [c[0] for c in fake.calls]
+        last_enable = max(i for i, c in enumerate(fake.calls)
+                          if c[0] == "evaluator" and not c[2].get("query")
+                          and c[2].get("enable") is True)
+        last_panel_edit = max(i for i, c in enumerate(fake.calls)
+                              if c[0] == "modelEditor" and c[2].get("edit"))
+        last_delete = max(i for i, c in enumerate(fake.calls) if c[0] == "delete")
+        assert last_enable > last_panel_edit, kinds
+        assert last_enable > last_delete, kinds
+
+    def test_an_evaluator_the_user_had_off_stays_off(self, monkeypatch):
+        fake, seen = self._fake(monkeypatch, enabled=False)
+        capture.capture_viewport({"angles": ["front"]})
+        assert seen == [False]
+        assert fake.evaluators["invisibility"] is False
+        # the query form is `-q -en`; only an EDIT with enable=True counts
+        assert not any(c[0] == "evaluator" and not c[2].get("query")
+                       and c[2].get("enable") is True for c in fake.calls)
+
+    def test_restored_even_when_the_frame_raises(self, monkeypatch):
+        fake, _ = self._fake(monkeypatch, enabled=True)
+        monkeypatch.setattr(capture, "_grab_pixels",
+                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+        with pytest.raises(RuntimeError):
+            capture.capture_viewport({"angles": ["front"]})
+        assert fake.evaluators["invisibility"] is True
+
+
 def test_lighting_rejects_an_unknown_mode(monkeypatch):
     fake = FakeCaptureCmds()
     monkeypatch.setattr(capture, "_cmds", lambda: fake)
@@ -538,6 +598,11 @@ class FakeCaptureCmds:
         self.isolate_members = []
         self.undo_state = True
         self.selection = []
+        # Evaluation Manager evaluators by name, as `evaluator -q -en` reads
+        # them. Only registered names answer (#799): Maya raises on an
+        # unknown evaluator, and a capture that spelt it wrong would be
+        # bracketing nothing.
+        self.evaluators = {"invisibility": True}
         self.editor_state = {
             "displayAppearance": "smoothShaded",
             "wireframeOnShaded": True,
@@ -655,6 +720,17 @@ class FakeCaptureCmds:
         for flag, value in kw.items():
             if flag in self.cm_prefs:
                 self.cm_prefs[flag] = value
+        return None
+
+    def evaluator(self, **kw):
+        name = kw.get("name")
+        if name not in self.evaluators:
+            raise RuntimeError("Unknown evaluator '%s'" % name)
+        self.calls.append(("evaluator", name, kw))
+        if kw.get("query"):
+            return self.evaluators[name]
+        if "enable" in kw:
+            self.evaluators[name] = bool(kw["enable"])
         return None
 
     def undoInfo(self, **kw):
@@ -902,6 +978,7 @@ class FakeCaptureCmds:
 
     def delete(self, *a, **kw):
         self.deleted.extend(a)
+        self.calls.append(("delete", a, kw))
         for name in a:
             resolved = self._resolve(name)
             if resolved is None:

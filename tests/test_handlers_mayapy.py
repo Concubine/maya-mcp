@@ -1993,7 +1993,7 @@ class TestM1AcceptanceGate:
         from maya_plugin.maya_mcp_plugin import _build_handlers, _undo_hooks
 
         cmds.file(rename=str(tmp_path / "gate.ma"))
-        undo_open, undo_close, _undo_flush = _undo_hooks()
+        undo_open, undo_close = _undo_hooks()
 
         # Maya 2027's mayapy standalone mis-parses undoInfo(closeChunk=True)
         # and any query=True command call when it runs on a thread other

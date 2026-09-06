@@ -406,68 +406,6 @@ class TestACommandThatReadsNothingSaysSo:
         assert "valid params: kind, name" in excinfo.value.hint
 
 
-def test_flush_undo_first_handler_gets_its_own_main_thread_hop_before_running():
-    """redmine #847. MEASURED on Maya 2027: after an isolate capture, file-new
-    spins forever unless the undo queue was flushed in a SEPARATE request
-    beforehand - the same flush inside the handler, in every order tried,
-    still spins. Separate requests are separate main-thread executions with
-    Maya's event loop running between them, so the dispatcher gives a marked
-    handler exactly that: the flush hook runs as its own main-thread hop,
-    then the handler runs as the next one."""
-    hops = []
-    calls = []
-
-    def main_thread_exec(fn):
-        hops.append(fn.__name__ if hasattr(fn, "__name__") else "?")
-        return fn()
-
-    def replace(params):
-        calls.append("replace")
-        return {"ok": 1}
-
-    replace.no_undo_chunk = True
-    replace.flush_undo_first = True
-
-    def plain(params):
-        calls.append("plain")
-        return {"ok": 2}
-
-    def flush():
-        calls.append("flush")
-
-    d = Dispatcher({"replace": replace, "plain": plain},
-                   main_thread_exec=main_thread_exec,
-                   undo_open=lambda: calls.append("open"),
-                   undo_close=lambda: calls.append("close"),
-                   undo_flush=flush)
-    try:
-        d.handle_request({"v": 1, "id": "a", "cmd": "replace", "params": {}})
-        assert calls == ["flush", "replace"]           # flushed, then run, no chunk
-        assert len(hops) == 2                          # two separate main-thread hops
-        calls.clear(); hops.clear()
-        d.handle_request({"v": 1, "id": "b", "cmd": "plain", "params": {}})
-        assert calls == ["open", "plain", "close"]     # an unmarked handler: unchanged
-        assert len(hops) == 1
-    finally:
-        d.shutdown()
-
-
-def test_flush_undo_first_without_a_flush_hook_just_runs():
-    calls = []
-
-    def replace(params):
-        calls.append("replace")
-        return {}
-
-    replace.flush_undo_first = True
-    d = Dispatcher({"replace": replace})
-    try:
-        assert d.handle_request({"v": 1, "id": "a", "cmd": "replace", "params": {}})["status"] == "ok"
-        assert calls == ["replace"]
-    finally:
-        d.shutdown()
-
-
 class TestTimeoutHintNamesOnlyAKnobTheCallerHas:
     """redmine #836: "pass a larger timeout_s (up to 1800 s)" was the hint for
     every command, and the bake tools had no timeout_s to pass - the hint sent

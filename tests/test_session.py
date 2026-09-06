@@ -802,21 +802,16 @@ def test_claim_is_removed_when_the_save_fails(fake, tmp_path):
     assert os.listdir(str(cp_dir)) == []  # no empty checkpoint left to restore
 
 
-class TestSceneReplacersAskForTheFlushHop:
-    """redmine #847. MEASURED on Maya 2027: after one capture_viewport with
-    isolate (reliably with lighting='scene'), cmds.file(new=True) spins one
-    core forever inside Maya's own undo flush. A flushUndo issued as a
-    SEPARATE request beforehand lets it return in 0.1 s; the same flush
-    inside the handler - before the checkpoint, after it, after
-    processIdleEvents, inside a chunk - still spins. So the handlers do not
-    flush themselves: they ask the dispatcher for its own main-thread hop
-    (tests/test_dispatcher.py proves the hop), and Maya's event loop runs
-    between the two."""
+class TestSceneReplacersCarryNoHop:
+    """redmine #847: the scene-replacing handlers carried a dispatcher flush
+    hop for a day on a timing artefact. The defect was the capture arming
+    Maya's invisibility evaluator (handlers/capture.py has the bracket and
+    tests/test_capture.py proves it); a replace is a plain handler again."""
 
-    def test_every_handler_that_replaces_the_scene_is_marked(self):
-        assert session.new_scene.flush_undo_first is True
-        assert session.open_scene.flush_undo_first is True
-        assert session.restore_checkpoint.flush_undo_first is True
+    def test_no_handler_asks_for_a_flush_hop_any_more(self):
+        for handler in (session.new_scene, session.open_scene,
+                        session.restore_checkpoint):
+            assert not hasattr(handler, "flush_undo_first")
 
     def test_and_they_still_take_their_safety_checkpoint(self, fake):
         session.new_scene({"confirm": True})

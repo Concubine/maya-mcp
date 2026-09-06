@@ -1,31 +1,31 @@
-"""Live gate for redmine #847: after a capture that isolates under scene
-lighting, the scene-lifecycle handlers still return.
+"""Live gate for redmine #847: a scene replace right after a capture returns.
 
-MEASURED on Maya 2027: on a fresh process, capture_viewport(isolate=[...],
-lighting='scene') returns fine, and the next new_scene never does - Maya's
-file-new spins one core forever inside its own undo flush. The queue then
-holds nothing but Maya's own entries (identical to a healthy capture's), and
-emptying it first lets file-new return in 0.1 s - but ONLY when the flush is
-issued as its own request; the same flush inside the handler, in every order
-tried, still spins. So the dispatcher gives the scene-replacing handlers a
-separate main-thread hop for the flush before they run. This proves it
-against a real Maya, where a hang shows up as a timeout on a process that
-then has to be killed.
+MEASURED on Maya 2027 (evals/newscene_spin_probe_847/, three identical native
+stack samples from three spinning processes): a capture changes what is
+visible - isolate, displayLights, the temp camera and its deletion - and
+Maya's Evaluation Manager invisibility evaluator starts monitoring that with
+a delayed notification. A file -new / -open within ~100 ms of the capture,
+before an idle turn delivered it, tears the evaluator down
+(AnimUISlice!TinvisibilityEvaluator::endMonitoring) into an access violation,
+after which Maya's own crash handler spins one core forever and only a
+process kill recovers. The plugin's capture brackets the frame with the
+evaluator off (handlers/capture.py). This proves it against a real Maya.
+
+EVERY claim runs at ZERO client gap - a request sent the instant the capture
+returns. Any gap of 0.1 s or more hid the defect for a day (a flush hop
+landed on that artefact and was removed), so this gate never sleeps, and it
+is only evidence when run while the user is at the machine: with the user
+away the race did not reproduce in 17 processes, cause unknown.
 
   1  first capture of the process, isolate + scene lighting, then new_scene
-     returns within HANG_S  (LANDED: the dispatcher's flush hop, measured 0.1 s)
-  2  the same capture, save_scene, the capture again, then open_scene returns
-  3  the same capture again, then restore_checkpoint returns
+  2  the same capture, save_scene, the capture again, then open_scene
+  3  the same capture again, then restore_checkpoint
+  4  a turntable (the other caller of the capture path), then new_scene
 
-Claims 2 and 3 are OPEN on #847 and run only with MCP847_ALL=1: measured
-2026-09-05, claim 2 still spins - a save_scene issued while the residue is
-present, then another capture, then open_scene. Whether the save, the second
-capture, or file-open itself is the ingredient is the next one-variable
-experiment; a process this spins on must be killed.
-
-DESTRUCTIVE: replaces the open scene three times. Defaults to port 9878 and
-refuses 9877 unless MAYA_MCP_ALLOW_USER_SESSION=1. RUN IT ON A FRESH MAYA:
-the poison is per process and a process this gate hangs must be killed.
+DESTRUCTIVE: replaces the open scene four times. Defaults to port 9878 and
+refuses 9877 unless MAYA_MCP_ALLOW_USER_SESSION=1. RUN IT ON A FRESH MAYA
+each time: evals/newscene_spin_probe_847/run.ps1 -Script does the launch/stop
+pair; a process this gate hangs must be killed.
 
 Run:  .venv/Scripts/python.exe evals/newscene_after_capture_live.py
 Exit: 0 pass, 1 fail, 2 no connection.
@@ -59,6 +59,11 @@ sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=mat + "SG
 cmds.connectAttr(mat + ".outColor", sg + ".surfaceShader", force=True)
 cmds.sets(plane, edit=True, forceElement=sg)
 cmds.select(clear=True)
+"""
+
+EVALUATOR_STATE = """
+import maya.cmds as cmds
+cmds.evaluator(query=True, name="invisibility", enable=True)
 """
 
 failures = []
@@ -96,12 +101,12 @@ def timed(label: str, command: str, params: dict) -> None:
     t0 = time.monotonic()
     response = send(command, params, HANG_S)
     took = time.monotonic() - t0
-    check("%s returns after an isolate+scene capture" % label,
+    check("%s returns at zero gap after a capture" % label,
           response.get("status") == "ok", "%.1f s%s" % (
               took, "" if response.get("status") == "ok"
               else " - " + json.dumps((response.get("error") or {}).get("message"))[:160]))
     if response.get("status") != "ok":
-        print("the Maya on %d is now spinning in file-new and must be killed" % PORT)
+        print("the Maya on %d is now spinning in its crash handler and must be killed" % PORT)
         sys.exit(1)
 
 
@@ -112,26 +117,31 @@ def main() -> None:
         sys.exit(2)
     work = tempfile.mkdtemp(prefix="mcp847_")
     saved = os.path.join(work, "subject.ma").replace("\\", "/")
-    try:
-        ok("new_scene", {"confirm": True})
-        poison()
-        timed("new_scene", "new_scene", {"confirm": True})
-        if os.environ.get("MCP847_ALL") != "1":
-            print("claims 2 and 3 are open on #847 - set MCP847_ALL=1 to run them "
-                  "(the process will need killing if they spin)")
-            return
 
-        poison()
-        ok("save_scene", {"path": saved})
-        poison()  # a second capture on the now-titled scene
-        timed("open_scene", "open_scene", {"path": saved, "confirm": True})
+    before = ok("execute_python", {"code": EVALUATOR_STATE}).get("result_repr")
+    ok("new_scene", {"confirm": True})
+    poison()
+    timed("new_scene", "new_scene", {"confirm": True})
 
-        cp = ok("checkpoint", {"label": "before_847"})
-        poison()
-        timed("restore_checkpoint", "restore_checkpoint",
-              {"checkpoint_id": cp["checkpoint_id"]})
-    finally:
-        pass  # a final new_scene is exactly the call under test; leave the process as it is
+    poison()
+    ok("save_scene", {"path": saved})
+    poison()  # a second capture on the now-titled scene
+    timed("open_scene", "open_scene", {"path": saved, "confirm": True})
+
+    cp = ok("checkpoint", {"label": "before_847"})
+    poison()
+    timed("restore_checkpoint", "restore_checkpoint",
+          {"checkpoint_id": cp["checkpoint_id"]})
+
+    ok("new_scene", {"confirm": True})
+    ok("execute_python", {"code": SETUP})
+    ok("capture_turntable", {"target": "calibPlane", "n_frames": 4,
+                             "lighting": "scene", "resolution": 128})
+    timed("new_scene after a turntable", "new_scene", {"confirm": True})
+
+    after = ok("execute_python", {"code": EVALUATOR_STATE}).get("result_repr")
+    check("the invisibility evaluator is back to what it was", before == after,
+          "before %s, after %s" % (before, after))
 
     if failures:
         print("\n%d FAILED: %s" % (len(failures), ", ".join(failures)))

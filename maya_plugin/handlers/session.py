@@ -260,17 +260,11 @@ def restore_checkpoint(params: Dict[str, Any]) -> Dict[str, Any]:
 
 
 restore_checkpoint.no_undo_chunk = True
-# The dispatcher flushes the undo queue in its OWN main-thread hop before this
-# handler runs (redmine #847). MEASURED on Maya 2027: after one capture_viewport
-# with isolate (reliably with lighting='scene'), cmds.file(new=True, force=True)
-# spins one core forever inside Maya's own undo flush; the queue then holds
-# only Maya's entries, identical to a healthy capture's. A flushUndo issued as
-# a separate request lets file-new return in 0.1 s; the same flush inside the
-# handler - before the checkpoint, after it, after processIdleEvents, inside a
-# chunk - still spins. Separate requests are separate main-thread executions
-# with the event loop running between them, which is what the hop gives.
-# Nothing reachable is lost: the replace discards the undo queue by design.
-restore_checkpoint.flush_undo_first = True
+# redmine #847: a scene replace right after a capture used to spin Maya
+# forever. The replace was never the defect - the capture armed Maya's
+# invisibility evaluator, whose tear-down inside file-new/open crashes; the
+# fix is the evaluator bracket in handlers/capture.py, and the flush hop
+# these handlers carried for a day was a timing artefact, measured and removed.
 
 
 def _steps(params: Dict[str, Any]) -> int:
@@ -444,7 +438,6 @@ def new_scene(params: Dict[str, Any]) -> Dict[str, Any]:
 
 
 new_scene.no_undo_chunk = True
-new_scene.flush_undo_first = True  # see restore_checkpoint (#847)
 
 
 # Every top-level key open_scene reads. Anything else is refused rather than
@@ -486,7 +479,6 @@ def open_scene(params: Dict[str, Any]) -> Dict[str, Any]:
 
 
 open_scene.no_undo_chunk = True
-open_scene.flush_undo_first = True  # see restore_checkpoint (#847)
 
 
 # Every top-level key save_scene reads. Anything else is refused rather than
