@@ -624,7 +624,12 @@ class FakeCaptureCmds:
         # follows these, not the panel's own view transform (measured).
         self.cm_prefs = {"viewTransformName": "ACES 1.0 SDR-video (sRGB)",
                          "cmEnabled": True}
-        self.ssao = False
+        # VP2's ambient-occlusion settings as a stock Maya 2027 has them
+        # (#832). ssaoAmount is capped at 3 by Maya ("Cannot set the
+        # attribute ... past its maximum value of 3", measured), and an
+        # attribute hardwareRenderingGlobals does not have raises, as in Maya.
+        self.vp2 = {"ssaoEnable": False, "ssaoAmount": 1.0, "ssaoRadius": 16,
+                    "ssaoFilterRadius": 16, "ssaoSamples": 16}
         self.active_camera = "persp"  # panel's current camera (not cmds.camera(), below)
         self.focus_panel = "modelPanel1"
         self._create_seq = 0
@@ -754,9 +759,15 @@ class FakeCaptureCmds:
         shape = self.nodes.get(resolved)
         return [shape] if shape else None
 
+    def _vp2_attr(self, attr):
+        name = attr.split(".", 1)[1]
+        if name not in self.vp2:
+            raise RuntimeError("No object matches name: %s" % attr)
+        return name
+
     def getAttr(self, attr):
-        if attr == "hardwareRenderingGlobals.ssaoEnable":
-            return self.ssao
+        if attr.startswith("hardwareRenderingGlobals."):
+            return self.vp2[self._vp2_attr(attr)]
         plug = self._plug(attr)
         if plug not in self.plugs:
             raise RuntimeError("No object matches name: %s" % attr)
@@ -766,8 +777,13 @@ class FakeCaptureCmds:
         return [tuple(value)] if isinstance(value, tuple) else value
 
     def setAttr(self, attr, *args, **kw):
-        if attr == "hardwareRenderingGlobals.ssaoEnable":
-            self.ssao = args[0]
+        if attr.startswith("hardwareRenderingGlobals."):
+            name = self._vp2_attr(attr)
+            if name == "ssaoAmount" and float(args[0]) > 3.0:
+                raise RuntimeError(
+                    "setAttr: Cannot set the attribute '%s' past its maximum "
+                    "value of 3." % attr)
+            self.vp2[name] = args[0]
             return None
         plug = self._plug(attr)
         self.plugs[plug] = tuple(args) if len(args) > 1 else args[0]
@@ -2583,3 +2599,93 @@ def test_turntable_carries_the_display_transform_too(monkeypatch):
 def test_render_and_capture_share_one_display_transform():
     from maya_plugin.handlers import render
     assert render.DISPLAY_TRANSFORM == capture.DISPLAY_TRANSFORM == "Un-tone-mapped (sRGB)"
+
+
+class TestSsaoReadsAsContact:
+    """#832: buffer='ssao' switched VP2's ambient occlusion on and left its
+    settings at Maya's defaults - amount 1.0, radius 16 px - which darken a
+    contact by at most 40/255 in a 16-px band (MEASURED on a cube, a cylinder
+    and a sphere on a floor, evals/capture_params_probe_832). A fresh agent
+    used the buffer to look for gaps at a lamp's joints and saw no crevice
+    darkening at all. Amount 2.0 with a radius of 1/24 of the frame (32 px at
+    768) darkens the same contacts by 147/255 and leaves open floor untouched;
+    the radius is in PIXELS (radius 32 at 384 px covers what 64 covers at
+    768), so it follows the frame. Every setting the frame changes is put
+    back."""
+
+    DEFAULTS = {"ssaoEnable": False, "ssaoAmount": 1.0, "ssaoRadius": 16,
+                "ssaoFilterRadius": 16, "ssaoSamples": 16}
+
+    def _fake(self, monkeypatch, **vp2):
+        fake = FakeCaptureCmds()
+        fake.vp2.update(vp2)
+        monkeypatch.setattr(capture, "_cmds", lambda: fake)
+        seen = []
+
+        def grab(*a, **k):
+            seen.append(dict(fake.vp2))
+            return (b"fakepng", {"blank": False, "unavailable_reason": None})
+
+        monkeypatch.setattr(capture, "_grab_pixels", grab)
+        return fake, seen
+
+    def test_ssao_sets_what_shows_contact_for_the_frame_and_puts_it_back(self, monkeypatch):
+        fake, seen = self._fake(monkeypatch)
+        capture.capture_viewport({"angles": ["front"], "buffer": "ssao", "resolution": 768})
+        assert seen == [{"ssaoEnable": True, "ssaoAmount": 2.0, "ssaoRadius": 32,
+                         "ssaoFilterRadius": 16, "ssaoSamples": 32}], seen
+        assert fake.vp2 == self.DEFAULTS
+
+    def test_the_radius_follows_the_frame(self, monkeypatch):
+        fake, seen = self._fake(monkeypatch)
+        capture.capture_viewport({"angles": ["front"], "buffer": "ssao", "resolution": 384})
+        capture.capture_viewport({"angles": ["front"], "buffer": "ssao", "resolution": 1024})
+        assert [(s["ssaoRadius"], s["ssaoFilterRadius"]) for s in seen] == [(16, 8), (42, 21)]
+        assert capture.ssao_settings(64) == {
+            "ssaoAmount": 2.0, "ssaoRadius": 8, "ssaoFilterRadius": 4, "ssaoSamples": 32}
+
+    def test_beauty_leaves_every_setting_alone(self, monkeypatch):
+        fake, seen = self._fake(monkeypatch, ssaoAmount=3.0, ssaoRadius=64)
+        capture.capture_viewport({"angles": ["front"], "buffer": "beauty"})
+        assert seen == [dict(self.DEFAULTS, ssaoAmount=3.0, ssaoRadius=64)]
+        assert fake.vp2 == dict(self.DEFAULTS, ssaoAmount=3.0, ssaoRadius=64)
+
+    def test_a_user_who_had_their_own_settings_gets_them_back(self, monkeypatch):
+        theirs = dict(ssaoEnable=True, ssaoAmount=3.0, ssaoRadius=64, ssaoFilterRadius=8, ssaoSamples=24)
+        fake, seen = self._fake(monkeypatch, **theirs)
+        capture.capture_viewport({"angles": ["front", "side"], "buffer": "ssao"})
+        assert all(s["ssaoAmount"] == 2.0 for s in seen)
+        assert fake.vp2 == theirs
+
+    def test_restored_even_when_the_frame_raises(self, monkeypatch):
+        fake, _ = self._fake(monkeypatch)
+        monkeypatch.setattr(capture, "_grab_pixels",
+                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+        with pytest.raises(RuntimeError):
+            capture.capture_viewport({"angles": ["front"], "buffer": "ssao"})
+        assert fake.vp2 == self.DEFAULTS
+
+    def test_the_result_names_the_settings_once(self, monkeypatch):
+        self._fake(monkeypatch)
+        result = capture.capture_viewport(
+            {"angles": ["front", "side"], "buffer": "ssao", "resolution": 768})
+        notes = [w for w in result["warnings"] if "ssao" in w]
+        assert len(notes) == 1, result["warnings"]
+        assert "amount 2.0" in notes[0] and "radius 32 px" in notes[0], notes
+        assert result["ssao"] == {"ssaoAmount": 2.0, "ssaoRadius": 32,
+                                  "ssaoFilterRadius": 16, "ssaoSamples": 32}
+
+    def test_beauty_says_nothing_about_ssao(self, monkeypatch):
+        self._fake(monkeypatch)
+        result = capture.capture_viewport({"angles": ["front"]})
+        assert not any("ssao" in w for w in result["warnings"])
+        assert result.get("ssao") is None
+
+    def test_the_fake_refuses_an_amount_maya_refuses(self):
+        # Maya 2027: "setAttr: Cannot set the attribute
+        # 'hardwareRenderingGlobals.ssaoAmount' past its maximum value of 3."
+        fake = FakeCaptureCmds()
+        with pytest.raises(RuntimeError):
+            fake.setAttr("hardwareRenderingGlobals.ssaoAmount", 4.0)
+        with pytest.raises(RuntimeError):
+            fake.getAttr("hardwareRenderingGlobals.noSuchThing")

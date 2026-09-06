@@ -26,6 +26,36 @@ from . import naming, pngprobe
 VALID_ANGLES = ("front", "side", "back", "top", "three_quarter", "current")
 VALID_SHADING = ("smoothShaded", "flatShaded", "wireframe", "textured")
 VALID_BUFFERS = ("beauty", "ssao")
+# buffer='ssao' at VP2's own settings - amount 1.0, radius 16 px, 16 samples -
+# darkens a contact by at most 40/255 in a 16-px band. MEASURED on Maya 2027
+# (redmine #832, evals/capture_params_probe_832): a cube, a cylinder and a
+# sphere standing on a floor, beauty against ssao from one camera at 768 px.
+# A fresh agent used the buffer to look for gaps at a lamp's joints and saw
+# no crevice darkening at all - the #764 shape, a mode that changed nothing
+# the caller could see. These settings darken the same contacts by 147/255
+# and leave open floor untouched (amount 3 spreads the same 147 wider, and
+# Maya refuses anything above 3). The radius is in PIXELS - radius 32 at
+# 384 px covers what 64 covers at 768, measured - so it follows the frame.
+SSAO_AMOUNT = 2.0
+SSAO_RADIUS_DIVISOR = 24  # 32 px at 768
+SSAO_SAMPLES = 32
+SSAO_ATTRS = ("ssaoEnable", "ssaoAmount", "ssaoRadius", "ssaoFilterRadius",
+              "ssaoSamples")
+
+
+def ssao_settings(resolution: int) -> Dict[str, Any]:
+    """The four VP2 numbers an ssao frame of `resolution` px is drawn with."""
+    radius = max(8, int(resolution) // SSAO_RADIUS_DIVISOR)
+    return {"ssaoAmount": SSAO_AMOUNT, "ssaoRadius": radius,
+            "ssaoFilterRadius": max(4, radius // 2), "ssaoSamples": SSAO_SAMPLES}
+
+
+def ssao_note(settings: Dict[str, Any]) -> str:
+    return ("buffer='ssao': VP2 ambient occlusion at amount %.1f, radius %d px, "
+            "%d samples - Maya's own defaults (1.0, 16 px) darken a contact by at "
+            "most 40/255 in a 16-px band, which reads as nothing (#832). Contacts "
+            "and crevices darken; open surfaces do not."
+            % (settings["ssaoAmount"], settings["ssaoRadius"], settings["ssaoSamples"]))
 # displayLights modes we expose. "scene" is the one that makes a lit model
 # judgeable; "default" is Maya's headlight (what every capture did before M2).
 VALID_LIGHTING = ("default", "scene", "flat")
@@ -774,11 +804,13 @@ def capture_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
     camera_positions = []
     warnings: List[str] = [w for w in [ensure_viewport_realized()] if w]
     warnings.extend(display_warnings(shading, shadows, buffer))
+    ssao_used = None
     for angle in angles:
         shot = _capture_one(
             angle, shading, wireframe_overlay, buffer, isolate, frame_all, resolution,
             lighting, shadows, frame_on=target,
         )
+        ssao_used = shot.get("ssao") or ssao_used
         images.append({"angle": angle, "png_b64": shot["png_b64"],
                        "blank": shot.get("blank"),
                        "display_transform": shot.get("display_transform")})
@@ -800,11 +832,17 @@ def capture_viewport(params: Dict[str, Any]) -> Dict[str, Any]:
                 "camera": shot["camera"],
             }
         )
+    if ssao_used:
+        # Once per call, like the encoding note: the numbers are the same
+        # on every frame, and a caller reading AO deserves to know which.
+        warnings.append(ssao_note(ssao_used))
     return {"images": images, "camera_positions": camera_positions,
             # One panel per call, so one encoding per call (#837): the name
             # every frame above carries, or None when it could not be set.
             "display_transform": (images[0].get("display_transform")
                                   if images else None),
+            # The AO settings the frames were drawn with; None for beauty.
+            "ssao": ssao_used,
             "warnings": warnings}
 
 
@@ -1111,7 +1149,11 @@ class _PanelState:
                 query=True, viewTransformName=True)
         except Exception:
             self.view_transform = None
-        self.ssao = cmds.getAttr("hardwareRenderingGlobals.ssaoEnable")
+        # VP2's ambient-occlusion settings, all five (#832): buffer='ssao'
+        # sets the four numbers as well as the switch, and every one comes
+        # back - a user who tuned their own AO keeps it.
+        self.ssao = {attr: cmds.getAttr("hardwareRenderingGlobals." + attr)
+                     for attr in SSAO_ATTRS}
         self.selection = cmds.ls(selection=True, long=True) or []
         try:
             self.focus_panel = cmds.getPanel(withFocus=True)
@@ -1161,10 +1203,11 @@ class _PanelState:
                     cmds.isolateSelect(panel, state=0)
             except Exception:
                 pass
-        try:
-            cmds.setAttr("hardwareRenderingGlobals.ssaoEnable", self.ssao)
-        except Exception:
-            pass
+        for attr in SSAO_ATTRS:
+            try:
+                cmds.setAttr("hardwareRenderingGlobals." + attr, self.ssao[attr])
+            except Exception:
+                pass
         try:
             cmds.lookThru(panel, self.camera)
         except Exception:
@@ -1329,6 +1372,11 @@ def _capture_one(
             "shadows": shadows,
         }
         cmds.modelEditor(panel, edit=True, **editor_kwargs)
+        # The switch alone left Maya's own AO numbers in place, and those
+        # read as nothing (#832); the frame's settings go in with it.
+        ssao = ssao_settings(resolution) if buffer == "ssao" else None
+        for attr, value in (ssao or {}).items():
+            cmds.setAttr("hardwareRenderingGlobals." + attr, value)
         cmds.setAttr("hardwareRenderingGlobals.ssaoEnable", buffer == "ssao")
         # Encode like the render eye (#837), after the panel is configured
         # and before the flush below, so the draw the playblast grabs is the
@@ -1389,6 +1437,8 @@ def _capture_one(
             # not the render's when it is not.
             "display_transform": display_transform,
             "display_transform_note": display_transform_note,
+            # The AO numbers this frame was drawn with, None for beauty (#832).
+            "ssao": ssao,
         }
     finally:
         state.restore()

@@ -208,3 +208,55 @@ class TestOutputPaths:
         images.write_png(target, second)
         with open(target, "rb") as fh:
             assert fh.read() == second
+
+
+class TestSheetsCarryTheirCells:
+    """#832: a contact sheet is read CELL by cell, and the message copy used
+    to be capped at the single-image 768 px - so 8 frames came back as 192-px
+    cells at every `resolution` from 256 to 1024 (measured through the
+    wrapper, evals/capture_params_probe_832). The sheet now gets the largest
+    frame an LLM reads at full detail, and the wrapper says what the cells
+    came out as."""
+
+    def test_the_grid_is_the_one_contact_sheet_lays_out(self):
+        assert images.grid_for(8) == (4, 2)
+        assert images.grid_for(16) == (4, 4)
+        assert images.grid_for(4) == (2, 2)
+        assert images.grid_for(2) == (2, 1)
+        assert images.grid_for(6) == (3, 2)
+        assert images.grid_for(1) == (1, 1)
+        assert images.grid_for(6, cols=6) == (6, 1)
+        assert images.grid_for(5, cols=2) == (2, 3)
+
+    def test_the_sheet_cap_is_the_largest_frame_an_llm_reads(self, monkeypatch):
+        monkeypatch.delenv("MAYA_MCP_MAX_SHEET_PX", raising=False)
+        assert images.max_sheet_px() == 1568
+        monkeypatch.setenv("MAYA_MCP_MAX_SHEET_PX", "1024")
+        assert images.max_sheet_px() == 1024
+
+    def test_a_sheet_within_the_cap_reports_its_cells_whole(self):
+        lines = images.sheet_report((1536, 768), (1536, 768), count=8, cols=4,
+                                    requested_cell=384, path=None)
+        assert lines == ["sheet: 1536x768 px, 8 cells of 384 px in 4 columns"]
+
+    def test_a_capped_sheet_says_what_the_cells_came_out_as_and_why(self):
+        lines = images.sheet_report((4096, 2048), (1568, 784), count=8, cols=4,
+                                    requested_cell=1024, path=None)
+        assert lines[0] == "sheet: 1568x784 px, 8 cells of 392 px in 4 columns"
+        note = lines[1]
+        assert "392 px" in note and "1024" in note and "1568" in note
+        assert "path" in note  # the way to get the full cells
+        assert "columns" in note  # and the other way
+
+    def test_a_capped_sheet_with_a_file_names_the_file(self):
+        lines = images.sheet_report((4096, 2048), (1568, 784), count=8, cols=4,
+                                    requested_cell=1024, path="D:/run/turn.png")
+        assert "D:/run/turn.png" in lines[1] and "1024" in lines[1]
+
+    def test_smaller_cells_that_were_not_the_cap_get_no_cap_note(self):
+        # The plugin drew smaller frames than asked (the M3dView fallback,
+        # #797 row 36) - the handler's own warning covers that; blaming the
+        # cap here would be a lie.
+        lines = images.sheet_report((1024, 512), (1024, 512), count=8, cols=4,
+                                    requested_cell=384, path=None)
+        assert lines == ["sheet: 1024x512 px, 8 cells of 256 px in 4 columns"]

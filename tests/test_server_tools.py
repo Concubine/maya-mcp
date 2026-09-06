@@ -3065,3 +3065,147 @@ class TestBakeToolsTakeATimeout:
             run(mcp.call_tool("maya_get_scene_graph", {}))
         assert conn.calls[0]["cmd"] == "get_scene_graph"
         assert not conn.calls[0]["timeout_adjustable"]
+
+
+class TestSheetsCarryTheirCells:
+    """#832: `resolution` on the three sheet tools never reached the returned
+    image - 8 turntable frames came back as a 768x384 sheet of 192-px cells
+    at 256, 400, 640 and 1024 alike (measured through this wrapper), while
+    the file on disk honoured it. A fresh agent raised it twice and saw
+    nothing change. The message copy of a sheet is now capped at the
+    largest frame an LLM reads (1568 px), the text says what the cells came
+    out as, and a note explains the cap when it bit."""
+
+    @staticmethod
+    def _frame(size):
+        return png_b64(size, size, color=(120, 90, 60))
+
+    def _turntable(self, n, size):
+        return FakeConn(responses={"capture_turntable": {
+            "images": [{"index": i, "azimuth": 360.0 * i / n, "png_b64": self._frame(size)}
+                       for i in range(n)],
+            "n_frames": n, "warnings": [],
+        }})
+
+    @staticmethod
+    def _picture(result):
+        block = [c for c in result.content if getattr(c, "type", None) == "image"][0]
+        return PILImage.open(io.BytesIO(base64.b64decode(block.data)))
+
+    @staticmethod
+    def _text(result):
+        return "\n".join(c.text for c in result.content if getattr(c, "type", None) == "text")
+
+    def test_a_turntable_at_the_default_resolution_returns_its_cells_whole(self):
+        mcp = server_mod.create_server(self._turntable(8, 384))
+        result = run(mcp.call_tool("maya_capture_turntable", {"n_frames": 8}))
+        assert result.is_error is False, self._text(result)
+        assert self._picture(result).size == (1536, 768)
+        assert "8 cells of 384 px" in self._text(result)
+        assert "note:" not in self._text(result)
+
+    def test_a_turntable_past_the_ceiling_says_what_the_cells_came_out_as(self):
+        mcp = server_mod.create_server(self._turntable(8, 1024))
+        result = run(mcp.call_tool("maya_capture_turntable", {"n_frames": 8, "resolution": 1024}))
+        assert self._picture(result).size == (1568, 784)
+        text = self._text(result)
+        assert "8 cells of 392 px" in text
+        assert "1024" in text and "1568" in text and "path" in text
+
+    def test_fewer_frames_carry_bigger_cells(self):
+        mcp = server_mod.create_server(self._turntable(4, 1024))
+        result = run(mcp.call_tool("maya_capture_turntable", {"n_frames": 4, "resolution": 1024}))
+        assert self._picture(result).size == (1568, 1568)
+        assert "4 cells of 784 px" in self._text(result)
+
+    def test_the_file_keeps_the_full_cells_and_the_note_names_it(self, tmp_path):
+        mcp = server_mod.create_server(self._turntable(8, 1024))
+        target = tmp_path / "turn.png"
+        result = run(mcp.call_tool("maya_capture_turntable", {
+            "n_frames": 8, "resolution": 1024, "path": str(target)}))
+        assert PILImage.open(target).size == (4096, 2048)
+        assert self._picture(result).size == (1568, 784)
+        assert "turn.png" in self._text(result)
+
+    def test_the_sheet_cap_is_its_own_knob(self, monkeypatch):
+        monkeypatch.setenv("MAYA_MCP_MAX_SHEET_PX", "1024")
+        mcp = server_mod.create_server(self._turntable(8, 384))
+        result = run(mcp.call_tool("maya_capture_turntable", {"n_frames": 8}))
+        assert self._picture(result).size == (1024, 512)
+        assert "8 cells of 256 px" in self._text(result)
+
+    def test_a_render_sheet_carries_its_cells_the_same_way(self):
+        conn = FakeConn(responses={"render_sheet": {
+            "images": [{"angle": "three_quarter", "label": label, "png_b64": self._frame(640)}
+                       for label in ("|kit_a", "|kit_b")],
+            "camera_positions": [], "renderer": "hw2", "samples": None,
+            "fallback_light": False, "zoom": 1.0, "relit_lights": 0, "warnings": [],
+        }})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_render_sheet", {
+            "subjects": ["|kit_a", "|kit_b"], "renderer": "hw2", "resolution": 640}))
+        assert result.is_error is False, self._text(result)
+        assert self._picture(result).size == (1280, 640)
+        assert "2 cells of 640 px" in self._text(result)
+
+    def test_a_preview_sheet_carries_its_cells_the_same_way(self):
+        conn = FakeConn(responses={"preview_clip": {
+            "images": [{"label": "f%d" % i, "png_b64": self._frame(512)} for i in range(4)],
+            "clip": "walk", "fps": 30, "frames": [0, 8, 16, 24], "warnings": [],
+        }})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_preview_clip", {
+            "root": "|rig", "name": "walk", "resolution": 512}))
+        assert result.is_error is False, self._text(result)
+        assert self._picture(result).size == (1024, 1024)
+        assert "4 cells of 512 px" in self._text(result)
+
+    def test_a_capture_above_the_message_cap_says_to_pass_a_path(self):
+        conn = FakeConn(responses={"capture_viewport": {
+            "images": [{"angle": "front", "png_b64": self._frame(1024)}],
+            "camera_positions": [], "warnings": [],
+        }})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_capture_viewport", {
+            "angles": ["front"], "resolution": 1024}))
+        text = self._text(result)
+        assert "1024" in text and "768" in text and "path" in text, text
+
+    def test_a_capture_with_a_path_needs_no_such_note(self, tmp_path):
+        conn = FakeConn(responses={"capture_viewport": {
+            "images": [{"angle": "front", "png_b64": self._frame(1024)}],
+            "camera_positions": [], "warnings": [],
+        }})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_capture_viewport", {
+            "angles": ["front"], "resolution": 1024, "path": str(tmp_path / "big.png")}))
+        assert "note:" not in self._text(result)
+
+    def test_a_capture_at_the_cap_needs_no_note_either(self):
+        conn = FakeConn(responses={"capture_viewport": {
+            "images": [{"angle": "front", "png_b64": self._frame(768)}],
+            "camera_positions": [], "warnings": [],
+        }})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_capture_viewport", {"angles": ["front"]}))
+        assert "note:" not in self._text(result)
+
+    def test_a_render_above_the_message_cap_says_to_pass_a_path(self):
+        conn = FakeConn(responses={"render_scene": {
+            "images": [{"angle": "front", "label": "front", "png_b64": self._frame(1024)}],
+            "camera_positions": [], "renderer": "arnold", "samples": 3,
+            "fallback_light": False, "zoom": 1.0, "relit_lights": 0, "warnings": [],
+        }})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_render_scene", {
+            "angles": ["front"], "resolution": 1024}))
+        text = self._text(result)
+        assert "1024" in text and "768" in text and "path" in text, text
+
+    def test_the_turntable_resolution_says_what_reaches_the_sheet(self):
+        mcp = server_mod.create_server(FakeConn())
+        tools = {t.name: t for t in run(mcp.list_tools())}
+        desc = tools["maya_capture_turntable"].input_schema["properties"]["resolution"]["description"]
+        assert "1568" in desc and "392" in desc and "path" in desc
+        desc = tools["maya_capture_viewport"].input_schema["properties"]["resolution"]["description"]
+        assert "768" in desc and "path" in desc

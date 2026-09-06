@@ -93,6 +93,7 @@ Environment variables, all optional:
 | `MAYA_MCP_LOG_LEVEL` | `INFO` | Rotating file logs in `~/.maya-mcp/logs/` |
 | `MAYA_MCP_LOG_DIR` | `~/.maya-mcp/logs` | Where those logs go |
 | `MAYA_MCP_MAX_IMAGE_PX` | `768` | Longest edge for returned viewport images |
+| `MAYA_MCP_MAX_SHEET_PX` | `1568` | Longest edge for returned contact sheets (turntable, render_sheet, preview_clip) - a sheet is read cell by cell, so it gets the largest frame an LLM reads at full detail |
 
 ## Tools
 

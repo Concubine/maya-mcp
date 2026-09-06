@@ -142,6 +142,35 @@ def _resolve_path(path: Optional[str]) -> Optional[str]:
     return images.resolve_output_path(path) if path is not None else None
 
 
+def _message_cap_note(resolution: int, path: Optional[str]) -> Optional[str]:
+    """The single-image cap, said out loud when it eats a bigger frame (#832).
+
+    A capture or render asked for at 1024 or 2048 comes back at 768 in the
+    message, and nothing said so: the file was the only place those pixels
+    went, and a caller who passed no path paid Maya for pixels they never
+    saw - `resolution` above the cap was inert from where they stood.
+    """
+    cap = images.max_image_px()
+    if path is not None or resolution <= cap:
+        return None
+    return ("note: resolution %d asked, but the returned copy is capped at %d px "
+            "on its long edge (MAYA_MCP_MAX_IMAGE_PX) - pass path= to keep the "
+            "full %d-px frame" % (resolution, cap, resolution))
+
+
+def _sheet_for_message(sheet: bytes, count: int, cols: Optional[int],
+                       resolution: int, path: Optional[str]):
+    """A composited sheet as the message carries it, plus the lines that say
+    what its cells came out as (#832): the sheet's own cap, not the
+    single-image one, because a sheet is read cell by cell."""
+    grid_cols, _ = images.grid_for(count, cols)
+    in_message = images.decode_and_downscale(
+        base64.b64encode(sheet).decode("ascii"), max_px=images.max_sheet_px())
+    lines = images.sheet_report(images.png_size(sheet), images.png_size(in_message),
+                                count, grid_cols, resolution, path)
+    return in_message, lines
+
+
 def _write_frames(path: Optional[str], labels, pngs) -> Optional[str]:
     """Write full-resolution frames to an already-resolved path.
 
@@ -318,8 +347,12 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         buffer: Annotated[
             Literal["beauty", "ssao"],
             Field(description=(
-                "'ssao' enables viewport ambient occlusion - surfacing flaws hide "
-                "in beauty renders and show in AO."
+                "'ssao' draws with VP2 ambient occlusion at settings that make "
+                "contacts and crevices read (amount 2.0, radius 1/24 of the "
+                "frame, 32 samples; Maya's own defaults darken a contact by at "
+                "most 40/255 in a 16-px band, which reads as nothing). Surfacing "
+                "flaws hide in beauty and show in AO; the result names the "
+                "settings used."
             )),
         ] = "beauty",
         lighting: Annotated[
@@ -354,7 +387,12 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             bool, Field(description="Frame the subject before capturing.")
         ] = True,
         resolution: Annotated[
-            int, Field(ge=64, le=2048, description="Capture resolution in pixels.")
+            int, Field(ge=64, le=2048, description=(
+                "Capture resolution in pixels. The returned copy is capped at "
+                "768 px on its long edge (MAYA_MCP_MAX_IMAGE_PX); above that, "
+                "pass `path` to keep the full frame - a note says so when you "
+                "did not."
+            )),
         ] = 768,
         path: Annotated[
             Optional[str],
@@ -411,6 +449,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         # emits but this wrapper never reads is a warning nobody sees (#757).
         for warning in result.get("warnings", []):
             content.append("note: " + warning)
+        cap_note = _message_cap_note(resolution, out_path)
+        if cap_note:
+            content.append(cap_note)
         wrote = _write_frames(
             out_path, [s["angle"] for s in shots],
             [base64.b64decode(s["png_b64"]) for s in shots],
@@ -434,7 +475,11 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "Views around the subject. Returns ONE contact sheet regardless."
         ))] = 8,
         resolution: Annotated[int, Field(ge=64, le=1024, description=(
-            "Per-cell resolution, before the sheet is downscaled."
+            "Per-cell size in px. The returned sheet keeps cells this size up "
+            "to a 1568-px sheet (MAYA_MCP_MAX_SHEET_PX, the largest frame an "
+            "LLM reads at full detail): 8 frames carry cells up to 392 px, 4 "
+            "frames up to 784. Past that a note names the cell size you got; "
+            "`path` always writes the full cells."
         ))] = 384,
         shading: Annotated[
             ShadingMode,
@@ -473,14 +518,16 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             for shot in result.get("images", [])
         ]
         sheet = images.contact_sheet(cells)
+        in_message, cell_lines = _sheet_for_message(
+            sheet, len(cells), None, resolution, out_path)
         content: List[Union[Image, str]] = [
-            Image(data=images.decode_and_downscale(
-                base64.b64encode(sheet).decode("ascii")), format="png"),
+            Image(data=in_message, format="png"),
             "turntable: %d frames, azimuths %s" % (
                 result.get("n_frames", 0),
                 json.dumps([s["azimuth"] for s in result.get("images", [])]),
             ),
         ]
+        content.extend(cell_lines)
         # Same reason as maya_capture_viewport: a blank cell in a contact
         # sheet reads as "that angle looks wrong", not "that angle drew
         # nothing" (#765).
@@ -617,6 +664,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         # IPR-hygiene report, for one) otherwise dies here unseen.
         for warning in result.get("warnings", []):
             content.append("note: " + warning)
+        cap_note = _message_cap_note(resolution, out_path)
+        if cap_note:
+            content.append(cap_note)
         wrote = _write_frames(
             out_path, [s["angle"] for s in result.get("images", [])],
             [base64.b64decode(s["png_b64"]) for s in result.get("images", [])],
@@ -653,7 +703,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             )),
         ] = "arnold",
         resolution: Annotated[int, Field(ge=64, le=1024, description=(
-            "Per-cell resolution, before the sheet is downscaled."
+            "Per-cell size in px. The returned sheet keeps cells this size up "
+            "to a 1568-px sheet (MAYA_MCP_MAX_SHEET_PX); past that a note "
+            "names the cell size you got, and `path` writes the full cells."
         ))] = 384,
         isolate: Annotated[bool, Field(description=(
             "Hide everything but each cell's own subject. True is the point of "
@@ -707,15 +759,17 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             if images.pixel_stats(cell)["blank"]
         ]
         sheet = images.contact_sheet(cells, cols=cols)
+        in_message, cell_lines = _sheet_for_message(
+            sheet, len(cells), cols, resolution, out_path)
         content: List[Union[Image, str]] = [
-            Image(data=images.decode_and_downscale(
-                base64.b64encode(sheet).decode("ascii")), format="png"),
+            Image(data=in_message, format="png"),
             "cells (row-major): " + json.dumps([s["label"] for s in shots]),
             # A cell of nothing is a valid image. Naming the empty ones is the
             # difference between "that piece looks wrong" and "that piece did
             # not render".
             "blank cells: " + (json.dumps(blank) if blank else "none"),
         ]
+        content.extend(cell_lines)
         # A subject containing another is a decision this tool made about what
         # the cell shows; unstated, it reads as a broken render (#640).
         for warning in result.get("warnings", []):
@@ -3027,7 +3081,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "for the densest sheet that fits 16 cells."
         ))] = None,
         resolution: Annotated[int, Field(ge=64, le=1024, description=(
-            "Per-cell resolution, before the sheet is downscaled."
+            "Per-cell size in px. The returned sheet keeps cells this size up "
+            "to a 1568-px sheet (MAYA_MCP_MAX_SHEET_PX); past that a note "
+            "names the cell size you got."
         ))] = 256,
         renderer: Annotated[Literal["arnold", "hw2"], Field(description=(
             "'hw2' (default here) - a preview is many frames and motion "
@@ -3058,14 +3114,16 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                                              max_px=resolution)
                  for s in shots]
         sheet = images.contact_sheet(cells)
+        in_message, cell_lines = _sheet_for_message(
+            sheet, len(cells), None, resolution, None)
         content: List[Union[Image, str]] = [
-            Image(data=images.decode_and_downscale(
-                base64.b64encode(sheet).decode("ascii")), format="png"),
+            Image(data=in_message, format="png"),
             "clip %r at %d fps - cells (row-major): %s" % (
                 result.get("clip"), result.get("fps", 0),
                 json.dumps([s["label"] for s in shots])),
             "frames: " + json.dumps(result.get("frames", [])),
         ]
+        content.extend(cell_lines)
         # The same forwarding render_sheet does: a handler notice (the #721
         # IPR-hygiene report, for one) otherwise dies here unseen.
         for warning in result.get("warnings", []):

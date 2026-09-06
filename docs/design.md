@@ -307,7 +307,7 @@ maya_reset_namespace()
 
 ## 6. Cross-cutting requirements
 
-**Token discipline.** Images: max 4 per tool call, longest edge ≤ `MAYA_MCP_MAX_IMAGE_PX` (default 768; turntable frames 384). Text: ≤ 4 KB per response unless the tool documents pagination. Any truncation is marked explicitly so the LLM knows to ask for more rather than assume completeness.
+**Token discipline.** Images: max 4 per tool call, longest edge ≤ `MAYA_MCP_MAX_IMAGE_PX` (default 768; turntable frames 384); a contact sheet's longest edge ≤ `MAYA_MCP_MAX_SHEET_PX` (default 1568), because a sheet is read cell by cell and 192-px cells judge nothing but silhouette (#832). Text: ≤ 4 KB per response unless the tool documents pagination. Any truncation is marked explicitly so the LLM knows to ask for more rather than assume completeness.
 
 **Error contract.** Never swallow an exception. Every error carries `type`, `message`, the complete Maya traceback, and a `hint` when the cause is recognizable (unknown node → suggest `maya_get_scene_graph`; component syntax error → show correct `f[a:b]` form; timeout → suggest splitting the operation). Actionable errors are a feature with equal rank to any tool.
 

@@ -17,6 +17,15 @@ import os
 from PIL import Image as PILImage
 
 DEFAULT_MAX_PX = 768
+# A contact sheet is read CELL by cell, so it gets the largest frame an LLM
+# takes at full detail - 1568 px on the long edge (Anthropic's documented
+# ceiling; anything larger is downsampled by the model itself, so sending
+# more is bytes for nothing). Under the single-image cap above, 8 turntable
+# frames came back as a 768x384 sheet of 192-px cells at every `resolution`
+# from 256 to 1024 (MEASURED through the wrapper, redmine #832), which a
+# fresh agent could judge for silhouette and nothing else - and the knob it
+# raised twice to fix that changed nothing it could see.
+DEFAULT_MAX_SHEET_PX = 1568
 
 
 def max_image_px() -> int:
@@ -24,6 +33,65 @@ def max_image_px() -> int:
         return int(os.environ.get("MAYA_MCP_MAX_IMAGE_PX", DEFAULT_MAX_PX))
     except ValueError:
         return DEFAULT_MAX_PX
+
+
+def max_sheet_px() -> int:
+    try:
+        return int(os.environ.get("MAYA_MCP_MAX_SHEET_PX", DEFAULT_MAX_SHEET_PX))
+    except ValueError:
+        return DEFAULT_MAX_SHEET_PX
+
+
+def png_size(png: bytes) -> tuple[int, int]:
+    """(width, height) of PNG bytes, without decoding the pixels."""
+    return PILImage.open(io.BytesIO(png)).size
+
+
+def grid_for(count: int, cols: int | None = None) -> tuple[int, int]:
+    """The (cols, rows) contact_sheet lays `count` cells out in.
+
+    Favor a wide-ish rectangle over a tall one: pick rows as the floor of
+    sqrt(n) and let cols absorb the remainder, so an exact square count
+    (8 -> 4x2, 16 -> 4x4) lands flush and others get one partially-filled
+    last row rather than a lopsided column count.
+    """
+    count = max(1, int(count))
+    if cols is None:
+        rows_for_cols = max(1, int(math.floor(math.sqrt(count))))
+        cols = int(math.ceil(count / rows_for_cols))
+    cols = max(1, int(cols))
+    return cols, int(math.ceil(count / cols))
+
+
+def sheet_report(sheet_size, message_size, count: int, cols: int,
+                 requested_cell: int, path: str | None) -> list[str]:
+    """What the message's copy of a sheet carries per cell - and, when the
+    cap shrank the cells below what was asked, why and what to do about it.
+
+    The first line is always there: a caller who asked for 1024-px cells
+    and reads a sheet of 392-px ones deserves the number, not a blur to
+    infer it from. The note only follows when the MESSAGE copy is what
+    shrank them - cells smaller than asked for any other reason (the plugin
+    drew smaller frames, #797 row 36) are that handler's warning to give,
+    and blaming the cap here would be a lie.
+    """
+    width, height = int(message_size[0]), int(message_size[1])
+    cell = width // max(1, int(cols))
+    lines = ["sheet: %dx%d px, %d cells of %d px in %d columns"
+             % (width, height, count, cell, cols)]
+    if cell < requested_cell and (width, height) != tuple(int(v) for v in sheet_size):
+        if path:
+            full = "the file at %s has the full %d-px cells" % (path, requested_cell)
+        else:
+            full = "path= writes the full %d-px cells" % requested_cell
+        lines.append(
+            "note: the cells came out at %d px, not the %d asked: the returned sheet "
+            "is capped at %d px on its long edge (MAYA_MCP_MAX_SHEET_PX, the largest "
+            "frame an LLM reads at full detail), and %d columns of %d px need %d. "
+            "Fewer columns carry bigger cells, and %s"
+            % (cell, requested_cell, max(width, height), cols, requested_cell,
+               cols * requested_cell, full))
+    return lines
 
 
 def decode_and_downscale(png_b64: str, max_px: int | None = None) -> bytes:
@@ -137,14 +205,7 @@ def contact_sheet(pngs, cols: int | None = None) -> bytes:
     tiles = [_open(p) for p in pngs]
     cell_w = max(t.width for t in tiles)
     cell_h = max(t.height for t in tiles)
-    if cols is None:
-        # Favor a wide-ish rectangle over a tall one: pick rows as the floor
-        # of sqrt(n) and let cols absorb the remainder, so an exact square
-        # count (8 -> 4x2, 16 -> 4x4) lands flush and others get one
-        # partially-filled last row rather than a lopsided column count.
-        rows_for_cols = max(1, int(math.floor(math.sqrt(len(tiles)))))
-        cols = int(math.ceil(len(tiles) / rows_for_cols))
-    rows = int(math.ceil(len(tiles) / cols))
+    cols, rows = grid_for(len(tiles), cols)
     sheet = PILImage.new("RGB", (cols * cell_w, rows * cell_h), (18, 18, 20))
     for i, tile in enumerate(tiles):
         x = (i % cols) * cell_w
