@@ -74,3 +74,19 @@ mocap/
 # the delivery.
 evals/kethran_run/checkpoints/
 evals/kethran_run/kethran_recovered.ma
+
+# The kethran armour/scars/face pass (2026-09-06, kethran2/). Same rule as the
+# run above: the scenes, the reports, the map sources and the finals are
+# committed. Excluded are the auto-checkpoints (88 MB safety net), the Maya
+# workspace scaffolding, and the superseded texture iterations - Maya caches a
+# file node by PATH, so every texture edit needed a new filename and the folder
+# accumulated v3..v9 of the albedo and v2..v6 of the height map. Only the two
+# the scene actually reads (hide_albedo_v10, body_height_v7), their inputs
+# (hide_albedo_v2, body_height) and the debug masks' source are kept.
+evals/kethran_run/kethran2/checkpoints/
+evals/kethran_run/kethran2/agent_project/
+evals/kethran_run/kethran2/maps/hide_albedo_v[3-9].png
+evals/kethran_run/kethran2/maps/hide_albedo_v6_greentest.png
+evals/kethran_run/kethran2/maps/body_height_v[2-6].png
+evals/kethran_run/kethran2/maps/scar_debug_*.png
+evals/kethran_run/kethran2/maps/probe_flat.png
