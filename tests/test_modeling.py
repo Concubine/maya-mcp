@@ -16,7 +16,16 @@ class FakeCmds:
         self.shapes = shapes or {}  # long transform -> (shape_long, node_type)
         self.calls = []
         self.xf = {}
+        # LOCAL pivots (rotate == scale, what `xform -piv` leaves): the world
+        # pivot is T + p. Stored local since #831 so that a later translate
+        # carries the pivot along, as Maya's does.
         self.pivots = {}
+        # #831: object-space boxes a test declares; exactWorldBoundingBox
+        # composes them through the same matrix model as `_world_point`,
+        # which is what Maya's call does (it transforms the local box - see
+        # maya-exact-bbox-is-not-vertex-bounds). `bboxes` (world, static)
+        # still wins when declared.
+        self.local_bboxes = {}
         self.face_count = 1000
         self.reduced_percentage = None
         self.selection = []
@@ -276,12 +285,60 @@ class FakeCmds:
                 return list(t)
             if kw.get("rotation"):
                 return list(r)
-            if kw.get("rotatePivot") or kw.get("pivots"):
-                return list(self.pivots.get(name, (0, 0, 0)))
+            if kw.get("matrix"):
+                # #831: the world matrix's translation row is where the
+                # node's ORIGIN is - it carries the pivot compensation that
+                # `-translation` leaves out.
+                origin = self._world_point(name, (0.0, 0.0, 0.0))
+                return [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                        0.0, 0.0, 1.0, 0.0] + list(origin) + [1.0]
+            if kw.get("rotatePivot") or kw.get("scalePivot") or kw.get("pivots"):
+                p = self.pivots.get(name, (0, 0, 0))
+                return [t[i] + p[i] for i in range(3)]
             return list(s)
+        # The write lands on the channels (#831): before this the fake
+        # recorded a write and changed nothing, so a handler that measures
+        # before and after could never see a move here.
+        t, r, s = (list(v) for v in self.xf.get(
+            name, ((0, 0, 0), (0, 0, 0), (1, 1, 1))))
+        if "translation" in kw:
+            v = kw["translation"]
+            t = [t[i] + v[i] for i in range(3)] if kw.get("relative") else list(v)
+        if "rotation" in kw:
+            v = kw["rotation"]
+            r = [r[i] + v[i] for i in range(3)] if kw.get("relative") else list(v)
+        if "scale" in kw:
+            v = kw["scale"]
+            s = [s[i] * v[i] for i in range(3)] if kw.get("relative") else list(v)
         if "pivots" in kw:
-            self.pivots[name] = tuple(kw["pivots"])
+            assert tuple(r) == (0, 0, 0) and tuple(s) == (1, 1, 1), (
+                "the fake places a pivot on an unrotated, unscaled node only "
+                "(Maya maps it through the inverse matrix; this model does not)")
+            self.pivots[name] = tuple(kw["pivots"][i] - t[i] for i in range(3))
+        self.xf[name] = (tuple(t), tuple(r), tuple(s))
         self.calls.append(("xform", name, kw))
+
+    def _world_point(self, name, v):
+        """R(S * (v - p)) + p + T: Maya's matrix order for one local point,
+        with the rotate and scale pivots at the same local point p (what
+        `xform -piv` leaves) and rotate order xyz.
+
+        Measured on 2027 (#831, evals/pivot_probe_831): a x2 scale about the
+        world origin on a cube at (18.22, 34.17, 0) moves its origin to
+        (36.44, 68.34, 0) and a 90-degree Z rotate to (-34.17, 18.22, 0),
+        while `xform -q -ws -t` answers (18.22, 34.17, 0) both times.
+        """
+        t, r, s = self.xf.get(name, ((0, 0, 0), (0, 0, 0), (1, 1, 1)))
+        p = self.pivots.get(name, (0, 0, 0))
+        x, y, z = [s[i] * (v[i] - p[i]) for i in range(3)]
+        rx, ry, rz = [math.radians(a) for a in r]
+        y, z = (y * math.cos(rx) - z * math.sin(rx),
+                y * math.sin(rx) + z * math.cos(rx))
+        x, z = (x * math.cos(ry) + z * math.sin(ry),
+                -x * math.sin(ry) + z * math.cos(ry))
+        x, y = (x * math.cos(rz) - y * math.sin(rz),
+                x * math.sin(rz) + y * math.cos(rz))
+        return [x + p[0] + t[0], y + p[1] + t[1], z + p[2] + t[2]]
 
     def delete(self, *names, **kw):
         for n in names:
@@ -378,13 +435,29 @@ class FakeCmds:
         return ["sculpt1", "sculptor1", "sculpt1StretchOrigin"]
 
     def exactWorldBoundingBox(self, name):
-        # #822: [xmin, ymin, zmin, xmax, ymax, zmax]; a test declares boxes
-        # via `bboxes`. No answers-anything fallback (#799).
+        # #822: [xmin, ymin, zmin, xmax, ymax, zmax]; a test declares world
+        # boxes via `bboxes` or object-space ones via `local_bboxes` (#831,
+        # composed through the node's matrix the way Maya's call is). No
+        # answers-anything fallback (#799) - except the one Maya itself
+        # gives: a transform with no geometry under it (an empty group, a
+        # joint) answers the INVERTED 1e20 sentinel, measured #640 and
+        # again by evals/pivot_probe_831/probe2.py.
         self._require(name)
         boxes = getattr(self, "bboxes", {})
-        if name not in boxes:
-            raise AssertionError("FakeCmds.exactWorldBoundingBox: no bbox declared for %r" % name)
-        return list(boxes[name])
+        if name in boxes:
+            return list(boxes[name])
+        if name in self.local_bboxes:
+            lo, hi = self.local_bboxes[name]
+            corners = [self._world_point(name, (x, y, z))
+                       for x in (lo[0], hi[0]) for y in (lo[1], hi[1])
+                       for z in (lo[2], hi[2])]
+            return ([min(c[i] for c in corners) for i in range(3)]
+                    + [max(c[i] for c in corners) for i in range(3)])
+        has_geometry = name in self.shapes or any(
+            k.startswith(name + "|") for k in self.shapes)
+        if not has_geometry:
+            return [1e20, 1e20, 1e20, -1e20, -1e20, -1e20]
+        raise AssertionError("FakeCmds.exactWorldBoundingBox: no bbox declared for %r" % name)
 
     def polyEvaluate(self, name, face=False, triangle=False, vertex=False, edge=False,
                      uvcoord=False):
@@ -837,6 +910,163 @@ def test_transform_still_refuses_an_empty_call(monkeypatch):
     with pytest.raises(HandlerError) as exc:
         modeling.transform({"names": ["|a"]})
     assert "pivot" in exc.value.hint
+
+
+class TestTransformSaysWhereTheObjectIs:
+    """#831. Measured on Maya 2027 (evals/pivot_probe_831/): a rotate or a
+    scale about a pivot that is not at the object's origin MOVES the object
+    and leaves the translate channel alone - `xform -q -ws -t` answers the
+    channel. So the result's `translate` read (18.22, 34.17, 0) before and
+    after a x2 scale about the world origin that carried the cube to
+    (36.44, 68.34, 0), and the docstring had told the caller to trust it.
+    The result now carries world_position (the origin, from the world
+    matrix) and bbox_center, and a warning names the move the channel did
+    not report."""
+
+    START = (18.22, 34.17, 0.0)
+
+    def _cube(self, fake, name, at=START):
+        fake.objects.add(name)
+        fake.shapes[name] = (name + "|" + name.split("|")[-1] + "Shape", "mesh")
+        fake.xf[name] = (tuple(at), (0.0, 0.0, 0.0), (1.0, 1.0, 1.0))
+        fake.local_bboxes[name] = ((-5.0, -5.0, -5.0), (5.0, 5.0, 5.0))
+
+    def test_a_scale_about_an_external_pivot_reports_where_the_object_went(self, monkeypatch):
+        fake = FakeCmds()
+        self._cube(fake, "|socket")
+        monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+        out = modeling.transform({"names": ["|socket"], "pivot": [0.0, 0.0, 0.0],
+                                  "scale": [2.0, 2.0, 2.0]})
+        obj = out["objects"][0]
+        # The channel, as Maya answers it: unchanged.
+        assert obj["translate"] == pytest.approx([18.22, 34.17, 0.0])
+        assert obj["world_position"] == pytest.approx([36.44, 68.34, 0.0])
+        assert obj["bbox_center"] == pytest.approx([36.44, 68.34, 0.0])
+        assert obj["pivot"] == pytest.approx([0.0, 0.0, 0.0])
+        [warning] = out["warnings"]
+        assert "|socket" in warning
+        assert "scaled about a pivot" in warning
+        assert "38.7" in warning            # how far that pivot is from the origin
+        assert "36.44, 68.34" in warning    # where the object went
+        assert "world_position" in warning and "translate" in warning
+
+    def test_a_rotate_about_an_external_pivot_reports_it_too(self, monkeypatch):
+        fake = FakeCmds()
+        self._cube(fake, "|arm")
+        monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+        out = modeling.transform({"names": ["|arm"], "pivot": [0.0, 0.0, 0.0],
+                                  "rotate": [0.0, 0.0, 90.0]})
+        obj = out["objects"][0]
+        assert obj["translate"] == pytest.approx([18.22, 34.17, 0.0])
+        assert obj["world_position"] == pytest.approx([-34.17, 18.22, 0.0])
+        [warning] = out["warnings"]
+        assert "rotated about a pivot" in warning
+
+    def test_both_in_one_call_names_both_verbs(self, monkeypatch):
+        fake = FakeCmds()
+        self._cube(fake, "|arm")
+        monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+        out = modeling.transform({"names": ["|arm"], "pivot": [0.0, 0.0, 0.0],
+                                  "rotate": [0.0, 0.0, 90.0], "scale": [2.0, 2.0, 2.0]})
+        [warning] = out["warnings"]
+        assert "rotated and scaled about a pivot" in warning
+
+    def test_a_scale_about_the_objects_own_pivot_moves_nothing_and_says_nothing(self, monkeypatch):
+        fake = FakeCmds()
+        self._cube(fake, "|shade")
+        monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+        out = modeling.transform({"names": ["|shade"], "scale": [2.0, 2.0, 2.0]})
+        obj = out["objects"][0]
+        assert obj["world_position"] == pytest.approx(list(self.START))
+        assert obj["bbox_center"] == pytest.approx(list(self.START))
+        assert out["warnings"] == []
+
+    def test_a_pivot_placed_at_the_objects_own_origin_changes_nothing(self, monkeypatch):
+        fake = FakeCmds()
+        self._cube(fake, "|shade")
+        monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+        out = modeling.transform({"names": ["|shade"], "pivot": list(self.START),
+                                  "scale": [2.0, 2.0, 2.0]})
+        assert out["objects"][0]["world_position"] == pytest.approx(list(self.START))
+        assert out["warnings"] == []
+
+    def test_a_pivot_placed_in_an_earlier_call_still_carries_the_object(self, monkeypatch):
+        """The reporter's shape, most likely: the pivot persists on the node,
+        so a later plain `scale` moves the object about it with no pivot
+        param in sight. The condition is where the pivot IS, not whether
+        this call placed it."""
+        fake = FakeCmds()
+        self._cube(fake, "|bulb")
+        monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+        first = modeling.transform({"names": ["|bulb"], "pivot": [0.0, 0.0, 0.0]})
+        assert first["warnings"] == []      # the pivot alone moves nothing
+        assert first["objects"][0]["world_position"] == pytest.approx(list(self.START))
+        second = modeling.transform({"names": ["|bulb"], "scale": [2.0, 2.0, 2.0]})
+        assert second["objects"][0]["translate"] == pytest.approx(list(self.START))
+        assert second["objects"][0]["world_position"] == pytest.approx([36.44, 68.34, 0.0])
+        [warning] = second["warnings"]
+        assert "scaled about a pivot" in warning
+
+    def test_a_translate_is_reported_by_the_channel_and_gets_no_warning(self, monkeypatch):
+        """Even on an object whose pivot sits off its origin: the channel
+        described this move exactly, so there is nothing to add."""
+        fake = FakeCmds()
+        self._cube(fake, "|base")
+        monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+        modeling.transform({"names": ["|base"], "pivot": [0.0, 0.0, 0.0],
+                            "scale": [2.0, 2.0, 2.0]})
+        out = modeling.transform({"names": ["|base"], "translate": [1.0, 0.0, 0.0]})
+        obj = out["objects"][0]
+        assert obj["translate"] == pytest.approx([19.22, 34.17, 0.0])
+        assert obj["world_position"] == pytest.approx([37.44, 68.34, 0.0])
+        assert out["warnings"] == []
+
+    def test_geometry_offset_from_its_origin_separates_the_two_answers(self, monkeypatch):
+        """probe2: a cube whose vertices sit 5 above its origin, scaled x2
+        about the world origin from (50, 0, 0) - the origin lands at
+        (100, 0, 0) and the box centre at (100, 10, 0). Two questions,
+        two numbers."""
+        fake = FakeCmds()
+        self._cube(fake, "|offset", at=(50.0, 0.0, 0.0))
+        fake.local_bboxes["|offset"] = ((-1.0, 4.0, -1.0), (1.0, 6.0, 1.0))
+        monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+        out = modeling.transform({"names": ["|offset"], "pivot": [0.0, 0.0, 0.0],
+                                  "scale": [2.0, 2.0, 2.0]})
+        obj = out["objects"][0]
+        assert obj["world_position"] == pytest.approx([100.0, 0.0, 0.0])
+        assert obj["bbox_center"] == pytest.approx([100.0, 10.0, 0.0])
+
+    def test_a_node_with_no_geometry_has_no_bbox_centre_but_still_an_origin(self, monkeypatch):
+        """An empty group or a joint: exactWorldBoundingBox answers the
+        inverted 1e20 sentinel (#640), which is not a centre of anything."""
+        fake = FakeCmds(objects={"|rig_root"})
+        fake.xf["|rig_root"] = ((5.0, 6.0, 7.0), (0.0, 0.0, 0.0), (1.0, 1.0, 1.0))
+        monkeypatch.setattr(modeling, "_cmds", lambda: fake)
+        out = modeling.transform({"names": ["|rig_root"], "pivot": [0.0, 0.0, 0.0],
+                                  "scale": [2.0, 2.0, 2.0]})
+        obj = out["objects"][0]
+        assert obj["bbox_center"] is None
+        assert obj["world_position"] == pytest.approx([10.0, 12.0, 14.0])
+        [warning] = out["warnings"]
+        assert "no geometry" in warning
+
+    def test_the_fake_models_what_the_probe_measured(self):
+        """The fake's matrix model against the numbers the live probe
+        recorded, so no test above can pass on a fake that drifted."""
+        fake = FakeCmds(objects={"|c"})
+        fake.xf["|c"] = ((18.22, 34.17, 0.0), (0.0, 0.0, 0.0), (1.0, 1.0, 1.0))
+        fake.xform("|c", worldSpace=True, pivots=(0.0, 0.0, 0.0))
+        fake.xform("|c", scale=(2.0, 2.0, 2.0), relative=True)
+        assert fake.xform("|c", query=True, worldSpace=True, translation=True) == pytest.approx(
+            [18.22, 34.17, 0.0])
+        assert fake.xform("|c", query=True, worldSpace=True, matrix=True)[12:15] == pytest.approx(
+            [36.44, 68.34, 0.0])
+        assert fake.xform("|c", query=True, worldSpace=True, rotatePivot=True) == pytest.approx(
+            [0.0, 0.0, 0.0])
+        fake.xf["|c"] = ((18.22, 34.17, 0.0), (0.0, 0.0, 0.0), (1.0, 1.0, 1.0))
+        fake.xform("|c", rotation=(0.0, 0.0, 90.0), relative=True)
+        assert fake.xform("|c", query=True, worldSpace=True, matrix=True)[12:15] == pytest.approx(
+            [-34.17, 18.22, 0.0])
 
 
 def test_delete_objects_lists_all_missing(monkeypatch):

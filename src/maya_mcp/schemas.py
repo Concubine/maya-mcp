@@ -302,7 +302,12 @@ class TransformedObject(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     name: str
-    translate: List[float]
+    translate: List[float] = Field(description=(
+        "The translate CHANNEL in world space, as Maya's `xform -q -ws -t` "
+        "answers it - NOT where the object is once its pivot sits off its "
+        "origin: a rotate or scale about such a pivot moves the object and "
+        "leaves this number alone (maya-mcp #831). Read world_position / "
+        "bbox_center for where it is."))
     rotate: List[float]
     scale: List[float]
     pivot: Optional[List[float]] = Field(
@@ -310,6 +315,23 @@ class TransformedObject(BaseModel):
         description="World-space rotate pivot after the call - the point this "
                     "object turns about, which is what a ragdoll reads. Same "
                     "meaning as AssembledObject.pivot.",
+    )
+    world_position: Optional[List[float]] = Field(
+        default=None,
+        description="Where the object's ORIGIN is in world space after the "
+                    "call: the world matrix's translation row, which carries "
+                    "the pivot compensation `translate` leaves out. Equal to "
+                    "translate whenever the pivot is at the origin. None only "
+                    "from a plugin older than #831.",
+    )
+    bbox_center: Optional[List[float]] = Field(
+        default=None,
+        description="Centre of the object's exact world bounding box after "
+                    "the call, descendants included - where the GEOMETRY is, "
+                    "which differs from world_position when the mesh is "
+                    "offset from its origin. None for a node with no geometry "
+                    "under it (an empty group, a joint), or from a plugin "
+                    "older than #831.",
     )
 
 

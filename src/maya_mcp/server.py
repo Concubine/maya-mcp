@@ -1569,9 +1569,16 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "call acts about the new pivot."
         ))] = None,
     ) -> TransformResult:
-        """Move/rotate/scale objects by name. Returns the resulting transforms —
+        """Move/rotate/scale objects by name. Returns the resulting transforms -
         trust these over your own bookkeeping: the live user may also be moving
-        things, and warnings will say so."""
+        things, and warnings will say so.
+
+        Which number is the position: `world_position` (the origin) and
+        `bbox_center` (the geometry). `translate` is the translate CHANNEL,
+        and a rotate or scale about a pivot that is not at the object's
+        origin moves the object without changing it - a warning names that
+        move when it happens, whether the pivot was placed in this call or
+        in an earlier one."""
         return TransformResult.model_validate(
             maya.request(
                 "transform",

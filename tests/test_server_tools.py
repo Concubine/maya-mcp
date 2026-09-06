@@ -1543,6 +1543,49 @@ def test_transform_forwards_pivot_and_reports_it_back():
     assert result.structured_content["objects"][0]["pivot"] == [0.0, 10.0, 0.0]
 
 
+def test_transform_result_carries_where_the_object_is():
+    """#831: after a scale about an external pivot the translate channel is
+    unchanged and the object has moved. The result carries world_position
+    and bbox_center, and the tool's own description names them as the
+    numbers to read for position - it used to say "trust these" about a
+    set that did not include one."""
+    conn = FakeConn({"transform": {
+        "objects": [{"name": "|socket", "translate": [18.22, 34.17, 0.0],
+                     "rotate": [0.0, 0.0, 0.0], "scale": [2.0, 2.0, 2.0],
+                     "pivot": [0.0, 0.0, 0.0],
+                     "world_position": [36.44, 68.34, 0.0],
+                     "bbox_center": [36.44, 68.34, 0.0]}],
+        "warnings": ["|socket was scaled about a pivot at [0.0, 0.0, 0.0]"],
+    }})
+    mcp = server_mod.create_server(conn)
+    result = run(mcp.call_tool("maya_transform", {
+        "names": ["|socket"], "pivot": [0.0, 0.0, 0.0], "scale": [2.0, 2.0, 2.0],
+    }))
+    obj = result.structured_content["objects"][0]
+    assert obj["translate"] == [18.22, 34.17, 0.0]
+    assert obj["world_position"] == [36.44, 68.34, 0.0]
+    assert obj["bbox_center"] == [36.44, 68.34, 0.0]
+    tools = {t.name: t for t in run(mcp.list_tools())}
+    description = tools["maya_transform"].description
+    assert "world_position" in description
+    assert "bbox_center" in description
+
+
+def test_transform_result_tolerates_a_plugin_that_predates_the_position_report():
+    """The user's own Maya restarts on its own schedule; a response from a
+    plugin older than #831 still validates, with the new fields None."""
+    from maya_mcp.schemas import TransformResult
+
+    result = TransformResult.model_validate({
+        "objects": [{"name": "|a", "translate": [0.0, 0.0, 0.0],
+                     "rotate": [0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0],
+                     "pivot": [0.0, 0.0, 0.0]}],
+        "warnings": [],
+    })
+    assert result.objects[0].world_position is None
+    assert result.objects[0].bbox_center is None
+
+
 def test_array_result_accepts_a_mirror_response():
     from maya_mcp.schemas import ArrayResult
 

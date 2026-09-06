@@ -329,6 +329,75 @@ def _apply_xform(cmds, name: str, translate, rotate, scale, relative: bool) -> N
             cmds.xform(name, scale=scale)
 
 
+def world_position(cmds, name: str) -> List[float]:
+    """Where the node's ORIGIN is in world space: the translation row of
+    its world matrix.
+
+    Not `xform -q -ws -t`: that answers the translate CHANNEL through the
+    parent's matrix and leaves out the node's own pivot compensation, so a
+    rotate or scale about a pivot that is not at the origin moves the
+    object and leaves that number alone. Measured for #831 on Maya 2027
+    (evals/pivot_probe_831): a x2 scale about the world origin carried a
+    cube from (18.22, 34.17, 0) to (36.44, 68.34, 0), and -t read 18.22
+    before and after; a 90-degree rotate about the same point carried it
+    to (-34.17, 18.22, 0), same story.
+    """
+    matrix = cmds.xform(name, query=True, worldSpace=True, matrix=True)
+    return [float(v) for v in matrix[12:15]]
+
+
+def bbox_center(cmds, name: str) -> Optional[List[float]]:
+    """Centre of the node's exact world bounding box, descendants included,
+    or None for a node with no geometry under it (an empty group, a
+    joint): Maya answers those with an INVERTED 1e20 sentinel box, min
+    above max, not an error (#640; measured again for #831).
+    """
+    box = cmds.exactWorldBoundingBox(name)
+    if any(box[i] > box[i + 3] for i in range(3)):
+        return None
+    return [(float(box[i]) + float(box[i + 3])) / 2.0 for i in range(3)]
+
+
+def _r3(vec) -> List[float]:
+    return [round(float(v), 3) for v in vec]
+
+
+def _pivot_carry_warning(name: str, rotate, scale, pivot_used,
+                         before: Dict[str, Any], after: Dict[str, Any]) -> Optional[str]:
+    """The sentence for a call that moved the object while its translate
+    channel stayed put: a rotate or scale about a pivot off the origin,
+    whether this call placed that pivot or an earlier one did (#831).
+
+    None when the channel accounts for the whole move - a translate, a
+    scale about the object's own origin, a pivot placed and nothing else.
+    """
+    carried = [
+        (after["world_position"][i] - before["world_position"][i])
+        - (after["translate"][i] - before["translate"][i])
+        for i in range(3)
+    ]
+    magnitude = max([1.0] + [abs(v) for v in
+                             list(before["world_position"]) + list(after["world_position"])])
+    if max(abs(v) for v in carried) <= 1e-4 * magnitude:
+        return None
+    verbs = [word for word, given in (("rotated", rotate), ("scaled", scale))
+             if given is not None]
+    distance = sum((float(pivot_used[i]) - before["world_position"][i]) ** 2
+                   for i in range(3)) ** 0.5
+    centre = ("bbox_center now %s" % _r3(after["bbox_center"])
+              if after["bbox_center"] is not None
+              else "no geometry under it to centre")
+    return (
+        "%s was %s about a pivot at %s, %.1f units from its origin, so the "
+        "object moved while its translate did not: world_position %s -> %s, "
+        "%s. translate %s is the channel Maya reports, not where the object "
+        "is - read world_position / bbox_center for that"
+        % (name, " and ".join(verbs) or "moved", _r3(pivot_used), distance,
+           _r3(before["world_position"]), _r3(after["world_position"]),
+           centre, _r3(after["translate"]))
+    )
+
+
 def _long(cmds, name: str) -> str:
     matches = cmds.ls(name, long=True) or [name]
     return matches[0]
@@ -585,22 +654,36 @@ def transform(params: Dict[str, Any]) -> Dict[str, Any]:
         moved = ledger.check(cmds, name)
         if moved:
             warnings.append(moved)
+        # #831: the origin is measured before AND after, because the
+        # translate channel does not report a rotate or scale about a pivot
+        # that is off the origin - the object moves, the number does not.
+        before = {
+            "translate": cmds.xform(name, query=True, worldSpace=True, translation=True),
+            "world_position": world_position(cmds, name),
+        }
         # Pivot FIRST: a relative rotation in the same call must turn about the
         # new pivot, not the old one. `pivots` moves the pivot without moving
         # the geometry, which is the whole point - a rig is pivots.
         if pivot is not None:
             cmds.xform(name, worldSpace=True, pivots=tuple(pivot))
+        # The pivot the rotate/scale below act about: the one just placed,
+        # or the one the node already had (a pivot persists across calls).
+        pivot_used = cmds.xform(name, query=True, worldSpace=True, rotatePivot=True)
         _apply_xform(cmds, name, translate, rotate, scale, relative)
         ledger.record(cmds, name)
-        objects.append(
-            {
-                "name": name,
-                "translate": cmds.xform(name, query=True, worldSpace=True, translation=True),
-                "rotate": cmds.xform(name, query=True, worldSpace=True, rotation=True),
-                "scale": cmds.xform(name, query=True, worldSpace=True, scale=True),
-                "pivot": cmds.xform(name, query=True, worldSpace=True, rotatePivot=True),
-            }
-        )
+        after = {
+            "name": name,
+            "translate": cmds.xform(name, query=True, worldSpace=True, translation=True),
+            "rotate": cmds.xform(name, query=True, worldSpace=True, rotation=True),
+            "scale": cmds.xform(name, query=True, worldSpace=True, scale=True),
+            "pivot": cmds.xform(name, query=True, worldSpace=True, rotatePivot=True),
+            "world_position": world_position(cmds, name),
+            "bbox_center": bbox_center(cmds, name),
+        }
+        carried = _pivot_carry_warning(name, rotate, scale, pivot_used, before, after)
+        if carried:
+            warnings.append(carried)
+        objects.append(after)
     return {"objects": objects, "warnings": warnings}
 
 

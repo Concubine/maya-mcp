@@ -345,6 +345,29 @@ class TestModelingInMaya:
         )
         assert moved["objects"][0]["translate"] == [0.0, 0.0, 0.0]
 
+    def test_transform_pivot_scale_reports_where_the_object_went(self):
+        # #831, measured: a scale about an external pivot moves the object
+        # and leaves the translate channel alone (xform -q -ws -t answers the
+        # channel). The result says where the object is and that it moved.
+        import maya.cmds as cmds
+
+        from maya_plugin.handlers import modeling
+
+        cube = cmds.polyCube(name="mb_pivot", w=10, h=10, d=10, ch=False)[0]
+        cmds.xform(cube, ws=True, t=(18.22, 34.17, 0))
+        out = modeling.transform({"names": ["|mb_pivot"], "pivot": [0, 0, 0],
+                                  "scale": [2, 2, 2]})
+        obj = out["objects"][0]
+        assert obj["translate"] == pytest.approx([18.22, 34.17, 0.0])
+        assert obj["world_position"] == pytest.approx([36.44, 68.34, 0.0])
+        assert obj["bbox_center"] == pytest.approx([36.44, 68.34, 0.0])
+        assert any("scaled about a pivot" in w and "world_position" in w
+                   for w in out["warnings"])
+        # A pivot placed at the object's own origin changes nothing and says nothing.
+        quiet = modeling.transform({"names": ["|mb_pivot"], "translate": [1, 0, 0]})
+        assert quiet["warnings"] == []
+        assert quiet["objects"][0]["world_position"] == pytest.approx([37.44, 68.34, 0.0])
+
     def test_group_reports_the_bbox_centre_pivot_and_a_renamed_member(self):
         # #823, measured: the pivot sits at the members' bbox centre and a
         # second "part" becomes "part1" inside the group.

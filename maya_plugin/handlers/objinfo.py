@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from ..dispatcher import HandlerError, require_known_keys
-from . import naming, units
+from . import modeling, naming, units
 
 SECTIONS = ("transform", "mesh_stats", "uvs", "shading", "history")
 DEFAULT_SECTIONS = ["transform", "mesh_stats"]
@@ -41,6 +41,11 @@ def _transform_section(cmds, name: str) -> Dict[str, Any]:
         "translate": cmds.xform(name, query=True, worldSpace=True, translation=True),
         "rotate": cmds.xform(name, query=True, worldSpace=True, rotation=True),
         "scale": cmds.xform(name, query=True, worldSpace=True, scale=True),
+        # #831: `translate` is the channel. Once a pivot sits off the origin
+        # and the object was turned or scaled about it, the origin is
+        # somewhere else and only the world matrix says where - the same
+        # field transform's result carries.
+        "world_position": modeling.world_position(cmds, name),
     }
 
 

@@ -132,6 +132,14 @@ class FakeCmds:
                               ("rotation", "rotate"), ("scale", "scale")):
             if kw.get(flag):
                 return list(values[channel])
+        if kw.get("matrix"):
+            # #831: the world matrix's translation row is where the ORIGIN
+            # is; it differs from `translate` once a pivot sits off it. A
+            # test declares it; undeclared, the origin is the translate,
+            # which is Maya's answer for a node with its pivot at home.
+            origin = values.get("world_position", values["translate"])
+            return [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                    0.0, 0.0, 1.0, 0.0] + list(origin) + [1.0]
         raise AssertionError("unexpected xform query %r" % (kw,))
 
     def listSets(self, object=None, type=None):
@@ -186,6 +194,19 @@ def test_default_include_is_transform_and_mesh_stats(monkeypatch):
     # is a bare triple without it (maya-mcp #634).
     assert set(result) == {"name", "transform", "mesh_stats", "units"}
     assert result["transform"]["translate"] == [1.0, 2.0, 3.0]
+
+
+def test_the_transform_section_says_where_the_origin_is(monkeypatch):
+    """#831: `translate` is the channel. On an object scaled or turned about
+    a pivot off its origin the origin is somewhere else, and only the world
+    matrix knows where - the section carries it as world_position, the
+    same field transform's result has."""
+    fake = FakeCmds()
+    fake.transforms["|golem|torso"]["world_position"] = [36.44, 68.34, 0.0]
+    monkeypatch.setattr(objinfo, "_cmds", lambda: fake)
+    result = objinfo.get_object_info({"name": "|golem|torso", "include": ["transform"]})
+    assert result["transform"]["translate"] == [1.0, 2.0, 3.0]
+    assert result["transform"]["world_position"] == [36.44, 68.34, 0.0]
 
 
 def test_the_transform_it_reports_is_never_unitless(monkeypatch):
