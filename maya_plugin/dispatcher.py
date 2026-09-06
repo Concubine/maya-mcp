@@ -24,7 +24,7 @@ from concurrent.futures import Future
 from concurrent.futures import TimeoutError as _FutureTimeoutError
 from typing import Any, Callable, Dict, Optional
 
-from . import protocol
+from . import progress, protocol
 
 DEFAULT_TIMEOUT_S = 30.0
 # Raised from 600 for #640. A timeout here does NOT stop the command - Maya runs
@@ -311,10 +311,17 @@ class Dispatcher:
                 "the instant that command finishes - retry shortly" % cmd
             )
         elapsed_s = time.monotonic() - self._running_since
+        # The stage the handler itself reported (maya_plugin.progress, #836):
+        # "map 2 of 3: curvature 2048 for body, 380s into it" is what tells
+        # a 40-minute bake apart from a wedged one.
+        stage = progress.current()
+        where = ""
+        if stage is not None:
+            where = ", at '%s' for %.0fs" % stage
         hint = (
-            "the session is busy: %r has been running for %.0fs; it will "
+            "the session is busy: %r has been running for %.0fs%s; it will "
             "unblock automatically the instant that command finishes - retry "
-            "shortly" % (cmd, elapsed_s)
+            "shortly" % (cmd, elapsed_s, where)
         )
         if elapsed_s > _LIKELY_WEDGED_S:
             hint += (
@@ -342,7 +349,9 @@ class Dispatcher:
             with self._lock:
                 self._running_cmd = cmd
                 self._running_since = time.monotonic()
+            progress.clear()  # a stage never outlives the command that set it (#836)
             response = self._run_job(req_id, handler, params)
+            progress.clear()
             with self._lock:
                 fut.set_result(response)
                 if self._inflight is fut:

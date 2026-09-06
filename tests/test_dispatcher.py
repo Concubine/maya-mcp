@@ -439,3 +439,64 @@ class TestTimeoutHintNamesOnlyAKnobTheCallerHas:
             assert "pass a larger timeout_s" in resp["error"]["hint"]
         finally:
             release.set()
+
+
+class TestStageInBusyHint:
+    """redmine #836: a long handler reports the stage it is in
+    (maya_plugin.progress) and the BusyError hint carries it, so a caller
+    can tell "map 2 of 3, 380 s into it" from "wedged". The dispatcher
+    clears the stage around every job: a stage never outlives the command
+    that reported it, and an unmarked command never inherits a stale one."""
+
+    def test_the_hint_carries_the_stage_and_how_long_it_has_stood(self, dispatcher):
+        from maya_plugin import progress
+        release = threading.Event()
+        reported = threading.Event()
+
+        def bake(params):
+            progress.report("map 2 of 3: curvature 2048 for body")
+            reported.set()
+            release.wait(5.0)
+            return {}
+
+        d = dispatcher({"bake": bake, "ping": lambda p: {}})
+        d.handle_request(req("bake", timeout_s=0.05))
+        try:
+            assert reported.wait(2.0)
+            busy = d.handle_request(req("ping"))
+            assert busy["error"]["type"] == "BusyError"
+            hint = busy["error"]["hint"]
+            assert "'bake'" in hint
+            assert "map 2 of 3: curvature 2048 for body" in hint
+            assert re.search(r"for \d+s", hint)
+        finally:
+            release.set()
+        # once it finishes, the stage is gone with it
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and progress.current() is not None:
+            time.sleep(0.01)
+        assert progress.current() is None
+
+    def test_a_stage_never_leaks_into_the_next_command(self, dispatcher):
+        from maya_plugin import progress
+
+        def bake(params):
+            progress.report("map 1 of 1: ao 256 for body")
+            return {}
+
+        release = threading.Event()
+
+        def slow(params):
+            release.wait(5.0)
+            return {}
+
+        d = dispatcher({"bake": bake, "slow": slow, "ping": lambda p: {}})
+        assert d.handle_request(req("bake"))["status"] == "ok"
+        assert progress.current() is None
+        d.handle_request(req("slow", timeout_s=0.05))
+        try:
+            busy = d.handle_request(req("ping"))
+            assert busy["error"]["type"] == "BusyError"
+            assert "map 1 of 1" not in busy["error"]["hint"]
+        finally:
+            release.set()

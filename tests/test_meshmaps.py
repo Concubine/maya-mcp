@@ -928,8 +928,12 @@ class TestEvidenceKeeping:
             meshmaps.bake_mesh_maps(_params(tmp_path, maps=["ao"]))
         assert list(tmp_path.glob("*.part.png"))  # evidence kept
 
-    def test_earlier_good_parts_are_still_swept_on_a_later_refusal(
+    def test_earlier_good_maps_stay_committed_and_the_refusal_names_them(
             self, fake, tmp_path, monkeypatch):
+        # #836: every verified map is committed into out_dir the moment it
+        # passes, so a refusal later in the run leaves the good maps on disk
+        # (progress a caller can see) and says which ones - never a stray
+        # .part file for a map that was fine, only the failing evidence.
         calls = {"n": 0}
         good = _fake_convert()
 
@@ -940,11 +944,41 @@ class TestEvidenceKeeping:
             else:
                 good(cmds_arg, src, dst)
         monkeypatch.setattr(meshmaps, "_exr_to_png", _convert)
-        with pytest.raises(HandlerError, match="drew nothing"):
+        with pytest.raises(HandlerError, match="drew nothing") as exc:
             meshmaps.bake_mesh_maps(_params(tmp_path,
                                             maps=["ao", "curvature"]))
         parts = [p.name for p in tmp_path.glob("*.part.png")]
         assert parts == ["limb_curvature.png.part.png"]  # only the evidence
+        assert (tmp_path / "limb_ao.png").is_file()      # committed, kept
+        assert "limb_ao.png" in exc.value.hint
+
+
+class TestProgressOnDisk:
+    """redmine #836: the kethran bake showed nothing in out_dir for 40
+    minutes because every map waited for the last. Each map lands the
+    moment it is verified, and the handler reports its stage for the
+    BusyError hint before each bake."""
+
+    def test_each_map_is_on_disk_before_the_next_one_bakes(
+            self, fake, tmp_path, monkeypatch):
+        from maya_plugin import progress
+        real = meshmaps._bake_one
+        seen = []
+
+        def spy(cmds_arg, shape, shader, resolution, extend_edges, part):
+            seen.append({"final_before": sorted(p.name for p in tmp_path.glob("limb_*.png")
+                                                if ".part" not in p.name),
+                         "stage": progress.current()[0]})
+            return real(cmds_arg, shape, shader, resolution, extend_edges, part)
+        monkeypatch.setattr(meshmaps, "_bake_one", spy)
+        out = meshmaps.bake_mesh_maps(_params(tmp_path, maps=["ao", "curvature"],
+                                              resolution=256))
+        assert [b["map"] for b in out["baked"]] == ["ao", "curvature"]
+        assert seen[0]["final_before"] == []
+        assert seen[1]["final_before"] == ["limb_ao.png"]   # ao landed first
+        assert seen[0]["stage"] == "map 1 of 2: ao 256 for limb"
+        assert seen[1]["stage"] == "map 2 of 2: curvature 256 for limb"
+        assert not list(tmp_path.glob("*.part*"))
 
 
 class TestCompositeMath:

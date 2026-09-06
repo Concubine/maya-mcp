@@ -40,6 +40,7 @@ import shutil
 import tempfile
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from .. import progress
 from ..dispatcher import HandlerError, refuse_inert, require_known_keys
 from . import material as material_mod
 from . import naming, pbr, pngprobe, pngwrite, session, texbake, texclaim, uvatlas
@@ -802,10 +803,17 @@ def bake_mesh_maps(params: Dict[str, Any]) -> Dict[str, Any]:
             for _t, shape in job["wearers"]:
                 unpadded_ao.add(shape)
 
-    # --- phase A: bake and verify, mutating NOTHING -------------------
+    # --- phase A: bake and verify, mutating NOTHING in the scene --------
+    # Each map is committed into out_dir the moment it is verified (#836):
+    # the kethran run watched an empty out_dir for 40 minutes because every
+    # map waited for the last, and could not tell slow from wedged. A
+    # refusal later in the run leaves the good maps on disk and names them;
+    # only the failing map's own .part is kept, as evidence, or swept.
     saved_selection = cmds.ls(selection=True) or []
     staged: List[Dict[str, Any]] = []
-    attempted: List[str] = []
+    baked: List[Dict[str, Any]] = []
+    total = len(settings["meshes"]) * len(settings["maps"])
+    attempted: Optional[str] = None
     try:
         for transform, shape in settings["meshes"]:
             short = transform.split("|")[-1]
@@ -815,32 +823,42 @@ def bake_mesh_maps(params: Dict[str, Any]) -> Dict[str, Any]:
                     basename = "%s_%s.png" % (short, map_name)
                     part = os.path.join(settings["out_dir"],
                                         basename + ".part.png")
-                    attempted.append(part)
+                    attempted = part
+                    progress.report("map %d of %d: %s %d for %s" % (
+                        len(staged) + 1, total, map_name,
+                        settings["resolution"], short))
                     padded = not (map_name == "ao" and shape in unpadded_ao)
                     _bake_one(cmds, shape, shader, settings["resolution"],
                               padded, part)
                     stats = _map_stats(part, transform, map_name, warnings)
+                    final_path = os.path.join(settings["out_dir"], basename)
+                    os.replace(part, final_path)
+                    attempted = None
                     staged.append({"mesh": transform, "shape": shape,
-                                   "map": map_name, "part": part,
-                                   "basename": basename, "padded": padded,
-                                   "stats": stats})
+                                   "map": map_name, "basename": basename,
+                                   "padded": padded, "stats": stats})
+                    baked.append({"mesh": transform, "map": map_name,
+                                  "file": final_path, "basename": basename,
+                                  "resolution": settings["resolution"],
+                                  "padded": padded, "stats": stats})
                 finally:
                     try:
                         cmds.delete(shader)
                     except Exception:  # noqa: BLE001 - already gone is fine
                         pass
     except Exception as exc:
-        # A refusal that names its part file as evidence keeps exactly
-        # that file - always attempted[-1]: it was appended right before
-        # the call that raised (the texbake phase-A discipline).
-        keep = getattr(exc, "keep_evidence", False)
-        for part in attempted:
-            if keep and part == attempted[-1]:
-                continue
+        # A refusal that names its part file as evidence keeps exactly that
+        # file; otherwise the failing map's part is swept. The maps that
+        # already passed are final files now, and the refusal says so.
+        if attempted is not None and not getattr(exc, "keep_evidence", False):
             try:
-                os.unlink(part)
+                os.unlink(attempted)
             except OSError:
                 pass
+        if baked and isinstance(exc, HandlerError):
+            exc.hint = "%s; %d of %d maps were already verified and are in " \
+                       "out_dir: %s" % (exc.hint, len(baked), total,
+                                        ", ".join(b["basename"] for b in baked))
         raise
     finally:
         try:
@@ -850,16 +868,6 @@ def bake_mesh_maps(params: Dict[str, Any]) -> Dict[str, Any]:
                 cmds.select(clear=True)
         except Exception:  # noqa: BLE001 - selection is a courtesy, not state
             pass
-
-    # --- commit the files (still no scene mutation) -------------------
-    baked: List[Dict[str, Any]] = []
-    for entry in staged:
-        final_path = os.path.join(settings["out_dir"], entry["basename"])
-        os.replace(entry["part"], final_path)
-        baked.append({"mesh": entry["mesh"], "map": entry["map"],
-                      "file": final_path, "basename": entry["basename"],
-                      "resolution": settings["resolution"],
-                      "padded": entry["padded"], "stats": entry["stats"]})
 
     # --- phase B: the apply_ao composite (the only mutation) ----------
     applied: List[Dict[str, Any]] = []

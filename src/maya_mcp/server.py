@@ -1152,7 +1152,10 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         shipped weakness this cures is measured: joins that read as
         floating because no contact shadow exists in the texture.
 
-        The bake mutates nothing. apply_ao is the one scene edit: it
+        The bake mutates nothing in the scene. Each map lands in out_dir
+        the moment it is verified, so a long bake shows its progress on
+        disk, and while it runs every other call's BusyError names the map
+        it is on. apply_ao is the one scene edit: it
         multiplies the AO into the colour map so the contact shadow ships
         in the texture - re-judge the next render, then export. Every map
         is verified (readable, drew something) with stats reported; flat

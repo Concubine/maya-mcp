@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from .. import progress
 from ..dispatcher import HandlerError, require_known_keys
 from . import naming, orphans, pbr, pngprobe, session, texclaim, uvatlas
 
@@ -870,10 +871,13 @@ def bake_textures(params: Dict[str, Any]) -> Dict[str, Any]:
     staged: List[Dict[str, Any]] = []
     attempted: List[str] = []
     try:
-        for job in jobs:
+        for n, job in enumerate(jobs, 1):
             part = os.path.join(settings["out_dir"],
                                 job["basename"] + ".part.png")
             attempted.append(part)
+            progress.report("bake %d of %d: %s %s at %d" % (
+                n, len(jobs), job["material"], job["slot"],
+                settings["resolution"]))
             _convert_solid_tx(cmds, job["terminal_plug"], job["mesh"], part,
                               settings["resolution"])
             check = _verify_bake(part, job)
