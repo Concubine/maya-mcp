@@ -65,7 +65,7 @@ class TestUniformity:
         # found (review fix #714 Important 4) - non_uniform is already
         # proven at that point, so distinct_values is capped at 2 rather
         # than paying to keep counting the other two pixels.
-        assert out["distinct_values"] == 2
+        assert out["distinct_values_seen"] == 2
         assert out["non_uniform"] is True
         assert out["unavailable_reason"] is None
 
@@ -74,7 +74,7 @@ class TestUniformity:
         path = _png(tmp_path / "flat.png",
                     [[(7, 7, 7), (7, 7, 7)], [(7, 7, 7), (7, 7, 7)]])
         out = pngprobe.uniformity(path)
-        assert out["distinct_values"] == 1
+        assert out["distinct_values_seen"] == 1
         assert out["non_uniform"] is False
 
     def test_an_unreadable_file_reports_rather_than_raising(self, tmp_path):
@@ -83,7 +83,7 @@ class TestUniformity:
         out = pngprobe.uniformity(str(bad))
         assert out["non_uniform"] is None
         assert out["unavailable_reason"]
-        assert out["distinct_values"] == 0
+        assert out["distinct_values_seen"] == 0
 
     def test_a_missing_file_reports_rather_than_raising(self, tmp_path):
         out = pngprobe.uniformity(str(tmp_path / "nope.png"))
@@ -107,7 +107,7 @@ class TestStreamingUniformity:
         streamed = pngprobe.uniformity(path)
         png = pngprobe.read_png(path)
         assert streamed["pixel_count"] == len(png["pixels"]) == 4
-        assert streamed["distinct_values"] == len(set(png["pixels"])) == 1
+        assert streamed["distinct_values_seen"] == len(set(png["pixels"])) == 1
         assert streamed["non_uniform"] is False
 
     def test_a_non_uniform_scan_never_reaches_the_last_row(

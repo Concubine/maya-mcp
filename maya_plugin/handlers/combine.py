@@ -168,6 +168,17 @@ def unite(
             if sg not in shaders_in:
                 shaders_in.append(sg)
 
+    # Where the inputs sat, read BEFORE the unite consumes them (#867).
+    # polyUnite lands its result at the world root whatever its inputs'
+    # parents were: twelve armour plates under |kethran came back as |armor
+    # at the root, outside the group that moves the animal, with a plain
+    # success - and the deliverable would have shipped that way. names[0]'s
+    # parent is carried, the way boolean_op carries a's.
+    parents = [
+        (cmds.listRelatives(t, parent=True, fullPath=True) or [None])[0]
+        for t in longs
+    ]
+
     # Ask for the name the caller WANTS, not a pre-uniquified one. polyUnite
     # consumes its inputs, so an input's own name is free by the time the
     # result needs it - but only after the unite. Uniquifying first, while
@@ -176,13 +187,29 @@ def unite(
     # _claim_name). MEASURED (evals/combine_pivot_probe_803.py): Maya
     # answers body1 for that request, and body is free to rename to
     # afterwards.
-    result = cmds.polyUnite(longs, ch=False, name=requested)
+    # History ON, deleted two steps below - the order boolean_op measured
+    # (#640) and this gate re-measured for polyUnite (#867, 2026-09-06):
+    # with ch=False Maya reaps the consumed inputs AND a parent left with
+    # no other child in the same stroke, so a group holding only the inputs
+    # was gone by the time the result could be put under it. With history
+    # on the inputs stay as empty transforms until the delete, the parent
+    # still exists, the result goes under it, and the delete then reaps the
+    # inputs while the parent survives because it holds the result.
+    result = cmds.polyUnite(longs, ch=True, name=requested)
     node = _long(cmds, result[0] if isinstance(result, (list, tuple)) else result)
 
     warnings: List[str] = []
+    # Before the history delete (see above), and before the pivot and the
+    # freeze: cmds.parent preserves world position by handing the node the
+    # inverse of its new parent's transform, and the freeze below bakes that
+    # away - the same order boolean_op uses.
+    node = _carry_parent(cmds, node, parents, warnings)
+    cmds.delete(node, constructionHistory=True)
+
     # Maya renames on collision. Match by SHORT NAME and claim the name now
-    # that the inputs are gone; only a name some UNRELATED object holds
-    # forces the suffix, and then the caller is told.
+    # that the inputs are gone - the history delete is the first moment an
+    # input's own name is free (#803); only a name some UNRELATED object
+    # holds forces the suffix, and then the caller is told.
     if _short(node) != requested:
         node = _long(cmds, cmds.rename(node, naming.unique_name(cmds, requested)))
         if _short(node) != requested:
@@ -224,6 +251,8 @@ def unite(
     return {
         "name": node,
         "inputs": len(longs),
+        # Read back, never assumed: where Maya HAS the result (#867).
+        "parent": (cmds.listRelatives(node, parent=True, fullPath=True) or [None])[0],
         "pivot": [round(q, 6) for q in pivot],
         "pivot_mode": pivot_mode,
         "frozen": bool(freeze),
@@ -231,3 +260,38 @@ def unite(
         "warnings": warnings,
         **stats,
     }
+
+
+def _carry_parent(cmds, node: str, parents: List[Optional[str]],
+                  warnings: List[str]) -> str:
+    """Put the united result under names[0]'s parent, and say when the
+    inputs did not agree on one (#867).
+
+    None in `parents` is the root. The first entry is carried; every other
+    distinct parent is named in a warning, because a caller who combined
+    pieces from two groups gets ONE answer and deserves to know which.
+    A parent that no longer exists (a group the unite emptied and something
+    else swept) is named too, and the result stays at the root rather
+    than failing a unite that already happened.
+    """
+    carried = parents[0]
+    others: List[Optional[str]] = []
+    for other in parents[1:]:
+        if other != carried and other not in others:
+            others.append(other)
+    if others:
+        warnings.append(
+            "inputs sat under %d different parents (%s); the result is under "
+            "%s, names[0]'s - maya_parent it elsewhere if another was meant"
+            % (len(others) + 1,
+               ", ".join(p or "the root" for p in [carried] + others),
+               carried or "the root"))
+    if carried is None:
+        return node
+    if not cmds.objExists(carried):
+        warnings.append(
+            "names[0]'s parent %s no longer exists; the result is at the "
+            "root" % carried)
+        return node
+    moved = cmds.parent(node, carried) or [node]
+    return _long(cmds, moved[0])

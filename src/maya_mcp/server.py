@@ -40,6 +40,7 @@ from .schemas import (
     BlendshapeTargetSpec,
     ClipKeySpec,
     CombineResult,
+    SessionInfo,
     CreateBlendshapeResult,
     CurveFormResult,
     DeleteClipResult,
@@ -140,6 +141,27 @@ def _resolve_path(path: Optional[str]) -> Optional[str]:
     "a bad call must cost nothing".
     """
     return images.resolve_output_path(path) if path is not None else None
+
+
+def _census(stats, path: Optional[str]) -> None:
+    """Fill a baked map's statistics from the written file itself (#866).
+
+    The plugin's streaming scan reports what it SAW (0, 1 or 2 values) and
+    two field reports read that 2 under its old name, distinct_values, as
+    a count - and nearly binned rich bakes on it. The exact count and the
+    luma range come from the file here, where PIL is. A plugin older than
+    #866 still sends its 2 under the old name: that goes to
+    distinct_values_seen, and distinct_values is the file's, or None.
+    """
+    legacy = stats.distinct_values
+    if stats.distinct_values_seen is None and legacy is not None:
+        stats.distinct_values_seen = legacy
+    census = images.map_census(path) if path else {
+        "census_unavailable_reason": "no file path in the result"}
+    stats.distinct_values = census.get("distinct_values")
+    for key in ("luma_min", "luma_max", "luma_mean", "luma_stddev",
+                "census_unavailable_reason"):
+        setattr(stats, key, census.get(key))
 
 
 def _message_cap_note(resolution: int, path: Optional[str]) -> Optional[str]:
@@ -252,6 +274,40 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 {"code": code, "timeout_s": timeout_s, "risky": risky},
                 timeout_s=float(timeout_s), timeout_adjustable=True,
             )
+        )
+
+    @mcp.tool(
+        title="Session info",
+        annotations=ToolAnnotations(
+            read_only_hint=True, destructive_hint=False, idempotent_hint=True
+        ),
+    )
+    def maya_session_info() -> SessionInfo:
+        """Which Maya is answering: pid, port, the open scene and whether it
+        has unsaved changes, the working directory, uptime, and which copy
+        of the plugin is loaded.
+
+        A port is not an identity - three Mayas on one machine, one holding
+        unsaved work from another worktree, and the only way to ask "who are
+        you" was execute_python against the very process in doubt (#862).
+        This reads the plugin's ping and touches nothing in the scene."""
+        result = maya.request("ping", {}, timeout_s=10)
+        process = result.get("process") or {}
+        plugin = result.get("plugin") or {}
+        return SessionInfo(
+            pid=process.get("pid"),
+            host=process.get("host"),
+            port=process.get("port"),
+            scene=process.get("scene"),
+            scene_modified=process.get("scene_modified"),
+            cwd=process.get("cwd"),
+            uptime_s=process.get("uptime_s"),
+            started_at=process.get("started_at"),
+            maya=result.get("maya"),
+            plugin_package_dir=plugin.get("package_dir"),
+            plugin_stamp=plugin.get("loaded_stamp") or plugin.get("stamp"),
+            plugin_digest=plugin.get("loaded_digest") or plugin.get("digest"),
+            plugin_restart_required=plugin.get("restart_required"),
         )
 
     @mcp.tool(
@@ -1128,7 +1184,7 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         rewire, EXCEPT on the no-op path where every requested slot is
         already file-backed - then nothing is baked and checkpoint_id is
         null (see skipped_file_backed)."""
-        return BakeTexturesResult.model_validate(
+        result = BakeTexturesResult.model_validate(
             maya.request(
                 "bake_textures",
                 {"meshes": meshes, "out_dir": out_dir,
@@ -1136,6 +1192,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 timeout_s=float(timeout_s), timeout_adjustable=True,
             )
         )
+        for entry in result.baked:
+            _census(entry.pixel_check, entry.file)
+        return result
 
     @mcp.tool(
         title="Bake AO/curvature/normal from geometry",
@@ -1180,8 +1239,12 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             "refuse (maya_bake_textures flattens them first)."
         ))] = False,
         curvature_radius: Annotated[Optional[float], Field(gt=0.0, description=(
-            "Sampling radius in scene units; defaults to 0.1, which suits "
-            "metre-scale assets. Refused unless 'curvature' is in maps."
+            "Sampling radius in scene units, world-space. Omit for 2% of each "
+            "mesh's bounding-box diagonal - an absolute default of 0.1 was a "
+            "millimetre on a centimetre-scale creature and baked a flat map "
+            "(#868); the result reports the radius used and its source. A "
+            "radius under 0.5% of the diagonal bakes flat and is warned. "
+            "Refused unless 'curvature' is in maps."
         ))] = None,
         curvature_output: Annotated[
             Optional[Literal["convex", "concave", "both"]], Field(description=(
@@ -1214,7 +1277,7 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         in the texture - re-judge the next render, then export. Every map
         is verified (readable, drew something) with stats reported; flat
         maps warn but ship, because flat can be honest here."""
-        return BakeMeshMapsResult.model_validate(
+        result = BakeMeshMapsResult.model_validate(
             maya.request(
                 "bake_mesh_maps",
                 {"meshes": meshes, "out_dir": out_dir, "maps": maps,
@@ -1224,6 +1287,9 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
                 timeout_s=float(timeout_s), timeout_adjustable=True,
             )
         )
+        for entry in result.baked:
+            _census(entry.stats, entry.file)
+        return result
 
     @mcp.tool(
         title="Apply directed wear/grime/grain",
@@ -1824,6 +1890,12 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
         stop being separate objects. That is what you want for a part built
         out of primitives, and it is far cheaper than union on the same
         geometry.
+
+        The result lives where names[0] lived: polyUnite drops it at the
+        world root, so it is reparented under names[0]'s parent (like
+        boolean_op's a) before the freeze, and `parent` reports where it
+        is. Inputs from several parents get one answer and a warning
+        naming the others.
 
         Reports the measured shell count: it should equal the number of
         inputs, and a lower number means inputs were already fused. Combining

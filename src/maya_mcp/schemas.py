@@ -719,11 +719,48 @@ class TextureRecipeResult(BaseModel):
     warnings: List[str] = Field(default_factory=list)
 
 
+class SessionInfo(BaseModel):
+    """Which Maya this server is talking to (#862): the process, the scene
+    it holds and whether that scene has unsaved changes, and which copy of
+    the plugin answered. Read from the plugin's ping - nothing in the scene
+    is touched."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    pid: Optional[int] = Field(default=None, description=(
+        "The Maya process answering on this port. A port is not an identity: "
+        "check this against the process you launched."))
+    host: Optional[str] = None
+    port: Optional[int] = None
+    scene: Optional[str] = Field(default=None, description=(
+        "Path of the open scene; '' for an untitled scene."))
+    scene_modified: Optional[bool] = Field(default=None, description=(
+        "True when the open scene carries unsaved changes - the flag to read "
+        "before killing a Maya. None from a plugin older than #862."))
+    cwd: Optional[str] = Field(default=None, description=(
+        "The process's working directory: a Maya launched from a repo imports "
+        "that repo's plugin. None from a plugin older than #862."))
+    uptime_s: Optional[float] = Field(default=None, description=(
+        "Seconds since the plugin bound the port - a restart resets it."))
+    started_at: Optional[float] = None
+    maya: Optional[bool] = Field(default=None, description=(
+        "False when the plugin runs headless (no maya.cmds)."))
+    plugin_package_dir: Optional[str] = None
+    plugin_stamp: Optional[str] = Field(default=None, description=(
+        "The commit the loaded plugin copy was stamped with, when deployed."))
+    plugin_digest: Optional[str] = None
+    plugin_restart_required: Optional[bool] = Field(default=None, description=(
+        "True when the files on disk no longer match the code Maya loaded."))
+
+
 class CombineResult(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     name: str = Field(description="Canonical long name of the merged object.")
     inputs: int = Field(description="How many meshes were consumed.")
+    parent: Optional[str] = Field(default=None, description=(
+        "Where the result lives: names[0]'s parent, carried onto it (#867); "
+        "None at the world root. Read back from Maya, not assumed."))
     tris: int
     verts: int
     faces: int
@@ -1356,12 +1393,21 @@ class PixelCheck(BaseModel):
     pixel_count: int = Field(description=(
         "Total pixels in the image (width x height). Always exact, even "
         "when the scan below short-circuited."))
-    distinct_values: int = Field(description=(
-        "Distinct pixel values seen. Exact for a flat image (1) or an "
-        "unmeasurable one (0); for a non-uniform image the scan stops as "
-        "soon as a second distinct value is found, so this is capped at 2 "
-        "rather than a true count - non_uniform is already proven at that "
-        "point and nothing downstream reads a larger number."))
+    distinct_values_seen: Optional[int] = Field(default=None, description=(
+        "What the plugin's streaming scan SAW before it stopped: 0 "
+        "(unreadable), 1 (flat), 2 (non-uniform - it stops at the second "
+        "value on purpose and never counts further). Not a count; the count "
+        "is distinct_values."))
+    distinct_values: Optional[int] = Field(default=None, description=(
+        "EXACT distinct RGB values in the written file, counted by the server "
+        "from the file itself (#866). None when the file could not be read "
+        "here - see census_unavailable_reason."))
+    luma_min: Optional[int] = Field(default=None, description="0..255 over the whole file.")
+    luma_max: Optional[int] = None
+    luma_mean: Optional[float] = None
+    luma_stddev: Optional[float] = Field(default=None, description=(
+        "Spread of the file's luma: a flat map is 0, a rich AO map reads tens."))
+    census_unavailable_reason: Optional[str] = None
     non_uniform: Optional[bool] = Field(default=None, description=(
         "True when the image carries more than one distinct pixel value. "
         "False means the bake is flat - the network sampled nothing, which "
@@ -1434,9 +1480,20 @@ class MeshMapStats(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     pixel_count: int
-    distinct_values: int = Field(description=(
-        "Distinct pixel values seen; capped at 2 once non-uniformity is "
-        "proven (nothing downstream reads a larger number)."))
+    distinct_values_seen: Optional[int] = Field(default=None, description=(
+        "What the plugin's streaming scan SAW before it stopped: 0, 1 or 2. "
+        "It stops at the second value on purpose; this is not a count."))
+    distinct_values: Optional[int] = Field(default=None, description=(
+        "EXACT distinct RGB values in the written file, counted by the server "
+        "from the file (#866): the number to trust a map by. None when the "
+        "file could not be read here - see census_unavailable_reason."))
+    luma_min: Optional[int] = None
+    luma_max: Optional[int] = None
+    luma_mean: Optional[float] = None
+    luma_stddev: Optional[float] = Field(default=None, description=(
+        "Spread of the file's luma over the whole image: 0 is flat, a rich "
+        "AO map reads tens."))
+    census_unavailable_reason: Optional[str] = None
     non_uniform: Optional[bool] = Field(default=None, description=(
         "False means the map is FLAT. Unlike maya_bake_textures, flat can "
         "be HONEST here (a lone convex mesh's AO is all-white; concave "
@@ -1464,6 +1521,16 @@ class BakedMeshMap(BaseModel):
         "alpha must keep marking the real UV shells - padding floods alpha "
         "to 1.0 over the whole image (measured)."))
     stats: MeshMapStats
+    curvature_radius: Optional[float] = Field(default=None, description=(
+        "The world-space sampling radius this curvature map was baked with "
+        "(#868); None on the other maps."))
+    curvature_radius_source: Optional[str] = Field(default=None, description=(
+        "'given', or 'default: 2% of <mesh>'s <D>-unit bounding-box "
+        "diagonal' - the default follows the mesh, because an absolute one "
+        "baked a flat map on a centimetre-scale creature."))
+    bbox_diagonal: Optional[float] = Field(default=None, description=(
+        "The mesh's world bounding-box diagonal at bake time, so a radius "
+        "can be read as a fraction of it."))
 
 
 class AppliedAo(BaseModel):

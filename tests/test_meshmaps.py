@@ -112,6 +112,8 @@ class FakeCmds:
         self.conns = {"limbSG.surfaceShader": ["limb_mat.outColor"]}
         self.existing_attrs = {"limb_mat.baseColor"}
         self.attr_values = {"limb_mat.baseColor": [(1.0, 1.0, 1.0)]}
+        # transform -> world bbox, for the curvature default (#868).
+        self.bboxes = {}
         # Plugs a rigger locked by hand: the other half of #799 contract
         # 2's "locked or connected" refusal, which no path in this module
         # produces on its own.
@@ -311,6 +313,12 @@ class FakeCmds:
         exist, which is the half that used to be missing (#799)."""
         self._require(plug.split(".")[0])
         return self.attr_values.get(plug, "")
+
+    def exactWorldBoundingBox(self, node):
+        """|limb is a unit cube unless a test says otherwise (#868): the
+        curvature default is a fraction of this box."""
+        self._require(node)
+        return list(self.bboxes.get(node, [-0.5, -0.5, -0.5, 0.5, 0.5, 0.5]))
 
     # mutation --------------------------------------------------------
     def shadingNode(self, node_type, name=None, **kw):
@@ -519,7 +527,9 @@ class TestCurvatureSettingsWithoutACurvatureBake:
         out = meshmaps.validate(
             _params(tmp_path, maps=["ao"], curvature_radius=None,
                     curvature_output=None), fake)
-        assert out["curvature_radius"] == meshmaps.DEFAULT_CURVATURE_RADIUS
+        # None stays None here: the default is a fraction of each mesh's
+        # bounding box, decided at bake time (#868).
+        assert out["curvature_radius"] is None
         assert out["curvature_output"] == "convex"
 
     def test_the_refusal_fires_before_maya_is_imported(self, tmp_path):
@@ -1271,3 +1281,69 @@ class TestStackedUVsRefuse:
         from maya_plugin.handlers import uvatlas
         monkeypatch.setattr(uvatlas, "face_uv_census", lambda *a: None)
         assert meshmaps.validate(_params(tmp_path), fake)["meshes"]
+
+
+class TestCurvatureRadiusFollowsTheMesh:
+    """#868: aiCurvature's radius is world-space, so the absolute default
+    of 0.1 was a millimetre on a centimetre-scale creature - a flat map,
+    shipped with a plain success (MEASURED: one torus at 0.95 / 32 / 380
+    units of diagonal baked 59 / 8 / TWO values at radius 0.1, and the same
+    fraction of the diagonal baked the same map at all three sizes). The
+    default is 2% of each mesh's bounding-box diagonal, the result says
+    which radius it used and why, and a given radius below 0.5% is named
+    as flat."""
+
+    BIG = [-109.8, -109.8, -109.8, 109.8, 109.8, 109.8]  # diagonal 380.4
+
+    def test_the_default_is_two_percent_of_the_bounding_box_diagonal(self, fake, tmp_path):
+        fake.bboxes["|limb"] = self.BIG
+        out = meshmaps.bake_mesh_maps(_params(tmp_path, maps=["curvature"]))
+        entry = out["baked"][0]
+        assert abs(entry["curvature_radius"] - 380.4 * 0.02) < 0.05
+        assert entry["curvature_radius_source"].startswith("default: 2%")
+        assert "limb" in entry["curvature_radius_source"]
+        assert abs(entry["bbox_diagonal"] - 380.4) < 0.1
+        radii = [v for k, v in fake.attr_values.items() if k.endswith(".radius")]
+        assert radii and abs(radii[0] - entry["curvature_radius"]) < 1e-9
+        assert not [w for w in out["warnings"] if "curvature_radius" in w]
+
+    def test_a_given_radius_is_used_and_said(self, fake, tmp_path):
+        fake.bboxes["|limb"] = self.BIG
+        out = meshmaps.bake_mesh_maps(
+            _params(tmp_path, maps=["curvature"], curvature_radius=3.0))
+        entry = out["baked"][0]
+        assert entry["curvature_radius"] == 3.0
+        assert entry["curvature_radius_source"] == "given"
+        assert not [w for w in out["warnings"] if "curvature_radius" in w]
+
+    def test_a_radius_below_half_a_percent_of_the_mesh_is_named_as_flat(self, fake, tmp_path):
+        fake.bboxes["|limb"] = self.BIG
+        out = meshmaps.bake_mesh_maps(
+            _params(tmp_path, maps=["curvature"], curvature_radius=0.1))
+        notes = [w for w in out["warnings"] if "curvature_radius 0.1" in w]
+        assert len(notes) == 1, out["warnings"]
+        assert "0.03%" in notes[0] and "380" in notes[0] and "7.6" in notes[0]
+        assert out["baked"][0]["curvature_radius"] == 0.1  # used as given, not clamped
+
+    def test_a_metre_scale_mesh_gets_a_matching_default(self, fake, tmp_path):
+        # |limb's fake box is the unit cube, diagonal 1.732
+        out = meshmaps.bake_mesh_maps(_params(tmp_path, maps=["curvature"]))
+        assert abs(out["baked"][0]["curvature_radius"] - 0.0346) < 0.001
+
+    def test_maps_without_curvature_carry_no_radius(self, fake, tmp_path):
+        out = meshmaps.bake_mesh_maps(_params(tmp_path, maps=["ao"]))
+        entry = out["baked"][0]
+        assert entry["curvature_radius"] is None
+        assert entry["curvature_radius_source"] is None
+        assert entry["bbox_diagonal"] is None
+
+    def test_the_rule_itself(self):
+        warnings = []
+        assert meshmaps.curvature_radius_for(None, 100.0, "|m", warnings) == (
+            2.0, "default: 2% of m's 100-unit bounding-box diagonal")
+        radius, source = meshmaps.curvature_radius_for(0.3, 100.0, "|m", warnings)
+        assert (radius, source) == (0.3, "given")
+        assert len(warnings) == 1 and "0.3%" in warnings[0] and "2 here" in warnings[0]
+        radius, source = meshmaps.curvature_radius_for(None, 0.0, "|m", warnings)
+        assert radius == 0.1 and "no extent" in source
+        assert len(warnings) == 1  # nothing new

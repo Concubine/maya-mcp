@@ -324,3 +324,167 @@ class TestStartServerWaitsForTheAutoloads:
             assert srv is not None
         finally:
             maya_mcp_plugin.stop_server()
+
+
+class TestTheListenerOutlivesAResetClient:
+    """#863, the variant measured on 2026-09-06: an agent Maya answered a
+    ping and fifteen minutes later refused connections with the process
+    still alive. PluginServer._accept_loop broke on ANY non-timeout OSError
+    from accept() and closed the listening socket - and Windows raises
+    ConnectionResetError from accept() when a client resets the connection
+    before the accept completes (a port scanner, a client that connects
+    and dies, a health check that hangs up). One stray reset ended the
+    listener for the life of the process, silently."""
+
+    def test_a_client_that_resets_before_accept_does_not_kill_the_listener(
+            self, plugin_server):
+        import struct
+        import time
+
+        srv = plugin_server()
+        for _ in range(40):
+            s = socket.socket()
+            # SO_LINGER (on, 0): close() sends RST instead of FIN.
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            s.connect(("127.0.0.1", srv.port))
+            s.close()
+        time.sleep(0.5)
+        conn = MayaConnection(port=srv.port, connect_timeout_s=2.0)
+        assert conn.request("ping", {}, timeout_s=5)["pong"] is True
+        conn.close()
+
+    def test_a_transient_accept_error_is_logged_and_the_loop_goes_on(
+            self, plugin_server, caplog):
+        import time
+
+        srv = plugin_server()
+        real = srv._sock
+
+        class FlakyOnce:
+            """The listening socket, with ONE accept() that fails the way a
+            reset client makes it fail on Windows."""
+
+            def __init__(self):
+                self.failed = False
+
+            def accept(self):
+                if not self.failed:
+                    self.failed = True
+                    raise ConnectionResetError(10054, "forcibly closed by the remote host")
+                return real.accept()
+
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+        flaky = FlakyOnce()
+        with caplog.at_level(logging.WARNING, logger="maya_mcp_plugin"):
+            srv._sock = flaky
+            deadline = time.monotonic() + 3.0
+            while not flaky.failed and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert flaky.failed
+            conn = MayaConnection(port=srv.port, connect_timeout_s=2.0)
+            assert conn.request("ping", {}, timeout_s=5)["pong"] is True
+            conn.close()
+        srv._sock = real
+        assert any("accept" in r.getMessage() and "10054" in r.getMessage()
+                   for r in caplog.records), [r.getMessage() for r in caplog.records]
+
+    def test_stop_still_ends_the_loop(self, plugin_server):
+        # The fix must not turn stop()'s own close into an endless retry.
+        import time
+
+        srv = plugin_server()
+        srv.stop()
+        deadline = time.monotonic() + 3.0
+        while srv._accept_thread.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not srv._accept_thread.is_alive()
+
+
+class TestPingSaysWhoAnswered:
+    """#862: three maya.exe were up on one machine and one held unsaved work
+    from another worktree; the only way to ask 'who are you' was
+    execute_python against the very process in doubt. ping's process block
+    now carries the working directory and whether the scene is modified,
+    so the session_info tool can answer the question without touching the
+    scene. Headless: no scene, so modified is None and the cwd is ours."""
+
+    def test_ping_carries_cwd_and_the_modified_flag(self, plugin_server):
+        srv = plugin_server()
+        conn = MayaConnection(port=srv.port)
+        info = conn.request("ping", {}, timeout_s=5)["process"]
+        assert info["cwd"] == os.getcwd()
+        assert info["scene_modified"] is None  # no Maya to ask
+        assert info["pid"] == os.getpid()
+        conn.close()
+
+
+class TestADeadListeningSocketIsRebound:
+    """#863: a transient accept() error is ridden out (above); a LISTENING
+    socket that is itself dead - EBADF, WSAENOTSOCK - cannot be, so the
+    loop binds a fresh one on the same port instead of ending, and says so
+    in the log. Only stop() ends the loop."""
+
+    def test_a_not_a_socket_error_rebinds_on_the_same_port(self, plugin_server, caplog):
+        import time
+
+        srv = plugin_server()
+        port = srv.port
+        real = srv._sock
+
+        class DeadOnce:
+            def __init__(self):
+                self.failed = False
+
+            def accept(self):
+                if not self.failed:
+                    self.failed = True
+                    raise OSError(10038, "An operation was attempted on something that is not a socket")
+                return real.accept()
+
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+        dead = DeadOnce()
+        with caplog.at_level(logging.WARNING, logger="maya_mcp_plugin"):
+            srv._sock = dead
+            deadline = time.monotonic() + 3.0
+            while (not dead.failed or srv._sock is dead) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert srv._sock is not dead  # a fresh socket replaced it
+            assert srv.port == port
+            conn = MayaConnection(port=port, connect_timeout_s=2.0)
+            assert conn.request("ping", {}, timeout_s=5)["pong"] is True
+            conn.close()
+        assert any("re-bound" in r.getMessage() for r in caplog.records), \
+            [r.getMessage() for r in caplog.records]
+
+
+class TestAColdConnectNamesTheProcessItKnew:
+    """#862, the other half: after a drop, the NEXT call's connect is refused
+    too - and that message used to be the launch instructions, as if Maya
+    had never been started. The handshake ping on every fresh connection
+    (below) means the pid is known by then."""
+
+    def test_the_handshake_learns_the_pid_before_any_request(self, plugin_server):
+        srv = plugin_server()
+        conn = MayaConnection(port=srv.port)
+        conn.request("execute_python", {"code": "1"}, timeout_s=10)
+        assert conn.last_pid == os.getpid()
+        conn.close()
+
+    def test_a_refused_connect_after_a_known_pid_says_whether_it_lives(self, plugin_server):
+        srv = plugin_server()
+        port = srv.port
+        conn = MayaConnection(port=port, connect_timeout_s=0.5)
+        conn.request("ping", {}, timeout_s=5)
+        assert conn.last_pid == os.getpid()
+        srv.stop()
+        with pytest.raises(Exception):
+            conn.request("ping", {}, timeout_s=5)  # the drop
+        with pytest.raises(Exception) as exc_info:
+            conn.request("ping", {}, timeout_s=5)  # the cold connect
+        msg = str(exc_info.value)
+        assert "pid %d" % os.getpid() in msg and "still running" in msg, msg
+        assert "start_server" in msg and "Make sure Maya is open" not in msg

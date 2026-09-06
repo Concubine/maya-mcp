@@ -142,7 +142,7 @@ in the first place):
 
 | cmd | params | result |
 |---|---|---|
-| `ping` | `{}` | `{ pong, maya, plugin: {package_dir, digest, stamp, loaded_digest, loaded_stamp, imported_at, restart_required}, process: {pid, host, port, started_at, uptime_s, scene} }` |
+| `ping` | `{}` | `{ pong, maya, plugin: {package_dir, digest, stamp, loaded_digest, loaded_stamp, imported_at, restart_required}, process: {pid, host, port, started_at, uptime_s, scene, scene_modified, cwd} }` |
 | `execute_python` | `{ code, timeout_s?, risky? }` | `{ stdout, stderr, result_repr, traceback, namespace_keys, checkpoint? }` |
 | `reset_namespace` | `{}` | `{ reset: true }` |
 | `get_scene_graph` | `{ filter?, max_objects?, cursor? }` | `{ objects: [...], total, cursor }` |

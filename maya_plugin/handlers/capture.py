@@ -531,12 +531,32 @@ def frame_warnings(shot: Dict[str, Any], label: str,
             "the panel's own camera and moves nothing. The other angles in "
             "this call were framed on it." % label)
     drawn = shot.get("drawn_size")
-    if drawn:
+    if drawn or shot.get("fallback"):
+        # Named whatever its size (#865): the fallback reads the SCREEN, and
+        # a field reporter got a frame with a cyan wireframe over everything
+        # on a black background from a call whose other angle was fine -
+        # exactly what an on-screen buffer of a minimized window holds. Only
+        # a size change used to be reported, so a fallback at the panel's
+        # own size passed as a normal capture.
+        size = (" at %dx%d, not %dx%d" % (drawn[0], drawn[1], resolution, resolution)
+                if drawn else "")
         out.append(
-            "%s was drawn at %dx%d, not %dx%d: the playblast failed and the "
-            "M3dView fallback reads the viewport's own framebuffer, whatever "
-            "size the panel happens to be. Measure pixels off it accordingly."
-            % (label, drawn[0], drawn[1], resolution, resolution))
+            "%s was read from the ON-SCREEN view%s: the offscreen playblast "
+            "failed and the M3dView fallback reads the viewport's own "
+            "framebuffer - whatever size the panel happens to be, and whatever "
+            "the screen showed (wireframe, selection highlight, the panel's "
+            "background). It is not the side-effect-free capture the other "
+            "frames are: reshoot it, and if this persists the viewport may be "
+            "hidden or minimized (#865)." % (label, size))
+    moved = shot.get("camera_moved")
+    if moved:
+        out.append(
+            "%s: the panel's camera %s moved during this frame, from %s to %s, "
+            "and was %s. Nothing in the capture moves that camera (measured, "
+            "#864) - if you see this note, note what else ran."
+            % (label, moved.get("camera"), moved.get("before"), moved.get("after"),
+               "put back" if moved.get("restored")
+               else "NOT put back (%s)" % moved.get("reason")))
     if shot.get("unlit"):
         out.append(
             "lighting='scene' but this scene has no light: the subject is lit "
@@ -1100,6 +1120,58 @@ def _apply_isolate(cmds, panel: str, targets: Sequence[str]) -> None:
         cmds.isolateSelect(panel, addDagObject=target)
 
 
+def _camera_pose(cmds, camera: str) -> Optional[Dict[str, Any]]:
+    """Where the panel's camera is, for the restore check (#864). None when
+    it cannot be read, and then nothing is checked or written."""
+    try:
+        matrix = [float(v) for v in cmds.xform(camera, query=True, worldSpace=True,
+                                               matrix=True)]
+        shapes = cmds.listRelatives(camera, shapes=True, fullPath=True) or []
+        shape = shapes[0] if shapes else None
+        coi = float(cmds.getAttr(shape + ".centerOfInterest")) if shape else None
+        return {"matrix": matrix, "coi": coi, "shape": shape}
+    except Exception:  # noqa: BLE001 - a pose that cannot be read is not checked
+        return None
+
+
+def _restore_camera_pose(cmds, camera: str, before: Dict[str, Any]
+                         ) -> Optional[Dict[str, Any]]:
+    """Put the panel's camera back where the frame found it, if anything
+    moved it meanwhile, and say so (#864).
+
+    A field report saw the panel camera pushed three to five times further
+    out on every capture call, and nothing in this module moves it -
+    measured on the reporter's own scene and a clean one (34 calls, the
+    camera never moved). So the mover is not known; what the docstring
+    promises is that a capture is side-effect-free, and this is where that
+    promise is kept for the camera: compared after the frame, restored,
+    reported. None when nothing moved.
+    """
+    after = _camera_pose(cmds, camera)
+    if after is None:
+        return None
+    moved = any(abs(a - b) > 1e-4 for a, b in zip(before["matrix"], after["matrix"]))
+    coi_moved = (before.get("coi") is not None and after.get("coi") is not None
+                 and abs(before["coi"] - after["coi"]) > 1e-4)
+    if not moved and not coi_moved:
+        return None
+    report: Dict[str, Any] = {
+        "camera": camera,
+        "before": [round(v, 3) for v in before["matrix"][12:15]],
+        "after": [round(v, 3) for v in after["matrix"][12:15]],
+        "restored": False, "reason": None,
+    }
+    try:
+        if moved:
+            cmds.xform(camera, worldSpace=True, matrix=before["matrix"])
+        if coi_moved and before.get("shape"):
+            cmds.setAttr(before["shape"] + ".centerOfInterest", before["coi"])
+        report["restored"] = True
+    except Exception as exc:  # noqa: BLE001 - reported, never raised from a finally
+        report["reason"] = str(exc)[:200]
+    return report
+
+
 class _PanelState:
     """Snapshot/restore for every viewport setting the capture touches."""
 
@@ -1107,6 +1179,9 @@ class _PanelState:
         self.cmds = cmds
         self.panel = panel
         self.camera = cmds.modelPanel(panel, query=True, camera=True)
+        # The user's camera pose, checked and put back after the frame (#864).
+        self.camera_pose = _camera_pose(cmds, self.camera)
+        self.camera_moved: Optional[Dict[str, Any]] = None
         me = lambda **kw: cmds.modelEditor(panel, query=True, **kw)  # noqa: E731
         self.display_appearance = me(displayAppearance=True)
         self.wireframe_on_shaded = me(wireframeOnShaded=True)
@@ -1212,6 +1287,8 @@ class _PanelState:
             cmds.lookThru(panel, self.camera)
         except Exception:
             pass
+        if self.camera_pose is not None:
+            self.camera_moved = _restore_camera_pose(cmds, self.camera, self.camera_pose)
         try:
             if self.focus_panel:
                 cmds.setFocus(self.focus_panel)
@@ -1270,6 +1347,7 @@ def _capture_one(
     # thing the finally does. Only ever restored to what it was: a user who
     # keeps it off keeps it off.
     invisibility_was = _invisibility_evaluator_off(cmds)
+    shot: Optional[Dict[str, Any]] = None
     try:
         # Framing and visibility are separate questions, exactly as in
         # render_scene: `frame_on` frames, `isolate` hides. With no frame_on,
@@ -1414,7 +1492,7 @@ def _capture_one(
         # would fail the whole call after the pixels were already grabbed;
         # fall back to the bare name rather than resolve-or-raise.
         camera_long = (cmds.ls(capture_cam, long=True) or [capture_cam])[0]
-        return {
+        shot = {
             "png_b64": base64.b64encode(png_bytes).decode("ascii"),
             "camera_position": list(pos),
             "camera_rotation": list(rot),
@@ -1429,6 +1507,7 @@ def _capture_one(
             "dominant": opacity.get("dominant"),
             # What this frame did NOT do, for frame_warnings above.
             "drawn_size": opacity.get("drawn_size"),
+            "fallback": opacity.get("fallback"),
             "unlit": unlit,
             "target_unframed": target_unframed,
             "occlusion": occlusion,
@@ -1440,8 +1519,12 @@ def _capture_one(
             # The AO numbers this frame was drawn with, None for beauty (#832).
             "ssao": ssao,
         }
+        return shot
     finally:
         state.restore()
+        if shot is not None:
+            # Known only after the restore compared the pose (#864).
+            shot["camera_moved"] = state.camera_moved
         if temp_camera is not None:
             try:
                 cmds.delete(temp_camera)
@@ -1566,6 +1649,10 @@ def _grab_pixels(cmds, panel: str, resolution: int):
         # honoured widthHeight has nothing to report (#797 row 36).
         if drawn is not None and drawn != (resolution, resolution):
             opacity["drawn_size"] = list(drawn)
+        if drawn is not None:
+            # Which path drew this frame, size aside (#865): a fallback at
+            # the panel's own size is still the on-screen buffer.
+            opacity["fallback"] = True
         with open(path, "rb") as fh:
             return fh.read(), opacity
     finally:

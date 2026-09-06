@@ -49,7 +49,52 @@ MAPS = ("ao", "curvature", "world_normal")
 CURVATURE_OUTPUTS = ("convex", "concave", "both")
 RESOLUTIONS = texbake.RESOLUTIONS
 DEFAULT_RESOLUTION = texbake.DEFAULT_RESOLUTION
-DEFAULT_CURVATURE_RADIUS = 0.1
+# aiCurvature's radius is WORLD-SPACE, so an absolute default is a different
+# map at every scale. MEASURED (redmine #868, evals/bake_stats_probe_866):
+# one torus at three sizes, convex curvature at 512 px - the old default of
+# 0.1 baked 59 values on a 0.95-unit diagonal, 8 on 32 units and TWO (0 and
+# 1) on 380 units: the kethran creature's flat map, shipped with a plain
+# success, after which apply_surface_detail refused the mask and the caller
+# debugged the wrong tool. The same FRACTION of the bounding-box diagonal
+# baked the same map at all three sizes (3%: 17-18 values, range 0-17), so
+# the default is a fraction; below 0.5% of the diagonal the map reads as
+# flat (0.5% gave ten values in a range of 0-9, 0.03% two).
+CURVATURE_RADIUS_FRACTION = 0.02
+CURVATURE_RADIUS_FLAT_FRACTION = 0.005
+# For a mesh with no extent at all (a degenerate bbox), the old absolute.
+CURVATURE_RADIUS_NO_EXTENT = 0.1
+
+
+def bbox_diagonal(cmds, transform: str) -> float:
+    box = cmds.exactWorldBoundingBox(transform)
+    return sum((float(box[i + 3]) - float(box[i])) ** 2 for i in range(3)) ** 0.5
+
+
+def curvature_radius_for(given, diagonal, mesh: str, warnings: List[str]):
+    """The radius a curvature bake of `mesh` samples with, and where it came
+    from (#868): the caller's number, or 2% of the mesh's bounding-box
+    diagonal. A given radius too small for the mesh is named, because the
+    map it bakes is flat and nothing else would say why."""
+    short = mesh.split("|")[-1]
+    if given is None:
+        if not diagonal or diagonal <= 0:
+            return CURVATURE_RADIUS_NO_EXTENT, (
+                "default: %g (%s has no extent to scale by)"
+                % (CURVATURE_RADIUS_NO_EXTENT, short))
+        radius = float(diagonal) * CURVATURE_RADIUS_FRACTION
+        return radius, ("default: 2%% of %s's %.4g-unit bounding-box diagonal"
+                        % (short, diagonal))
+    if diagonal and diagonal > 0:
+        fraction = float(given) / float(diagonal)
+        if fraction < CURVATURE_RADIUS_FLAT_FRACTION:
+            warnings.append(
+                "curvature_radius %g is %.1g%% of %s's bounding-box diagonal "
+                "(%.4g units): below 0.5%% the map reads as flat (measured on a "
+                "torus: 0.03%% baked two values, 0.5%% ten, 3%% eighteen). Omit "
+                "it for the default, 2%% of the diagonal (%.3g here)"
+                % (given, fraction * 100.0, short, diagonal,
+                   float(diagonal) * CURVATURE_RADIUS_FRACTION))
+    return float(given), "given"
 
 BAKE_MESH_MAPS_KEYS = ("meshes", "out_dir", "maps", "resolution", "apply_ao",
                        "curvature_radius", "curvature_output")
@@ -187,14 +232,15 @@ def validate_pure(params: Dict[str, Any]) -> Dict[str, Any]:
             "nothing else reads it - the requested maps (%s) ignore it in "
             "silence" % ", ".join(maps),
             hint="add 'curvature' to maps, or drop curvature_radius")
-    if radius is None:
-        radius = DEFAULT_CURVATURE_RADIUS
-    if (isinstance(radius, bool) or not isinstance(radius, (int, float))
+    # None stays None: the default is decided PER MESH at bake time, as a
+    # fraction of that mesh's bounding box (#868) - see curvature_radius_for.
+    if radius is not None and (
+            isinstance(radius, bool) or not isinstance(radius, (int, float))
             or radius <= 0):
         raise HandlerError("curvature_radius must be a positive number "
                            "(scene units)",
-                           hint="the sampling radius around each point; "
-                                "0.1 suits metre-scale assets")
+                           hint="the sampling radius around each point; omit "
+                                "it for 2%% of the mesh's bounding-box diagonal")
 
     curvature_output = params.get("curvature_output")
     if curvature_output is not None and not curvature:
@@ -217,7 +263,7 @@ def validate_pure(params: Dict[str, Any]) -> Dict[str, Any]:
     # echoed a dropped request back is the false claim #797 is about.
     return {"names": names, "out_dir": out_dir, "maps": maps,
             "resolution": resolution, "apply_ao": apply_ao,
-            "curvature_radius": float(radius),
+            "curvature_radius": float(radius) if radius is not None else None,
             "curvature_output": curvature_output}
 
 
@@ -554,8 +600,8 @@ def _exr_to_png(cmds, src: str, dst: str) -> None:
             % (proc.returncode, src, tail or "(no output)"))
 
 
-def _make_bake_shader(cmds, map_name: str,
-                      settings: Dict[str, Any]) -> str:
+def _make_bake_shader(cmds, map_name: str, settings: Dict[str, Any],
+                      curvature_radius: Optional[float] = None) -> str:
     base = "mcpBake_%s" % map_name
     if map_name == "ao":
         node = cmds.shadingNode("aiAmbientOcclusion", asShader=True,
@@ -565,7 +611,13 @@ def _make_bake_shader(cmds, map_name: str,
                                 name=naming.unique_name(cmds, base))
         cmds.setAttr(node + ".output",
                      CURVATURE_OUTPUTS.index(settings["curvature_output"]))
-        cmds.setAttr(node + ".radius", settings["curvature_radius"])
+        # Decided per mesh (#868), never the settings' absolute alone.
+        radius = (curvature_radius if curvature_radius is not None
+                  else settings["curvature_radius"])
+        if radius is None:
+            raise HandlerError("the curvature bake has no radius for this mesh",
+                               hint="curvature_radius_for decides it per mesh")
+        cmds.setAttr(node + ".radius", float(radius))
     else:  # world_normal
         node = cmds.shadingNode("aiUtility", asShader=True,
                                 name=naming.unique_name(cmds, base))
@@ -646,7 +698,7 @@ def _map_stats(path: str, mesh: str, map_name: str,
             "it means the geometry has no crevices at this radius. It CAN "
             "be honest, which is why this is a warning and not a refusal - "
             "but check it if you expected detail" % (map_name, mesh))
-    return {"distinct_values": uni["distinct_values"],
+    return {"distinct_values_seen": uni["distinct_values_seen"],
             "pixel_count": uni["pixel_count"],
             "non_uniform": uni["non_uniform"],
             "blank": opa["blank"]}
@@ -817,8 +869,14 @@ def bake_mesh_maps(params: Dict[str, Any]) -> Dict[str, Any]:
     try:
         for transform, shape in settings["meshes"]:
             short = transform.split("|")[-1]
+            diagonal = (bbox_diagonal(cmds, transform)
+                        if "curvature" in settings["maps"] else None)
             for map_name in settings["maps"]:
-                shader = _make_bake_shader(cmds, map_name, settings)
+                radius = source = None
+                if map_name == "curvature":
+                    radius, source = curvature_radius_for(
+                        settings["curvature_radius"], diagonal, transform, warnings)
+                shader = _make_bake_shader(cmds, map_name, settings, radius)
                 try:
                     basename = "%s_%s.png" % (short, map_name)
                     part = os.path.join(settings["out_dir"],
@@ -840,7 +898,14 @@ def bake_mesh_maps(params: Dict[str, Any]) -> Dict[str, Any]:
                     baked.append({"mesh": transform, "map": map_name,
                                   "file": final_path, "basename": basename,
                                   "resolution": settings["resolution"],
-                                  "padded": padded, "stats": stats})
+                                  "padded": padded, "stats": stats,
+                                  # The radius this curvature map was
+                                  # sampled with and where it came from
+                                  # (#868); None on the other maps.
+                                  "curvature_radius": radius,
+                                  "curvature_radius_source": source,
+                                  "bbox_diagonal": (round(diagonal, 4)
+                                                    if diagonal is not None else None)})
                 finally:
                     try:
                         cmds.delete(shader)

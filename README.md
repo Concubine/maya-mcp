@@ -107,6 +107,7 @@ reference for exact fields; each row here is one sentence.
 |---|---|
 | `maya_execute_python` | Run Python in Maya with a persistent namespace; full tracebacks come back verbatim. |
 | `maya_get_scene_graph` | Compact paginated outline of the scene; never returns component data. |
+| `maya_session_info` | Which Maya is answering: pid, port, the open scene and whether it has unsaved changes, cwd, uptime, plugin stamp. Touches nothing. |
 | `maya_capture_viewport` | Offscreen multi-angle viewport captures returned as images; side-effect-free. |
 
 ### Session safety

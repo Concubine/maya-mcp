@@ -55,6 +55,7 @@ class TestRegistration:
             "maya_execute_python",
             "maya_get_scene_graph",
             "maya_get_object_info",
+            "maya_session_info",
             "maya_capture_viewport",
             "maya_capture_turntable",
             "maya_render_scene",
@@ -3209,3 +3210,147 @@ class TestSheetsCarryTheirCells:
         assert "1568" in desc and "392" in desc and "path" in desc
         desc = tools["maya_capture_viewport"].input_schema["properties"]["resolution"]["description"]
         assert "768" in desc and "path" in desc
+
+
+class TestSessionInfo:
+    """#862: with three maya.exe on one machine - one holding unsaved work
+    from another worktree - the only 'who are you' was execute_python
+    against the very process in doubt, and that query is what the dying
+    one died on. maya_session_info asks the plugin's ping and hands back
+    the identity without touching the scene."""
+
+    PING = {
+        "pong": True, "maya": True,
+        "plugin": {"package_dir": "D:/devel/maya-mcp/maya_plugin", "digest": "abc",
+                   "stamp": "813895d58b50", "loaded_digest": "abc",
+                   "loaded_stamp": "813895d58b50", "imported_at": "2026-09-06T20:15:04Z",
+                   "restart_required": False},
+        "process": {"pid": 19468, "host": "127.0.0.1", "port": 9878,
+                    "started_at": 1788725720.5, "uptime_s": 2546.7,
+                    "scene": "D:/run/kethran_armored.ma", "scene_modified": True,
+                    "cwd": "D:/devel/maya-mcp"},
+    }
+
+    def test_it_is_registered(self):
+        mcp = server_mod.create_server(FakeConn())
+        assert "maya_session_info" in {t.name for t in run(mcp.list_tools())}
+
+    def test_it_reports_the_process_the_scene_and_the_code(self):
+        conn = FakeConn(responses={"ping": self.PING})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_session_info", {}))
+        assert result.is_error is False, result.content
+        assert conn.calls[0]["cmd"] == "ping"
+        info = json.loads(result.content[0].text)
+        assert info["pid"] == 19468 and info["port"] == 9878
+        assert info["scene"] == "D:/run/kethran_armored.ma"
+        assert info["scene_modified"] is True
+        assert info["cwd"] == "D:/devel/maya-mcp"
+        assert info["uptime_s"] == 2546.7
+        assert info["plugin_stamp"] == "813895d58b50"
+        assert info["plugin_restart_required"] is False
+
+    def test_a_plugin_that_predates_the_fields_still_answers(self):
+        older = dict(self.PING, process={"pid": 1, "host": "127.0.0.1", "port": 9878,
+                                        "started_at": None, "uptime_s": None, "scene": ""})
+        mcp = server_mod.create_server(FakeConn(responses={"ping": older}))
+        result = run(mcp.call_tool("maya_session_info", {}))
+        assert result.is_error is False, result.content
+        info = json.loads(result.content[0].text)
+        assert info["scene_modified"] is None and info["cwd"] is None
+
+
+class TestBakeStatsAreExact:
+    """#866: every bake reported distinct_values: 2, rich or flat, because
+    the plugin's scan stops at the second value on purpose and the field
+    was named as a count. Two independent reports nearly binned good maps
+    on it. The plugin's number is now distinct_values_seen; the server
+    counts the written file itself and reports the exact number and the
+    luma spread beside it."""
+
+    @staticmethod
+    def _gradient(path, steps=256):
+        img = PILImage.new("L", (steps, 4))
+        img.putdata([x for _ in range(4) for x in range(steps)])
+        img.save(path)
+
+    @staticmethod
+    def _flat(path, value=140):
+        PILImage.new("RGB", (16, 16), (value, value, value)).save(path)
+
+    def _mesh_maps(self, file, stats):
+        conn = FakeConn(responses={"bake_mesh_maps": dict(_meshmaps_result_stub(), baked=[
+            {"mesh": "|limb", "map": "ao", "file": file, "basename": "limb_ao.png",
+             "resolution": 256, "padded": True, "stats": stats}])})
+        mcp = server_mod.create_server(conn)
+        result = run(mcp.call_tool("maya_bake_mesh_maps", {"meshes": ["|limb"], "out_dir": "C:/out"}))
+        assert result.is_error is False, result.content
+        return schemas.BakeMeshMapsResult(**result.structured_content).baked[0].stats
+
+    def test_a_rich_map_is_counted_from_the_file(self, tmp_path):
+        path = str(tmp_path / "limb_ao.png")
+        self._gradient(path)
+        stats = self._mesh_maps(path, {"distinct_values_seen": 2, "pixel_count": 1024,
+                                       "non_uniform": True, "blank": False})
+        assert stats.distinct_values == 256
+        assert stats.distinct_values_seen == 2
+        assert (stats.luma_min, stats.luma_max) == (0, 255)
+        assert stats.luma_stddev > 50
+        assert stats.census_unavailable_reason is None
+
+    def test_a_flat_map_counts_one(self, tmp_path):
+        path = str(tmp_path / "limb_ao.png")
+        self._flat(path)
+        stats = self._mesh_maps(path, {"distinct_values_seen": 1, "pixel_count": 256,
+                                       "non_uniform": False, "blank": False})
+        assert stats.distinct_values == 1 and stats.luma_stddev == 0
+        assert stats.luma_mean == 140
+
+    def test_a_file_the_server_cannot_read_says_so_instead_of_a_number(self):
+        stats = self._mesh_maps("C:/nowhere/limb_ao.png",
+                                {"distinct_values_seen": 2, "pixel_count": 1024,
+                                 "non_uniform": True, "blank": False})
+        assert stats.distinct_values is None
+        assert stats.census_unavailable_reason and "nowhere" in stats.census_unavailable_reason
+
+    def test_a_plugin_older_than_866_keeps_its_2_where_it_belongs(self, tmp_path):
+        # The user's stale Maya still sends the capped scan as distinct_values.
+        path = str(tmp_path / "limb_ao.png")
+        self._gradient(path, steps=64)
+        stats = self._mesh_maps(path, {"distinct_values": 2, "pixel_count": 256,
+                                       "non_uniform": True, "blank": False})
+        assert stats.distinct_values_seen == 2
+        assert stats.distinct_values == 64
+
+    def test_bake_textures_gets_the_same_census(self, tmp_path):
+        path = str(tmp_path / "skin_mat_color_baked.png")
+        self._gradient(path, steps=128)
+        result = _bake_result_with(
+            baked=[{"material": "skin_mat", "slot": "color", "attr": "baseColor",
+                    "file": path, "basename": "skin_mat_color_baked.png",
+                    "resolution": 128, "colorspace": "sRGB", "wired_plug": "outColor",
+                    "kept_intermediates": [], "deleted_nodes": [],
+                    "pixel_check": {"pixel_count": 512, "distinct_values_seen": 2,
+                                    "non_uniform": True, "unavailable_reason": None}}])
+        check = result.baked[0].pixel_check
+        assert check.distinct_values == 128 and check.distinct_values_seen == 2
+        assert check.luma_max == 127
+
+
+class TestMapCensus:
+    def test_counts_colours_and_the_luma_spread(self, tmp_path):
+        path = str(tmp_path / "m.png")
+        img = PILImage.new("RGB", (4, 1))
+        img.putdata([(0, 0, 0), (255, 255, 255), (255, 255, 255), (10, 20, 30)])
+        img.save(path)
+        out = server_mod.images.map_census(path)
+        assert out["distinct_values"] == 3
+        assert out["luma_min"] == 0 and out["luma_max"] == 255
+        assert out["luma_stddev"] > 100
+
+    def test_an_unreadable_file_is_reported_not_raised(self, tmp_path):
+        bad = tmp_path / "bad.png"
+        bad.write_bytes(b"not a png")
+        out = server_mod.images.map_census(str(bad))
+        assert "census_unavailable_reason" in out and "distinct_values" not in out
+        assert "distinct_values" not in server_mod.images.map_census(str(tmp_path / "missing.png"))

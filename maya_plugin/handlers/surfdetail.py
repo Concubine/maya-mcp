@@ -252,8 +252,8 @@ def _load_mask(maps_dir: str, short: str, kind: str) -> Dict[str, Any]:
                  "re-bake it with maya_bake_mesh_maps")
     if not uni["non_uniform"]:
         raise HandlerError(
-            "%s is flat (distinct_values=%d) - there is no directional "
-            "signal to drive %s from" % (path, uni["distinct_values"], kind),
+            "%s is flat (distinct_values_seen=%d) - there is no directional "
+            "signal to drive %s from" % (path, uni["distinct_values_seen"], kind),
             hint="re-bake with maya_bake_mesh_maps at a mesh/radius that "
                  "actually varies, or drop the effect that needs it")
     return pngprobe.read_png(path)

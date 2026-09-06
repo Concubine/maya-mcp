@@ -15,6 +15,7 @@ import math
 import os
 
 from PIL import Image as PILImage
+from PIL import ImageStat
 
 DEFAULT_MAX_PX = 768
 # A contact sheet is read CELL by cell, so it gets the largest frame an LLM
@@ -270,6 +271,35 @@ def pixel_stats(png: bytes) -> dict:
         "clipped_px": clipped,
         "clipped_fraction": round(clipped / total, 4) if total else 0.0,
         "mean_luma": round(luma_sum / total, 1) if total else 0.0,
+    }
+
+
+def map_census(path: str) -> dict:
+    """An exact account of a written map's values (#866).
+
+    The plugin's own scan stops at the second distinct value on purpose (a
+    4096 bake is 16.7M pixels of pure-Python unfiltering inside Maya), and
+    two field reports read that 2 as a count and nearly binned rich bakes
+    on it. The server has PIL and the file, so it counts: distinct RGB
+    values over the whole image, and the luma range and spread - a flat map
+    has a stddev of 0, a rich AO map reads tens. Never raises: an
+    unreadable file is reported as such, distinct from "1".
+    """
+    try:
+        img = PILImage.open(path)
+        img.load()
+    except Exception as exc:  # noqa: BLE001 - reported, never raised
+        return {"census_unavailable_reason": "%s: %s" % (type(exc).__name__, exc)}
+    rgb = img.convert("RGB")
+    total = max(1, rgb.width * rgb.height)
+    colours = rgb.getcolors(maxcolors=total) or []
+    stat = ImageStat.Stat(rgb.convert("L"))
+    return {
+        "distinct_values": len(colours),
+        "luma_min": int(stat.extrema[0][0]),
+        "luma_max": int(stat.extrema[0][1]),
+        "luma_mean": round(float(stat.mean[0]), 2),
+        "luma_stddev": round(float(stat.stddev[0]), 2),
     }
 
 

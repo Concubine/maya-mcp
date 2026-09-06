@@ -142,20 +142,23 @@ def uniformity(path) -> Dict[str, Any]:
     more than one distinct pixel value", so it walks `_unfilter_rows`
     (never building the full row list either) and stops as soon as a
     SECOND distinct value turns up - that already answers non_uniform=True
-    and nothing past it changes the answer. `distinct_values` reflects
-    this: exact up to 2, then capped there rather than paying to keep
-    counting a number nothing downstream reads.
+    and nothing past it changes the answer. `distinct_values_seen` says
+    exactly that: how many values the scan SAW before it stopped - 0
+    (unreadable), 1 (flat) or 2 (non-uniform, and no further). It used to
+    be called `distinct_values`, and two field reports (redmine #866) read
+    the 2 as a count and nearly binned rich bakes on it: the exact count
+    is the MCP server's to take from the written file, where PIL is.
     """
     path = str(path)
     if not os.path.isfile(path):
-        return {"pixel_count": 0, "distinct_values": 0, "non_uniform": None,
+        return {"pixel_count": 0, "distinct_values_seen": 0, "non_uniform": None,
                 "unavailable_reason": "no file at %s" % path}
     try:
         width, height, _bit_depth, _colour_type, stride, idat = (
             _read_header_and_idat(path))
         raw = zlib.decompress(idat)
     except Exception as exc:  # noqa: BLE001 - any read failure is reportable
-        return {"pixel_count": 0, "distinct_values": 0, "non_uniform": None,
+        return {"pixel_count": 0, "distinct_values_seen": 0, "non_uniform": None,
                 "unavailable_reason": "%s: %s" % (type(exc).__name__, exc)}
 
     total = width * height
@@ -170,13 +173,13 @@ def uniformity(path) -> Dict[str, Any]:
                     # Non-uniform is already proven; the remaining pixels
                     # (unscanned rows included - the generator is simply
                     # never asked for another row) cannot change that.
-                    return {"pixel_count": total, "distinct_values": 2,
+                    return {"pixel_count": total, "distinct_values_seen": 2,
                             "non_uniform": True, "unavailable_reason": None}
     except Exception as exc:  # noqa: BLE001 - any read failure is reportable
-        return {"pixel_count": 0, "distinct_values": 0, "non_uniform": None,
+        return {"pixel_count": 0, "distinct_values_seen": 0, "non_uniform": None,
                 "unavailable_reason": "%s: %s" % (type(exc).__name__, exc)}
     distinct = len(seen)
-    return {"pixel_count": scanned, "distinct_values": distinct,
+    return {"pixel_count": scanned, "distinct_values_seen": distinct,
             "non_uniform": distinct > 1, "unavailable_reason": None}
 
 

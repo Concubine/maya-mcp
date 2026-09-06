@@ -583,7 +583,11 @@ class FakeCaptureCmds:
                 capture.MAYA_HORIZONTAL_APERTURE_IN,
             "|persp|perspShape.filmFit": 0,
             "|persp|perspShape.focalLength": 35.0,
+            "|persp|perspShape.centerOfInterest": 5.0,
         }
+        # plug -> what feeds it (#864): a driven or locked translate refuses
+        # the pose restore's xform write, as Maya's does.
+        self.driven_plugs = {}
         # Shapes cmds.ls(geometry=True, visible=True) reports. EMPTY by
         # default, which is why _capture_one's frame_all branch has only
         # ever taken its `viewFit(allObjects=True)` fallback here (#799).
@@ -758,6 +762,29 @@ class FakeCaptureCmds:
             return None
         shape = self.nodes.get(resolved)
         return [shape] if shape else None
+
+    def xform(self, node, **kw):
+        """Only the forms the pose guard uses (#864): a world-matrix query
+        (identity rotation, the translate plug as the row) and a matrix
+        write, which lands on translate and refuses a driven plug."""
+        resolved = self._require(node)
+        self.calls.append(("xform", resolved, dict(kw)))
+        if kw.get("query"):
+            if kw.get("matrix"):
+                t = self.plugs.get(resolved + ".translate", (0.0, 0.0, 0.0))
+                return [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+                        float(t[0]), float(t[1]), float(t[2]), 1.0]
+            raise AssertionError("unmodelled xform query: %r" % (kw,))
+        if "matrix" in kw:
+            plug = resolved + ".translate"
+            if plug in self.driven_plugs:
+                raise RuntimeError(
+                    "xform: The attribute '%s' is locked or connected and cannot "
+                    "be modified (%s feeds it)" % (plug, self.driven_plugs[plug]))
+            m = kw["matrix"]
+            self.plugs[plug] = (float(m[12]), float(m[13]), float(m[14]))
+            return None
+        raise AssertionError("unmodelled xform write: %r" % (kw,))
 
     def _vp2_attr(self, attr):
         name = attr.split(".", 1)[1]
@@ -2689,3 +2716,135 @@ class TestSsaoReadsAsContact:
             fake.setAttr("hardwareRenderingGlobals.ssaoAmount", 4.0)
         with pytest.raises(RuntimeError):
             fake.getAttr("hardwareRenderingGlobals.noSuchThing")
+
+
+class TestAFrameFromTheScreenIsNamed:
+    """#865: a field reporter's first angle came back with a cyan wireframe
+    over everything on a black background while the second angle in the
+    same call was fine, and the identical call a moment later gave two
+    clean frames. No leak reproduced on their scene or a clean one
+    (evals/capture_state_probe_864: 13 + 24 + 7 calls, zero anomalies) -
+    but that frame is exactly what the M3dView fallback returns when the
+    offscreen playblast fails: the ON-SCREEN buffer, with whatever the
+    screen showed. Only a size change used to be reported, so a fallback
+    at the panel's own size passed as a normal capture. Now the path is
+    named whatever the size."""
+
+    def _shot(self, **extra):
+        shot = {"png_b64": "ZmFrZQ==", "camera_position": [0, 0, 1],
+                "camera_rotation": [0, 0, 0], "camera": "|cam",
+                "blank": False, "blank_unmeasurable": None}
+        shot.update(extra)
+        return shot
+
+    def test_a_fallback_at_the_panels_own_size_is_still_named(self, monkeypatch):
+        monkeypatch.setattr(capture, "_capture_one",
+                            lambda *a, **k: self._shot(fallback=True))
+        result = capture.capture_viewport({"angles": ["current"], "resolution": 768})
+        notes = [w for w in result["warnings"] if "ON-SCREEN" in w]
+        assert len(notes) == 1, result["warnings"]
+        assert "reshoot" in notes[0] and "wireframe" in notes[0] and "current" in notes[0]
+        assert "not 768x768" not in notes[0]  # the size did not change
+
+    def test_a_fallback_that_also_changed_the_size_says_both_in_one_note(self, monkeypatch):
+        monkeypatch.setattr(capture, "_capture_one",
+                            lambda *a, **k: self._shot(fallback=True, drawn_size=[412, 380]))
+        result = capture.capture_viewport({"angles": ["front"], "resolution": 768})
+        assert len(result["warnings"]) == 1, result["warnings"]
+        note = result["warnings"][0]
+        assert "412x380" in note and "768" in note and "ON-SCREEN" in note
+
+    def test_a_playblast_frame_says_nothing(self, monkeypatch):
+        monkeypatch.setattr(capture, "_capture_one",
+                            lambda *a, **k: self._shot(fallback=None))
+        result = capture.capture_viewport({"angles": ["front"]})
+        assert result["warnings"] == []
+
+    def test_the_grab_marks_the_path_it_took(self, monkeypatch, tmp_path):
+        # The playblast fails; the fallback writes the file at the panel's
+        # size, which here equals the request - so drawn_size stays unset
+        # and only `fallback` says which path drew it.
+        fake = FakeCaptureCmds()
+        written = {}
+
+        def playblast(**kw):
+            return None
+
+        def read_color_buffer(path):
+            from PIL import Image as PILImage  # noqa: PLC0415
+
+            PILImage.new("RGBA", (64, 64), (0, 208, 208, 255)).save(path)
+            written["path"] = path
+            return (64, 64)
+
+        fake.playblast = playblast
+        fake.currentTime = lambda **kw: 1.0
+        monkeypatch.setattr(capture, "_read_color_buffer", read_color_buffer)
+        png, opacity = capture._grab_pixels(fake, "modelPanel1", 64)
+        assert opacity.get("fallback") is True
+        assert "drawn_size" not in opacity
+        assert png[:4] == b"\x89PNG"
+
+
+class TestThePanelCameraIsPutBack:
+    """#864: a field report saw the panel's camera pushed three to five
+    times further out on every capture call with frame_all:false. Nothing
+    in this module moves that camera - measured on the reporter's own
+    armour scene (headCam, seven calls) and on a clean scene (persp, 13
+    calls, 24 rounds): it never moved. So the mover is unknown; what the
+    docstring promises is a side-effect-free capture, and that promise is
+    now kept for the camera's pose: read before the frame, compared after,
+    put back, and reported."""
+
+    def _fake(self, monkeypatch, move_to=None, driven=None):
+        fake = FakeCaptureCmds()
+        if driven:
+            fake.driven_plugs["|persp.translate"] = driven
+        monkeypatch.setattr(capture, "_cmds", lambda: fake)
+
+        def grab(*a, **k):
+            if move_to is not None:
+                fake.plugs["|persp.translate"] = tuple(move_to)
+            return (b"fakepng", {"blank": False, "unavailable_reason": None})
+
+        monkeypatch.setattr(capture, "_grab_pixels", grab)
+        return fake
+
+    def test_a_camera_nothing_moved_gets_no_note_and_no_write(self, monkeypatch):
+        fake = self._fake(monkeypatch)
+        result = capture.capture_viewport({"angles": ["current"], "frame_all": False})
+        assert result["warnings"] == []
+        assert not [c for c in fake.calls if c[0] == "xform" and "matrix" in c[2]
+                    and not c[2].get("query")]
+
+    def test_a_camera_something_moved_is_put_back_and_named(self, monkeypatch):
+        fake = self._fake(monkeypatch, move_to=(10, 20, 30))
+        result = capture.capture_viewport({"angles": ["current"], "frame_all": False})
+        assert fake.plugs["|persp.translate"] == (0.0, 0.0, 0.0)
+        notes = [w for w in result["warnings"] if "moved during this frame" in w]
+        assert len(notes) == 1, result["warnings"]
+        assert "persp" in notes[0] and "put back" in notes[0]
+        assert "[10.0, 20.0, 30.0]" in notes[0] and "[0.0, 0.0, 0.0]" in notes[0]
+        # the frame was shot from where the camera WAS at grab time
+        assert result["camera_positions"][0]["position"] == [10, 20, 30]
+
+    def test_a_placed_angle_checks_the_panel_camera_too(self, monkeypatch):
+        fake = self._fake(monkeypatch, move_to=(1, 2, 3))
+        result = capture.capture_viewport({"angles": ["front"]})
+        assert fake.plugs["|persp.translate"] == (0.0, 0.0, 0.0)
+        assert any("moved during this frame" in w for w in result["warnings"])
+
+    def test_a_driven_camera_is_named_as_not_put_back(self, monkeypatch):
+        fake = self._fake(monkeypatch, move_to=(10, 20, 30), driven="|persp_parentConstraint1")
+        result = capture.capture_viewport({"angles": ["current"], "frame_all": False})
+        assert fake.plugs["|persp.translate"] == (10, 20, 30)  # left as Maya has it
+        notes = [w for w in result["warnings"] if "moved during this frame" in w]
+        assert len(notes) == 1 and "NOT put back" in notes[0], result["warnings"]
+        assert "parentConstraint" in notes[0]
+
+    def test_a_pose_that_cannot_be_read_is_not_guarded(self, monkeypatch):
+        fake = self._fake(monkeypatch, move_to=(10, 20, 30))
+        fake.xform = None  # a Maya that answers nothing here: no check, no write
+        result = capture.capture_viewport({"angles": ["current"], "frame_all": False})
+        assert not any("moved during this frame" in w for w in result["warnings"])
+        assert fake.plugs["|persp.translate"] == (10, 20, 30)

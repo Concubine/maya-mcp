@@ -60,6 +60,12 @@ class FakeCmds:
         self.connected_plugs = {}
         # node -> connections, for the typed listConnections queries.
         self.connections = {}
+        # node -> its parent's long path (#867). A node absent here is at
+        # the root, as listRelatives(parent=True) answers None for one.
+        self.parents = {}
+        # result -> the inputs a polyUnite WITH history left behind as empty
+        # transforms, reaped by delete(constructionHistory=True) (#867).
+        self.history = {}
 
     # --- existence ---------------------------------------------------------
     # #799 contract 1: real Maya raises "No object matches name" for a node it
@@ -136,12 +142,34 @@ class FakeCmds:
         return bool(self.ls(name))
 
     def listRelatives(self, node, shapes=False, children=False, fullPath=False,
-                      noIntermediate=False, **kwargs):
+                      noIntermediate=False, parent=False, **kwargs):
         self._require(node)
         if shapes:
             entry = self.shapes.get(node)
             return [entry[0]] if entry else None
+        if parent:
+            found = self.parents.get(node)
+            return [found] if found else None
         return None
+
+    def parent(self, child, target):
+        """cmds.parent: the child moves under target and answers its NEW
+        path. Modelled with the rename below in mind: every per-node table
+        is re-keyed, so a later question about the old path raises the way
+        Maya's does (#799), and one about the new path answers."""
+        self._require(child)
+        self._require(target)
+        moved = target + "|" + child.split("|")[-1]
+        self.objects.remove(child)
+        self.objects.append(moved)
+        self.shapes[moved] = self.shapes.pop(child, (moved + "Shape", "mesh"))
+        for table in (self.pivots, self.bboxes, self.sg_members, self.history):
+            if child in table:
+                table[moved] = table.pop(child)
+        self.parents.pop(child, None)
+        self.parents[moved] = target
+        self.calls.append(("parent", child, target))
+        return [moved]
 
     def nodeType(self, node):
         self._require(node)
@@ -165,16 +193,33 @@ class FakeCmds:
         taken = {o.split("|")[-1] for o in self.objects}
         actual = self._unite_name or (asked + "1" if asked in taken else asked)
         node = "|" + actual
-        for m in members:
-            # Consumed, not merely hidden: the transform and its shape both
-            # stop existing, and a later question about either must raise.
-            if m in self.objects:
-                self.objects.remove(m)
-                self.deleted.append(m)
-            self.shapes.pop(m, None)
+        if kwargs.get("ch"):
+            # History ON (#867): the inputs stay as EMPTY transforms - their
+            # shapes feed the unite - until delete(constructionHistory=True)
+            # reaps them, and with them any parent left childless.
+            for m in members:
+                self.shapes.pop(m, None)
+            self.history[node] = list(members)
+        else:
+            for m in members:
+                # Consumed, not merely hidden: the transform and its shape
+                # both stop existing, and a later question about either
+                # must raise. MEASURED (live gate 2026-09-06): a parent
+                # holding nothing else goes with them.
+                self._reap(m)
         self.objects.append(node)
         self.shapes[node] = (node + "Shape", "mesh")
         return [node, node + "_unite"]
+
+    def _reap(self, node):
+        if node in self.objects:
+            self.objects.remove(node)
+            self.deleted.append(node)
+        self.shapes.pop(node, None)
+        parent = self.parents.pop(node, None)
+        if parent and parent in self.objects and not any(
+                self.parents.get(o) == parent for o in self.objects):
+            self._reap(parent)
 
     def polyEvaluate(self, node, **kwargs):
         self._require(node)
@@ -235,8 +280,14 @@ class FakeCmds:
 
     def delete(self, node, **kwargs):
         self._require(node)
-        self.calls.append(("delete", node, None))
-        if not kwargs.get("constructionHistory") and node in self.objects:
+        self.calls.append(("delete", node, bool(kwargs.get("constructionHistory"))))
+        if kwargs.get("constructionHistory"):
+            # Reaps the unite's emptied inputs (and a parent left with no
+            # child - MEASURED); the result itself stays.
+            for member in self.history.pop(node, []):
+                self._reap(member)
+            return
+        if node in self.objects:
             self.objects.remove(node)
             self.shapes.pop(node, None)
             self.deleted.append(node)
@@ -246,12 +297,17 @@ class FakeCmds:
         # Maya never refuses a rename collision; it suffixes. Modelled so a
         # handler that renames onto a held name is caught by the name it
         # gets back, the way it would be live.
-        if "|" + new in self.objects and "|" + new != node:
+        if any(o.split("|")[-1] == new and o != node for o in self.objects):
             new = new + "1"
         self.objects.remove(node)
-        renamed = "|" + new
+        # The path is kept: a rename does not move a node (#867).
+        renamed = node.rsplit("|", 1)[0] + "|" + new
         self.objects.append(renamed)
         self.shapes[renamed] = self.shapes.pop(node, (renamed + "Shape", "mesh"))
+        for table in (self.pivots, self.bboxes, self.sg_members, self.parents,
+                      self.history):
+            if node in table:
+                table[renamed] = table.pop(node)
         self.calls.append(("rename", node, new))
         return renamed
 
@@ -301,7 +357,7 @@ class TestCombine:
         fake = FakeCmds()
         out = _run(fake, names=["|a", "|b"], name="kit_piece")
         assert out["name"] == "|kit_piece"
-        assert ("polyUnite", ("|a", "|b"), False) in [
+        assert ("polyUnite", ("|a", "|b"), True) in [  # history on, deleted after the reparent (#867)
             (c[0], c[1], c[2]) for c in fake.calls if c[0] == "polyUnite"
         ]
 
@@ -574,3 +630,119 @@ class TestTheFakeRefusesWhatMayaRefuses:
         out = _run(fake, names=["|a", "|b"], name="p")
         assert out["shading"]["repaired"] is True
         assert any("shading groups" in w for w in out["warnings"])
+
+
+class TestCombineCarriesTheParent:
+    """#867: polyUnite lands its result at the world root, and combine said
+    nothing - twelve armour plates under |kethran came back as |armor at the
+    root, outside the group that moves the animal, with a plain success.
+    boolean_op carries a's parent (modeling._carry_parent); combine now
+    carries names[0]'s the same way, BEFORE the freeze so the freeze bakes
+    the compensating transform cmds.parent introduces, and says so when the
+    inputs sat under several parents."""
+
+    @staticmethod
+    def _fake(objects, parents):
+        fake = FakeCmds(objects=objects)
+        fake.parents.update(parents)
+        return fake
+
+    def test_inputs_under_one_group_keep_it(self):
+        fake = self._fake(("|grp", "|grp|a", "|grp|b"),
+                          {"|grp|a": "|grp", "|grp|b": "|grp"})
+        fake.shapes.pop("|grp")  # a group has no shape
+        out = _run(fake, names=["|grp|a", "|grp|b"], name="ab")
+        assert out["name"] == "|grp|ab"
+        assert out["parent"] == "|grp"
+        assert ("parent", "|ab", "|grp") in fake.calls
+        assert not [w for w in out["warnings"] if "parent" in w]
+
+    def test_the_reparent_comes_before_the_freeze_so_the_freeze_bakes_it(self):
+        fake = self._fake(("|grp", "|grp|a", "|grp|b"),
+                          {"|grp|a": "|grp", "|grp|b": "|grp"})
+        fake.shapes.pop("|grp")
+        _run(fake, names=["|grp|a", "|grp|b"], name="ab")
+        kinds = [c[0] for c in fake.calls]
+        assert kinds.index("parent") < kinds.index("makeIdentity"), kinds
+        assert fake.frozen == ["|grp|ab"]
+
+    def test_mixed_parents_carry_the_first_and_say_which(self):
+        fake = self._fake(("|grp", "|other", "|grp|a", "|other|b", "|c"),
+                          {"|grp|a": "|grp", "|other|b": "|other"})
+        fake.shapes.pop("|grp")
+        fake.shapes.pop("|other")
+        out = _run(fake, names=["|grp|a", "|other|b", "|c"], name="abc")
+        assert out["name"] == "|grp|abc"
+        assert out["parent"] == "|grp"
+        note = [w for w in out["warnings"] if "parent" in w]
+        assert len(note) == 1, out["warnings"]
+        assert "|grp" in note[0] and "|other" in note[0] and "root" in note[0]
+
+    def test_root_level_inputs_stay_at_the_root_without_a_word(self):
+        fake = self._fake(("|a", "|b"), {})
+        out = _run(fake, names=["|a", "|b"], name="ab")
+        assert out["name"] == "|ab"
+        assert out["parent"] is None
+        assert not [c for c in fake.calls if c[0] == "parent"]
+        assert not [w for w in out["warnings"] if "parent" in w]
+
+    def test_a_first_input_at_the_root_with_grouped_siblings_says_so(self):
+        fake = self._fake(("|grp", "|a", "|grp|b"), {"|grp|b": "|grp"})
+        fake.shapes.pop("|grp")
+        out = _run(fake, names=["|a", "|grp|b"], name="ab")
+        assert out["name"] == "|ab" and out["parent"] is None
+        note = [w for w in out["warnings"] if "parent" in w]
+        assert len(note) == 1 and "|grp" in note[0], out["warnings"]
+
+    def test_a_parent_that_no_longer_exists_is_named_and_the_result_stays_at_the_root(self):
+        fake = self._fake(("|a", "|b"), {"|a": "|gone"})
+        out = _run(fake, names=["|a", "|b"], name="ab")
+        assert out["name"] == "|ab" and out["parent"] is None
+        note = [w for w in out["warnings"] if "|gone" in w]
+        assert note and "root" in note[0], out["warnings"]
+
+    def test_the_reported_parent_is_read_back_not_assumed(self):
+        # cmds.parent answers the new path; the result reports what Maya
+        # has, the way the pivot is reported after the freeze (#803).
+        fake = self._fake(("|grp", "|grp|a", "|grp|b"),
+                          {"|grp|a": "|grp", "|grp|b": "|grp"})
+        fake.shapes.pop("|grp")
+        out = _run(fake, names=["|grp|a", "|grp|b"], name="ab")
+        assert fake.parents["|grp|ab"] == "|grp"
+        assert out["parent"] == fake.listRelatives("|grp|ab", parent=True, fullPath=True)[0]
+
+    def test_the_fake_moves_a_node_the_way_maya_does(self):
+        fake = self._fake(("|grp", "|a"), {})
+        fake.shapes.pop("|grp")
+        assert fake.parent("|a", "|grp") == ["|grp|a"]
+        assert "|grp|a" in fake.objects and "|a" not in fake.objects
+        assert fake.listRelatives("|grp|a", parent=True, fullPath=True) == ["|grp"]
+        assert fake.listRelatives("|grp", parent=True, fullPath=True) is None
+        with pytest.raises(RuntimeError):
+            fake.parent("|a", "|grp")  # already moved: Maya has no |a any more
+
+    def test_a_group_holding_only_the_inputs_survives_to_hold_the_result(self):
+        # MEASURED (live gate 2026-09-06): polyUnite without history reaps a
+        # parent left with no child along with the inputs, so the group was
+        # gone before the result could be put under it. History stays on
+        # until the result is under the group; the delete then reaps the
+        # emptied inputs and the group survives because it holds the result.
+        fake = self._fake(("|grp", "|grp|a", "|grp|b"),
+                          {"|grp|a": "|grp", "|grp|b": "|grp"})
+        fake.shapes.pop("|grp")
+        out = _run(fake, names=["|grp|a", "|grp|b"], name="ab")
+        assert "|grp" in fake.objects
+        assert out["name"] == "|grp|ab" and out["parent"] == "|grp"
+        assert "|grp|a" not in fake.objects and "|grp|b" not in fake.objects
+        kinds = [(c[0], c[2]) for c in fake.calls if c[0] in ("polyUnite", "parent", "delete", "rename")]
+        assert kinds[0] == ("polyUnite", True)
+        assert kinds.index(("parent", "|grp")) < kinds.index(("delete", True))
+
+    def test_the_fake_reaps_a_childless_parent_with_the_history_delete(self):
+        fake = self._fake(("|grp", "|grp|a", "|grp|b"),
+                          {"|grp|a": "|grp", "|grp|b": "|grp"})
+        fake.shapes.pop("|grp")
+        node = fake.polyUnite(["|grp|a", "|grp|b"], ch=True, name="ab")[0]
+        assert "|grp|a" in fake.objects  # still there, empty, until the delete
+        fake.delete(node, constructionHistory=True)
+        assert "|grp" not in fake.objects and "|grp|a" not in fake.objects

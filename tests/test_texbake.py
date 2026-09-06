@@ -946,7 +946,7 @@ class TestTwoPhaseBake:
         monkeypatch.setattr(texbake, "_convert_solid_tx", _fake_bake(fake))
         monkeypatch.setattr(texbake.pngprobe, "uniformity",
                             lambda _p: {"pixel_count": 1024,
-                                        "distinct_values": 1,
+                                        "distinct_values_seen": 1,
                                         "non_uniform": False,
                                         "unavailable_reason": None})
         with pytest.raises(HandlerError, match="flat") as excinfo:
@@ -964,7 +964,7 @@ class TestTwoPhaseBake:
         monkeypatch.setattr(texbake, "_convert_solid_tx", _fake_bake(fake))
         monkeypatch.setattr(texbake.pngprobe, "uniformity",
                             lambda _p: {"pixel_count": 0,
-                                        "distinct_values": 0,
+                                        "distinct_values_seen": 0,
                                         "non_uniform": None,
                                         "unavailable_reason": "unreadable"})
         with pytest.raises(HandlerError, match="could not be measured") as excinfo:
@@ -990,7 +990,7 @@ class TestTwoPhaseBake:
         monkeypatch.setattr(texbake, "_convert_solid_tx", _fake_bake(fake))
         monkeypatch.setattr(texbake.pngprobe, "uniformity",
                             lambda _p: {"pixel_count": 1024,
-                                        "distinct_values": 186,
+                                        "distinct_values_seen": 186,
                                         "non_uniform": True,
                                         "unavailable_reason": None})
         out = texbake.bake_textures(_params(tmp_path))
@@ -1011,7 +1011,7 @@ class TestTwoPhaseBake:
         monkeypatch.setattr(texbake, "_convert_solid_tx", _fake_bake(fake))
         monkeypatch.setattr(texbake.pngprobe, "uniformity",
                             lambda _p: {"pixel_count": 0,
-                                        "distinct_values": 0,
+                                        "distinct_values_seen": 0,
                                         "non_uniform": None,
                                         "unavailable_reason": "unreadable"})
         with pytest.raises(HandlerError, match="could not be measured"):
@@ -1036,7 +1036,7 @@ class TestFixRound1:
         monkeypatch.setattr(texbake, "_convert_solid_tx", _fake_bake(fake))
         monkeypatch.setattr(texbake.pngprobe, "uniformity",
                             lambda _p: {"pixel_count": 1024,
-                                        "distinct_values": 186,
+                                        "distinct_values_seen": 186,
                                         "non_uniform": True,
                                         "unavailable_reason": None})
 
@@ -1060,7 +1060,7 @@ class TestFixRound1:
         monkeypatch.setattr(texbake, "_convert_solid_tx", _fake_bake(fake))
         monkeypatch.setattr(texbake.pngprobe, "uniformity",
                             lambda _p: {"pixel_count": 1024,
-                                        "distinct_values": 186,
+                                        "distinct_values_seen": 186,
                                         "non_uniform": True,
                                         "unavailable_reason": None})
 
@@ -1095,7 +1095,7 @@ class TestFixRound1:
         monkeypatch.setattr(texbake, "_convert_solid_tx", _bake)
         monkeypatch.setattr(texbake.pngprobe, "uniformity",
                             lambda _p: {"pixel_count": 1024,
-                                        "distinct_values": 186,
+                                        "distinct_values_seen": 186,
                                         "non_uniform": True,
                                         "unavailable_reason": None})
 
@@ -1122,7 +1122,7 @@ class TestFixRound1:
         monkeypatch.setattr(texbake, "_convert_solid_tx", _fake_bake(fake))
         monkeypatch.setattr(texbake.pngprobe, "uniformity",
                             lambda _p: {"pixel_count": 1024,
-                                        "distinct_values": 186,
+                                        "distinct_values_seen": 186,
                                         "non_uniform": True,
                                         "unavailable_reason": None})
 
@@ -1146,7 +1146,7 @@ class TestFixRound1:
         monkeypatch.setattr(texbake, "_convert_solid_tx", _fake_bake(fake))
         monkeypatch.setattr(texbake.pngprobe, "uniformity",
                             lambda _p: {"pixel_count": 1024,
-                                        "distinct_values": 186,
+                                        "distinct_values_seen": 186,
                                         "non_uniform": True,
                                         "unavailable_reason": None})
 
@@ -1213,7 +1213,7 @@ class TestNormalSlotWithAnIndirectBump:
         monkeypatch.setattr(texbake, "_convert_solid_tx", _fake_bake(fake))
         monkeypatch.setattr(texbake.pngprobe, "uniformity",
                             lambda _p: {"pixel_count": 1024,
-                                        "distinct_values": 186,
+                                        "distinct_values_seen": 186,
                                         "non_uniform": True,
                                         "unavailable_reason": None})
 

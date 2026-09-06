@@ -4,6 +4,7 @@ Runs a fake plugin (real TCP server speaking the wire protocol) in a thread —
 no Maya required.
 """
 
+import os
 import socket
 import threading
 import time
@@ -39,6 +40,8 @@ class FakePlugin:
                 conn, _ = self._srv.accept()
             except socket.timeout:
                 continue
+            except OSError:
+                return  # a test closed the listener on purpose (#862)
             self.connections += 1
             threading.Thread(target=self._client, args=(conn,), daemon=True).start()
         self._srv.close()
@@ -87,7 +90,9 @@ class TestRequests:
         conn = MayaConnection(port=srv.port)
         result = conn.request("ping", {"x": 1}, timeout_s=5)
         assert result == {"echo": {"x": 1}}
-        frame = srv.frames[0]
+        # frames[0] is the identity handshake (#862); the request is next
+        assert srv.frames[0]["cmd"] == "ping" and srv.frames[0]["params"] == {}
+        frame = srv.frames[1]
         assert frame["v"] == protocol.PROTOCOL_VERSION
         assert frame["cmd"] == "ping"
         assert frame["params"] == {"x": 1}
@@ -100,7 +105,7 @@ class TestRequests:
         srv = plugin()
         conn = MayaConnection(port=srv.port)
         conn.request("ping", {}, timeout_s=5, timeout_adjustable=True)
-        assert srv.frames[0]["timeout_adjustable"] is True
+        assert srv.frames[1]["timeout_adjustable"] is True  # [0] is the handshake
         conn.close()
 
     def test_persistent_connection_reused_across_requests(self, plugin):
@@ -168,16 +173,20 @@ class TestConnectionFailures:
         drop_next["flag"] = True
         with pytest.raises(MayaConnectionError):
             conn.request("b", {}, timeout_s=5)
-        # transparent fresh connection on the next call
+        # transparent fresh connection on the next call. Three connections,
+        # not two: the drop's diagnosis (#862) opens one probe connection to
+        # learn that the plugin still listens, then the next call reconnects.
         assert conn.request("c", {}, timeout_s=5) == {"echo": {}}
-        assert srv.connections == 2
+        assert srv.connections == 3
         conn.close()
 
     def test_response_timeout_raises_and_next_request_gets_fresh_connection(self, plugin):
         stall = {"flag": True}
 
         def responder(frame):
-            if stall["flag"]:
+            # Only the request under test stalls - the identity handshake (#862)
+            # goes first on this connection and must not eat the stall.
+            if stall["flag"] and frame["cmd"] == "slow":
                 stall["flag"] = False
                 time.sleep(3.0)  # far beyond the request timeout + grace
             return echo_responder(frame)
@@ -226,3 +235,108 @@ class TestSerialization:
             t.join()
         assert active["max"] == 1
         conn.close()
+
+
+class TestAMidRequestFailureSaysWhatHappened:
+    """#862: 'it will be re-established on the next call' was said on every
+    mid-request failure - including the two where the Maya process had
+    died, nothing listened on the port, and the caller lost time retrying.
+    After a failure the connection now finds out which of three things
+    happened and says so: the listener still answers (retry is right), the
+    port refuses and the last pid seen is gone (relaunch), or the port
+    refuses while that pid still runs (the plugin server died inside a
+    living Maya - start_server() or relaunch)."""
+
+    @staticmethod
+    def _drop_once_responder(after=None):
+        state = {"drop": False}
+
+        def responder(frame):
+            if frame["cmd"] == "ping":
+                return protocol.make_ok(frame["id"], {
+                    "pong": True, "process": {"pid": state.get("pid"), "port": 0}}, elapsed_ms=1)
+            if state["drop"]:
+                state["drop"] = False
+                if after:
+                    after()
+                return None
+            return echo_responder(frame)
+
+        return responder, state
+
+    def test_a_dropped_socket_with_the_plugin_still_listening_says_retry(self, plugin):
+        responder, state = self._drop_once_responder()
+        srv = plugin(responder)
+        conn = MayaConnection(port=srv.port)
+        conn.request("a", {}, timeout_s=5)
+        state["drop"] = True
+        with pytest.raises(MayaConnectionError) as exc_info:
+            conn.request("b", {}, timeout_s=5)
+        msg = str(exc_info.value)
+        assert "still accepts connections" in msg and "next call" in msg, msg
+        assert "relaunch" not in msg.lower()
+        assert conn.request("c", {}, timeout_s=5) == {"echo": {}}
+        conn.close()
+
+    def test_a_plugin_that_stopped_listening_says_relaunch(self, plugin):
+        srv_box = {}
+        responder, state = self._drop_once_responder(after=lambda: srv_box["srv"]._srv.close())
+        srv = plugin(responder)
+        srv_box["srv"] = srv
+        conn = MayaConnection(port=srv.port, connect_timeout_s=0.5)
+        conn.request("a", {}, timeout_s=5)
+        state["drop"] = True
+        with pytest.raises(MayaConnectionError) as exc_info:
+            conn.request("b", {}, timeout_s=5)
+        msg = str(exc_info.value)
+        assert "nothing is listening" in msg and "%d" % srv.port in msg, msg
+        assert "relaunch" in msg.lower() and "retry" in msg.lower(), msg
+        assert "next call" not in msg
+
+    def test_a_known_pid_that_is_alive_says_the_server_died_inside_maya(self, plugin):
+        srv_box = {}
+        responder, state = self._drop_once_responder(after=lambda: srv_box["srv"]._srv.close())
+        state["pid"] = os.getpid()  # a process that is certainly alive: this one
+        srv = plugin(responder)
+        srv_box["srv"] = srv
+        conn = MayaConnection(port=srv.port, connect_timeout_s=0.5)
+        conn.request("ping", {}, timeout_s=5)  # the pid is learned from any ping that passes through
+        assert conn.last_pid == os.getpid()
+        state["drop"] = True
+        with pytest.raises(MayaConnectionError) as exc_info:
+            conn.request("b", {}, timeout_s=5)
+        msg = str(exc_info.value)
+        assert "pid %d" % os.getpid() in msg and "still running" in msg, msg
+        assert "start_server" in msg and "retry" in msg.lower(), msg
+
+    def test_a_known_pid_that_is_gone_says_the_process_died(self, plugin):
+        srv_box = {}
+        responder, state = self._drop_once_responder(after=lambda: srv_box["srv"]._srv.close())
+        state["pid"] = _finished_pid()
+        srv = plugin(responder)
+        srv_box["srv"] = srv
+        conn = MayaConnection(port=srv.port, connect_timeout_s=0.5)
+        conn.request("ping", {}, timeout_s=5)
+        state["drop"] = True
+        with pytest.raises(MayaConnectionError) as exc_info:
+            conn.request("b", {}, timeout_s=5)
+        msg = str(exc_info.value)
+        assert "pid %d" % state["pid"] in msg and "gone" in msg, msg
+        assert "relaunch" in msg.lower() and "reopen" in msg.lower(), msg
+
+    def test_process_alive_answers_for_this_process_and_a_finished_one(self):
+        from maya_mcp import connection
+
+        assert connection.process_alive(os.getpid()) is True
+        assert connection.process_alive(_finished_pid()) is False
+
+
+def _finished_pid():
+    """The pid of a child that has already exited - a process that is
+    certainly gone (pid reuse within the same test is not a real risk)."""
+    import subprocess
+    import sys
+
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    return child.pid

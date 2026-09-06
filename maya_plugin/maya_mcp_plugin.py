@@ -126,6 +126,17 @@ def _scene_name() -> Optional[str]:
         return None
 
 
+def _scene_modified() -> Optional[bool]:
+    """Whether the open scene carries unsaved changes, or None headless.
+    Never raises, for the same reason _scene_name never does."""
+    try:
+        import maya.cmds as cmds  # noqa: PLC0415
+
+        return bool(cmds.file(query=True, modified=True))
+    except Exception:  # noqa: BLE001 - see docstring
+        return None
+
+
 def _process_info() -> Dict[str, Any]:
     """WHICH process is answering - a port is not an identity (maya-mcp #648).
 
@@ -147,6 +158,12 @@ def _process_info() -> Dict[str, Any]:
         "started_at": started,
         "uptime_s": round(time.time() - started, 1) if started else None,
         "scene": _scene_name(),
+        # The two a human needs before killing a Maya (#862): three were up
+        # on one machine, one of them holding unsaved work from another
+        # worktree, and the only way to ask was execute_python against the
+        # very process in doubt.
+        "scene_modified": _scene_modified(),
+        "cwd": os.getcwd(),
     }
 
 
@@ -288,6 +305,17 @@ def _setup_logging() -> None:
     logsetup.configure(log, "plugin")
 
 
+# accept() errors that mean the LISTENING socket is gone, not the client's
+# connection: a closed or invalid descriptor. Everything else (10054 reset,
+# 10053 abort, 10055 no buffers, 10024 too many files) is a moment, not a
+# death, and the loop rides it out.
+_DEAD_LISTENER_ERRNOS = {errno.EBADF, errno.ENOTSOCK, errno.EINVAL, 10038, 10022, 10009}
+
+
+def _dead_listener(exc: BaseException) -> bool:
+    return getattr(exc, "errno", None) in _DEAD_LISTENER_ERRNOS
+
+
 class PluginServer:
     def __init__(
         self,
@@ -307,6 +335,7 @@ class PluginServer:
                 raise PortInUseError(_port_in_use_message(host, port)) from exc
             raise
         self._sock.settimeout(0.25)
+        self._family = family
         self.host = host
         self.port = self._sock.getsockname()[1]
         _bound_at = time.time()
@@ -336,14 +365,65 @@ class PluginServer:
             os.getpid(),
         )
 
+    def _listener_closed(self) -> bool:
+        try:
+            return self._sock.fileno() == -1
+        except OSError:
+            return True
+
+    def _rebind(self, exc: BaseException) -> bool:
+        """The listening socket itself is dead: bind a new one on the same
+        port. False when the port is held by someone else right now - the
+        loop keeps trying, and stop() still ends it."""
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+        try:
+            fresh = socket.create_server((self.host, self.port), family=self._family)
+        except OSError as bind_exc:
+            log.error("listener on %s:%d died (%s) and could NOT be re-bound (%s); "
+                      "retrying", self.host, self.port, exc, bind_exc)
+            return False
+        fresh.settimeout(0.25)
+        self._sock = fresh
+        log.warning("listener on %s:%d died (%s) and was re-bound (pid %d)",
+                    self.host, self.port, exc, os.getpid())
+        return True
+
     def _accept_loop(self) -> None:
+        failures = 0
         while not self._stop.is_set():
             try:
                 conn, addr = self._sock.accept()
             except socket.timeout:
                 continue
-            except OSError:
-                break
+            except OSError as exc:
+                # Only stop() ends this loop. Anything else is something the
+                # accept has to survive: Windows raises WSAECONNRESET (10054)
+                # from accept() for a client that reset before the accept
+                # completed - a port probe, a health check that hung up, a
+                # client that died - and this loop used to `break` on ANY
+                # OSError, closing the listener for the life of the process
+                # while Maya went on running, with no log line (redmine 863:
+                # an agent Maya answered a ping and fifteen minutes later
+                # refused connections, the process alive; its plugin log
+                # ends without the 'stopped' line stop() writes). A dead
+                # listening socket is re-bound; a transient is logged,
+                # backed off and carried on.
+                if self._stop.is_set():
+                    break
+                failures += 1
+                if self._listener_closed() or _dead_listener(exc):
+                    if not self._rebind(exc):
+                        time.sleep(1.0)
+                    continue
+                if failures <= 5 or failures % 100 == 0:
+                    log.warning("accept failed (%s), %d so far; the listener stays up",
+                                exc, failures)
+                time.sleep(min(1.0, 0.05 * failures))
+                continue
+            failures = 0
             log.info("client connected from %s:%d", *addr[:2])
             with self._conns_lock:
                 self._conns.add(conn)
