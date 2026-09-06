@@ -433,10 +433,16 @@ class TestModelingInMaya:
 
         for kind in modeling.PRIMITIVE_KINDS:
             for divisions in (1, 2, 3):
-                built = modeling.create_primitive({
-                    "kind": kind, "divisions": divisions,
-                    "name": "fc_%s_%d" % (kind, divisions),
-                })
+                params = {"kind": kind, "name": "fc_%s_%d" % (kind, divisions)}
+                if modeling.SUBDIVISION_AXES[kind]:
+                    params["divisions"] = divisions
+                # A platonic solid has no axis to spend `divisions` on, and
+                # since #797 passing it is refused (the refusal itself is
+                # asserted in test_platonic_solid_kinds_build_with_fixed_
+                # low_poly_face_counts). Build it bare: the projection must
+                # still name the same fixed count at every value this loop
+                # would have asked for, or the budget drifts for them too.
+                built = modeling.create_primitive(params)
                 assert cmds.polyEvaluate(built["name"], face=True) == (
                     modeling.projected_faces(kind, divisions)
                 ), (kind, divisions)
