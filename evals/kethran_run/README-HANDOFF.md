@@ -1,5 +1,7 @@
 # The Kethran — handoff
 
+> **Moved 2026-09-07 (Redmine #870):** the asset's home is now `D:\develd-assets\kethran\`, including `kethran2/` (the armour + texture pass) which no longer lives here. What stays in this folder stays only because `kethran.ma` is a test fixture for `evals/uv_normalize_live.py` and the two bake-hang probes. Do not add art here.
+
 **Read this before touching the scene.** Written by the Claude session that built it,
 2026-09-05, for whoever picks it up next (human or agent).
 
