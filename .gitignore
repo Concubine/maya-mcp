@@ -90,3 +90,7 @@ evals/kethran_run/kethran2/maps/hide_albedo_v6_greentest.png
 evals/kethran_run/kethran2/maps/body_height_v[2-6].png
 evals/kethran_run/kethran2/maps/scar_debug_*.png
 evals/kethran_run/kethran2/maps/probe_flat.png
+
+# The 2026-08-14 structures run left its Maya auto-checkpoints TRACKED, unlike every other
+# run. Removed with the asset move (redmine 870); ignored so a re-run does not re-commit them.
+evals/structures/checkpoints/
