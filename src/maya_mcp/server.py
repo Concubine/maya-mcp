@@ -211,6 +211,34 @@ def _write_frames(path: Optional[str], labels, pngs) -> Optional[str]:
     return "wrote: " + json.dumps(written)
 
 
+def _plugin_commit(plugin: Dict[str, Any]) -> Optional[str]:
+    """The short commit the RUNNING plugin copy was stamped with, or None.
+
+    A stamp is a dict on the wire - `read_stamp` returns the parsed install
+    record, never a string - so the field cannot just be handed the value
+    under the key: every stamped plugin failed SessionInfo validation and
+    maya_session_info answered nothing at all, on the one call whose whole
+    job is to say which Maya you are talking to (#921, #862). Dev never saw it
+    because a Maya launched from the repo imports an UNSTAMPED copy, and the
+    stamp degrades to None there.
+
+    Precedence follows version.plugin_info: the loaded stamp describes the
+    code in the interpreter and only exists alongside a loaded digest; the
+    disk stamp describes whatever install.py wrote most recently. Shortened
+    to 12 and marked +dirty the way the staleness banner writes it.
+    """
+    loaded = plugin.get("loaded_stamp") if plugin.get("loaded_digest") else None
+    stamp = loaded or plugin.get("stamp")
+    if not isinstance(stamp, dict):
+        # A bare string from some future plugin is already the answer; anything
+        # else (None, unstamped, corrupt) has nothing to say.
+        return stamp if isinstance(stamp, str) else None
+    commit = stamp.get("commit")
+    if not commit:
+        return None
+    return "%s%s" % (str(commit)[:12], "+dirty" if stamp.get("dirty") else "")
+
+
 def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
     """Build the MCPServer; the connection is injectable for tests."""
     maya = conn if conn is not None else MayaConnection()
@@ -305,7 +333,7 @@ def create_server(conn: Optional[MayaConnection] = None) -> MCPServer:
             started_at=process.get("started_at"),
             maya=result.get("maya"),
             plugin_package_dir=plugin.get("package_dir"),
-            plugin_stamp=plugin.get("loaded_stamp") or plugin.get("stamp"),
+            plugin_stamp=_plugin_commit(plugin),
             plugin_digest=plugin.get("loaded_digest") or plugin.get("digest"),
             plugin_restart_required=plugin.get("restart_required"),
         )

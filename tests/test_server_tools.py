@@ -3219,11 +3219,17 @@ class TestSessionInfo:
     one died on. maya_session_info asks the plugin's ping and hands back
     the identity without touching the scene."""
 
+    # A stamp is the install record read_stamp parsed - a DICT, never the bare
+    # string this fake used to send. The fake's shape was the whole reason the
+    # suite passed while every stamped plugin failed validation (#921).
+    STAMP = {"commit": "813895d58b50aa1c3f7e", "dirty": False,
+             "installed_at": "2026-09-06T20:14:58Z"}
+
     PING = {
         "pong": True, "maya": True,
         "plugin": {"package_dir": "D:/devel/maya-mcp/maya_plugin", "digest": "abc",
-                   "stamp": "813895d58b50", "loaded_digest": "abc",
-                   "loaded_stamp": "813895d58b50", "imported_at": "2026-09-06T20:15:04Z",
+                   "stamp": STAMP, "loaded_digest": "abc",
+                   "loaded_stamp": STAMP, "imported_at": "2026-09-06T20:15:04Z",
                    "restart_required": False},
         "process": {"pid": 19468, "host": "127.0.0.1", "port": 9878,
                     "started_at": 1788725720.5, "uptime_s": 2546.7,
@@ -3249,6 +3255,54 @@ class TestSessionInfo:
         assert info["uptime_s"] == 2546.7
         assert info["plugin_stamp"] == "813895d58b50"
         assert info["plugin_restart_required"] is False
+
+    def test_an_unstamped_plugin_answers_with_the_rest_of_its_identity(self):
+        """#921: a Maya launched from the repo imports a copy install.py never
+        stamped. That is the common agent case, it reads None, and it must not
+        cost the caller the pid and port it actually asked for."""
+        plugin = dict(self.PING["plugin"], stamp=None, loaded_stamp=None)
+        mcp = server_mod.create_server(
+            FakeConn(responses={"ping": dict(self.PING, plugin=plugin)}))
+        result = run(mcp.call_tool("maya_session_info", {}))
+        assert result.is_error is False, result.content
+        info = json.loads(result.content[0].text)
+        assert info["plugin_stamp"] is None
+        assert info["pid"] == 19468 and info["port"] == 9878
+
+    def test_a_dirty_install_is_not_reported_as_the_clean_commit(self):
+        """The staleness banner's own convention: a commit that had uncommitted
+        changes at install time describes code no commit contains."""
+        stamp = dict(self.STAMP, dirty=True)
+        plugin = dict(self.PING["plugin"], stamp=stamp, loaded_stamp=stamp)
+        mcp = server_mod.create_server(
+            FakeConn(responses={"ping": dict(self.PING, plugin=plugin)}))
+        info = json.loads(run(
+            mcp.call_tool("maya_session_info", {})).content[0].text)
+        assert info["plugin_stamp"] == "813895d58b50+dirty"
+
+    def test_the_loaded_stamp_wins_over_whatever_was_installed_since(self):
+        """plugin_info's own precedence: loaded_* describes the code in the
+        interpreter, and between a deploy and a restart the disk has moved on
+        (#604). Reporting the disk commit would name code Maya never ran."""
+        newer = {"commit": "ffffffffffff0000", "dirty": False,
+                 "installed_at": "2026-09-07T09:00:00Z"}
+        plugin = dict(self.PING["plugin"], stamp=newer, restart_required=True)
+        mcp = server_mod.create_server(
+            FakeConn(responses={"ping": dict(self.PING, plugin=plugin)}))
+        info = json.loads(run(
+            mcp.call_tool("maya_session_info", {})).content[0].text)
+        assert info["plugin_stamp"] == "813895d58b50"
+
+    def test_a_disk_stamp_answers_when_no_copy_was_loaded(self):
+        """plugin_info omits the loaded pair for an explicit other package_dir;
+        the disk stamp is then the only thing there is to report."""
+        plugin = {"package_dir": "D:/other/maya_plugin", "digest": "abc",
+                  "stamp": self.STAMP}
+        mcp = server_mod.create_server(
+            FakeConn(responses={"ping": dict(self.PING, plugin=plugin)}))
+        info = json.loads(run(
+            mcp.call_tool("maya_session_info", {})).content[0].text)
+        assert info["plugin_stamp"] == "813895d58b50"
 
     def test_a_plugin_that_predates_the_fields_still_answers(self):
         older = dict(self.PING, process={"pid": 1, "host": "127.0.0.1", "port": 9878,
